@@ -750,6 +750,7 @@ dependencies = [
 name = "qerith-core"
 version = "0.1.0"
 dependencies = [
+ "sha2",
  "tokio",
  "velmora",
  "velmora-test-nntp",
