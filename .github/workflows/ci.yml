@@ -132,29 +132,34 @@ jobs:
       - name: Prove the committed lockfile is fresh
         run: cargo metadata --locked --format-version 1 > /dev/null
       # Pin policy: allow-git admits velmora by URL only, so a `branch`,
-      # `tag` or bare git selector would still pass the audit. The lock is
-      # fresh (above), so every git source in it must be velmora at a full
-      # 40-character `rev` that equals the resolved commit.
+      # `tag` or bare git selector would still pass the audit. Read the
+      # sources from Cargo's own resolve (all features, locked) rather than
+      # grepping Cargo.lock, so lockfile formatting cannot hide an entry:
+      # every git source must be velmora at a full 40-character `rev` that
+      # equals the resolved commit.
       - name: Prove every git dependency is pinned by immutable rev
         run: |
           set -euo pipefail
-          re='^source = "git\+https://github\.com/TogetherWeOwn/velmora\?rev=([0-9a-f]{40})#([0-9a-f]{40})"$'
+          re='^git\+https://github\.com/TogetherWeOwn/velmora\?rev=([0-9a-f]{40})#([0-9a-f]{40})$'
+          sources=$(cargo metadata --locked --all-features --format-version 1 \
+            | jq -r '.packages[] | .source // empty | select(startswith("git+"))')
           count=0
           fail=0
-          while IFS= read -r line; do
+          while IFS= read -r src; do
+            [ -n "$src" ] || continue
             count=$((count + 1))
-            if [[ "$line" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
+            if [[ "$src" =~ $re ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
               continue
             fi
-            echo "pin check: not pinned by a full immutable velmora rev: $line"
+            echo "pin check: not pinned by a full immutable velmora rev: $src"
             fail=1
-          done < <(grep '^source = "git+' Cargo.lock || true)
+          done <<< "$sources"
           if [ "$count" -eq 0 ]; then
-            echo "pin check: no velmora git source in Cargo.lock"
+            echo "pin check: no velmora git source in the resolve"
             exit 1
           fi
           [ "$fail" -eq 0 ] || exit 1
-          echo "pin check: ${count} velmora git source(s) pinned by full rev"
+          echo "pin check: ${count} velmora git package(s) pinned by full rev"
       - name: Audit advisories, bans, licenses, sources
         run: cargo-deny --manifest-path Cargo.toml check
 
