@@ -1,0 +1,106 @@
+use chrono::{DateTime, Utc};
+use quick_xml::{events::Event, Reader};
+
+use super::{ErrorCode, Policy, Result};
+
+/// Strict regular RestoreObject subset. Unknown elements, attributes, DTDs,
+/// entities, CDATA and duplicate fields fail closed. No XML-side effects.
+pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
+    if xml.len() > policy.limits.control_xml_bytes {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(true);
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut root_seen = false;
+    let mut parameters_seen = false;
+    let mut days = None;
+    let mut tier = None;
+    let mut text = String::new();
+    loop {
+        match reader.read_event().map_err(|_| ErrorCode::MalformedXML)? {
+            Event::Start(e) => {
+                let name = e.name().as_ref().to_vec();
+                let parent = stack.last().map(Vec::as_slice);
+                let allowed = match (parent, name.as_slice()) {
+                    (None, b"RestoreRequest") if !root_seen => {
+                        root_seen = true;
+                        true
+                    }
+                    (Some(b"RestoreRequest"), b"Days") if days.is_none() => true,
+                    (Some(b"RestoreRequest"), b"GlacierJobParameters") if !parameters_seen => {
+                        parameters_seen = true;
+                        true
+                    }
+                    (Some(b"GlacierJobParameters"), b"Tier") if tier.is_none() => true,
+                    _ => false,
+                };
+                if !allowed {
+                    return Err(ErrorCode::InvalidRequest);
+                }
+                for attr in e.attributes() {
+                    let attr = attr.map_err(|_| ErrorCode::MalformedXML)?;
+                    if !stack.is_empty()
+                        || attr.key.as_ref() != b"xmlns"
+                        || attr.value.as_ref() != b"http://s3.amazonaws.com/doc/2006-03-01/"
+                    {
+                        return Err(ErrorCode::InvalidRequest);
+                    }
+                }
+                text.clear();
+                stack.push(name);
+            }
+            Event::Text(e) => {
+                if !matches!(stack.last().map(Vec::as_slice), Some(b"Days" | b"Tier")) {
+                    return Err(ErrorCode::InvalidRequest);
+                }
+                text.push_str(&e.decode().map_err(|_| ErrorCode::MalformedXML)?);
+            }
+            Event::End(_) => {
+                let name = stack.pop().ok_or(ErrorCode::MalformedXML)?;
+                match name.as_slice() {
+                    b"Days" => days = Some(std::mem::take(&mut text)),
+                    b"Tier" => tier = Some(std::mem::take(&mut text)),
+                    _ => {}
+                }
+            }
+            Event::Decl(_) if !root_seen => {}
+            Event::Eof => break,
+            _ => return Err(ErrorCode::InvalidRequest),
+        }
+    }
+    if !root_seen || !stack.is_empty() {
+        return Err(ErrorCode::MalformedXML);
+    }
+    policy.restore(
+        days.as_deref().ok_or(ErrorCode::InvalidArgument)?,
+        tier.as_deref(),
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RestoreStatus {
+    Unavailable,
+    Pending,
+    Available { expiry: i64 },
+}
+
+impl RestoreStatus {
+    /// Adapter renders this only for an authorized logical reference + G.
+    /// Expired/failed/never-restored states omit the header entirely.
+    pub fn header(&self, now: i64) -> Result<Option<String>> {
+        match self {
+            Self::Unavailable => Ok(None),
+            Self::Pending => Ok(Some("ongoing-request=\"true\"".into())),
+            Self::Available { expiry } if now < *expiry => {
+                let expiry = DateTime::<Utc>::from_timestamp(*expiry, 0)
+                    .ok_or(ErrorCode::InvalidArgument)?;
+                Ok(Some(format!(
+                    "ongoing-request=\"false\", expiry-date=\"{}\"",
+                    expiry.format("%a, %d %b %Y %H:%M:%S GMT")
+                )))
+            }
+            Self::Available { .. } => Ok(None),
+        }
+    }
+}
