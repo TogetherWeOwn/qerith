@@ -1,0 +1,31 @@
+[package]
+name = "qerith-core"
+version = "0.1.0"
+edition = "2021"
+description = "Qerith core over the pinned velmora Usenet engine"
+license = "MIT"
+repository = "https://github.com/TogetherWeOwn/qerith"
+# velmora's locked dependency graph needs 1.89 (aes 0.9).
+rust-version = "1.89"
+
+[features]
+default = ["native-tls"]
+native-tls = ["velmora/native-tls"]
+worker-transport = ["velmora/worker-transport"]
+
+[dependencies]
+# The engine (NNTP, yEnc, NZB, transports) lives in TogetherWeOwn/velmora.
+# Pin policy: an immutable git `rev` only (never a branch or tag); a bump is
+# a reviewed PR that moves this rev, the matching velmora-test-nntp rev below
+# and Cargo.lock together.
+velmora = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "c5e79d617896490a47d577a9b062cd0010e0bc8a", default-features = false }
+
+[dev-dependencies]
+# Same immutable pin as velmora above: the synthetic NNTP server the smoke
+# test fetches from, so no CI run touches real Usenet.
+velmora-test-nntp = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "c5e79d617896490a47d577a9b062cd0010e0bc8a" }
+tokio = { version = "1", features = ["full"] }
+
+[lib]
+name = "qerith_core"
+path = "src/lib.rs"
