@@ -140,6 +140,14 @@ fn publication_checks_full_length_digest_and_preserves_prior_delivery() {
     cache.append(c.key, c.bytes(), &mut trace);
     cache.append(c.key, &[0], &mut trace);
     assert_eq!(cache.publish(&c, &mut trace), Err(Failure::Integrity));
+    let next = fixture(8);
+    assert_ne!(c.bytes(), next.bytes());
+    assert_ne!(c.digest(), next.digest());
+    cache.begin(next.key, &mut trace);
+    cache.append(next.key, c.bytes(), &mut trace);
+    assert_eq!(cache.publish(&next, &mut trace), Err(Failure::Integrity));
+    assert_eq!(cache.delivery(next.key), None);
+    assert_eq!(cache.delivery(c.key), Some(c.bytes()));
 }
 
 #[test]

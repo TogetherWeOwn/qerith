@@ -32,7 +32,11 @@ impl FixtureC {
     /// Arbitrary opaque bytes stand in for committed ciphertext C. This is not
     /// encryption, an approved encrypted format, or proof about plaintext.
     pub fn new(key: Key) -> Self {
-        let bytes: Vec<_> = (0..3072u32).map(|i| (i * 7 + i / 256) as u8).collect();
+        let mut bytes: Vec<_> = (0..3072u32).map(|i| (i * 7 + i / 256) as u8).collect();
+        // Distinct fixture coordinates must have distinguishable payloads so
+        // a stale prefix relabelled as a new generation cannot pass verification.
+        bytes[..8].copy_from_slice(&key.object.to_le_bytes());
+        bytes[8..16].copy_from_slice(&key.generation.to_le_bytes());
         let digest = Sha256::digest(&bytes).into();
         Self { key, bytes, digest }
     }
