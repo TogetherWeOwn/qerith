@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/qerith-core"]
+resolver = "2"
