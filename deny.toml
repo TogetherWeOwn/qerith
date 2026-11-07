@@ -70,5 +70,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 # velmora: the shared Usenet engine behind qerith-core (MIT,
 # TogetherWeOwn-owned, public). Consumers pin it by immutable git `rev`
-# only; the Cargo.lock entries record that exact commit.
+# only; the Cargo.lock entries record that exact commit. allow-git cannot
+# check the selector, so the cargo-deny CI job also fails any lock git
+# source that is not velmora at a full 40-character rev.
 allow-git = ["https://github.com/TogetherWeOwn/velmora"]
