@@ -750,6 +750,8 @@ dependencies = [
 name = "qerith-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "tokio",
  "velmora",
  "velmora-test-nntp",

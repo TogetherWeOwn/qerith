@@ -9,5 +9,7 @@
 //! replacement STREAM format lands in velmora first and Qerith moves to
 //! that pin once it merges.
 
+pub mod native;
+
 pub use velmora::{nntp, nzb, segment_identity, transport, transports, yenc};
 pub use velmora::{Error, Result};
