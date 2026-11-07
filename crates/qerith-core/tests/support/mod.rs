@@ -321,7 +321,7 @@ impl Archive {
             trace.0.push(Event::Article(n));
             let mut raw = Vec::new();
             client
-                .article_to(&article.message_id, &mut raw)
+                .article_to(engine_id(article), &mut raw)
                 .await
                 .map_err(|err| {
                     if matches!(err, qerith_core::Error::ArticleNotFound(_)) {
@@ -370,7 +370,7 @@ impl Archive {
         let article = self.articles.get(n).ok_or(Failure::Missing)?;
         let mut client = self.connect().await?;
         client
-            .post_article(&article.message_id, &article.raw)
+            .post_article(engine_id(article), &article.raw)
             .await
             .map_err(|_| Failure::Transport)?;
         client.quit().await;
@@ -393,6 +393,16 @@ impl Archive {
     pub fn addr(&self) -> std::net::SocketAddr {
         self.server.as_ref().expect("running fixture").addr()
     }
+}
+
+// The server corpus stores bracketed IDs; the engine client accepts bare IDs
+// and supplies the wire brackets itself. Only adapt our generated corpus IDs.
+fn engine_id(article: &Article) -> &str {
+    article
+        .message_id
+        .strip_prefix('<')
+        .and_then(|id| id.strip_suffix('>'))
+        .expect("bracketed fixture corpus ID")
 }
 
 fn articles(fixture: &FixtureC) -> Vec<Article> {
