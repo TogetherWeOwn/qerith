@@ -774,6 +774,25 @@ async fn hot_upload() -> (s::Service<Access>, Io, o::Transfer, o::Job, Rc<Auth>)
         )
         .await
         .unwrap();
+    let archive = service
+        .catalogue()
+        .outbox(TENANT)
+        .into_iter()
+        .find_map(|event| match event.effect {
+            Effect::RunJob(job) if job.kind == JobKind::Archive => Some(job.id),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        service.catalogue_mut(),
+        &mut io,
+        archive,
+        &Time(Cell::new(10)),
+        &Rules::default(),
+        auth.as_ref(),
+    )
+    .await
+    .unwrap();
     make_available(&mut service, &mut io, &transfer.target, auth.as_ref()).await;
     (service, io, transfer, job, auth)
 }
