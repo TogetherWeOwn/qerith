@@ -1228,14 +1228,20 @@ impl<A: Access> o::OperationPort for Service<A> {
         self.check_authorization(scope, request)
     }
     fn preconditions(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
-        self.check_authorization(scope, request)?;
-        self.check_preconditions(scope, request)
-            .map_err(|failure| self.retain_request_effects(scope, request, failure))
+        self.check_preconditions(scope, request).map_err(|failure| {
+            match self.check_authorization(scope, request) {
+                Ok(()) => self.retain_request_effects(scope, request, failure),
+                Err(denial) => denial,
+            }
+        })
     }
     fn admit(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
-        self.check_authorization(scope, request)?;
-        self.check_admission(scope, request)
-            .map_err(|failure| self.retain_request_effects(scope, request, failure))
+        self.check_admission(scope, request).map_err(|failure| {
+            match self.check_authorization(scope, request) {
+                Ok(()) => self.retain_request_effects(scope, request, failure),
+                Err(denial) => denial,
+            }
+        })
     }
     fn resolve_cursor(
         &mut self,
