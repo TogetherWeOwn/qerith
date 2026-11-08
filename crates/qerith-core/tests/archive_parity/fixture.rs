@@ -9,6 +9,13 @@ use crate::{storage, support::Event};
 
 pub const TENANT: TenantId = TenantId(1);
 pub const BYTES: usize = 3072;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Adapter {
+    Native,
+    Rest,
+    Mcp,
+}
+pub const ADAPTERS: [Adapter; 3] = [Adapter::Native, Adapter::Rest, Adapter::Mcp];
 pub fn id(value: &str) -> o::Opaque {
     o::Opaque::new(value).unwrap()
 }
@@ -53,8 +60,9 @@ impl s::Access for Access {
     fn key_envelope(&self, scope: &o::Scope, _: &n::Opaque, _: &n::Opaque) -> bool {
         scope.tenant == id("tenant")
     }
-    fn copy_compatible(&self, _: &o::Scope, _: &n::Object, _: &o::Opaque) -> bool {
-        false
+    fn copy_compatible(&self, scope: &o::Scope, source: &n::Object, _: &o::Opaque) -> bool {
+        scope.tenant == id("tenant")
+            && source.ciphertext.profile.crypto.as_str() == "unqualified_mock"
     }
 }
 pub struct Time(Cell<u64>);
@@ -161,6 +169,10 @@ pub struct Fixture {
     object: n::Object,
     restore_job: Option<JobId>,
     serial: usize,
+    adapter: Adapter,
+    native_projection: Option<s::Service<Access>>,
+    aliases: BTreeMap<o::Scope, n::Object>,
+    downloads: BTreeMap<o::Opaque, (String, n::Action)>,
 }
 async fn native(
     service: &mut s::Service<Access>,
@@ -195,7 +207,7 @@ async fn native(
         .body
 }
 impl Fixture {
-    pub async fn archived() -> Self {
+    pub async fn archived(adapter: Adapter) -> Self {
         let auth = Access::default();
         let mut service = s::Service::new(auth.clone(), limits(), profile(), 10).unwrap();
         let mut io = Io {
@@ -204,8 +216,12 @@ impl Fixture {
         };
         let time = Time(Cell::new(10));
         let mut sessions = BTreeMap::new();
-        for subscriber in 0..20 {
-            let caller = scope(subscriber);
+        let foreign = (0..20).map(|n| o::Scope {
+            tenant: id("other"),
+            ..scope(n)
+        });
+        let callers = (0..20).map(scope).chain(foreign);
+        for caller in callers {
             let policy = profile();
             let n::ResponseBody::Capabilities(selection) = native(
                 &mut service,
@@ -350,10 +366,50 @@ impl Fixture {
             object,
             restore_job: None,
             serial: 0,
+            adapter,
+            native_projection: None,
+            aliases: BTreeMap::new(),
+            downloads: BTreeMap::new(),
         }
     }
     pub fn target(&self) -> n::Target {
-        self.object.target.clone()
+        self.target_for(&scope(0))
+    }
+    fn object_for(&self, caller: &o::Scope) -> &n::Object {
+        self.aliases.get(caller).unwrap_or(&self.object)
+    }
+    fn target_for(&self, caller: &o::Scope) -> n::Target {
+        self.object_for(caller).target.clone()
+    }
+    fn fields_for(&self, caller: &o::Scope) -> serde_json::Value {
+        let target = self.target_for(caller);
+        serde_json::json!({"reference":target.object.as_str(), "generation":target.g.as_str()})
+    }
+    pub async fn prepare_subscribers(&mut self, count: usize) {
+        // The catalogue supports one live subscription per reference revision,
+        // not one per principal on the same name. Use public logical Copy to
+        // make independent names sharing the same immutable storage generation.
+        self.restore_seconds(&scope(0), "setup_warm", 1).await;
+        self.run().await.unwrap();
+        for subscriber in 1..count {
+            let name = format!("object_{subscriber}");
+            let fields = serde_json::json!({
+                "source":"object", "source_generation":self.object.target.g.as_str(),
+                "reference":name, "if_absent":true, "identity":format!("setup_copy_{subscriber}")
+            });
+            let o::Output::Job(copy) = self.parity(&scope(0), o::Operation::Copy, fields).unwrap()
+            else {
+                panic!("copy setup")
+            };
+            let mut object = self.object.clone();
+            object.target = n::Target {
+                object: nid(copy.target.reference.as_str()),
+                g: nid(copy.target.generation.as_str()),
+            };
+            self.aliases.insert(scope(subscriber), object);
+        }
+        self.restore_job = None;
+        self.set_now(11);
     }
     pub fn target_fields(&self) -> serde_json::Value {
         serde_json::json!({"reference":self.object.target.object.as_str(), "generation":self.object.target.g.as_str()})
@@ -408,6 +464,7 @@ impl Fixture {
         self.restore_job.unwrap()
     }
     pub fn evict(&mut self) {
+        let now = self.service.now();
         let generation = self.generation();
         let candidate = self
             .service
@@ -416,23 +473,23 @@ impl Fixture {
                 TENANT,
                 generation,
                 DeletionKind::DeliveryCache,
-                10,
-                11,
+                now,
+                now + 1,
                 &self.auth,
             )
             .unwrap();
         let event = self
             .service
             .catalogue_mut()
-            .finalize_deletion(candidate, 11, &self.auth)
+            .finalize_deletion(candidate, now + 1, &self.auth)
             .unwrap();
         let dispatch = self
             .service
             .catalogue_mut()
-            .dispatch_deletion(TENANT, event, 11, &self.auth)
+            .dispatch_deletion(TENANT, event, now + 1, &self.auth)
             .unwrap();
         assert_eq!(dispatch.generation, generation);
-        assert!(11 < dispatch.valid_until);
+        assert!(now + 1 < dispatch.valid_until);
         let DeletionTarget::StorageVersion(location) = dispatch.target else {
             panic!("exact immutable version")
         };
@@ -444,7 +501,7 @@ impl Fixture {
             .acknowledge_deletion(TENANT, event)
             .unwrap();
         self.io.inner.assert_empty();
-        self.set_now(11);
+        self.set_now(now + 1);
     }
     pub async fn run(&mut self) -> RunResult<()> {
         let event = self.event(self.physical());
@@ -496,6 +553,19 @@ impl Fixture {
                 &transfer.handle,
             );
         }
+        // Run every scenario three times, retaining a different adapter's
+        // mutation history each time. Worker/reconnect assertions therefore
+        // inspect native and MCP side effects, not only REST-created state.
+        let native = self.native_projection.take();
+        match self.adapter {
+            Adapter::Native => {
+                if let Some(native) = native {
+                    self.service = native;
+                }
+            }
+            Adapter::Mcp => self.service = mcp_service,
+            Adapter::Rest => {}
+        }
         rest.outcome
     }
     pub async fn native_snapshot(
@@ -511,12 +581,16 @@ impl Fixture {
             &self.time,
             caller,
             identity,
-            self.sessions.get(caller),
+            Some(
+                self.sessions
+                    .get(caller)
+                    .expect("valid negotiated caller session, including foreign tenants"),
+            ),
             action,
         )
         .await;
         if let n::ResponseBody::Download(transfer) = &body {
-            assert_eq!(transfer.object, self.object);
+            assert_eq!(&transfer.object, self.object_for(caller));
             Self::read(
                 &mut self.io,
                 &service,
@@ -524,6 +598,12 @@ impl Fixture {
                 caller,
                 &id(transfer.handle.as_str()),
             );
+        }
+        if matches!(
+            body,
+            n::ResponseBody::Restore(_) | n::ResponseBody::Cancel(_) | n::ResponseBody::Download(_)
+        ) {
+            self.native_projection = Some(service);
         }
         body
     }
@@ -566,20 +646,25 @@ impl Fixture {
         format!("poll_{}", self.serial)
     }
     pub async fn restore(&mut self, caller: &o::Scope, identity: &str) -> o::Job {
+        self.restore_seconds(caller, identity, 50).await
+    }
+    async fn restore_seconds(&mut self, caller: &o::Scope, identity: &str, seconds: u32) -> o::Job {
         let body = self
             .native_snapshot(
                 caller,
                 identity,
                 n::Action::Restore(n::Restore {
-                    target: self.target(),
+                    target: self.target_for(caller),
                     max_bytes: BYTES as u64,
-                    max_seconds: 50,
+                    max_seconds: seconds,
                 }),
             )
             .await;
-        let o::Output::Job(job) = self
-            .parity(caller, o::Operation::Restore, self.restore_fields(identity))
-            .unwrap()
+        let mut fields = self.fields_for(caller);
+        fields["identity"] = identity.into();
+        fields["availability_seconds"] = seconds.into();
+        fields["max_seconds"] = seconds.into();
+        let o::Output::Job(job) = self.parity(caller, o::Operation::Restore, fields).unwrap()
         else {
             panic!("restore")
         };
@@ -587,7 +672,7 @@ impl Fixture {
             panic!("native restore {body:?}")
         };
         assert_eq!(status.job.as_str(), job.handle.as_str());
-        assert_eq!(status.target, self.target());
+        assert_eq!(status.target, self.target_for(caller));
         self.restore_job = Some(
             self.service
                 .catalogue()
@@ -636,7 +721,7 @@ impl Fixture {
         };
         assert_eq!(status.state, state);
         assert_eq!(status.job.as_str(), current.handle.as_str());
-        assert_eq!(status.target, self.target());
+        assert_eq!(status.target, self.target_for(caller));
         assert_eq!(status.completed_bytes, current.progress.completed());
         assert_eq!(status.total_bytes, current.progress.total());
     }
@@ -657,23 +742,25 @@ impl Fixture {
         assert_eq!(entry.target.generation.as_str(), self.target().g.as_str());
     }
     pub async fn download(&mut self, available: bool) -> Option<o::Transfer> {
+        self.download_for(&scope(0), available).await
+    }
+    pub async fn download_for(
+        &mut self,
+        caller: &o::Scope,
+        available: bool,
+    ) -> Option<o::Transfer> {
         let identity = self.next_poll();
+        let action = n::Action::Download(n::Download {
+            target: self.target_for(caller),
+            range: None,
+            max_bytes: BYTES as u64,
+        });
         let body = self
-            .native_snapshot(
-                &scope(0),
-                &identity,
-                n::Action::Download(n::Download {
-                    target: self.target(),
-                    range: None,
-                    max_bytes: BYTES as u64,
-                }),
-            )
+            .native_snapshot(caller, &identity, action.clone())
             .await;
-        let result = self.parity(
-            &scope(0),
-            o::Operation::AuthorizeDownload,
-            self.download_fields(&identity),
-        );
+        let mut fields = self.fields_for(caller);
+        fields["identity"] = identity.clone().into();
+        let result = self.parity(caller, o::Operation::AuthorizeDownload, fields);
         if available {
             let n::ResponseBody::Download(native) = body else {
                 panic!("native download {body:?}")
@@ -687,15 +774,34 @@ impl Fixture {
                 &mut self.io,
                 &self.service,
                 &self.auth,
-                &scope(0),
+                caller,
                 &transfer.handle,
             );
+            self.downloads
+                .insert(transfer.handle.clone(), (identity, action));
             Some(transfer)
         } else {
             assert_eq!(result.unwrap_err().code, o::ErrorCode::NotAvailable);
             assert_eq!(body, n::ResponseBody::Error(n::ErrorCode::Unavailable));
             None
         }
+    }
+    pub async fn expired_transfer(&mut self, caller: &o::Scope, transfer: &o::Transfer) {
+        assert!(self.service.now() >= transfer.expires_at);
+        assert!(
+            self.service.redeem(caller, &transfer.handle).is_err(),
+            "issued handle expired despite retained physical bytes"
+        );
+        let (identity, action) = self.downloads.get(&transfer.handle).unwrap().clone();
+        let body = self.native_snapshot(caller, &identity, action).await;
+        let expected = if self.adapter == Adapter::Native {
+            n::ErrorCode::GenerationMismatch
+        } else {
+            n::ErrorCode::Unavailable
+        };
+        assert_eq!(body, n::ResponseBody::Error(expected));
+        // In the Native lane this is a real issued native replay record, not a
+        // fresh request against a REST-created checkpoint.
     }
     pub async fn cancel(&mut self, caller: &o::Scope, job: &o::Job, identity: &str) {
         let body = self
