@@ -64,7 +64,11 @@ pub fn verify(
     policy: &Policy,
     authority: &impl Authority,
 ) -> Result<VerifiedRequest> {
-    if !https || headers.get("host") != Some(policy.host.as_str()) {
+    if !https
+        || !headers
+            .get("host")
+            .is_some_and(|host| host.eq_ignore_ascii_case(&policy.host))
+    {
         return Err(ErrorCode::AccessDenied);
     }
     target.validate_features()?;

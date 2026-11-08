@@ -94,7 +94,13 @@ fn static_botocore_canonical_and_signature_goldens() {
     let all: Vec<Value> = serde_json::from_str(include_str!("fixtures/s3-static.json")).unwrap();
     for v in all {
         let h = headers(&fields(&v));
-        let target = Target::parse(v["target"].as_str().unwrap(), &policy()).unwrap();
+        let p = Policy::new(
+            h.get("host").unwrap().to_ascii_lowercase(),
+            "us-east-1".into(),
+            limits(),
+        )
+        .unwrap();
+        let target = Target::parse(v["target"].as_str().unwrap(), &p).unwrap();
         let presigned = v["presigned"].as_bool().unwrap();
         assert_eq!(
             canonical_request(
@@ -117,7 +123,7 @@ fn static_botocore_canonical_and_signature_goldens() {
                 &h,
                 true,
                 NOW,
-                &policy(),
+                &p,
                 &authority(),
             )
             .unwrap();
@@ -155,6 +161,56 @@ fn static_botocore_canonical_and_signature_goldens() {
                 &authority()
             )
             .is_err());
+        }
+    }
+}
+
+#[test]
+fn endpoint_host_casing_preserves_signed_bytes_and_port() {
+    for name in [
+        "header-empty",
+        "presign-get",
+        "header-mixed-host",
+        "presign-mixed-host",
+        "header-host-port",
+        "presign-host-port",
+    ] {
+        let v = fixture(name);
+        let h = headers(&fields(&v));
+        let host = h.get("host").unwrap();
+        let target = Target::parse(v["target"].as_str().unwrap(), &policy()).unwrap();
+        for endpoint in [host.to_ascii_lowercase(), host.to_ascii_uppercase()] {
+            let p = Policy::new(endpoint, "us-east-1".into(), limits()).unwrap();
+            assert!(
+                verify("GET", &target, &h, true, NOW, &p, &authority()).is_ok(),
+                "{name}"
+            );
+            assert_eq!(
+                verify("GET", &target, &h, false, NOW, &p, &authority()).unwrap_err(),
+                ErrorCode::AccessDenied
+            );
+        }
+        for endpoint in [
+            "other.invalid".to_owned(),
+            format!("{}:443", host.split(':').next().unwrap()),
+            format!("{}:9443", host.split(':').next().unwrap()),
+        ] {
+            let p = Policy::new(endpoint, "us-east-1".into(), limits()).unwrap();
+            assert_eq!(
+                verify("GET", &target, &h, true, NOW, &p, &authority()).unwrap_err(),
+                ErrorCode::AccessDenied,
+                "{name}"
+            );
+        }
+        if name.contains("mixed-host") || name.contains("host-port") {
+            let p = Policy::new(host.to_ascii_lowercase(), "us-east-1".into(), limits()).unwrap();
+            let mut f = fields(&v);
+            set(&mut f, "Host", &host.to_ascii_lowercase());
+            assert_eq!(
+                verify("GET", &target, &headers(&f), true, NOW, &p, &authority()).unwrap_err(),
+                ErrorCode::SignatureDoesNotMatch,
+                "casing the signed Host bytes must invalidate {name}"
+            );
         }
     }
 }
@@ -423,6 +479,73 @@ fn header_duplicates_bounds_case_and_signed_order() {
     l.header_count = 1;
     let p = Policy::new("s3.us-east-1.amazonaws.com".into(), "us-east-1".into(), l).unwrap();
     assert!(Headers::new(&[("host", "s3.invalid"), ("x", "y")], &p).is_err());
+}
+
+#[test]
+fn repeated_etag_conditions_combine_in_order_before_cold_state() {
+    let m = metadata(None);
+    let t = Target::parse("/bucket/key", &policy()).unwrap();
+    for (name, second, matches) in [
+        ("If-Match", "\"opaque,not-md5\"", true),
+        ("If-Match", "\"other\"", false),
+        ("If-Match", "W/\"opaque,not-md5\"", false),
+        ("If-None-Match", "\"opaque,not-md5\"", true),
+        ("If-None-Match", "W/\"opaque,not-md5\"", true),
+        ("If-None-Match", "\"other\"", false),
+    ] {
+        let first = "\"miss,inside\"";
+        let joined = format!("{first},{second}");
+        let repeated = Headers::new(
+            &[
+                ("Host", "s3.us-east-1.amazonaws.com"),
+                (name, first),
+                (&name.to_ascii_lowercase(), second),
+            ],
+            &policy(),
+        )
+        .unwrap();
+        let single = Headers::new(
+            &[("Host", "s3.us-east-1.amazonaws.com"), (name, &joined)],
+            &policy(),
+        )
+        .unwrap();
+        assert_eq!(repeated.get(name), Some(joined.as_str()));
+        let signed = format!("host;{}", name.to_ascii_lowercase());
+        assert_eq!(
+            canonical_request("GET", &t, &repeated, &signed, EMPTY_SHA, false).unwrap(),
+            canonical_request("GET", &t, &single, &signed, EMPTY_SHA, false).unwrap()
+        );
+        for head in [false, true] {
+            for available in [false, true] {
+                let c = Conditions::from_headers(&repeated);
+                let result = plan_read(&m, head, &c, None, available, false).map(|p| p.status);
+                let expected = if name == "If-Match" && !matches {
+                    Err(ErrorCode::PreconditionFailed)
+                } else if name == "If-None-Match" && matches {
+                    Ok(304)
+                } else if !head && !available {
+                    Err(ErrorCode::InvalidObjectState)
+                } else {
+                    Ok(200)
+                };
+                assert_eq!(
+                    result, expected,
+                    "{name}: {joined}, head={head}, available={available}"
+                );
+            }
+        }
+    }
+    for name in [
+        "Range",
+        "If-Modified-Since",
+        "If-Unmodified-Since",
+        "Authorization",
+    ] {
+        assert!(
+            Headers::new(&[(name, "x"), (name, "y")], &policy()).is_err(),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -1029,6 +1152,69 @@ fn pre_epoch_dates_enforce_conditions_before_cold_state() {
             200,
             "{value}"
         );
+    }
+}
+
+#[test]
+fn signed_or_expanded_http_date_years_are_ignored() {
+    for value in [
+        "Fri, 01 Jan -0001 00:00:00 GMT",
+        "Fri Jan  1 00:00:00 -0001",
+        "Wed, 31 Dec +1969 23:59:59 GMT",
+        "Wed Dec 31 23:59:59 +1969",
+        "Sat, 01 Jan +10000 00:00:00 GMT",
+        "Sat Jan  1 00:00:00 +10000",
+    ] {
+        let c = Conditions {
+            if_unmodified_since: Some(value.into()),
+            ..Default::default()
+        };
+        for head in [false, true] {
+            assert_eq!(
+                plan_read(&metadata(None), head, &c, None, true, false)
+                    .unwrap()
+                    .status,
+                200,
+                "{value}"
+            );
+            assert_eq!(
+                plan_read(&metadata(None), head, &c, None, false, false).map(|p| p.status),
+                if head {
+                    Ok(200)
+                } else {
+                    Err(ErrorCode::InvalidObjectState)
+                },
+                "{value}"
+            );
+        }
+        let before = chrono::NaiveDate::from_ymd_opt(-2, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let m =
+            ObjectMetadata::new("g".into(), 10, "\"opaque\"".into(), before, vec![], None).unwrap();
+        let c = Conditions {
+            if_modified_since: Some(value.into()),
+            ..Default::default()
+        };
+        for head in [false, true] {
+            assert_eq!(
+                plan_read(&m, head, &c, None, true, false).unwrap().status,
+                200,
+                "{value}"
+            );
+            assert_eq!(
+                plan_read(&m, head, &c, None, false, false).map(|p| p.status),
+                if head {
+                    Ok(200)
+                } else {
+                    Err(ErrorCode::InvalidObjectState)
+                },
+                "{value}"
+            );
+        }
     }
 }
 

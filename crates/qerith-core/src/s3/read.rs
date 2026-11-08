@@ -206,16 +206,22 @@ fn http_date(value: &str) -> Option<i64> {
     // Use the existing calendar parser for the four-digit pre-epoch forms;
     // round-trip to retain the HTTP grammar, weekday and non-leap-second rules.
     let value = value.trim();
-    ["%a, %d %b %Y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
-        .iter()
-        .find_map(|format| {
-            let parsed = chrono::NaiveDateTime::parse_from_str(value, format).ok()?;
-            let utc = parsed.and_utc();
-            (utc.timestamp() < 0
-                && utc.timestamp_subsec_nanos() == 0
-                && parsed.format(format).to_string() == value)
-                .then_some(utc.timestamp())
-        })
+    [
+        ("%a, %d %b %Y %H:%M:%S GMT", 29, 12..16),
+        ("%a %b %e %H:%M:%S %Y", 24, 20..24),
+    ]
+    .into_iter()
+    .find_map(|(format, length, year)| {
+        if value.len() != length || !value.as_bytes().get(year)?.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let parsed = chrono::NaiveDateTime::parse_from_str(value, format).ok()?;
+        let utc = parsed.and_utc();
+        (utc.timestamp() < 0
+            && utc.timestamp_subsec_nanos() == 0
+            && parsed.format(format).to_string() == value)
+            .then_some(utc.timestamp())
+    })
 }
 
 fn format_date(value: i64) -> String {

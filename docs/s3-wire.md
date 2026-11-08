@@ -13,7 +13,8 @@ here. No live providers, credentials, customer data or deployment are involved.
    and `Headers`. Never use form decoding (`+` is not a space), URL path cleanup,
    slash merging, dot resolution or Unicode normalization. `Headers` preserves
    interior value whitespace (including quoted metadata) for semantic access,
-   combines repeated list values in order, and rejects singleton duplicates.
+   combines repeated list values (including If-Match and If-None-Match) in order,
+   and rejects singleton duplicates.
    SigV4 whitespace folding occurs only in canonical signing input. All retained
    content/cache metadata fields must be signed, with a shared field classifier.
    `ObjectMetadata` shares the ingress token-name and value-byte validators, requires
@@ -23,7 +24,9 @@ here. No live providers, credentials, customer data or deployment are involved.
    HTTP/2 adapters map
    the trusted `:authority` to one Host field and reject conflicting authority.
 2. `verify` validates local SigV4 header/presign authentication against an explicit
-   endpoint/region and caller clock. `Authority` resolves only local permanent
+   endpoint/region and caller clock. Endpoint hostname comparison is ASCII
+   case-insensitive, with the explicit port preserved; signing still uses the
+   original Host value bytes. `Authority` resolves only local permanent
    signing credentials and enforces per-principal method/bucket/key authority.
    Unknown/revoked/expired credentials return None. This is not IAM/STS or an
    AWS credential gateway. No plaintext transport, anonymous, SigV2, SigV4a,
@@ -52,8 +55,10 @@ here. No live providers, credentials, customer data or deployment are involved.
    If-Unmodified-Since; If-None-Match suppresses If-Modified-Since. HTTP-date
    parsing supports IMF-fixdate, RFC 850 and asctime; invalid dates are ignored.
    The existing chrono calendar parser handles four-digit pre-1970 dates that
-   httpdate 1.0.3 cannot represent, retaining signed epoch seconds, weekday and
-   grammar validation. The normal three-format parser is unchanged.
+   httpdate 1.0.3 cannot represent, requiring exactly four unsigned year digits
+   while retaining signed epoch seconds, weekday and grammar validation. Signed
+   or expanded input years are invalid and ignored. The normal three-format parser
+   is unchanged.
    Bodyless 304 retains the corresponding Cache-Control and Expires metadata. Applicable 304/412/416 precede cold 403. Multiple ranges are 400.
    HEAD is always bodyless; satisfiable HEAD Range changes Content-Length but
    keeps status 200. GET range is inclusive, clamped, 206 and exact slice of C.

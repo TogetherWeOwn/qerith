@@ -32,6 +32,10 @@ CASES = [
     ("presign-get", "GET", "/bucket/key", {}, b"", True, False),
     ("presign-put", "PUT", "/bucket/key", {"Content-Length": "3", "Content-MD5": "kAFQmDzST7DWlj99KOF/cg=="}, b"abc", True, False),
     ("presign-head", "HEAD", "/bucket/key", {}, b"", True, False),
+    ("header-mixed-host", "GET", "/bucket/key", {"Host": "S3.US-East-1.AMAZONAWS.com"}, b"", False, False),
+    ("presign-mixed-host", "GET", "/bucket/key", {"Host": "S3.US-East-1.AMAZONAWS.com"}, b"", True, False),
+    ("header-host-port", "GET", "/bucket/key", {"Host": "S3.US-East-1.AMAZONAWS.com:8443"}, b"", False, False),
+    ("presign-host-port", "GET", "/bucket/key", {"Host": "S3.US-East-1.AMAZONAWS.com:8443"}, b"", True, False),
 ]
 rows = []
 for name, method, target, headers, body, presigned, canonical_only in CASES:
@@ -50,7 +54,9 @@ for name, method, target, headers, body, presigned, canonical_only in CASES:
         signed = "content-length;content-md5;host" if method == "PUT" else "host"
         req.url = req.url.split("&X-Amz-Signature=")[0]
     canonical = signer.canonical_request(req)
-    fields = list(req.headers.items()) + [("Host", HOST)]
+    fields = list(req.headers.items())
+    if "Host" not in req.headers:
+        fields.append(("Host", HOST))
     if auth:
         fields.append(("Authorization", auth))
     rows.append(dict(name=name, method=method, target=signed_target, headers=fields,

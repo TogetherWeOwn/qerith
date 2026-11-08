@@ -223,8 +223,6 @@ impl Headers {
                         | "content-disposition"
                         | "expires"
                         | "range"
-                        | "if-match"
-                        | "if-none-match"
                         | "if-modified-since"
                         | "if-unmodified-since"
                 ))
