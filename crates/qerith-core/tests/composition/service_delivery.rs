@@ -1,5 +1,5 @@
 use super::*;
-use qerith_core::s3::{archive::QualifiedCache, read::ByteRange, ErrorCode};
+use qerith_core::s3::{archive::QualifiedCache, ByteRange, ErrorCode};
 
 #[derive(Clone, Copy)]
 enum CacheFault {
@@ -83,6 +83,14 @@ async fn delivery_sanitizes_cache_failure_after_reference_revocation() {
 }
 
 fn authorize(service: &mut s::Service<Access>, target: &o::LogicalReference) -> o::Transfer {
+    authorize_named(service, target, "delivery")
+}
+
+fn authorize_named(
+    service: &mut s::Service<Access>,
+    target: &o::LogicalReference,
+    identity: &str,
+) -> o::Transfer {
     let o::Output::Download(transfer) = parity(
         service,
         &scope(),
@@ -90,7 +98,7 @@ fn authorize(service: &mut s::Service<Access>, target: &o::LogicalReference) -> 
         vec![
             text("reference", target.reference.as_str()),
             text("generation", target.generation.as_str()),
-            text("identity", "delivery"),
+            text("identity", identity),
         ],
     )
     .unwrap() else {
@@ -199,6 +207,185 @@ async fn native_rest_mcp_handles_deliver_exact_generated_ciphertext_after_reconn
             "physical_provider_qualification": false,
         }),
     );
+}
+
+#[tokio::test]
+async fn delivery_after_confirmed_eviction_requires_explicit_cold_restore_and_new_pin() {
+    let (mut service, mut io, upload, _, auth) = hot_upload().await;
+    let old = authorize(&mut service, &upload.target);
+    let time = Time(Cell::new(60));
+    {
+        let mut cache = Cache {
+            io: &io,
+            auth: &auth,
+            time: &time,
+            fault: CacheFault::None,
+            reads: 0,
+        };
+        assert!(service
+            .read_download(&scope(), &old.handle, &mut cache, &time)
+            .is_err());
+        assert_eq!(cache.reads, 0);
+    }
+    let previous_location = service
+        .catalogue()
+        .generation(TENANT, GENERATION)
+        .unwrap()
+        .cache_location
+        .unwrap();
+    // Reuse candidate/grace/dispatch/exact-version acknowledgement, not a timer
+    // that deletes retained safety bytes or grants a new availability lease.
+    evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+    io.assert_cold();
+    service.set_now(time.0.get()).unwrap();
+    let allocations = service.allocations();
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::AuthorizeDownload,
+        vec![
+            text("reference", upload.target.reference.as_str()),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "still_cold"),
+        ],
+    )
+    .is_err());
+    assert_eq!(service.allocations(), allocations);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::Restore,
+        vec![
+            text("reference", upload.target.reference.as_str()),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "cold_delivery_restore"),
+            ("availability_seconds".into(), o::Value::Number(50)),
+        ],
+    )
+    .unwrap();
+    let mut service = s::Service::reconnect(
+        service.checkpoint(),
+        Access(auth.clone()),
+        limits(),
+        profile(),
+        time.0.get(),
+    )
+    .unwrap();
+    let restore = service
+        .catalogue()
+        .outbox(TENANT)
+        .into_iter()
+        .find_map(|event| match event.effect {
+            Effect::RunJob(job) if job.kind == JobKind::Restore => Some(job.id),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        service.catalogue_mut(),
+        &mut io,
+        restore,
+        &time,
+        &Rules::default(),
+        auth.as_ref(),
+    )
+    .await
+    .unwrap();
+    let location = service
+        .catalogue()
+        .generation(TENANT, GENERATION)
+        .unwrap()
+        .cache_location
+        .unwrap();
+    assert_ne!(location, previous_location);
+    assert!(!io.copies.contains_key(&previous_location));
+    let transfer = authorize_named(&mut service, &upload.target, "restored_delivery");
+    let archive_io = io.order.clone();
+    let mut cache = Cache {
+        io: &io,
+        auth: &auth,
+        time: &time,
+        fault: CacheFault::None,
+        reads: 0,
+    };
+    assert!(service
+        .read_download(&scope(), &old.handle, &mut cache, &time)
+        .is_err());
+    assert_eq!(cache.reads, 0, "restore cannot revive an expired pin");
+    assert_eq!(
+        service
+            .read_download(&scope(), &transfer.handle, &mut cache, &time)
+            .unwrap(),
+        io.fixture.bytes()
+    );
+    assert_eq!(cache.reads, 1);
+    assert_eq!(io.order, archive_io, "delivery does not fetch the archive");
+    evidence(
+        "service-delivery-cold.json",
+        serde_json::json!({
+            "kind": "synthetic_cold_restore_delivery",
+            "head_sha": std::env::var("QERITH_EVIDENCE_HEAD").ok(),
+            "confirmed_exact_version_eviction": true,
+            "empty_cache_before_restore": true,
+            "new_immutable_cache_version": true,
+            "old_pin_denied_without_cache_io": true,
+            "cache_reads": cache.reads,
+            "durable_restart_or_physical_provider_qualification": false,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn delivery_copy_binding_survives_source_delete_but_not_destination_replacement() {
+    let (mut service, mut io, upload, _, auth) = hot_upload().await;
+    let o::Output::Job(copy) = parity(
+        &mut service,
+        &scope(),
+        o::Operation::Copy,
+        copy_fields(&upload.target, "copy", "delivery_copy"),
+    )
+    .unwrap() else {
+        panic!("copy");
+    };
+    assert_ne!(copy.target.generation, upload.target.generation);
+    make_available(&mut service, &mut io, &copy.target, auth.as_ref()).await;
+    let transfer = authorize(&mut service, &copy.target);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::Delete,
+        vec![
+            text("reference", upload.target.reference.as_str()),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "delete_delivery_source"),
+        ],
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    let mut cache = Cache {
+        io: &io,
+        auth: &auth,
+        time: &time,
+        fault: CacheFault::None,
+        reads: 0,
+    };
+    assert_eq!(
+        service
+            .read_download(&scope(), &transfer.handle, &mut cache, &time)
+            .unwrap(),
+        io.fixture.bytes()
+    );
+    let mut replacement = copy_fields(&copy.target, "copy", "replace_delivery_copy");
+    replacement.retain(|(name, _)| name != "if_absent");
+    replacement.push(text("generation", copy.target.generation.as_str()));
+    parity(&mut service, &scope(), o::Operation::Copy, replacement).unwrap();
+    assert!(service
+        .read_download(&scope(), &transfer.handle, &mut cache, &time)
+        .is_err());
+    assert_eq!(
+        cache.reads, 1,
+        "stale logical G must not touch shared bytes"
+    );
+    assert!(!io.copies.is_empty());
 }
 
 #[tokio::test]
