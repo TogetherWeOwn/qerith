@@ -53,8 +53,8 @@ class S3Failure(Exception):
 
 
 class Client:
-    def __init__(self, args, evidence):
-        self.args, self.evidence = args, evidence
+    def __init__(self, args, evidence, identity="fixture"):
+        self.args, self.evidence, self.identity = args, evidence, identity
         self.restrictive = args.profile.endswith("restrictive")
         self.sequence = 0
         self.trace = []
@@ -72,7 +72,7 @@ class Client:
                 )
             self.client = boto3.client(
                 "s3", endpoint_url=args.endpoint, region_name="us-east-1",
-                aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+                aws_access_key_id=self.identity,
                 aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
                 verify=os.environ["QERITH_CLIENT_CERT"], config=config,
             )
@@ -118,7 +118,8 @@ class Client:
     def cli(self, operation, parameters):
         parameters = dict(parameters)
         command = [os.environ["QERITH_AWS_CLI"], "--endpoint-url", self.args.endpoint,
-                   "--region", "us-east-1", "--output", "json", "--no-cli-pager"]
+                   "--region", "us-east-1", "--output", "json", "--no-cli-pager",
+                   "--no-paginate"]
         if self.restrictive:
             command += ["--cli-connect-timeout", "2", "--cli-read-timeout", "3"]
         command += ["--debug", "s3api", operation.replace("_", "-")]
@@ -131,13 +132,16 @@ class Client:
             command += ["--body", str(body)]
         output = self.evidence / f"get-{self.sequence}.bin"
         if operation == "get_object":
-            # CLI v2's streaming-output customization requires these flags even
-            # when the service parameters are otherwise supplied as JSON.
-            command += ["--bucket", parameters.pop("Bucket"), "--key", parameters.pop("Key")]
-        command += ["--cli-input-json", json.dumps(parameters)]
-        if operation == "get_object":
+            # This pinned streaming-output command rejects --cli-input-json.
+            # Preserve the exact values as argv, without shell or JSON parsing.
+            for name, value in parameters.items():
+                option = "--" + re.sub(r"(?<!^)(?=[A-Z])", "-", name).lower()
+                command += [option, str(value)]
             command.append(str(output))
-        completed = subprocess.run(command, capture_output=True, timeout=20, check=False)
+        else:
+            command += ["--cli-input-json", json.dumps(parameters)]
+        env = dict(os.environ, AWS_ACCESS_KEY_ID=self.identity)
+        completed = subprocess.run(command, env=env, capture_output=True, timeout=20, check=False)
         # Debug supplies the actual HTTP status absent from normal s3api JSON.
         # The parent runner strips ambient credentials; these logs are synthetic only.
         (self.evidence / f"cli-{self.sequence}.stderr").write_bytes(completed.stderr[:262144])
@@ -289,11 +293,59 @@ class Matrix:
             part = {"PartNumber": number, "ETag": result["ETag"]}
             part.update({key: value for key, value in result.items() if key.startswith("Checksum")})
             parts.append(part)
-        listed = self.client.call("list_parts", **upload)
-        assert [p["PartNumber"] for p in listed["Parts"]] == [1, 2]
-        result = self.client.call("complete_multipart_upload", **upload, MultipartUpload={"Parts": parts})
+        listed = self.client.call("list_parts", **upload, MaxParts=1)
+        assert [p["PartNumber"] for p in listed["Parts"]] == [1] and listed["IsTruncated"]
+        listed = self.client.call("list_parts", **upload, MaxParts=1,
+                                  PartNumberMarker=listed["NextPartNumberMarker"])
+        assert [p["PartNumber"] for p in listed["Parts"]] == [2] and not listed["IsTruncated"]
+        self.multipart_request = {**upload, "MultipartUpload": {"Parts": parts}}
+        result = self.client.call("complete_multipart_upload", **self.multipart_request)
+        self.multipart_etag = result["ETag"]
         assert result["Key"] == obj["Key"] and result["Bucket"] == self.bucket
         self.client.expect_error("get_object", ["InvalidObjectState"], 403, **obj)
+        return result
+
+    def upload_inventory(self):
+        pending = []
+        for key in ("pending-b.bin", "pending-a.bin", "pending-a.bin"):
+            start = self.client.call("create_multipart_upload", Bucket=self.bucket, Key=key)
+            pending.append({"Bucket": self.bucket, "Key": key, "UploadId": start["UploadId"]})
+        marker, found = {}, []
+        for _ in range(MAX_POLLS):
+            page = self.client.call("list_multipart_uploads", Bucket=self.bucket,
+                                    Prefix="pending-", MaxUploads=1, **marker)
+            found.extend((u["Key"], u["UploadId"]) for u in page.get("Uploads", []))
+            if not page["IsTruncated"]:
+                break
+            next_marker = {"KeyMarker": page["NextKeyMarker"],
+                           "UploadIdMarker": page["NextUploadIdMarker"]}
+            assert next_marker != marker, "non-advancing upload marker"
+            marker = next_marker
+        else:
+            raise AssertionError("upload inventory exceeded page bound")
+        assert found == sorted((u["Key"], u["UploadId"]) for u in pending)
+        for upload in pending:
+            self.client.call("abort_multipart_upload", **upload)
+        remaining = self.client.call("list_multipart_uploads", Bucket=self.bucket, Prefix="pending-")
+        assert not remaining.get("Uploads"), remaining
+        return {"uploads": found, "pages": len(found)}
+
+    def multipart_errors_replay(self):
+        replay = self.client.call("complete_multipart_upload", **self.multipart_request)
+        assert replay["ETag"] == self.multipart_etag, "lost-response replay changed generation"
+        changed = dict(self.multipart_request)
+        changed["MultipartUpload"] = {"Parts": [{"PartNumber": 1, "ETag": '"wrong"'}]}
+        error = self.client.expect_error("complete_multipart_upload", ["InvalidPart"], 400, **changed)
+        head = self.client.call("head_object", Bucket=self.bucket, Key="multipart.bin")
+        assert head["ETag"] == self.multipart_etag and head["ContentLength"] == 512
+        return {"etag": replay["ETag"], "conflicting_retry": error}
+
+    def integrity_errors(self):
+        result = self.client.expect_error("put_object", ["BadDigest"], 400,
+            Bucket=self.bucket, Key="bad-digest.bin", Body=OPAQUE,
+            ChecksumAlgorithm="SHA256", ChecksumSHA256=base64.b64encode(bytes(32)).decode("ascii"))
+        self.client.expect_error("head_object", ["404", "NotFound"], 404,
+                                  Bucket=self.bucket, Key="bad-digest.bin")
         return result
 
     def abort(self):
@@ -346,6 +398,74 @@ class Matrix:
                                   Bucket=self.bucket, Key="copy.bin")
         return result
 
+    def tenant_isolation(self):
+        directory = self.evidence / "foreign"
+        directory.mkdir()
+        foreign = Client(self.args, directory, identity="foreign")
+        try:
+            inventory = foreign.call("list_buckets")
+            assert not inventory.get("Buckets"), inventory
+            errors = [foreign.expect_error("head_object", ["403", "AccessDenied"], 403, **self.object),
+                      foreign.expect_error("get_object", ["AccessDenied"], 403, **self.object),
+                      foreign.expect_error("restore_object", ["AccessDenied"], 403,
+                          **self.object, RestoreRequest={"Days": 1}),
+                      foreign.expect_error("put_object", ["AccessDenied"], 403,
+                          **self.object, Body=OPAQUE)]
+            return {"errors": errors, "trace": "foreign/calls.json"}
+        finally:
+            if foreign.client:
+                foreign.client.close()
+
+    def revoked_credentials(self):
+        control(self.args, "revoke")
+        try:
+            result = [self.client.expect_error("get_object", ["AccessDenied"], 403, **self.object),
+                      self.client.expect_error("head_object", ["403", "AccessDenied"], 403, **self.object),
+                      self.client.expect_error("restore_object", ["AccessDenied"], 403,
+                          **self.object, RestoreRequest={"Days": 1})]
+        finally:
+            control(self.args, "allow")
+        self.get()
+        return result
+
+    def copy_conditions_replace(self):
+        source = {"Bucket": self.bucket, "Key": KEY}
+        self.client.expect_error("copy_object", ["PreconditionFailed"], 412,
+            Bucket=self.bucket, Key="copy-replace.bin", CopySource=source,
+            CopySourceIfMatch='"wrong"')
+        self.client.expect_error("head_object", ["404", "NotFound"], 404,
+            Bucket=self.bucket, Key="copy-replace.bin")
+        result = self.client.call("copy_object", Bucket=self.bucket, Key="copy-replace.bin",
+            CopySource=source, CopySourceIfMatch=self.baseline["ETag"],
+            MetadataDirective="REPLACE", Metadata={"fixture": "replaced"}, ContentType="text/plain")
+        head = self.client.call("head_object", Bucket=self.bucket, Key="copy-replace.bin")
+        assert head["Metadata"] == {"fixture": "replaced"} and head["ContentType"] == "text/plain"
+        self.client.expect_error("get_object", ["InvalidObjectState"], 403,
+            Bucket=self.bucket, Key="copy-replace.bin")
+        return result
+
+    def upload_part_copy(self):
+        obj = {"Bucket": self.bucket, "Key": "part-copy.bin"}
+        start = self.client.call("create_multipart_upload", **obj,
+            ChecksumAlgorithm="SHA256", ChecksumType="COMPOSITE")
+        upload = {**obj, "UploadId": start["UploadId"]}
+        source = {"Bucket": self.bucket, "Key": KEY}
+        self.client.expect_error("upload_part_copy", ["InvalidRange"], 416,
+            **upload, PartNumber=1, CopySource=source, CopySourceRange="bytes=99999-99999")
+        part = self.client.call("upload_part_copy", **upload, PartNumber=1,
+            CopySource=source, CopySourceRange="bytes=1-31")["CopyPartResult"]
+        assert part["ChecksumSHA256"] == digest(OPAQUE[1:32])
+        result = self.client.call("complete_multipart_upload", **upload,
+            MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"],
+                                       "ChecksumSHA256": part["ChecksumSHA256"]}]})
+        self.client.expect_error("get_object", ["InvalidObjectState"], 403, **obj)
+        control(self.args, "post")
+        self.client.call("restore_object", **obj, RestoreRequest={"Days": 1})
+        control(self.args, "restore")
+        read = self.client.call("get_object", **obj)
+        assert read["Body"] == OPAQUE[1:32]
+        return result
+
     def expire(self):
         result = control(self.args, "expire")
         self.check_head("none")
@@ -370,7 +490,8 @@ class Matrix:
         return results
 
     def delete(self):
-        keys = [KEY, "multipart.bin", "copy.bin", "list-a.bin", "list-b.bin", "absent.bin"]
+        keys = [KEY, "multipart.bin", "copy.bin", "copy-replace.bin", "part-copy.bin",
+                "list-a.bin", "list-b.bin", "absent.bin"]
         result = self.client.call("delete_objects", Bucket=self.bucket,
                                   Delete={"Objects": [{"Key": key} for key in keys]})
         assert not result.get("Errors"), result
@@ -391,8 +512,11 @@ class Matrix:
             Bucket=self.bucket, Key="copy.bin", CopySource={"Bucket": self.bucket, "Key": KEY}))
         self.row("conditional-before-restore", self.condition)
         self.row("list-pagination", self.list_pages)
+        self.row("upload-inventory", self.upload_inventory)
         self.row("multipart", self.multipart)
+        self.row("multipart-errors-replay", self.multipart_errors_replay)
         self.row("abort-multipart", self.abort)
+        self.row("integrity-errors", self.integrity_errors)
         self.row("archive-empty-cache", lambda: control(self.args, "archive"))
         self.row("before-restore", lambda: [self.check_head("none"), self.cold()])
         self.row("restore-admission", self.restore_request)
@@ -403,7 +527,11 @@ class Matrix:
         self.row("completed-get", self.get)
         self.row("range-get", lambda: self.get(True))
         self.row("conditional-completed", self.conditions_completed)
+        self.row("tenant-isolation", self.tenant_isolation)
+        self.row("revoked-credentials", self.revoked_credentials)
         self.row("restored-copy", self.restored_copy, fatal=False)
+        self.row("copy-conditions-replace", self.copy_conditions_replace, fatal=False)
+        self.row("upload-part-copy", self.upload_part_copy, fatal=False)
         self.row("renew-restore", lambda: self.restore_request(200))
         self.row("expired-restore", self.expire)
         self.row("restore-io-failure", self.failed_restore)

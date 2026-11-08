@@ -232,6 +232,113 @@ async fn completion_sha256_header_is_rejected_not_ignored() {
 }
 
 #[tokio::test]
+async fn multipart_inventory_and_part_copy_use_the_restored_generation() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    assert_eq!(
+        f.call("PUT", "/archive/source", b"exact bytes", &[])
+            .await
+            .status,
+        200
+    );
+    f.control("archive", b"").await;
+    let start = f
+        .call("POST", "/archive/destination?uploads", b"", &[])
+        .await;
+    assert_eq!(start.status, 200);
+    let start = String::from_utf8(start.body).unwrap();
+    let id = start
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap();
+    let inventory = f.call("GET", "/archive?uploads", b"", &[]).await;
+    assert_eq!(inventory.status, 200);
+    assert!(String::from_utf8_lossy(&inventory.body).contains("<Key>destination</Key>"));
+    let target = format!("/archive/destination?partNumber=1&uploadId={id}");
+    error(
+        &f.call(
+            "PUT",
+            &target,
+            b"",
+            &[("x-amz-copy-source", "archive/source")],
+        )
+        .await,
+        403,
+        "InvalidObjectState",
+    );
+    assert_eq!(
+        f.call(
+            "POST",
+            "/archive/source?restore",
+            b"<RestoreRequest><Days>1</Days></RestoreRequest>",
+            &[]
+        )
+        .await
+        .status,
+        202
+    );
+    assert_eq!(f.control("restore", b"").await["cold_retrievals"], 1);
+    error(
+        &f.call(
+            "PUT",
+            &target,
+            b"",
+            &[
+                ("x-amz-copy-source", "archive/source"),
+                ("x-amz-copy-source-range", "bytes=9-99"),
+            ],
+        )
+        .await,
+        416,
+        "InvalidRange",
+    );
+    let copied = f
+        .call(
+            "PUT",
+            &target,
+            b"",
+            &[
+                ("x-amz-copy-source", "archive/source"),
+                ("x-amz-copy-source-range", "bytes=1-4"),
+            ],
+        )
+        .await;
+    assert_eq!(copied.status, 200);
+    let copied = String::from_utf8(copied.body).unwrap();
+    assert!(copied.contains("<CopyPartResult>"));
+    let etag = copied
+        .split("<ETag>")
+        .nth(1)
+        .unwrap()
+        .split("</ETag>")
+        .next()
+        .unwrap();
+    let body = format!("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{etag}</ETag></Part></CompleteMultipartUpload>");
+    let complete = f
+        .call(
+            "POST",
+            &format!("/archive/destination?uploadId={id}"),
+            body.as_bytes(),
+            &[],
+        )
+        .await;
+    assert_eq!(complete.status, 200);
+    let head = f.call("HEAD", "/archive/destination", b"", &[]).await;
+    assert_eq!(header(&head, "content-length"), Some("4"));
+    error(
+        &f.call("GET", "/archive/destination", b"", &[]).await,
+        403,
+        "InvalidObjectState",
+    );
+    let inventory = f.call("GET", "/archive?uploads", b"", &[]).await;
+    assert!(!String::from_utf8_lossy(&inventory.body).contains("<Upload>"));
+}
+
+#[tokio::test]
 async fn atomic_s3_commit_real_post_cold_restore_and_failed_expiry_states() {
     let mut f = Fixture::new();
     f.control("configure", br#"{"host":"localhost:443"}"#).await;

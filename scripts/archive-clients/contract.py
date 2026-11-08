@@ -4,10 +4,12 @@ PROFILES = ("cli-default", "cli-restrictive", "boto3-default", "boto3-restrictiv
 ROWS = (
     "reset-fixture", "create-bucket", "bucket-inventory", "put-object", "retained-head",
     "retained-get-denied", "cold-copy-denied", "conditional-before-restore",
-    "list-pagination", "multipart", "abort-multipart", "archive-empty-cache",
+    "list-pagination", "upload-inventory", "multipart", "multipart-errors-replay",
+    "abort-multipart", "integrity-errors", "archive-empty-cache",
     "before-restore", "restore-admission", "pending-restore", "pending-restart",
     "whole-generation-restore", "completed-head", "completed-get", "range-get",
-    "conditional-completed", "restored-copy", "renew-restore", "expired-restore",
+    "conditional-completed", "tenant-isolation", "revoked-credentials", "restored-copy",
+    "copy-conditions-replace", "upload-part-copy", "renew-restore", "expired-restore",
     "restore-io-failure", "missing-errors", "delete-nonempty-bucket",
     "delete-objects", "delete-bucket",
 )

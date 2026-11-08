@@ -185,6 +185,25 @@ fn number(target: &s3::Target, name: &str, default: u64) -> s3::Result<u64> {
     })
 }
 
+fn copy_range(value: &str) -> s3::Result<(usize, usize)> {
+    let (start, end) = value
+        .strip_prefix("bytes=")
+        .and_then(|v| v.split_once('-'))
+        .ok_or(s3::ErrorCode::InvalidArgument)?;
+    if start.is_empty()
+        || end.is_empty()
+        || !start.bytes().chain(end.bytes()).all(|b| b.is_ascii_digit())
+    {
+        return Err(s3::ErrorCode::InvalidArgument);
+    }
+    let start = start.parse().map_err(|_| s3::ErrorCode::InvalidArgument)?;
+    let end = end.parse().map_err(|_| s3::ErrorCode::InvalidArgument)?;
+    if start > end {
+        return Err(s3::ErrorCode::InvalidRange);
+    }
+    Ok((start, end))
+}
+
 impl State {
     pub fn new(secret: String) -> Self {
         Self {
@@ -236,6 +255,9 @@ impl State {
         let result = self.dispatch(&request);
         let mut response =
             result.unwrap_or_else(|e| e.response(request.method == "HEAD", "synthetic-request"));
+        response
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("x-amz-request-id"));
         response.headers.push((
             "x-amz-request-id".into(),
             format!("synthetic-{}", self.requests),
@@ -334,6 +356,9 @@ impl State {
                 .mutations
                 .delete_objects(tenant, &target, deleted, self.time.0, &access);
         }
+        if method == "GET" && query(&target, "uploads").is_some() && target.key.is_none() {
+            return self.list_uploads(&target, &access);
+        }
         let key = target.key.as_deref().ok_or(s3::ErrorCode::NotImplemented)?;
         let reference = Reference {
             tenant,
@@ -397,6 +422,43 @@ impl State {
             if method == "PUT" {
                 let part = u16::try_from(number(&target, "partNumber", 0)?)
                     .map_err(|_| s3::ErrorCode::InvalidArgument)?;
+                if headers.get("x-amz-copy-source").is_some() {
+                    if !request.body.is_empty() {
+                        return Err(s3::ErrorCode::InvalidRequest);
+                    }
+                    let source = self.copy_source(tenant, &headers, &p, &access)?;
+                    let range = headers
+                        .get("x-amz-copy-source-range")
+                        .map(copy_range)
+                        .transpose()?;
+                    let evidence = self.mutations.upload_part_copy_with_cache(
+                        &reference,
+                        id,
+                        part,
+                        source,
+                        range,
+                        self.time.0,
+                        &access,
+                        Some(&mut self.io),
+                    )?;
+                    let checksum = evidence.checksum.map_or(String::new(), |bytes| {
+                        let algorithm = if self.checksum.get(&id)
+                            == Some(&MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32))
+                        {
+                            "CRC32"
+                        } else {
+                            "SHA256"
+                        };
+                        format!(
+                            "<Checksum{algorithm}>{}</Checksum{algorithm}>",
+                            STANDARD.encode(bytes)
+                        )
+                    });
+                    return Ok(xml(format!(
+                        "<CopyPartResult><ETag>{}</ETag>{checksum}</CopyPartResult>",
+                        escape(&evidence.etag)
+                    )));
+                }
                 let body = ValidatedBody::new(request.body.clone(), &headers, &verified, &p)?;
                 let evidence =
                     self.mutations
@@ -457,21 +519,7 @@ impl State {
                 self.admit_commit()?;
                 let prepared = self.prepare(&reference, &headers)?;
                 let result = if headers.get("x-amz-copy-source").is_some() {
-                    let source_target = CopySource::target(&headers, &p)?;
-                    let name = format!(
-                        "{}/{}",
-                        source_target.bucket,
-                        source_target
-                            .key
-                            .as_deref()
-                            .ok_or(s3::ErrorCode::InvalidRequest)?
-                    );
-                    let view = self
-                        .mutations
-                        .catalogue()
-                        .lookup(tenant, &name, self.time.0, &access)
-                        .map_err(|_| s3::ErrorCode::AccessDenied)?;
-                    let source = CopySource::from_headers(tenant, view.generation, &headers, &p)?;
+                    let source = self.copy_source(tenant, &headers, &p, &access)?;
                     self.mutations
                         .copy_object_with_cache(
                             prepared,
@@ -493,6 +541,82 @@ impl State {
             }
             _ => Err(s3::ErrorCode::NotImplemented),
         }
+    }
+
+    fn copy_source(
+        &self,
+        tenant: TenantId,
+        headers: &s3::Headers,
+        p: &s3::Policy,
+        access: &Access,
+    ) -> s3::Result<CopySource> {
+        let source = CopySource::target(headers, p)?;
+        let name = format!(
+            "{}/{}",
+            source.bucket,
+            source.key.as_deref().ok_or(s3::ErrorCode::InvalidRequest)?
+        );
+        let view = self
+            .mutations
+            .catalogue()
+            .lookup(tenant, &name, self.time.0, access)
+            .map_err(|_| s3::ErrorCode::AccessDenied)?;
+        CopySource::from_headers(tenant, view.generation, headers, p)
+    }
+
+    fn list_uploads(&self, target: &s3::Target, access: &Access) -> s3::Result<s3::Response> {
+        if query(target, "delimiter").is_some() || query(target, "encoding-type").is_some() {
+            return Err(s3::ErrorCode::NotImplemented);
+        }
+        let max = usize::try_from(number(target, "max-uploads", 64)?)
+            .map_err(|_| s3::ErrorCode::InvalidArgument)?;
+        if max == 0 || max > 64 {
+            return Err(s3::ErrorCode::InvalidArgument);
+        }
+        let prefix = query(target, "prefix").unwrap_or("");
+        let bucket = format!("{}/", target.bucket);
+        let key_marker = query(target, "key-marker").unwrap_or("");
+        let id_marker = query(target, "upload-id-marker");
+        if id_marker.is_some() && key_marker.is_empty() {
+            return Err(s3::ErrorCode::InvalidArgument);
+        }
+        let marker = number(target, "upload-id-marker", 0)?;
+        // The producer orders by upload identity. Scan at most the fixture's 64
+        // session slots, then render S3's key/upload-id marker order explicitly.
+        let mut entries = self
+            .mutations
+            .list_uploads(
+                access.tenant,
+                &format!("{bucket}{prefix}"),
+                0,
+                64,
+                self.time.0,
+                access,
+            )?
+            .entries;
+        entries.sort_by(|a, b| (&a.reference.name, a.id.0).cmp(&(&b.reference.name, b.id.0)));
+        entries.retain(|u| {
+            let key = u.reference.name.strip_prefix(&bucket).unwrap();
+            key_marker.is_empty()
+                || key > key_marker
+                || (key == key_marker && id_marker.is_some() && u.id.0 > marker)
+        });
+        let truncated = entries.len() > max;
+        entries.truncate(max);
+        let mut body = format!("<ListMultipartUploadsResult><Bucket>{}</Bucket><Prefix>{}</Prefix><KeyMarker>{}</KeyMarker><UploadIdMarker>{}</UploadIdMarker><MaxUploads>{max}</MaxUploads><IsTruncated>{truncated}</IsTruncated>", escape(&target.bucket), escape(prefix), escape(key_marker), escape(id_marker.unwrap_or("")));
+        if truncated {
+            let last = entries.last().unwrap();
+            body.push_str(&format!(
+                "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{}</NextUploadIdMarker>",
+                escape(last.reference.name.strip_prefix(&bucket).unwrap()),
+                last.id.0
+            ));
+        }
+        for upload in entries {
+            body.push_str(&format!("<Upload><Key>{}</Key><UploadId>{}</UploadId><StorageClass>GLACIER</StorageClass></Upload>", escape(upload.reference.name.strip_prefix(&bucket).unwrap()), upload.id.0));
+        }
+        body.push_str("</ListMultipartUploadsResult>");
+        Ok(xml(body))
     }
 
     fn prepare(&self, reference: &Reference, headers: &s3::Headers) -> s3::Result<PreparedWrite> {

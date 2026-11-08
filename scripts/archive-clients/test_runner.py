@@ -22,17 +22,20 @@ from worker import Client, Matrix, control
 
 
 class CliArgumentTests(unittest.TestCase):
-    def test_streaming_get_supplies_required_bucket_and_key_flags(self):
+    def test_streaming_get_uses_only_explicit_options_and_positional_outfile(self):
         with tempfile.TemporaryDirectory() as directory:
             client = Client.__new__(Client)
             client.args = SimpleNamespace(endpoint="https://127.0.0.1:443")
             client.evidence, client.sequence, client.restrictive = Path(directory), 1, True
+            client.identity = "fixture"
 
             def invoke(command, **kwargs):
                 self.assertEqual(command[command.index("--bucket") + 1], "archive")
                 self.assertEqual(command[command.index("--key") + 1], "opaque/%2F +/café/../key")
-                self.assertEqual(json.loads(command[command.index("--cli-input-json") + 1]),
-                                 {"ChecksumMode": "ENABLED"})
+                self.assertNotIn("--cli-input-json", command)
+                for option, value in (("--checksum-mode", "ENABLED"), ("--range", "bytes=1-3"),
+                                      ("--if-match", '"exact"'), ("--if-none-match", '"other"')):
+                    self.assertEqual(command[command.index(option) + 1], value)
                 Path(command[-1]).write_bytes(b"verified octets")
                 return subprocess.CompletedProcess(command, 0, b"{}", b'"GET / HTTP/1.1" 200 ')
 
@@ -40,7 +43,8 @@ class CliArgumentTests(unittest.TestCase):
                     mock.patch("worker.subprocess.run", side_effect=invoke):
                 result = client.cli(
                     "get_object", {"Bucket": "archive", "Key": "opaque/%2F +/café/../key",
-                                   "ChecksumMode": "ENABLED"})
+                                   "ChecksumMode": "ENABLED", "Range": "bytes=1-3",
+                                   "IfMatch": '"exact"', "IfNoneMatch": '"other"'})
             self.assertEqual(result["Body"], b"verified octets")
             self.assertEqual(result["ResponseMetadata"]["HTTPStatusCode"], 200)
 

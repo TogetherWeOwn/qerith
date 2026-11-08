@@ -79,10 +79,12 @@ Controls apply fixture-wide to eligible objects:
 | `restart` | Clone/reconnect in-memory model while preserving pending job/state; not actual crash durability |
 | `fail` | Next whole-generation restore I/O fails |
 
-Control responses are saved as row observations; the parent fixture must assert
-its own exact-G/eviction/capacity invariants, not merely return counters. The parent
-also offers `revoke`/`allow` and a `foreign` synthetic tenant identity; this slice
-does not claim their broader tenant/revocation qualification.
+Control responses are saved as row observations; the fixture asserts its own
+exact-G/eviction/capacity invariants, not merely returning counters. `post` archives
+newly committed generations without advancing retention or evicting caches.
+`revoke`/`allow` and a separate `foreign` signing identity exercise wire-level
+tenant isolation and credential revocation. They do not establish broader
+native/REST/MCP moderation or revocation parity.
 
 Fixture sizes are deliberately small: the main object is 272 arbitrary bytes,
 two multipart parts are 256 bytes each (the fixture minimum nonfinal part must
@@ -143,22 +145,42 @@ Both restrictive profiles declare every row must-pass:
    S3 request; then bucket creation, ListBuckets/HeadBucket/location.
 2. PUT, retained metadata/checksum HEAD, no immediate GET lease, cold copy denial.
 3. Conditional 304 before restore and bounded encoded-key listing pagination.
-4. Multipart initiation, two uploads, ListParts, completion, no immediate GET;
-   abort then NoSuchUpload.
+4. Multipart inventory paginates by key/upload-id, including two sessions on the
+   same key, and excludes aborted/completed sessions. Initiation, two uploads,
+   one-part ListParts pages, completion, no immediate GET; exact completion replay
+   returns the same ETag and a conflicting retry fails without replacing bytes.
+   Abort then NoSuchUpload; bad upload checksum fails without creating a key.
 5. Archive/empty-cache control; pre-restore HEAD and 403 InvalidObjectState.
 6. Restore 202; pending HEAD, GET 403, duplicate 409; reconnect simulation preserves
    pending state; explicit whole-G completion.
 7. Completed HEAD, exact full GET, exact range and Content-Range; metadata/ETag/
    checksum persistence; 304/412/416 conditions.
-8. Restored-source copy preserving metadata but granting no destination GET lease;
-   restore renewal 200, expired HEAD with no restore header and GET 403;
+8. Foreign signed credentials cannot discover the bucket or read, restore or
+   overwrite its key, even with a live source lease. Revoked credentials fail
+   GET/HEAD/restore; restoring credential authority preserves the original ETag.
+   Restored-source copy preserves metadata but grants no destination GET lease;
+   failed source condition creates no key; REPLACE changes only destination metadata.
+   Ranged UploadPartCopy derives SHA256 part evidence from the verified cold-restored
+   source, completes atomically and grants no immediate destination lease. An early
+   retained restore of that new destination returns the exact copied range; source
+   bytes are never reuploaded or warmed as a copy workaround.
+   Restore renewal 200, expired HEAD with no restore header and GET 403;
    injected failed restore likewise has no lease/header.
 9. Missing key/bodyless HEAD/bucket errors; nonempty bucket conflict; batch and
    single logical deletion, missing GET, empty bucket deletion.
 
+CLI GET supplies explicit options and a positional output path: this pinned
+streaming command rejects `--cli-input-json`. CLI automatic pagination is disabled
+so the application, not a hidden CLI iterator, exercises each bounded wire page.
+These invocation choices do not change checksum/signing/retry/transport defaults.
+Upload inventory scans at most the fixture's 64 session slots and explicitly
+rejects unimplemented delimiter/encoding variants. Completion replay models an
+identical request after a lost response; it is not actual crash durability or a
+wire-loss injection.
+
 A prerequisite failure leaves later dependent rows explicitly **unqualified**,
-not passed. Copy is independent of the later restore-state rows, so its failure
-is non-short-circuiting. Each row records a call-sequence range in `calls.json`;
+not passed. Copy rows are independent of the later restore-state rows, so their
+failure is non-short-circuiting. Each row records a call-sequence range in `calls.json`;
 control responses are embedded in the row. CLI stderr gives actual wire status,
 raw TLS-terminated request/response streams retain exact signing input, and the
 manifest hashes every evidence artifact. Unknown/missing/duplicated/relabelled
