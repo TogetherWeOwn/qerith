@@ -666,6 +666,9 @@ pub fn validate_response(
                     matches!(status.outcome, Some(Outcome::Committed | Outcome::Restored))
                 }
                 CancelOutcome::CleanupRequired => false,
+                CancelOutcome::AlreadyFinished => {
+                    matches!(status.state, JobState::Failed | JobState::Cancelled)
+                }
             };
             if valid {
                 Ok(())

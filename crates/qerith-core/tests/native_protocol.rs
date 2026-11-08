@@ -1140,6 +1140,90 @@ fn cleanup_obligation_does_not_replace_terminal_failure() {
 }
 
 #[test]
+fn cancel_after_cleanup_is_a_noop_without_rewriting_terminal_status() {
+    let mut memory = MemoryAuthority::new();
+    let req = request("cancel");
+    let finished = response(&req, ResponseBody::Cancel(CancelOutcome::AlreadyFinished));
+    assert_eq!(
+        serde_json::to_value(&finished).unwrap()["body"]["output"],
+        "already_finished"
+    );
+    assert_eq!(
+        decode_response(&serde_json::to_vec(&finished).unwrap()).unwrap(),
+        finished
+    );
+    for kind in [JobKind::Upload, JobKind::Restore] {
+        memory.job.kind = kind;
+        for (state, outcome) in [
+            (JobState::Cancelled, Outcome::CleanupRequired),
+            (JobState::Cancelled, Outcome::CancelledBeforeCommit),
+            (JobState::Failed, Outcome::CleanupRequired),
+            (JobState::Failed, Outcome::IntegrityFailure),
+            (JobState::Failed, Outcome::IrrecoverableKey),
+            (JobState::Failed, Outcome::Unavailable),
+        ] {
+            memory.job.state = state;
+            memory.job.outcome = Some(outcome);
+            let terminal = memory.job.clone();
+            for cleanup_required in [true, false] {
+                memory.cleanup_required = cleanup_required;
+                assert_eq!(
+                    validate_response(&req, &finished, &memory.owner, &policy(), &memory, NOW),
+                    if cleanup_required {
+                        Err(ErrorCode::InvalidState)
+                    } else {
+                        Ok(())
+                    }
+                );
+                let cleanup = response(&req, ResponseBody::Cancel(CancelOutcome::CleanupRequired));
+                assert_eq!(
+                    validate_response(&req, &cleanup, &memory.owner, &policy(), &memory, NOW),
+                    if cleanup_required {
+                        Ok(())
+                    } else {
+                        Err(ErrorCode::InvalidState)
+                    }
+                );
+                let status_req = request("status");
+                assert_eq!(
+                    validate_response(
+                        &status_req,
+                        &response(&status_req, ResponseBody::Status(terminal.clone())),
+                        &memory.owner,
+                        &policy(),
+                        &memory,
+                        NOW
+                    ),
+                    Ok(())
+                );
+                assert_eq!(memory.job, terminal);
+            }
+        }
+        for (state, outcome) in [
+            (JobState::Queued, None),
+            (JobState::Running, None),
+            (
+                JobState::Succeeded,
+                Some(if memory.job.kind == JobKind::Upload {
+                    Outcome::Committed
+                } else {
+                    Outcome::Restored
+                }),
+            ),
+        ] {
+            memory.job.state = state;
+            memory.job.outcome = outcome;
+            memory.job.completed_bytes = 10;
+            memory.job.total_bytes = Some(10);
+            assert_eq!(
+                validate_response(&req, &finished, &memory.owner, &policy(), &memory, NOW),
+                Err(ErrorCode::InvalidState)
+            );
+        }
+    }
+}
+
+#[test]
 fn restore_response_requires_an_owned_persisted_job_snapshot() {
     let memory = MemoryAuthority::new();
     let req = request("restore");

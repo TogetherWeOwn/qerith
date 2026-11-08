@@ -175,14 +175,19 @@ checkpoints, retained results and idempotency before acknowledging, so status
 works across transport/process reconnects. The test `MemoryAuthority` demonstrates
 portable resolution semantics only and **does not claim persistence or durability**.
 Cancellation is an explicit request, with outcomes requested, cancelled before
-commit, already committed, or cleanup required. Acknowledging a request is not
-proof that all side effects stopped. Cancel responses reconcile the authoritative
+commit, already committed, cleanup required, or already finished. Acknowledging a
+request is not proof that all side effects stopped. Cancel responses reconcile the authoritative
 record: `JobRecord::cleanup_required` is a trusted obligation independent of the
 immutable terminal status. It takes precedence over other cancel replies, so an
 integrity-failed upload can retain `integrity_failure` while cancel reports
 `cleanup_required`. Cleanup completion clears that separate obligation, never
-rewrites the terminal failure. Without cleanup outstanding, successful upload or
-restore publication is reported as already committed. `requested` applies only
+rewrites the terminal failure. With no cleanup outstanding, `already_finished`
+is a no-op acknowledgement for failed/cancelled jobs, including historical
+`cleanup_required` outcomes after cleanup completes. It claims neither successful
+publication nor that cancellation caused the terminal result; status retains the
+original outcome. It is rejected while cleanup is outstanding or work is active
+or successful. Successful upload or restore publication is reported as already
+committed. `requested` applies only
 to queued/running work. Adapters read status and cleanup from one consistent
 snapshot and reconcile actual terminal effects;
 one waiter's cancellation must not erase another waiter's demand. Nothing can

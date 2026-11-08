@@ -289,6 +289,7 @@ pub enum CancelOutcome {
     CancelledBeforeCommit,
     AlreadyCommitted,
     CleanupRequired,
+    AlreadyFinished,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
