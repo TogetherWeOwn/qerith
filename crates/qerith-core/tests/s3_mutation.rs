@@ -193,11 +193,11 @@ fn body_with(
     let authorization = format!("AWS4-HMAC-SHA256 Credential=fixture/20130524/fixture/s3/aws4_request, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, string.as_bytes())));
     fields.push(("authorization", &authorization));
     let headers = s3::Headers::new(&fields, &p)?;
+    let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &authority)?;
     assert_eq!(
         s3::verify("PUT", &target, &headers, true, NOW, &p, &WireAuth::new()).err(),
         Some(s3::ErrorCode::SignatureDoesNotMatch)
     );
-    let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &authority)?;
     ValidatedBody::new(bytes.to_vec(), &headers, &verified, &p)
 }
 fn body(bytes: &[u8]) -> ValidatedBody {
