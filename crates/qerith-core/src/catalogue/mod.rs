@@ -227,6 +227,8 @@ pub struct JobView {
     pub id: JobId,
     pub generation: GenerationId,
     pub kind: JobKind,
+    /// Restore settings, absent for archival work. Also present in RunJob events.
+    pub profile: Option<String>,
     pub state: JobState,
     pub checkpoint: u64,
     /// Opaque manifest/article/repair inventory reference, not engine internals.
@@ -256,13 +258,39 @@ pub struct DeletionCandidate {
     kind: DeletionKind,
 }
 
+/// Worker-only generation inputs; not subject to logical-reference visibility.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationView {
+    pub metadata: CiphertextMetadata,
+    pub cache_location: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeletionTarget {
+    StorageVersion(String),
+    /// Retire catalogue metadata without issuing a storage request.
+    MetadataOnly,
+}
+
+/// Dispatch authorization is bounded by the earliest verification expiry.
+/// A worker must not start storage I/O at or after valid_until.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeletionDispatch {
+    pub event: EventId,
+    pub generation: GenerationId,
+    pub kind: DeletionKind,
+    pub target: DeletionTarget,
+    pub valid_until: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     RunJob(JobView),
+    /// Queue notification only: dispatch_deletion must authorize execution.
     Delete {
         generation: GenerationId,
         kind: DeletionKind,
-        location: String,
+        target: DeletionTarget,
     },
 }
 
@@ -312,6 +340,14 @@ pub trait MetadataOutbox {
 pub trait JobPort {
     fn outbox(&self, tenant: TenantId) -> Vec<OutboxEvent>;
     fn job(&self, tenant: TenantId, job: JobId) -> Result<JobView>;
+    fn generation(&self, tenant: TenantId, generation: GenerationId) -> Result<GenerationView>;
+    /// Retire an expired or superseded intent, without deleting staged bytes.
+    fn retire_upload_intent(
+        &mut self,
+        tenant: TenantId,
+        intent: OperationId,
+        now: u64,
+    ) -> Result<()>;
     fn claim(&mut self, tenant: TenantId, job: JobId, now: u64, until: u64) -> Result<Fence>;
     fn expire_job(&mut self, tenant: TenantId, job: JobId, now: u64) -> Result<()>;
     fn transition(
@@ -357,6 +393,29 @@ pub trait JobPort {
         now: u64,
         authority: &dyn Authority,
     ) -> Result<EventId>;
+    /// Recheck current obligations before issuing any storage request. Repeated
+    /// dispatch is fenced; uncertain remote outcomes require reconciliation.
+    fn dispatch_deletion(
+        &mut self,
+        tenant: TenantId,
+        event: EventId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<DeletionDispatch>;
+    /// Withdraw only a queued effect that has never been dispatched.
+    fn cancel_deletion(&mut self, tenant: TenantId, event: EventId) -> Result<()>;
+    /// After dispatch expiry, recover only with trusted evidence that no remote
+    /// request remains in flight, no effect occurred, and the same copy survives.
+    /// settlement_ref identifies the worker/storage reconciliation record.
+    fn reconcile_retained_deletion(
+        &mut self,
+        tenant: TenantId,
+        event: EventId,
+        retained: CompleteCopy,
+        settlement_ref: String,
+        now: u64,
+    ) -> Result<()>;
+    /// Only after confirmed storage completion (or metadata-only dispatch).
     fn acknowledge_deletion(&mut self, tenant: TenantId, event: EventId) -> Result<()>;
 }
 

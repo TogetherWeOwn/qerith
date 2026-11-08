@@ -34,6 +34,8 @@ struct Generation {
     moderation_epoch: u64,
     revision: u64,
     deleting: Option<(EventId, DeletionKind)>,
+    deletion_dispatched: bool,
+    dispatch_valid_until: u64,
     verification: BTreeMap<BackboneId, VerificationEvidence>,
     independence: Option<IndependenceEvidence>,
 }
@@ -57,7 +59,6 @@ struct Subscriber {
 #[derive(Clone)]
 struct Job {
     view: JobView,
-    profile: String,
     subscribers: BTreeMap<String, Subscriber>,
     fence: u64,
     claimed_until: u64,
@@ -120,13 +121,21 @@ impl Tenant {
         self.references.get(name).map_or(0, |r| r.revision)
     }
 
-    fn visible(&self, name: &str) -> Result<(&LogicalReference, &Generation)> {
+    fn metadata(&self, name: &str) -> Result<(&LogicalReference, &Generation)> {
         let r = self.references.get(name).ok_or(Error::Unavailable)?;
         let g = self
             .generations
             .get(&r.generation.ok_or(Error::Unavailable)?)
             .ok_or(Error::Unavailable)?;
-        if g.prohibited || g.deleting.is_some() {
+        if g.prohibited {
+            return Err(Error::Unavailable);
+        }
+        Ok((r, g))
+    }
+
+    fn visible(&self, name: &str) -> Result<(&LogicalReference, &Generation)> {
+        let (r, g) = self.metadata(name)?;
+        if g.deleting.is_some() {
             return Err(Error::Unavailable);
         }
         Ok((r, g))
@@ -182,7 +191,7 @@ impl Tenant {
         &mut self,
         generation: GenerationId,
         kind: JobKind,
-        profile: String,
+        profile: Option<String>,
         deadline: u64,
     ) -> Result<JobId> {
         let id = JobId(self.allocate()?);
@@ -191,6 +200,7 @@ impl Tenant {
             id,
             generation,
             kind,
+            profile,
             state: JobState::Queued,
             checkpoint: 0,
             checkpoint_ref: None,
@@ -212,7 +222,6 @@ impl Tenant {
             id,
             Job {
                 view,
-                profile,
                 subscribers: BTreeMap::new(),
                 fence: 0,
                 claimed_until: 0,
@@ -289,6 +298,8 @@ impl Tenant {
                         moderation_epoch: 0,
                         revision: 1,
                         deleting: None,
+                        deletion_dispatched: false,
+                        dispatch_valid_until: 0,
                         verification: BTreeMap::new(),
                         independence: None,
                     },
@@ -305,12 +316,8 @@ impl Tenant {
                     .get_mut(&intent)
                     .ok_or(Error::Unavailable)?
                     .pending = false;
-                let archive = self.new_job(
-                    i.generation,
-                    JobKind::Archive,
-                    String::new(),
-                    i.archive_deadline,
-                )?;
+                let archive =
+                    self.new_job(i.generation, JobKind::Archive, None, i.archive_deadline)?;
                 Ok(Outcome::Committed {
                     generation: i.generation,
                     revision,
@@ -400,7 +407,7 @@ impl Tenant {
                         j.view.generation == generation
                             && j.view.kind == JobKind::Restore
                             && j.moderation_epoch == moderation_epoch
-                            && j.profile == profile
+                            && j.view.profile.as_ref() == Some(&profile)
                             && !terminal(&j.view.state)
                             && j.view.deadline == deadline
                             && j.view.deadline > now
@@ -408,10 +415,13 @@ impl Tenant {
                     .map(|(id, _)| *id);
                 let id = match existing {
                     Some(id) => id,
-                    None => self.new_job(generation, JobKind::Restore, profile, deadline)?,
+                    None => self.new_job(generation, JobKind::Restore, Some(profile), deadline)?,
                 };
                 let j = self.jobs.get_mut(&id).ok_or(Error::Unavailable)?;
-                if j.subscribers.contains_key(&name) {
+                if j.subscribers
+                    .get(&name)
+                    .is_some_and(|s| s.revision == expected_revision)
+                {
                     return Err(Error::Conflict);
                 }
                 j.subscribers.insert(
@@ -511,7 +521,6 @@ impl Tenant {
             .ok_or(Error::Unavailable)?;
         if !authority.is_current()
             || g.safety_hold
-            || g.deleting.is_some()
             || !g.archived
             || !self.verified(generation, now)
         {
@@ -604,7 +613,7 @@ impl MetadataOutbox for MemoryCatalogue {
     ) -> Result<ReferenceView> {
         permit(authority, tenant, name, Action::Read)?;
         let t = self.tenants.get(&tenant).ok_or(Error::Unavailable)?;
-        let (r, g) = t.visible(name)?;
+        let (r, g) = t.metadata(name)?;
         Ok(ReferenceView {
             generation: r.generation.ok_or(Error::Unavailable)?,
             revision: r.revision,
@@ -691,9 +700,56 @@ impl JobPort for MemoryCatalogue {
             .clone())
     }
 
+    fn generation(&self, tenant: TenantId, generation: GenerationId) -> Result<GenerationView> {
+        let g = self
+            .tenants
+            .get(&tenant)
+            .and_then(|t| t.generations.get(&generation))
+            .ok_or(Error::Unavailable)?;
+        Ok(GenerationView {
+            metadata: g.metadata.clone(),
+            cache_location: g.cache.clone(),
+        })
+    }
+
+    fn retire_upload_intent(
+        &mut self,
+        tenant: TenantId,
+        intent: OperationId,
+        now: u64,
+    ) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let i = t.intents.get(&intent).ok_or(Error::Unavailable)?;
+            if !i.pending
+                || (now < i.archive_deadline && t.current_revision(&i.name) == i.expected_revision)
+            {
+                return Err(Error::Conflict);
+            }
+            let generation = t.references.get(&i.name).and_then(|r| r.generation);
+            t.intents
+                .get_mut(&intent)
+                .ok_or(Error::Unavailable)?
+                .pending = false;
+            if let Some(generation) = generation {
+                t.touch(generation)?;
+            }
+            Ok(())
+        })
+    }
+
     fn claim(&mut self, tenant: TenantId, job: JobId, now: u64, until: u64) -> Result<Fence> {
         self.atomic(tenant, |t| {
             let j = t.jobs.get_mut(&job).ok_or(Error::Unavailable)?;
+            let g = t
+                .generations
+                .get(&j.view.generation)
+                .ok_or(Error::Unavailable)?;
+            if g.prohibited || g.deleting.is_some() {
+                return Err(Error::Unavailable);
+            }
+            if j.view.kind == JobKind::Restore && j.moderation_epoch != g.moderation_epoch {
+                return Err(Error::Unavailable);
+            }
             if terminal(&j.view.state) || j.claimed_until > now {
                 return Err(Error::Fenced);
             }
@@ -704,6 +760,11 @@ impl JobPort for MemoryCatalogue {
                 return Err(Error::Conflict);
             }
             j.fence = next(j.fence)?;
+            // Archival obligation survives policy changes. Only a new claim may
+            // adopt the current epoch; prior workers retain their stale fence.
+            if j.view.kind == JobKind::Archive {
+                j.moderation_epoch = g.moderation_epoch;
+            }
             j.claimed_until = until;
             j.view.state = JobState::Running;
             let fence = Fence {
@@ -879,7 +940,7 @@ impl JobPort for MemoryCatalogue {
                 .generations
                 .get_mut(&evidence.generation)
                 .ok_or(Error::Unavailable)?;
-            if g.deleting.is_some()
+            if g.deletion_dispatched
                 || g.prohibited
                 || evidence.reconstructed != g.metadata.identity
                 || evidence.verified_at > now
@@ -919,9 +980,6 @@ impl JobPort for MemoryCatalogue {
                 .generations
                 .get_mut(&generation)
                 .ok_or(Error::Unavailable)?;
-            if g.deleting.is_some() {
-                return Err(Error::Fenced);
-            }
             g.safety_hold = hold;
             t.touch(generation)
         })
@@ -939,7 +997,7 @@ impl JobPort for MemoryCatalogue {
                 .generations
                 .get_mut(&generation)
                 .ok_or(Error::Unavailable)?;
-            if epoch <= g.moderation_epoch || g.deleting.is_some() {
+            if epoch <= g.moderation_epoch {
                 return Err(Error::Fenced);
             }
             g.moderation_epoch = epoch;
@@ -962,6 +1020,9 @@ impl JobPort for MemoryCatalogue {
             return Err(Error::Invalid);
         }
         t.safe_to_delete(tenant, generation, kind, now, authority)?;
+        if t.generations[&generation].deleting.is_some() {
+            return Err(Error::Unsafe);
+        }
         Ok(DeletionCandidate {
             tenant,
             generation,
@@ -997,7 +1058,10 @@ impl JobPort for MemoryCatalogue {
             }
             // Physical archive deletion is deliberately absent: logical deletion
             // cannot promise erasure of propagated Usenet articles.
-            let location = g.cache.clone().unwrap_or_default();
+            let target = g
+                .cache
+                .clone()
+                .map_or(DeletionTarget::MetadataOnly, DeletionTarget::StorageVersion);
             let id = EventId(t.allocate()?);
             t.events.insert(
                 id,
@@ -1006,7 +1070,7 @@ impl JobPort for MemoryCatalogue {
                     effect: Effect::Delete {
                         generation: candidate.generation,
                         kind: candidate.kind,
-                        location,
+                        target,
                     },
                 },
             );
@@ -1016,6 +1080,115 @@ impl JobPort for MemoryCatalogue {
                 .deleting = Some((id, candidate.kind));
             t.touch(candidate.generation)?;
             Ok(id)
+        })
+    }
+
+    fn dispatch_deletion(
+        &mut self,
+        tenant: TenantId,
+        event: EventId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<DeletionDispatch> {
+        self.atomic(tenant, |t| {
+            let e = t.events.get(&event).ok_or(Error::Unavailable)?.clone();
+            let Effect::Delete {
+                generation,
+                kind,
+                target,
+            } = e.effect
+            else {
+                return Err(Error::Invalid);
+            };
+            let g = t.generations.get(&generation).ok_or(Error::Unavailable)?;
+            if g.deleting != Some((event, kind)) || g.deletion_dispatched {
+                return Err(Error::Fenced);
+            }
+            t.safe_to_delete(tenant, generation, kind, now, authority)?;
+            let i = g.independence.as_ref().ok_or(Error::Unsafe)?;
+            let mut valid_until = i.valid_until;
+            for b in &i.backbones {
+                valid_until =
+                    valid_until.min(g.verification.get(b).ok_or(Error::Unsafe)?.valid_until);
+            }
+            let g = t
+                .generations
+                .get_mut(&generation)
+                .ok_or(Error::Unavailable)?;
+            g.deletion_dispatched = true;
+            g.dispatch_valid_until = valid_until;
+            t.touch(generation)?;
+            Ok(DeletionDispatch {
+                event,
+                generation,
+                kind,
+                target,
+                valid_until,
+            })
+        })
+    }
+
+    fn cancel_deletion(&mut self, tenant: TenantId, event: EventId) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let e = t.events.get(&event).ok_or(Error::Unavailable)?;
+            let Effect::Delete {
+                generation, kind, ..
+            } = e.effect
+            else {
+                return Err(Error::Invalid);
+            };
+            let g = t
+                .generations
+                .get_mut(&generation)
+                .ok_or(Error::Unavailable)?;
+            if g.deleting != Some((event, kind)) || g.deletion_dispatched {
+                return Err(Error::Fenced);
+            }
+            g.deleting = None;
+            t.events.remove(&event);
+            t.touch(generation)
+        })
+    }
+
+    fn reconcile_retained_deletion(
+        &mut self,
+        tenant: TenantId,
+        event: EventId,
+        retained: CompleteCopy,
+        settlement_ref: String,
+        now: u64,
+    ) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let e = t.events.get(&event).ok_or(Error::Unavailable)?;
+            let Effect::Delete {
+                generation,
+                kind,
+                ref target,
+            } = e.effect
+            else {
+                return Err(Error::Invalid);
+            };
+            let g = t
+                .generations
+                .get_mut(&generation)
+                .ok_or(Error::Unavailable)?;
+            if g.deleting != Some((event, kind))
+                || !g.deletion_dispatched
+                || now < g.dispatch_valid_until
+            {
+                return Err(Error::Fenced);
+            }
+            if settlement_ref.is_empty()
+                || target != &DeletionTarget::StorageVersion(retained.location.clone())
+                || g.cache.as_ref() != Some(&retained.location)
+            {
+                return Err(Error::Unsafe);
+            }
+            complete_copy(&g.metadata, &retained)?;
+            g.deleting = None;
+            g.deletion_dispatched = false;
+            t.events.remove(&event);
+            t.touch(generation)
         })
     }
 
@@ -1032,10 +1205,11 @@ impl JobPort for MemoryCatalogue {
                 .generations
                 .get_mut(&generation)
                 .ok_or(Error::Unavailable)?;
-            if g.deleting != Some((event, kind)) {
+            if g.deleting != Some((event, kind)) || !g.deletion_dispatched {
                 return Err(Error::Fenced);
             }
             g.cache = None;
+            g.deletion_dispatched = false;
             // Keep the generation, moderation epoch and operation/tombstone
             // ledger. An acknowledged delete never makes its identity reusable.
             g.deleting = if kind == DeletionKind::UnreferencedGeneration {

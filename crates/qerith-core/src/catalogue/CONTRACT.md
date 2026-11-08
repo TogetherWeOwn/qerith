@@ -29,9 +29,20 @@ engine dependency and immutable pin are unchanged.
   Job/event IDs are tenant-scoped and stable across retries. Claims cannot extend
   the absolute job deadline. Expiration explicitly terminates even an abandoned
   claim; failed or expired archival work does not release the safety copy.
+  `JobView` and `RunJob` include the restore profile (`None` for archives).
+  `generation` supplies retained-copy location and metadata even after the last
+  logical tombstone, only to trusted tenant-scoped workers. It grants no serving
+  or publication authority; workers must still claim and condition transitions.
+  A new archive claim can adopt the current permitted moderation epoch while
+  advancing its fence; old workers remain rejected. Restore subscriptions never
+  adopt a newer epoch implicitly: a new authorized request is required.
+  `retire_upload_intent` explicitly retires expired/superseded positive intents;
+  it neither deletes staged bytes nor relaxes the veto on an unresolved intent.
 - Restore coalescing requires the same tenant, generation, profile and fixed
   deadline. Each logical reference retains its revision, subscription and
-  availability duration. Cancellation removes only that subscription, not an
+  availability duration. A relinked reference can replace its stale-revision
+  subscriber; duplicate current-revision subscriptions still conflict.
+  Cancellation removes only that subscription, not an
   archive obligation or another subscriber. Publication rechecks each subscriber
   against **current** authority and reference identity, then atomically publishes
   the complete verified copy and only eligible logical availability leases.
@@ -49,6 +60,12 @@ and HTTP/S3 error translation belong outside this port. `Unavailable` deliberate
 conflates absence with denied reference access. No global existence, cross-tenant
 content lookup, reference-count or plaintext/key API is exposed. Physical
 cross-tenant deduplication is not implemented or authorized by this contract.
+`validator` is an opaque **generation validator**, unique within a tenant for the
+ledger's lifetime, not a content-derived ETag. Protocol adapters must mint it
+independently of any repeatable content validator. Deleted generations retain
+that reservation. Releasing a serving pin requires current Read authority for
+its reference; revoked readers cannot mutate the pin ledger. Such pins have a
+fixed expiry and conservatively veto deletion until release or expiry.
 
 ## Evidence, eviction and deletion
 
@@ -70,8 +87,27 @@ Expired/missing/uncertain evidence fails closed even after archive completion.
 This module does not perform live qualification or manufacture signed receipts.
 
 Deletion is candidate → grace → current-authority and all-obligations recheck →
-fenced deleting state + outbox event → conditional storage effect → ack. Candidate
-revision changes fence stale decisions. Every current reference is consulted;
+fenced queued state + outbox notification → `dispatch_deletion` recheck →
+conditional storage effect → ack. Candidate revision changes fence stale decisions.
+A `Delete` outbox record alone is **not execution permission**. Dispatch checks
+current evidence, authority, holds and all obligations again, consumes the event's
+single dispatch right, and returns a target with the earliest evidence expiry.
+Workers must not start I/O at or after that `valid_until`; metadata checks cannot
+cancel already-issued remote requests. `MetadataOnly` explicitly requires no
+storage call, rather than an empty storage-version identifier.
+
+A delayed, undispatched event can refresh verification while queued, or be
+withdrawn with `cancel_deletion`; withdrawal preserves the cache, removes the
+notification and fences redelivery. An ack without dispatch is rejected. After
+dispatch, cancellation is refused: reconcile confirmed completion with ack, not
+with a guessed absence. If no effect occurred, `reconcile_retained_deletion`
+requires the dispatch validity window to have ended, a complete retained-copy
+assertion for the **same** version, and a trusted settlement reference proving
+all issued requests have settled without deleting it. Only then is the event
+withdrawn and admission reopened. An absent/uncertain request outcome stays
+fenced. The trusted worker must authenticate settlement and honor expiry; strings
+and synthetic fixture assertions do not prove remote quiescence. Durable adapters
+must persist this dispatch/reconciliation state and remote request identities. Every current reference is consulted;
 unreferenced-generation cleanup requires none remain. Delivery-cache eviction
 may retain live references only when archived and currently qualified, without
 availability guarantees. Pending positive intents, unfinished jobs (implicit
@@ -80,7 +116,10 @@ safety/retention holds all veto deletion. Unknown authority vetoes deletion.
 Conservatively, even orphan-generation cleanup requires qualified archival
 safety; failing archive jobs therefore retain bytes pending explicit remediation.
 
-While deleting, new reference, restore and serving admission is refused. Storage
+While deleting, new reference, restore and serving admission is refused; authorized
+metadata-only lookup remains available. Policy and safety updates remain writable
+through dispatch and reconciliation; acknowledging a storage effect never resets
+the current policy. Storage
 locations must be immutable, tenant/generation/copy-qualified versions, not
 reusable object keys. An acknowledged old delete may be redelivered, so a new
 copy must never reuse its location. The reference adapter reserves locations and
