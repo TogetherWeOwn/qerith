@@ -417,6 +417,345 @@ async fn inner_clock_unavailable_retains_unknown_and_cleanup_without_masking_rev
 }
 
 #[tokio::test]
+async fn terminal_cancel_replay_retains_committed_effects_after_generation_moves() {
+    let (mut service, mut io, upload, _, auth) = hot_upload().await;
+    let selection = negotiate(&mut service, &mut io).await;
+    let o::Output::Job(job) = parity(
+        &mut service,
+        &scope(),
+        o::Operation::Restore,
+        vec![
+            text("reference", "object"),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "restore_before_move"),
+            ("availability_seconds".into(), o::Value::Number(30)),
+        ],
+    )
+    .unwrap() else {
+        panic!("restore");
+    };
+    let physical = service
+        .catalogue()
+        .outbox(TENANT)
+        .into_iter()
+        .rev()
+        .find_map(|event| match event.effect {
+            Effect::RunJob(job) if job.kind == JobKind::Restore => Some(job.id),
+            _ => None,
+        })
+        .unwrap();
+    run(
+        service.catalogue_mut(),
+        &mut io,
+        physical,
+        &Time(Cell::new(10)),
+        &Rules::default(),
+        auth.as_ref(),
+    )
+    .await
+    .unwrap();
+    let fields = vec![
+        text("job", job.handle.as_str()),
+        text("identity", "cancel_before_move"),
+    ];
+    let direct = o::dispatch(
+        &mut service,
+        Some(&scope()),
+        o::VERSION,
+        o::Operation::Cancel,
+        fields.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        parity(&mut service, &scope(), o::Operation::Cancel, fields.clone()).unwrap(),
+        direct
+    );
+    assert!(matches!(
+        direct,
+        o::Output::Cancel {
+            outcome: o::CancelOutcome::AlreadyCommitted,
+            job: o::Job {
+                effects: o::Effects::Committed,
+                ..
+            }
+        }
+    ));
+    let native_cancel = request(
+        "native_cancel_before_move",
+        Some(&selection.session),
+        n::Action::Cancel {
+            job: nid(job.handle.as_str()),
+        },
+    );
+    assert_eq!(
+        native(
+            &mut service,
+            &native_cancel,
+            &mut io,
+            &Time(Cell::new(10)),
+            &Rules::default()
+        )
+        .await,
+        n::ResponseBody::Cancel(n::CancelOutcome::AlreadyCommitted)
+    );
+
+    let mut intent = upload_intent(&io);
+    intent.precondition = n::Precondition::Matches(nid(upload.target.generation.as_str()));
+    service
+        .bind_upload(&scope(), id("move_target"), id("root"), intent)
+        .unwrap();
+    let o::Output::Upload { transfer, .. } = parity(
+        &mut service,
+        &scope(),
+        o::Operation::InitiateUpload,
+        vec![
+            text("reference", "object"),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "move_target"),
+            ("max_bytes".into(), o::Value::Number(io.identity().length)),
+        ],
+    )
+    .unwrap() else {
+        panic!("replacement upload");
+    };
+    fully_stage(&mut service, &io, &transfer);
+    let mut commit = commit_fields(&transfer);
+    commit.retain(|(name, _)| name != "identity");
+    commit.push(text("identity", "move_target_commit"));
+    parity(&mut service, &scope(), o::Operation::CommitUpload, commit).unwrap();
+    service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &Time(Cell::new(10)),
+            &Rules::default(),
+        )
+        .await
+        .unwrap();
+
+    // A different authorized job must not replace the original replay obligation.
+    let mut intent = upload_intent(&io);
+    intent.object = nid("object_b");
+    service
+        .bind_upload(&scope(), id("other_upload"), id("root"), intent)
+        .unwrap();
+    let o::Output::Upload { job: other, .. } = parity(
+        &mut service,
+        &scope(),
+        o::Operation::InitiateUpload,
+        vec![
+            text("reference", "object_b"),
+            text("identity", "other_upload"),
+            ("if_absent".into(), o::Value::Flag(true)),
+            ("max_bytes".into(), o::Value::Number(io.identity().length)),
+        ],
+    )
+    .unwrap() else {
+        panic!("other upload");
+    };
+    assert_eq!(other.effects, o::Effects::None);
+    let changed = vec![
+        text("job", other.handle.as_str()),
+        text("identity", "cancel_before_move"),
+    ];
+    let allocations = service.allocations();
+    let outbox = service.catalogue().outbox(TENANT);
+    let stored = service.catalogue().job(TENANT, physical).unwrap();
+    let current = service
+        .catalogue()
+        .lookup(TENANT, "object", 10, auth.as_ref())
+        .unwrap();
+    let calls = io.order.len();
+    auth.denied.borrow_mut().insert("object:Restore".into());
+    auth.denied.borrow_mut().insert("object:Write".into());
+    // Read-only terminal projection remains identical to Status.
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Status,
+        vec![text("job", job.handle.as_str())],
+        o::ErrorCode::PreconditionFailed,
+        o::Effects::Committed,
+    );
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Cancel,
+        vec![
+            text("job", job.handle.as_str()),
+            text("identity", "new_cancel_after_move"),
+        ],
+        o::ErrorCode::PreconditionFailed,
+        o::Effects::Committed,
+    );
+    for action in [
+        n::Action::Cancel {
+            job: nid(job.handle.as_str()),
+        },
+        n::Action::Status {
+            job: nid(job.handle.as_str()),
+        },
+    ] {
+        let req = request("native_after_move", Some(&selection.session), action);
+        assert_eq!(
+            native(
+                &mut service,
+                &req,
+                &mut io,
+                &Time(Cell::new(10)),
+                &Rules::default()
+            )
+            .await,
+            n::ResponseBody::Error(n::ErrorCode::PreconditionFailed)
+        );
+    }
+    assert_eq!(
+        native(
+            &mut service,
+            &native_cancel,
+            &mut io,
+            &Time(Cell::new(10)),
+            &Rules::default()
+        )
+        .await,
+        n::ResponseBody::Error(n::ErrorCode::PreconditionFailed)
+    );
+
+    auth.denied.borrow_mut().insert("object:Read".into());
+    for attempt in [&fields, &changed] {
+        reject(
+            &mut service,
+            &scope(),
+            o::Operation::Cancel,
+            attempt.clone(),
+            o::ErrorCode::Denied,
+            o::Effects::None,
+        );
+    }
+    assert_eq!(
+        native(
+            &mut service,
+            &native_cancel,
+            &mut io,
+            &Time(Cell::new(10)),
+            &Rules::default()
+        )
+        .await,
+        n::ResponseBody::Error(n::ErrorCode::NotAuthorized)
+    );
+    auth.denied.borrow_mut().remove("object:Read");
+    for caller in [
+        o::Scope {
+            principal: id("foreign"),
+            ..scope()
+        },
+        o::Scope {
+            tenant: id("foreign"),
+            ..scope()
+        },
+    ] {
+        reject(
+            &mut service,
+            &caller,
+            o::Operation::Cancel,
+            fields.clone(),
+            o::ErrorCode::Denied,
+            o::Effects::None,
+        );
+        let response = service
+            .native_call(
+                &caller,
+                &id("root"),
+                &native_cancel,
+                s::UploadWorker {
+                    storage: &mut io,
+                    budget: &budget(),
+                    clock: &Time(Cell::new(10)),
+                    policy: &Rules::default(),
+                },
+            )
+            .await;
+        assert_eq!(
+            response.body,
+            n::ResponseBody::Error(n::ErrorCode::NotAuthorized)
+        );
+    }
+    let args = serde_json::json!({"job":job.handle.as_str(), "identity":"cancel_before_move"});
+    let bytes = serde_json::to_vec(&args).unwrap();
+    let unauthenticated = o::Failure::new(o::ErrorCode::Unauthenticated);
+    assert_eq!(
+        o::dispatch(
+            &mut service,
+            None,
+            o::VERSION,
+            o::Operation::Cancel,
+            fields.clone()
+        )
+        .unwrap_err(),
+        unauthenticated
+    );
+    assert_eq!(
+        o::rest_request(&mut service, None, "POST", "/v1/operations/cancel", &bytes)
+            .outcome
+            .unwrap_err(),
+        unauthenticated
+    );
+    assert_eq!(
+        o::mcp_request(
+            &mut service,
+            None,
+            o::McpSession::default(),
+            o::TaskMode::Baseline,
+            "cancel",
+            &bytes
+        )
+        .outcome
+        .unwrap_err(),
+        unauthenticated
+    );
+
+    // The existing replay entry triggers a non-denial authorization failure.
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Cancel,
+        fields,
+        o::ErrorCode::PreconditionFailed,
+        o::Effects::Committed,
+    );
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Cancel,
+        changed,
+        o::ErrorCode::Conflict,
+        o::Effects::Committed,
+    );
+    assert_eq!(service.allocations(), allocations);
+    assert_eq!(service.catalogue().outbox(TENANT), outbox);
+    assert_eq!(service.catalogue().job(TENANT, physical).unwrap(), stored);
+    assert_eq!(
+        service
+            .catalogue()
+            .lookup(TENANT, "object", 10, auth.as_ref())
+            .unwrap(),
+        current
+    );
+    assert_eq!(io.order.len(), calls);
+    evidence(
+        "service-terminal-cancel-replay.json",
+        serde_json::json!({
+            "same_identity":"PreconditionFailed/Committed", "changed_handle":"Conflict/Committed",
+            "revoked_or_foreign":"Denied/None", "anonymous":"Unauthenticated/None",
+            "paths":["domain", "REST", "MCP", "native"], "new_rejection_effects":0,
+            "qualification":"synthetic reference only"
+        }),
+    );
+}
+
+#[tokio::test]
 async fn cancel_uses_live_restore_terminal_state_before_mutation_grants() {
     for state in [
         "queued",
