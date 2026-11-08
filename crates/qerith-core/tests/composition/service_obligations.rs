@@ -225,7 +225,34 @@ async fn copy_changed_inputs_keep_committed_original_and_recheck_original_grants
         o::ErrorCode::Conflict,
         o::Effects::Committed,
     );
+    let until = service
+        .catalogue()
+        .lookup(TENANT, "object", 10, auth.as_ref())
+        .unwrap()
+        .availability_until
+        .unwrap();
+    service.set_now(until).unwrap();
+    // Lease expiry must not replace an authorized bound-identity conflict.
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Copy,
+        fields.clone(),
+        o::ErrorCode::Conflict,
+        o::Effects::Committed,
+    );
+    // A fresh identity still needs an available source and has no prior effects.
+    reject(
+        &mut service,
+        &scope(),
+        o::Operation::Copy,
+        copy_fields(&upload.target, "copy_b", "fresh_copy"),
+        o::ErrorCode::NotAvailable,
+        o::Effects::None,
+    );
     for revoked in [
+        "copy_b:Write",
+        "object:Read",
         "copy_a:Write",
         "root",
         "key_ref",
@@ -753,6 +780,120 @@ async fn terminal_cancel_replay_retains_committed_effects_after_generation_moves
             "qualification":"synthetic reference only"
         }),
     );
+}
+
+#[tokio::test]
+async fn cancel_write_only_upload_rechecks_write_without_requiring_read() {
+    for path in ["domain", "REST_MCP", "native"] {
+        for revoked in [false, true] {
+            let auth = Rc::new(Auth::default());
+            auth.denied.borrow_mut().insert("object:Read".into());
+            let mut service =
+                s::Service::new(Access(auth.clone()), limits(), profile(), 10).unwrap();
+            let mut io = Io::new(1).await;
+            service
+                .bind_upload(&scope(), id("init"), id("root"), upload_intent(&io))
+                .unwrap();
+            let o::Output::Upload { job, .. } = parity(
+                &mut service,
+                &scope(),
+                o::Operation::InitiateUpload,
+                vec![
+                    text("reference", "object"),
+                    text("identity", "init"),
+                    ("max_bytes".into(), o::Value::Number(io.identity().length)),
+                    ("if_absent".into(), o::Value::Flag(true)),
+                ],
+            )
+            .unwrap() else {
+                panic!("write-only upload");
+            };
+            let selection = negotiate(&mut service, &mut io).await;
+            let status = vec![text("job", job.handle.as_str())];
+            assert_eq!(
+                parity(&mut service, &scope(), o::Operation::Status, status.clone()).unwrap(),
+                o::Output::Job(job.clone())
+            );
+            let fields = vec![
+                text("job", job.handle.as_str()),
+                text("identity", "write_only_cancel"),
+            ];
+            let allocations = service.allocations();
+            let outbox = service.catalogue().outbox(TENANT);
+            let calls = io.order.len();
+            if revoked {
+                auth.denied.borrow_mut().insert("object:Write".into());
+            }
+            if path == "native" {
+                assert_eq!(
+                    native(
+                        &mut service,
+                        &request(
+                            "write_only_cancel",
+                            Some(&selection.session),
+                            n::Action::Cancel {
+                                job: nid(job.handle.as_str()),
+                            },
+                        ),
+                        &mut io,
+                        &Time(Cell::new(10)),
+                        &Rules::default(),
+                    )
+                    .await,
+                    if revoked {
+                        n::ResponseBody::Error(n::ErrorCode::NotAuthorized)
+                    } else {
+                        n::ResponseBody::Cancel(n::CancelOutcome::CancelledBeforeCommit)
+                    }
+                );
+            } else {
+                let result = if path == "domain" {
+                    o::dispatch(
+                        &mut service,
+                        Some(&scope()),
+                        o::VERSION,
+                        o::Operation::Cancel,
+                        fields,
+                    )
+                } else {
+                    parity(&mut service, &scope(), o::Operation::Cancel, fields)
+                };
+                if revoked {
+                    let failure = result.unwrap_err();
+                    assert_eq!(
+                        failure,
+                        o::Failure {
+                            code: o::ErrorCode::Denied,
+                            effects: o::Effects::None,
+                        }
+                    );
+                    assert!(!failure.reconciliation_required());
+                } else {
+                    let o::Output::Cancel { outcome, job } = result.unwrap() else {
+                        panic!("write-only cancel");
+                    };
+                    assert_eq!(outcome, o::CancelOutcome::StoppedBeforeCommit);
+                    assert_eq!(job.state, o::JobState::Cancelled);
+                    assert_eq!(job.effects, o::Effects::None);
+                }
+            }
+            auth.denied.borrow_mut().remove("object:Write");
+            let o::Output::Job(after) =
+                parity(&mut service, &scope(), o::Operation::Status, status).unwrap()
+            else {
+                panic!("status");
+            };
+            if revoked {
+                assert_eq!(after, job);
+            } else {
+                assert_eq!(after.state, o::JobState::Cancelled);
+                assert_eq!(after.effects, o::Effects::None);
+            }
+            assert_eq!(service.allocations(), allocations);
+            assert_eq!(service.catalogue().outbox(TENANT), outbox);
+            assert_eq!(io.order.len(), calls);
+        }
+    }
 }
 
 #[tokio::test]

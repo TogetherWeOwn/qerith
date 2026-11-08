@@ -547,6 +547,9 @@ impl<A: Access> Service<A> {
                 return Err(denied());
             }
         }
+        // New inputs are authorized before a bound identity takes precedence
+        // over source availability. Retention separately rechecks the original.
+        self.replay(scope, request)?;
         if !view
             .availability_until
             .is_some_and(|until| until > self.now)
@@ -1202,7 +1205,7 @@ impl<A: Access> Service<A> {
         }
         if let Some(id) = request.opaque("job") {
             let job = if request.operation() == o::Operation::Cancel {
-                self.job_access(scope, id, Some(c::Action::Read))?
+                self.job_access(scope, id, None)?
             } else {
                 self.authorized_job(scope, id, None)?
             };
