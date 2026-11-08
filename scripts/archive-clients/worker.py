@@ -176,6 +176,7 @@ def control(args, command):
         assert response.status == 200, f"fixture {command}: {response.status}"
         result = json.loads(body)
         assert isinstance(result, dict), "control must return a JSON object"
+        assert result.get("ok") is True, f"fixture {command} did not acknowledge success"
         return result
     finally:
         connection.close()
@@ -376,6 +377,7 @@ class Matrix:
 
     def run(self):
         c = self.client
+        self.row("reset-fixture", lambda: control(self.args, "reset"))
         self.row("create-bucket", lambda: c.call("create_bucket", Bucket=self.bucket))
         self.row("bucket-inventory", self.inventory)
         self.row("put-object", self.upload)

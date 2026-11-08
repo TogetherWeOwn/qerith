@@ -36,6 +36,16 @@ def artifact_hashes(evidence):
     return hashes
 
 
+def finalize_manifest(evidence, head):
+    # Rust saves its final service trace after this runner exits. Hash only once
+    # the fixture has stopped, including failure artifacts, without promoting FAIL.
+    manifest = json.loads((evidence / "manifest.json").read_text())
+    manifest["artifacts"] = artifact_hashes(evidence)
+    write_json(evidence / "manifest.json", manifest)
+    return (manifest.get("head") == head and manifest.get("overall") == "pass"
+            and passed(manifest.get("profiles", [])) and not manifest.get("relay_errors"))
+
+
 def run_bounded(command, env, output, seconds):
     with output.open("wb") as log:
         process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -152,6 +162,7 @@ def execute(args):
                 body = response.read(65537)
                 assert response.status == 200 and len(body) <= 65536
                 manifest["configure"] = json.loads(body)
+                assert manifest["configure"].get("ok") is True, "fixture configure did not acknowledge success"
             finally:
                 connection.close()
             manifest["endpoint"] = relay.endpoint

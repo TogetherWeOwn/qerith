@@ -2,7 +2,7 @@
 
 PROFILES = ("cli-default", "cli-restrictive", "boto3-default", "boto3-restrictive")
 ROWS = (
-    "create-bucket", "bucket-inventory", "put-object", "retained-head",
+    "reset-fixture", "create-bucket", "bucket-inventory", "put-object", "retained-head",
     "retained-get-denied", "cold-copy-denied", "conditional-before-restore",
     "list-pagination", "multipart", "abort-multipart", "archive-empty-cache",
     "before-restore", "restore-admission", "pending-restore", "pending-restart",
