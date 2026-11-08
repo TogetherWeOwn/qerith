@@ -954,6 +954,251 @@ fn finish_upload(transfer: &Transfer, identity: &str) -> Fields {
 }
 
 #[test]
+fn upload_abort_uses_permitted_edges_for_active_work() {
+    for transport in TRANSPORTS {
+        for state in [
+            JobState::Queued,
+            JobState::Running,
+            JobState::CancelRequested,
+        ] {
+            let mut fixture = Fixture::default();
+            let a = scope("a");
+            let (transfer, job) = initiate_at(transport, &mut fixture, &a, "new", "init", None);
+            let stored = fixture
+                .jobs
+                .get_mut(&(a.clone(), job.handle.clone()))
+                .unwrap();
+            assert!(stored.state.permits(state));
+            stored.state = state;
+            let objects = fixture.objects.clone();
+            let fields = finish_upload(&transfer, "abort");
+            let cancelled = call(
+                transport,
+                &mut fixture,
+                Some(&a),
+                Operation::AbortUpload,
+                fields.clone(),
+            )
+            .unwrap();
+            let Output::Cancel {
+                job: stopped,
+                outcome,
+            } = &cancelled
+            else {
+                panic!()
+            };
+            assert_eq!(*outcome, CancelOutcome::StoppedBeforeCommit);
+            assert_eq!(stopped.state, JobState::Cancelled);
+            assert_eq!(stopped.effects, Effects::None);
+            assert_eq!(fixture.objects, objects);
+            let expected = if state == JobState::Running {
+                vec![
+                    (JobState::Running, JobState::CancelRequested),
+                    (JobState::CancelRequested, JobState::Cancelled),
+                ]
+            } else {
+                vec![(state, JobState::Cancelled)]
+            };
+            assert_eq!(fixture.transitions, expected);
+            assert_eq!(fixture.effects, 2);
+            for replay_transport in TRANSPORTS {
+                assert_eq!(
+                    call(
+                        replay_transport,
+                        &mut fixture,
+                        Some(&a),
+                        Operation::AbortUpload,
+                        fields.clone()
+                    ),
+                    Ok(cancelled.clone())
+                );
+                assert_eq!(fixture.effects, 2);
+                assert_eq!(fixture.transitions, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_upload_commit_and_abort_preserve_records_and_effects() {
+    for transport in TRANSPORTS {
+        for state in [JobState::Failed, JobState::Cancelled, JobState::Succeeded] {
+            let mut fixture = Fixture::default();
+            let a = scope("a");
+            let (transfer, job) = initiate_at(transport, &mut fixture, &a, "new", "init", None);
+            let stored = fixture
+                .jobs
+                .get_mut(&(a.clone(), job.handle.clone()))
+                .unwrap();
+            // Model valid external completion without adding a worker to the fixture.
+            assert!(stored.state.permits(JobState::Running));
+            stored.state = JobState::Running;
+            let effects = match state {
+                JobState::Failed => Effects::Unknown,
+                JobState::Succeeded => Effects::Committed,
+                _ => Effects::None,
+            };
+            if state == JobState::Cancelled {
+                assert!(stored.state.permits(JobState::CancelRequested));
+                stored.state = JobState::CancelRequested;
+            }
+            assert!(stored.state.permits(state));
+            stored.state = state;
+            stored.effects = effects;
+            stored.error = (state == JobState::Failed).then_some(Failure {
+                code: ErrorCode::IntegrityFailed,
+                effects,
+            });
+            let terminal = stored.clone();
+            let jobs = fixture.jobs.clone();
+            let objects = fixture.objects.clone();
+            assert_eq!(
+                call(
+                    transport,
+                    &mut fixture,
+                    Some(&a),
+                    Operation::CommitUpload,
+                    finish_upload(&transfer, "commit")
+                ),
+                Err(Failure {
+                    code: ErrorCode::Conflict,
+                    effects
+                })
+            );
+            assert_eq!(fixture.effects, 1);
+            assert_eq!(fixture.replay.len(), 1);
+            let aborted = call(
+                transport,
+                &mut fixture,
+                Some(&a),
+                Operation::AbortUpload,
+                finish_upload(&transfer, "abort"),
+            )
+            .unwrap();
+            assert_eq!(
+                aborted,
+                Output::Cancel {
+                    job: terminal,
+                    outcome: if effects == Effects::Committed {
+                        CancelOutcome::AlreadyCommitted
+                    } else {
+                        CancelOutcome::AlreadyTerminal
+                    },
+                }
+            );
+            assert_eq!(
+                fixture.effects, 2,
+                "only the abort receipt is newly accepted"
+            );
+            assert_eq!(fixture.jobs, jobs);
+            assert_eq!(fixture.objects, objects);
+            assert!(fixture.transitions.is_empty());
+            assert_eq!(
+                parity(
+                    &fixture,
+                    Some(&a),
+                    Operation::AbortUpload,
+                    finish_upload(&transfer, "abort")
+                ),
+                Ok(aborted)
+            );
+        }
+    }
+}
+
+#[test]
+fn seeded_and_reserved_generations_do_not_collide_and_reconcile() {
+    for transport in TRANSPORTS {
+        for operation in [Operation::InitiateUpload, Operation::Copy] {
+            let mut fixture = Fixture::default();
+            let a = scope("a");
+            fixture.objects.insert(
+                (id("a"), id("new")),
+                Entry {
+                    target: target("new", "g2"),
+                    bytes: 16,
+                    available: true,
+                },
+            );
+            // Consecutive candidates also collide with an existing job reservation.
+            fixture
+                .jobs
+                .get_mut(&(a.clone(), id("restorejob")))
+                .unwrap()
+                .target
+                .generation = id("g3");
+            assert_eq!(fixture.sequence, 0);
+            let mut fields = args(operation);
+            fields.retain(|(name, _)| name != "if_absent");
+            fields.push(text("generation", "g2"));
+            let accepted =
+                call(transport, &mut fixture, Some(&a), operation, fields.clone()).unwrap();
+            let job = match &accepted {
+                Output::Upload { transfer, job } => {
+                    assert_eq!(transfer.target, job.target);
+                    job
+                }
+                Output::Job(job) => job,
+                _ => panic!(),
+            };
+            assert_eq!(job.target.generation, id("g4"));
+            assert_eq!(fixture.effects, 1);
+            assert_eq!(
+                fixture.objects[&(id("a"), id("new"))].target.generation,
+                id("g2")
+            );
+            let jobs = fixture.jobs.clone();
+            let sequence = fixture.sequence;
+            for replay_transport in TRANSPORTS {
+                assert_eq!(
+                    call(
+                        replay_transport,
+                        &mut fixture,
+                        Some(&a),
+                        operation,
+                        fields.clone()
+                    ),
+                    Ok(accepted.clone())
+                );
+                assert_eq!(fixture.effects, 1);
+                assert_eq!(fixture.jobs, jobs);
+                assert_eq!(fixture.sequence, sequence);
+            }
+            // A second acceptance must not reuse the first reserved generation,
+            // even when a test seed resets the synthetic sequence.
+            fixture.sequence = 0;
+            let mut second = fields.clone();
+            second.retain(|(name, _)| name != "identity");
+            second.push(text("identity", "second"));
+            let second = call(transport, &mut fixture, Some(&a), operation, second).unwrap();
+            let second_job = match second {
+                Output::Upload { job, .. } | Output::Job(job) => job,
+                _ => panic!(),
+            };
+            assert_eq!(second_job.target.generation, id("g5"));
+            if let Output::Upload { transfer, .. } = &accepted {
+                call(
+                    transport,
+                    &mut fixture,
+                    Some(&a),
+                    Operation::CommitUpload,
+                    finish_upload(transfer, "commit"),
+                )
+                .unwrap();
+                assert_eq!(
+                    fixture.objects[&(id("a"), id("new"))].target,
+                    transfer.target
+                );
+                assert_eq!(
+                    call(transport, &mut fixture, Some(&a), operation, fields),
+                    Ok(accepted.clone())
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn competing_uploads_recheck_destination_fences_and_cannot_republish() {
     for transport in TRANSPORTS {
         let mut fixture = Fixture::default();

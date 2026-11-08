@@ -146,6 +146,29 @@ impl Fixture {
         self.sequence
     }
 
+    fn fresh_generation(&mut self) -> Opaque {
+        self.next();
+        loop {
+            let generation = id(&format!("g{}", self.sequence + 1));
+            if !self
+                .objects
+                .values()
+                .any(|e| e.target.generation == generation)
+                && !self
+                    .jobs
+                    .values()
+                    .any(|j| j.target.generation == generation)
+                && !self
+                    .uploads
+                    .values()
+                    .any(|u| u.transfer.target.generation == generation)
+            {
+                return generation;
+            }
+            self.next();
+        }
+    }
+
     fn replayed(&self, scope: &Scope, request: &Request) -> Result<Option<Output>, Failure> {
         match request
             .reconciliation(scope)
@@ -234,8 +257,12 @@ impl Fixture {
                         effects: Effects::Committed,
                     });
                 }
-                if self.jobs[&(scope.clone(), upload.job.clone())].state == JobState::Cancelled {
-                    return Err(Failure::new(ErrorCode::Conflict));
+                let job = &self.jobs[&(scope.clone(), upload.job.clone())];
+                if job.state.terminal() {
+                    return Err(Failure {
+                        code: ErrorCode::Conflict,
+                        effects: job.effects,
+                    });
                 }
                 self.check_destination(scope, &upload.initiation)?;
             }
@@ -322,10 +349,11 @@ impl OperationPort for Fixture {
         let operation = request.operation();
         let output = match operation {
             Operation::InitiateUpload => {
-                let sequence = self.next();
+                let generation = self.fresh_generation();
+                let sequence = self.sequence;
                 let target = LogicalReference {
                     reference: request.opaque("reference").unwrap().clone(),
-                    generation: id(&format!("g{}", sequence + 1)),
+                    generation,
                 };
                 let job = Job {
                     handle: id(&format!("uploadjob{sequence}")),
@@ -385,9 +413,14 @@ impl OperationPort for Fixture {
                     }
                     Output::Job(job.clone())
                 } else {
-                    let outcome = if upload.committed {
+                    let outcome = if upload.committed || job.effects == Effects::Committed {
                         CancelOutcome::AlreadyCommitted
+                    } else if job.state.terminal() {
+                        CancelOutcome::AlreadyTerminal
                     } else {
+                        if job.state == JobState::Running {
+                            transition(job, JobState::CancelRequested, &mut self.transitions);
+                        }
                         transition(job, JobState::Cancelled, &mut self.transitions);
                         job.effects = Effects::None;
                         CancelOutcome::StoppedBeforeCommit
@@ -484,13 +517,14 @@ impl OperationPort for Fixture {
                 Output::Cancel { job, outcome }
             }
             Operation::Restore | Operation::Copy | Operation::Delete => {
-                let sequence = self.next();
                 let reference = request.opaque("reference").unwrap().clone();
                 let generation = if operation == Operation::Copy {
-                    id(&format!("g{}", sequence + 1))
+                    self.fresh_generation()
                 } else {
+                    self.next();
                     request.opaque("generation").unwrap().clone()
                 };
+                let sequence = self.sequence;
                 let job = Job {
                     handle: id(&format!("mutationjob{sequence}")),
                     target: LogicalReference {
