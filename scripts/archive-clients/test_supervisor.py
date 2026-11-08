@@ -57,6 +57,102 @@ except KeyboardInterrupt:
 """
 
 
+# Execute the real main() watcher, replacing only the network/client workload.
+# The test's separate adopter process owns PR_SET_CHILD_SUBREAPER, so no other
+# unittest or shared-host process has its adoption policy changed.
+WATCHED_RUNNER = f"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+import runner, supervisor
+
+def workload(_args):
+    session_id = supervisor.ensure_session()
+    watchdog, heartbeat = supervisor.spawn_supervisor(
+        session_id, os.environ["SUPERVISOR_LOG"], max_seconds=60)
+    worker = (
+        "import os, subprocess, sys, time\\n"
+        "descendant = subprocess.Popen([sys.executable, '-I', '-c', "
+        "'import time; time.sleep(60)'])\\n"
+        "open(os.environ['DESCENDANT_PID'], 'w').write(str(descendant.pid))\\n"
+        "open(os.environ['WORKER_PID'], 'w').write(str(os.getpid()))\\n"
+        "time.sleep(60)\\n"
+    )
+    return runner.run_bounded([sys.executable, '-I', '-c', worker], dict(os.environ),
+                              Path(os.environ["WORKER_LOG"]), 60)
+
+runner.execute = workload
+sys.argv = ['runner', '--upstream', 'http://127.0.0.1:1', '--control-token', 'synthetic']
+sys.exit(runner.main())
+"""
+
+SUBREAPER = f"""
+import ctypes, os, signal, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+import supervisor
+from test_supervisor import gone
+
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.prctl(36, 1, 0, 0, 0) == 0, 'PR_SET_CHILD_SUBREAPER failed'
+runner = None
+parent = subprocess.Popen([sys.executable, '-I', '-c',
+    "import os, subprocess, sys, time; "
+    "runner = subprocess.Popen([sys.executable, '-I', '-c', sys.argv[1]]); "
+    "open(os.environ['RUNNER_PID'], 'w').write(str(runner.pid)); time.sleep(60)",
+    {WATCHED_RUNNER!r}])
+try:
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            runner = int(Path(os.environ['RUNNER_PID']).read_text())
+            worker = int(Path(os.environ['WORKER_PID']).read_text())
+            descendant = int(Path(os.environ['DESCENDANT_PID']).read_text())
+            break
+        except (FileNotFoundError, ValueError):
+            assert parent.poll() is None, 'fixture parent exited during startup'
+            assert time.monotonic() < deadline, 'runner workload never became ready'
+            time.sleep(0.05)
+    assert int(supervisor._stat_fields(runner)[1]) == parent.pid
+    parent.kill()
+    parent.wait(timeout=5)
+    # A non-init adopter really owns the runner, not a mocked getppid value.
+    assert os.getpid() != 1
+    assert int(supervisor._stat_fields(runner)[1]) == os.getpid()
+    deadline = time.monotonic() + 12
+    while True:
+        waited, status = os.waitpid(runner, os.WNOHANG)
+        if waited:
+            assert os.waitstatus_to_exitcode(status) == 1, 'main did not unwind on parent loss'
+            break
+        assert time.monotonic() < deadline, 'main watcher missed non-init adoption'
+        time.sleep(0.05)
+    deadline = time.monotonic() + 10
+    while supervisor.session_groups(runner) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not supervisor.session_groups(runner), 'runner session survived'
+    assert gone(worker) and gone(descendant), 'workload survived parent change'
+finally:
+    parent.kill() if parent.poll() is None else None
+    parent.wait(timeout=5)
+    if runner is not None:
+        for group in supervisor.session_groups(runner):
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    # Reap adopted workload and watchdog children without leaking zombies.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if not waited:
+            time.sleep(0.05)
+"""
+
+
 def gone(pid):
     stat = Path("/proc", str(pid), "stat")
     if not stat.exists():
@@ -65,6 +161,16 @@ def gone(pid):
 
 
 class SupervisedTeardownTests(unittest.TestCase):
+    def test_main_watcher_unwinds_after_non_init_subreaper_adoption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ)
+            for name in ("RUNNER_PID", "WORKER_PID", "DESCENDANT_PID",
+                         "SUPERVISOR_LOG", "WORKER_LOG"):
+                env[name] = str(Path(directory) / name.lower())
+            result = subprocess.run([sys.executable, "-I", "-c", SUBREAPER],
+                                    env=env, capture_output=True, timeout=50)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def spawn_fixture_parent(self, directory, graceful=False):
         private = Path(directory) / "private"
         private.mkdir()

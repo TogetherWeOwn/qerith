@@ -243,13 +243,12 @@ def main():
     parent_pid = os.getppid()
 
     def watch_parent():
-        while parent_pid != 1 and os.getppid() != 1:
+        while parent_pid != 1 and os.getppid() == parent_pid:
             time.sleep(1)
-        if parent_pid != 1:
-            os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
 
-    threading.Thread(target=watch_parent, daemon=True).start()
     try:
+        threading.Thread(target=watch_parent, daemon=True).start()
         return execute(args)
     except BaseException as error:
         print(f"archive client runner failed: {type(error).__name__}", file=sys.stderr)

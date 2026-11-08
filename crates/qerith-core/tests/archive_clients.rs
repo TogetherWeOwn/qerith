@@ -13,7 +13,7 @@ mod support;
 
 use std::time::Duration;
 
-/// PIDs of processes that still belong to the runner's dedicated session. The
+/// Deduplicated process groups still live in the runner's dedicated session. The
 /// Python runner becomes a session leader (sid == runner pid); its out-of-session
 /// supervisor escalates TERM/KILL over that session on runner death, so an empty
 /// result proves no worker or CLI group survived teardown. Linux-only: Actions is
@@ -45,11 +45,17 @@ fn session_survivors(session_id: u32) -> Vec<u32> {
         if fields.next() == Some("Z") {
             continue;
         }
-        let session = fields.nth(2).and_then(|f| f.parse::<u32>().ok());
+        fields.next(); // ppid
+        let group = fields.next().and_then(|f| f.parse::<u32>().ok());
+        let session = fields.next().and_then(|f| f.parse::<u32>().ok());
         if session == Some(session_id) {
-            survivors.push(name.parse().unwrap_or(0));
+            if let Some(group) = group.filter(|group| *group > 1) {
+                survivors.push(group);
+            }
         }
     }
+    survivors.sort_unstable();
+    survivors.dedup();
     survivors
 }
 
@@ -76,7 +82,7 @@ fn drain_session(session_id: u32) -> Vec<u32> {
 #[cfg(target_os = "linux")]
 fn kill_group(pgid: u32) {
     let _ = std::process::Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
+        .args(["-KILL", "--", &format!("-{pgid}")])
         .status();
 }
 
@@ -112,11 +118,79 @@ impl Drop for RunnerGuard {
                 Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             }
         }
-        for survivor in drain_session(self.session_id) {
+        let survivors = drain_session(self.session_id);
+        if !survivors.is_empty() {
             eprintln!("runner session survivor after supervisor drain");
-            kill_group(survivor);
+            for group in survivors {
+                kill_group(group);
+            }
+            if !drain_session(self.session_id).is_empty() {
+                eprintln!("runner session still has live groups after fallback teardown");
+            }
         }
     }
+}
+
+/// Exercise the Rust guard without a supervisor: the worker leader is reaped
+/// before the guard drops, leaving a descendant whose PID is not its PGID.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn fallback_drains_descendant_after_worker_group_leader_exits() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    struct GroupCleanup(u32);
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            kill_group(self.0);
+        }
+    }
+
+    let script = r#"
+import os, subprocess, sys, time
+os.setsid()
+worker = subprocess.Popen(
+    [sys.executable, '-I', '-c',
+     "import subprocess, sys; "
+     "child = subprocess.Popen([sys.executable, '-I', '-c', "
+     "'import time; time.sleep(60)'], stdout=subprocess.DEVNULL); "
+     "print(child.pid, flush=True)"],
+    process_group=0, stdout=subprocess.PIPE, text=True)
+descendant = worker.stdout.readline().strip()
+assert worker.wait(timeout=5) == 0
+print(worker.pid, descendant, flush=True)
+time.sleep(60)
+"#;
+    let child = tokio::process::Command::new("python3")
+        .args(["-I", "-c", script])
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let session_id = child.id().unwrap();
+    let mut guard = RunnerGuard { child, session_id };
+    let mut output = BufReader::new(guard.child.stdout.take().unwrap());
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    let ids: Vec<u32> = line
+        .split_whitespace()
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let _cleanup = GroupCleanup(ids[0]);
+    assert_ne!(ids[0], ids[1], "descendant must not lead the worker group");
+    assert!(!std::path::Path::new(&format!("/proc/{}", ids[0])).exists());
+    assert!(std::path::Path::new(&format!("/proc/{}", ids[1])).exists());
+
+    // No heartbeat supervisor exists in this case. Drop must use and verify the
+    // fallback itself, rather than letting normal supervision mask a bad target.
+    drop(guard);
+    assert!(
+        session_survivors(session_id).is_empty(),
+        "fallback left a live descendant after guard destruction"
+    );
 }
 
 /// Actions-only network client qualification. The ordinary suite compiles this
