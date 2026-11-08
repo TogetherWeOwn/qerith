@@ -127,6 +127,22 @@ pub struct State {
     requests: usize,
     commits: usize,
     events: Vec<serde_json::Value>,
+    trace_history: Vec<serde_json::Value>,
+}
+
+fn validate_checksum_type(headers: &s3::Headers, checksum: MultipartChecksum) -> s3::Result<()> {
+    let expected = match checksum {
+        MultipartChecksum::None => None,
+        MultipartChecksum::CompositeSha256 => Some("COMPOSITE"),
+        MultipartChecksum::Full(_) => Some("FULL_OBJECT"),
+    };
+    if headers
+        .get("x-amz-checksum-type")
+        .is_some_and(|kind| Some(kind) != expected)
+    {
+        return Err(s3::ErrorCode::InvalidRequest);
+    }
+    Ok(())
 }
 
 fn wall() -> u64 {
@@ -232,6 +248,7 @@ impl State {
             requests: 0,
             commits: 0,
             events: vec![],
+            trace_history: vec![],
         }
     }
 
@@ -302,6 +319,15 @@ impl State {
         };
         let tenant = access.tenant;
         let method = request.method.as_str();
+        let selectors = ["uploads", "uploadId", "delete", "restore"];
+        if selectors
+            .iter()
+            .filter(|name| query(&target, name).is_some())
+            .count()
+            > 1
+        {
+            return Err(s3::ErrorCode::InvalidRequest);
+        }
         let multipart = query(&target, "uploads").is_some() || query(&target, "uploadId").is_some();
         let mutation = (target.key.is_some() && matches!(method, "PUT" | "DELETE"))
             || multipart
@@ -368,6 +394,9 @@ impl State {
             if method != "POST" {
                 return Err(s3::ErrorCode::NotImplemented);
             }
+            if !request.body.is_empty() {
+                return Err(s3::ErrorCode::InvalidRequest);
+            }
             let prepared = self.prepare(&reference, &headers)?;
             let checksum = match headers
                 .get("x-amz-checksum-algorithm")
@@ -378,6 +407,7 @@ impl State {
                 Some("CRC32") => MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32),
                 _ => return Err(s3::ErrorCode::InvalidRequest),
             };
+            validate_checksum_type(&headers, checksum)?;
             let id = self
                 .mutations
                 .initiate(prepared, checksum, self.time.0, &access)?;
@@ -480,6 +510,7 @@ impl State {
             if method == "POST" {
                 self.admit_commit()?;
                 let checksum = *self.checksum.get(&id).ok_or(s3::ErrorCode::NoSuchUpload)?;
+                validate_checksum_type(&headers, checksum)?;
                 // The producer's composite SHA256 contract accepts per-part XML
                 // evidence, not a full-object SHA256 completion header. Never drop it.
                 if headers.get("x-amz-checksum-sha256").is_some() {
@@ -519,6 +550,15 @@ impl State {
                 self.admit_commit()?;
                 let prepared = self.prepare(&reference, &headers)?;
                 let result = if headers.get("x-amz-copy-source").is_some() {
+                    // Copy reuses verified source checksums; selection/recomputation
+                    // is not implemented by this fixture and must not be ignored.
+                    if !request.body.is_empty()
+                        || headers.get("x-amz-checksum-algorithm").is_some()
+                        || headers.get("x-amz-sdk-checksum-algorithm").is_some()
+                    {
+                        return Err(s3::ErrorCode::InvalidRequest);
+                    }
+                    let _ = ValidatedBody::new(request.body.clone(), &headers, &verified, &p)?;
                     let source = self.copy_source(tenant, &headers, &p, &access)?;
                     self.mutations
                         .copy_object_with_cache(
@@ -817,10 +857,14 @@ impl State {
                 // Fixture-only teardown between client profiles; this is neither
                 // product deletion nor evidence of archive erasure.
                 let host = self.host.clone();
+                let snapshot = self.trace_snapshot();
+                let mut history = std::mem::take(&mut self.trace_history);
+                history.push(snapshot);
                 let events = std::mem::take(&mut self.events);
                 let requests = self.requests;
                 *self = Self::new(self.secret.clone());
                 self.host = host;
+                self.trace_history = history;
                 self.events = events;
                 self.requests = requests;
             }
@@ -835,10 +879,29 @@ impl State {
         response
     }
 
+    fn trace_snapshot(&self) -> serde_json::Value {
+        json!({"schema":"qerith.synthetic-archive-trace.v1", "events":self.events, "engine_trace":format!("{:?}", self.io.trace), "cold_retrievals":self.io.cold_retrievals, "retained_bytes":self.mutations.retained_bytes(TENANT), "simulated_backbones":true})
+    }
+
     pub fn save_trace(&self) {
         if let Ok(dir) = std::env::var("QERITH_CLIENT_EVIDENCE_DIR") {
             std::fs::create_dir_all(&dir).unwrap();
-            let trace = json!({"schema":"qerith.synthetic-archive-trace.v1", "events":self.events, "engine_trace":format!("{:?}", self.io.trace), "cold_retrievals":self.io.cold_retrievals, "retained_bytes":self.mutations.retained_bytes(TENANT), "simulated_backbones":true});
+            let trace = self.trace_snapshot();
+            // Episode zero is configuration before the first profile reset.
+            // Subsequent episodes follow the runner's declared profile order.
+            for (index, snapshot) in self
+                .trace_history
+                .iter()
+                .chain(std::iter::once(&trace))
+                .enumerate()
+            {
+                std::fs::write(
+                    std::path::Path::new(&dir)
+                        .join(format!("service-trace-episode-{index:02}.json")),
+                    serde_json::to_vec_pretty(snapshot).unwrap(),
+                )
+                .unwrap();
+            }
             std::fs::write(
                 std::path::Path::new(&dir).join("service-trace.json"),
                 serde_json::to_vec_pretty(&trace).unwrap(),
@@ -846,4 +909,35 @@ impl State {
             .unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn reset_preserves_each_engine_trace_episode() {
+    let mut state = State::new("synthetic".into());
+    state
+        .io
+        .trace
+        .0
+        .push(crate::support::Event::RepairPosted(7));
+    assert_eq!(state.control("reset", b"").await.status, 200);
+    assert!(state.trace_history[0]["engine_trace"]
+        .as_str()
+        .unwrap()
+        .contains("RepairPosted(7)"));
+    assert!(state.io.trace.0.is_empty());
+    state
+        .io
+        .trace
+        .0
+        .push(crate::support::Event::RepairPosted(8));
+    assert_eq!(state.control("reset", b"").await.status, 200);
+    assert_eq!(state.trace_history.len(), 2);
+    assert!(state.trace_history[1]["engine_trace"]
+        .as_str()
+        .unwrap()
+        .contains("RepairPosted(8)"));
+    assert!(state.trace_history[0]["engine_trace"]
+        .as_str()
+        .unwrap()
+        .contains("RepairPosted(7)"));
 }

@@ -418,6 +418,9 @@ impl MemoryMutations {
         &self.catalogue
     }
     /// Trusted worker fixtures only. Not exposed as an end-user mutation port.
+    /// Direct catalogue installs do not register storage or format context here:
+    /// they are not copyable sources. Use this model's validated write paths to
+    /// install copyable generations; never infer source context from a destination.
     pub fn catalogue_worker(&mut self) -> &mut MemoryCatalogue {
         &mut self.catalogue
     }
@@ -456,6 +459,9 @@ impl MemoryMutations {
         // after the in-memory storage operation. Real storage needs reconciliation.
         cat::JobPort::acknowledge_deletion(&mut staged, tenant, event)?;
         self.retained.remove(&(tenant, dispatch.generation));
+        if dispatch.kind == cat::DeletionKind::UnreferencedGeneration {
+            self.contexts.remove(&(tenant, dispatch.generation));
+        }
         self.catalogue = staged;
         Ok(())
     }

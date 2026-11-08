@@ -252,7 +252,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: archive-clients-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ env.QERITH_CLIENT_EVIDENCE_DIR }}/
+          path: ${{ env.QERITH_CLIENT_EVIDENCE_DIR }}
           if-no-files-found: error
           retention-days: 7
       - name: Remove private keys and client installations on success, failure or cancellation

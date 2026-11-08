@@ -22,6 +22,32 @@ from worker import Client, Matrix, control
 
 
 class CliArgumentTests(unittest.TestCase):
+    def test_negative_cli_row_requires_the_declared_http_status(self):
+        for wire_status in (None, 404, 403):
+            with self.subTest(status=wire_status), tempfile.TemporaryDirectory() as directory:
+                client = Client.__new__(Client)
+                client.args = SimpleNamespace(endpoint="https://127.0.0.1:443")
+                client.evidence, client.sequence, client.restrictive = Path(directory), 0, True
+                client.identity, client.client, client.trace, client.settings = "fixture", None, [], {}
+                stderr = b"An error occurred (AccessDenied) when calling GetObject"
+                if wire_status is not None:
+                    stderr += f'\n"GET / HTTP/1.1" {wire_status} '.encode()
+                with mock.patch.dict(os.environ, {"QERITH_AWS_CLI": "/synthetic/aws"}), \
+                        mock.patch("worker.subprocess.run", return_value=
+                                   subprocess.CompletedProcess([], 1, b"", stderr)), \
+                        mock.patch("worker.Client", return_value=client):
+                    matrix = Matrix(SimpleNamespace(profile="cli-restrictive"), Path(directory))
+                    action = lambda: client.expect_error("get_object", ["AccessDenied"], 403)
+                    if wire_status == 403:
+                        matrix.row(ROWS[0], action)
+                        self.assertEqual(matrix.rows[0]["outcome"], "pass")
+                    else:
+                        with self.assertRaises(AssertionError):
+                            matrix.row(ROWS[0], action)
+                        saved = json.loads((Path(directory) / "result.json").read_text())
+                        self.assertEqual(saved["rows"][0]["outcome"], "fail")
+                        self.assertFalse(saved["qualified"])
+
     def test_copy_source_is_left_unescaped_for_vendor_encoding(self):
         for operation in ("copy_object", "upload_part_copy"):
             with self.subTest(operation=operation), tempfile.TemporaryDirectory() as directory:
@@ -238,6 +264,8 @@ class WorkflowTests(unittest.TestCase):
         header = job.split("    steps:\n", 1)[0]
         self.assertNotIn("${{ runner.", header)
         self.assertIn('export QERITH_CLIENT_PRIVATE_DIR="$RUNNER_TEMP/', job)
+        self.assertIn('path: ${{ env.QERITH_CLIENT_EVIDENCE_DIR }}\n', job)
+        self.assertNotIn('path: ${{ env.QERITH_CLIENT_EVIDENCE_DIR }}/', job)
 
 
 class IsolationTests(unittest.TestCase):

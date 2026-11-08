@@ -52,6 +52,12 @@ pub async fn read(stream: &mut TcpStream) -> std::io::Result<Request> {
             return Err(invalid());
         }
     }
+    if fields
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return Err(invalid());
+    }
     let length = length.unwrap_or(0);
     if length > MAX_BODY {
         return Err(invalid());
@@ -70,6 +76,29 @@ pub async fn read(stream: &mut TcpStream) -> std::io::Result<Request> {
         fields,
         body,
     })
+}
+
+#[tokio::test]
+async fn transfer_encoding_is_rejected_before_body_or_continue() {
+    for length in ["", "Content-Length: 4\r\n"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        client.write_all(format!(
+            "POST /archive/key?uploads HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n{length}Expect: 100-continue\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        // No body is sent: rejection must precede reading it or sending Continue.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), read(&mut server))
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(e) if e.kind() == std::io::ErrorKind::InvalidData));
+        drop(server);
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.is_empty());
+    }
 }
 
 pub async fn write(

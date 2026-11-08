@@ -240,6 +240,164 @@ async fn delete_objects_validates_selected_sha256_before_mutation() {
 }
 
 #[tokio::test]
+async fn copy_rejects_ignored_body_and_checksum_selection_without_publication() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    assert_eq!(
+        f.call("PUT", "/archive/source", b"source", &[])
+            .await
+            .status,
+        200
+    );
+    f.control("post", b"").await;
+    assert_eq!(
+        f.call(
+            "POST",
+            "/archive/source?restore",
+            b"<RestoreRequest><Days>1</Days></RestoreRequest>",
+            &[]
+        )
+        .await
+        .status,
+        202
+    );
+    f.control("restore", b"").await;
+    for (body, extra) in [
+        (b"ignored".as_slice(), vec![]),
+        (b"".as_slice(), vec![("x-amz-checksum-algorithm", "CRC32")]),
+        (b"".as_slice(), vec![("x-amz-checksum-algorithm", "SHA256")]),
+        (
+            b"".as_slice(),
+            vec![("x-amz-sdk-checksum-algorithm", "CRC32")],
+        ),
+    ] {
+        let mut headers = vec![("x-amz-copy-source", "archive/source")];
+        headers.extend(extra);
+        error(
+            &f.call("PUT", "/archive/destination", body, &headers).await,
+            400,
+            "InvalidRequest",
+        );
+        assert_eq!(
+            f.call("HEAD", "/archive/destination", b"", &[])
+                .await
+                .status,
+            404
+        );
+    }
+    assert_eq!(
+        f.call(
+            "PUT",
+            "/archive/destination",
+            b"",
+            &[("x-amz-copy-source", "archive/source")]
+        )
+        .await
+        .status,
+        200
+    );
+}
+
+#[tokio::test]
+async fn multipart_selectors_and_checksum_types_are_fail_closed() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    error(
+        &f.call("POST", "/archive/key?uploadId=1&uploads=", b"", &[])
+            .await,
+        400,
+        "InvalidRequest",
+    );
+    for (algorithm, kind) in [
+        ("CRC32", "COMPOSITE"),
+        ("SHA256", "FULL_OBJECT"),
+        ("CRC32", "invalid"),
+    ] {
+        error(
+            &f.call(
+                "POST",
+                "/archive/key?uploads",
+                b"",
+                &[
+                    ("x-amz-checksum-algorithm", algorithm),
+                    ("x-amz-checksum-type", kind),
+                ],
+            )
+            .await,
+            400,
+            "InvalidRequest",
+        );
+    }
+    let inventory = f.call("GET", "/archive?uploads", b"", &[]).await;
+    assert_eq!(inventory.status, 200);
+    assert!(!String::from_utf8_lossy(&inventory.body).contains("<Upload>"));
+    let init = f
+        .call(
+            "POST",
+            "/archive/key?uploads",
+            b"",
+            &[
+                ("x-amz-checksum-algorithm", "CRC32"),
+                ("x-amz-checksum-type", "FULL_OBJECT"),
+            ],
+        )
+        .await;
+    assert_eq!(init.status, 200);
+    let xml = String::from_utf8(init.body).unwrap();
+    let id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap();
+    let part = f
+        .call(
+            "PUT",
+            &format!("/archive/key?partNumber=1&uploadId={id}"),
+            b"part",
+            &[("x-amz-checksum-crc32", "SQ9wxg==")],
+        )
+        .await;
+    assert_eq!(part.status, 200);
+    let body = format!("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag><ChecksumCRC32>SQ9wxg==</ChecksumCRC32></Part></CompleteMultipartUpload>", header(&part, "etag").unwrap());
+    let target = format!("/archive/key?uploadId={id}");
+    for kind in ["COMPOSITE", "invalid"] {
+        error(
+            &f.call(
+                "POST",
+                &target,
+                body.as_bytes(),
+                &[
+                    ("x-amz-checksum-crc32", "SQ9wxg=="),
+                    ("x-amz-checksum-type", kind),
+                ],
+            )
+            .await,
+            400,
+            "InvalidRequest",
+        );
+        assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 404);
+    }
+    assert_eq!(
+        f.call(
+            "POST",
+            &target,
+            body.as_bytes(),
+            &[
+                ("x-amz-checksum-crc32", "SQ9wxg=="),
+                ("x-amz-checksum-type", "FULL_OBJECT")
+            ]
+        )
+        .await
+        .status,
+        200
+    );
+}
+
+#[tokio::test]
 async fn completion_sha256_header_is_rejected_not_ignored() {
     let mut f = Fixture::new();
     f.control("configure", br#"{"host":"localhost:443"}"#).await;

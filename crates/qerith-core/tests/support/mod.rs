@@ -254,10 +254,15 @@ impl Archive {
             Fault::Corrupt(n) => {
                 // Keep the original yEnc checksum but change an encoded byte.
                 let raw = &mut config.articles[n].raw;
+                let marker: &[u8] = if fixture.parts() > 1 {
+                    b"=ypart "
+                } else {
+                    b"=ybegin "
+                };
                 let pos = raw
-                    .windows(7)
-                    .position(|w| w == b"=ypart ")
-                    .expect("multipart header");
+                    .windows(marker.len())
+                    .position(|w| w == marker)
+                    .expect("yEnc framing header");
                 let body = pos + raw[pos..].windows(2).position(|w| w == b"\r\n").unwrap() + 2;
                 raw[body] = if raw[body] == b'A' { b'B' } else { b'A' };
             }

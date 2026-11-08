@@ -489,6 +489,26 @@ fn late_completion_gets_a_fresh_archive_window_and_invalid_windows_never_publish
 }
 
 #[test]
+fn catalogue_only_import_does_not_infer_trusted_copy_context() {
+    let mut original = model();
+    let first = put(&mut original, "source", b"retained");
+    restore(&mut original, "source");
+    let mut imported = model();
+    *imported.catalogue_worker() = original.catalogue().clone();
+    assert_eq!(
+        imported.copy_object(
+            prepare(&imported, "dest"),
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            8,
+            &auth(),
+        ),
+        Err(s3::ErrorCode::InvalidRequest)
+    );
+    assert!(imported.catalogue().lookup(T, "dest", 8, &auth()).is_err());
+}
+
+#[test]
 fn worker_deletion_reclaims_only_dispatched_retained_bytes() {
     let mut m = model();
     let first = put(&mut m, "source", b"retained");

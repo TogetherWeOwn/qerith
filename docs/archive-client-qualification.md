@@ -99,6 +99,24 @@ in that profile; later profiles still attempt their own reset.
 Copy-after-restore is a must-pass row after true retained eviction. The runner
 never reuploads/warm-substitutes the source to make copy succeed. A failed copy
 row is recorded as FAIL while later expiry/failure/deletion rows continue.
+CopyObject checksum selection/recomputation is unsupported and explicitly rejects;
+ordinary copies preserve only verified source checksum metadata. Nonempty copy
+bodies, conflicting multipart selectors and unsupported/mismatched multipart
+checksum types also reject before publication. Transfer-Encoding is rejected at
+the fixture ingress, not decoded into a supported upload.
+
+Only generations committed through the mutation model's validated write paths
+have trusted format-context records and are copyable sources. Direct installs via
+its catalogue-worker escape hatch do not register that evidence and intentionally
+fail closed, even when supplied cache bytes match the digest. No external-writer
+format-context import adapter is qualified by this fixture.
+
+Engine traces survive each profile reset as `service-trace-episode-NN.json`;
+episode 00 is configuration before the initial reset, then episodes 01–04 follow
+the declared profile order. `service-trace.json` remains the final episode for
+compatibility. Finalization hashes all episodes after fixture exit. CLI negative
+rows declaring a status fail if the debug output lacks that status; an error code
+alone is never sufficient evidence.
 
 ## Exact clients and profiles
 

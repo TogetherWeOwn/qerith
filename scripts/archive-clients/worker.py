@@ -168,7 +168,7 @@ class Client:
             self.call(operation, **parameters)
         except S3Failure as error:
             assert error.code in codes, f"wanted {codes}, got {error.code}"
-            if status is not None and error.status is not None:
+            if status is not None:
                 assert error.status == status, (error.status, status)
             return {"code": error.code, "status": error.status}
         raise AssertionError(f"{operation} unexpectedly succeeded")

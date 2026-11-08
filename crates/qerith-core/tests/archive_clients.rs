@@ -26,7 +26,12 @@ async fn pinned_archive_clients() {
         .read_exact(&mut random)
         .unwrap();
     let secret: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let token = format!("fixture-control-{secret}");
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut random)
+        .unwrap();
+    let control: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let token = format!("fixture-control-{control}");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = format!("http://{}", listener.local_addr().unwrap());
     let mut child = tokio::process::Command::new("python3")

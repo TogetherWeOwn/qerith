@@ -57,6 +57,33 @@ async fn empty_spool_requires_post_for_actual_committed_lengths() {
 }
 
 #[tokio::test]
+async fn single_part_corruption_returns_integrity_without_publication() {
+    for length in [1, 1024] {
+        let c = FixtureC::committed(
+            Key {
+                object: 7,
+                generation: 9,
+            },
+            vec![0x5a; length],
+        );
+        let mut archive =
+            Archive::spawn(&c, identity("simulated", "single-part"), Fault::Corrupt(0)).await;
+        let mut trace = Trace::default();
+        let mut cache = MemoryCache::default();
+        assert_eq!(
+            archive
+                .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
+                .await
+                .unwrap_err(),
+            Failure::Integrity
+        );
+        assert!(cache.delivery(c.key()).is_none());
+        cache.cleanup(c.key(), &mut trace);
+        cache.assert_empty(&mut trace);
+    }
+}
+
+#[tokio::test]
 async fn empty_cache_reconstruction_preserves_c_and_replays() {
     let c = fixture(7);
     let expected = vec![
