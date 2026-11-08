@@ -6,6 +6,7 @@
 //! decoded upload bytes may enter the retained-cache commit. These types neither
 //! prove encryption nor grant a restore lease or durable commit.
 
+pub mod archive;
 mod auth;
 pub mod mutation;
 mod read;
@@ -36,6 +37,9 @@ pub enum ErrorCode {
     PreconditionFailed,
     InvalidRange,
     InvalidObjectState,
+    NoSuchBucket,
+    BucketAlreadyOwnedByYou,
+    BucketNotEmpty,
     NoSuchKey,
     NoSuchUpload,
     InvalidPart,
@@ -57,8 +61,11 @@ impl ErrorCode {
             | Self::InvalidObjectState => 403,
             Self::PreconditionFailed => 412,
             Self::InvalidRange => 416,
-            Self::NoSuchKey | Self::NoSuchUpload => 404,
-            Self::RestoreAlreadyInProgress | Self::ConditionalRequestConflict => 409,
+            Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload => 404,
+            Self::RestoreAlreadyInProgress
+            | Self::BucketAlreadyOwnedByYou
+            | Self::BucketNotEmpty
+            | Self::ConditionalRequestConflict => 409,
             Self::NotImplemented => 501,
             Self::SlowDown => 503,
             Self::InternalError => 500,
@@ -96,7 +103,8 @@ fn xml(value: &str) -> String {
             '>' => "&gt;".into(),
             '"' => "&quot;".into(),
             '\'' => "&apos;".into(),
-            c if c == '\t' || c == '\n' || c == '\r' || c >= ' ' => c.to_string(),
+            '\r' => "&#13;".into(),
+            c if c == '\t' || c == '\n' || c >= ' ' => c.to_string(),
             _ => "\u{fffd}".into(),
         })
         .collect()

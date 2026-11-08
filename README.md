@@ -47,6 +47,15 @@ A bump is a reviewed PR in this repo:
    40-character `rev`. `ci-ok` blocks the merge only once it is a required
    status check on `main`; until then, a reviewer must confirm it is green.
 
+## Native client contracts
+
+`qerith_core::native` provides versioned wire types, profile negotiation,
+scoped-reference validation and golden request/response fixtures. See
+[the native protocol contract](docs/native-protocol.md) for trust boundaries,
+resume/replay, generation-bound transfers and durable adapter obligations.
+It implements no encryption, storage, listener or key recovery, and ships no
+production cryptographic profile.
+
 ## Checks
 
 CI (`.github/workflows/ci.yml`, aggregated as `ci-ok`) runs `cargo fmt`,

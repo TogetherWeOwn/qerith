@@ -526,7 +526,9 @@ fn decoded_xml_forbidden_destinations_never_publish_or_complete() {
         assert!(m.catalogue().lookup(T, &name, 4, &auth()).is_err());
         assert!(m.catalogue().outbox(T).is_empty());
         assert_eq!(m.retained_bytes(T), 0);
-        assert_eq!(m.cleanup(200, 10).unwrap().removed, 0);
+        let cleanup = m.cleanup(200, mutation_policy().sessions).unwrap();
+        assert_eq!(cleanup.examined, 0);
+        assert_eq!(cleanup.removed, 0);
     }
 }
 
