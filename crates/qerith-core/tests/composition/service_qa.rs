@@ -127,13 +127,15 @@ async fn catalogue_and_service_identities_interleave_without_losing_reconciliati
         text("generation", upload.target.generation.as_str()),
         text("identity", "interleaved_download"),
     ];
-    assert!(parity(
-        &mut service,
-        &scope(),
-        o::Operation::AuthorizeDownload,
-        std::mem::take(&mut download)
-    )
-    .is_ok());
+    assert!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::AuthorizeDownload,
+            std::mem::take(&mut download)
+        )
+        .is_ok()
+    );
     make_available(&mut service, &mut io, &copy.target, auth.as_ref()).await;
     let mut intent = upload_intent(&io);
     intent.object = nid("new_object");
@@ -221,7 +223,7 @@ async fn write_only_existing_targets_support_replace_copy_and_delete_without_rea
     fields.retain(|(name, _)| name != "identity");
     fields.push(text("identity", "write_only_commit"));
     parity(&mut service, &scope(), o::Operation::CommitUpload, fields).unwrap();
-    service
+    let committed = service
         .finish_upload(
             &scope(),
             &transfer.handle,
@@ -232,16 +234,60 @@ async fn write_only_existing_targets_support_replace_copy_and_delete_without_rea
         )
         .await
         .unwrap();
-    assert!(parity(
-        &mut service,
-        &scope(),
-        o::Operation::Stat,
-        vec![
-            text("reference", "object"),
-            text("generation", transfer.target.generation.as_str())
-        ]
-    )
-    .is_err());
+    let calls = io.order.len();
+    let outbox = service.catalogue().outbox(TENANT);
+    let allocations = service.allocations();
+    for reconnect in [false, true] {
+        if reconnect {
+            service = s::Service::reconnect(
+                service.checkpoint(),
+                Access(auth.clone()),
+                limits(),
+                profile(),
+                10,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            service
+                .finish_upload(
+                    &scope(),
+                    &transfer.handle,
+                    &mut io,
+                    &budget(),
+                    &Time(Cell::new(10)),
+                    &Rules::default(),
+                )
+                .await
+                .unwrap(),
+            committed
+        );
+        for operation in [o::Operation::Status, o::Operation::Result] {
+            let failure = parity(
+                &mut service,
+                &scope(),
+                operation,
+                vec![text("job", committed.handle.as_str())],
+            )
+            .unwrap_err();
+            assert_eq!(failure, o::Failure::new(o::ErrorCode::Denied));
+        }
+    }
+    assert_eq!(io.order.len(), calls);
+    assert_eq!(service.catalogue().outbox(TENANT), outbox);
+    assert_eq!(service.allocations(), allocations);
+    assert!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Stat,
+            vec![
+                text("reference", "object"),
+                text("generation", transfer.target.generation.as_str())
+            ]
+        )
+        .is_err()
+    );
     let stale = vec![
         text("reference", "object"),
         text("generation", upload.target.generation.as_str()),
@@ -295,16 +341,18 @@ async fn write_only_existing_targets_support_replace_copy_and_delete_without_rea
             .code,
         o::ErrorCode::PreconditionFailed
     );
-    assert!(parity(
-        &mut service,
-        &scope(),
-        o::Operation::Stat,
-        vec![
-            text("reference", "copy"),
-            text("generation", replaced.target.generation.as_str())
-        ]
-    )
-    .is_err());
+    assert!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Stat,
+            vec![
+                text("reference", "copy"),
+                text("generation", replaced.target.generation.as_str())
+            ]
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -501,6 +549,358 @@ async fn tightened_byte_limit_preserves_uncertain_upload_effects_and_cleanup_aft
     assert_eq!(job.state, o::JobState::CancelRequested);
     assert_eq!(job.effects, o::Effects::Unknown);
     assert_eq!(io.order.len(), calls);
+}
+
+fn assert_rejection_parity(
+    service: &mut s::Service<Access>,
+    operation: o::Operation,
+    fields: o::Fields,
+    code: o::ErrorCode,
+    effects: o::Effects,
+) {
+    let allocations = service.allocations();
+    let outbox = service.catalogue().outbox(TENANT);
+    let direct = o::dispatch(
+        service,
+        Some(&scope()),
+        o::VERSION,
+        operation,
+        fields.clone(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        parity(service, &scope(), operation, fields).unwrap_err(),
+        direct
+    );
+    assert_eq!(direct, o::Failure { code, effects });
+    assert_eq!(
+        direct.reconciliation_required(),
+        effects != o::Effects::None
+    );
+    assert!(!direct.retryable());
+    assert_eq!(service.allocations(), allocations);
+    assert_eq!(service.catalogue().outbox(TENANT), outbox);
+}
+
+#[tokio::test]
+async fn authorized_upload_rejections_preserve_uncertain_effects_across_policy_and_state_fences() {
+    for case in ["records", "revision", "expiry", "deadline", "cancel"] {
+        let (mut service, mut io, transfer, job, auth) = pending_upload().await;
+        fully_stage(&mut service, &io, &transfer);
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::CommitUpload,
+            commit_fields(&transfer),
+        )
+        .unwrap();
+        io.inject = Injection::PartialUpload;
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &Time(Cell::new(10)),
+                &Rules::default(),
+            )
+            .await
+            .unwrap_err();
+        let mut bounded = limits();
+        let mut now = 10;
+        let expected = match case {
+            "records" => {
+                bounded.records = 1;
+                o::ErrorCode::QuotaExceeded
+            }
+            "revision" => {
+                service
+                    .bind_upload(&scope(), id("second_init"), id("root"), upload_intent(&io))
+                    .unwrap();
+                let o::Output::Upload {
+                    transfer: second, ..
+                } = parity(
+                    &mut service,
+                    &scope(),
+                    o::Operation::InitiateUpload,
+                    vec![
+                        text("reference", "object"),
+                        text("identity", "second_init"),
+                        ("if_absent".into(), o::Value::Flag(true)),
+                        ("max_bytes".into(), o::Value::Number(io.identity().length)),
+                    ],
+                )
+                .unwrap()
+                else {
+                    panic!("second upload");
+                };
+                fully_stage(&mut service, &io, &second);
+                let mut fields = commit_fields(&second);
+                fields.retain(|(name, _)| name != "identity");
+                fields.push(text("identity", "second_commit"));
+                parity(&mut service, &scope(), o::Operation::CommitUpload, fields).unwrap();
+                io.inject = Injection::None;
+                service
+                    .finish_upload(
+                        &scope(),
+                        &second.handle,
+                        &mut io,
+                        &budget(),
+                        &Time(Cell::new(10)),
+                        &Rules::default(),
+                    )
+                    .await
+                    .unwrap();
+                o::ErrorCode::PreconditionFailed
+            }
+            "expiry" => {
+                now = 211;
+                o::ErrorCode::Conflict
+            }
+            "deadline" => {
+                now = 1011;
+                o::ErrorCode::Conflict
+            }
+            "cancel" => {
+                parity(
+                    &mut service,
+                    &scope(),
+                    o::Operation::Cancel,
+                    vec![
+                        text("job", job.handle.as_str()),
+                        text("identity", "before_rejection_cancel"),
+                    ],
+                )
+                .unwrap();
+                o::ErrorCode::Conflict
+            }
+            _ => unreachable!(),
+        };
+        service = s::Service::reconnect(
+            service.checkpoint(),
+            Access(auth.clone()),
+            bounded,
+            profile(),
+            now,
+        )
+        .unwrap();
+        let calls = io.order.len();
+        let mut fields = commit_fields(&transfer);
+        fields.retain(|(name, _)| name != "identity");
+        fields.push(text("identity", "fresh_uncertain_commit"));
+        assert_rejection_parity(
+            &mut service,
+            o::Operation::CommitUpload,
+            fields.clone(),
+            expected,
+            o::Effects::Unknown,
+        );
+        // The retained obligation is not disclosed through revoked, missing or foreign handles.
+        auth.denied.borrow_mut().insert("key_ref".into());
+        assert_rejection_parity(
+            &mut service,
+            o::Operation::CommitUpload,
+            fields.clone(),
+            o::ErrorCode::Denied,
+            o::Effects::None,
+        );
+        auth.denied.borrow_mut().clear();
+        let mut foreign = scope();
+        foreign.principal = id("other_principal");
+        assert_eq!(
+            parity(
+                &mut service,
+                &foreign,
+                o::Operation::CommitUpload,
+                fields.clone()
+            )
+            .unwrap_err(),
+            o::Failure::new(o::ErrorCode::Denied),
+        );
+        fields.retain(|(name, _)| name != "transfer");
+        fields.push(text("transfer", "missing_upload"));
+        assert_rejection_parity(
+            &mut service,
+            o::Operation::CommitUpload,
+            fields,
+            o::ErrorCode::Denied,
+            o::Effects::None,
+        );
+        // Restore capacity/time policy, not state, to inspect cleanup-aware cancellation.
+        service =
+            s::Service::reconnect(service.checkpoint(), Access(auth), limits(), profile(), now)
+                .unwrap();
+        let o::Output::Cancel { outcome, job } = parity(
+            &mut service,
+            &scope(),
+            o::Operation::Cancel,
+            vec![
+                text("job", job.handle.as_str()),
+                text("identity", "after_rejection_cancel"),
+            ],
+        )
+        .unwrap() else {
+            panic!("cancel");
+        };
+        if case == "deadline" {
+            assert_eq!(outcome, o::CancelOutcome::AlreadyTerminal);
+            assert_eq!(job.state, o::JobState::Failed);
+        } else {
+            assert_eq!(outcome, o::CancelOutcome::Requested);
+            assert_eq!(job.state, o::JobState::CancelRequested);
+        }
+        assert_eq!(job.effects, o::Effects::Unknown);
+        assert_eq!(io.order.len(), calls);
+    }
+}
+
+struct ReentryClock(bool);
+impl Clock for ReentryClock {
+    fn now(&self) -> qerith_core::catalogue::Result<u64> {
+        if self.0 { Err(Error::Invalid) } else { Ok(9) }
+    }
+}
+
+#[tokio::test]
+async fn authorized_worker_clock_failures_preserve_uncertain_effects_without_io() {
+    let (mut service, mut io, transfer, _, auth) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    io.inject = Injection::PartialUpload;
+    service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &Time(Cell::new(10)),
+            &Rules::default(),
+        )
+        .await
+        .unwrap_err();
+    service = s::Service::reconnect(
+        service.checkpoint(),
+        Access(auth.clone()),
+        limits(),
+        profile(),
+        10,
+    )
+    .unwrap();
+    let calls = io.order.len();
+    let allocations = service.allocations();
+    let outbox = service.catalogue().outbox(TENANT);
+    for fails in [true, false] {
+        let failure = service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &ReentryClock(fails),
+                &Rules::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            o::Failure {
+                code: o::ErrorCode::Unavailable,
+                effects: o::Effects::Unknown
+            }
+        );
+        assert!(failure.reconciliation_required());
+        assert!(!failure.retryable());
+    }
+    auth.denied.borrow_mut().insert("key_ref".into());
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &ReentryClock(true),
+                &Rules::default(),
+            )
+            .await
+            .unwrap_err(),
+        o::Failure::new(o::ErrorCode::Denied)
+    );
+    assert_eq!(io.order.len(), calls);
+    assert_eq!(service.allocations(), allocations);
+    assert_eq!(service.catalogue().outbox(TENANT), outbox);
+}
+
+#[tokio::test]
+async fn restore_replay_policy_rejection_retains_accepted_effects_for_queued_and_running_jobs() {
+    for running in [false, true] {
+        let (mut service, io, upload, _, auth) = hot_upload().await;
+        let fields = vec![
+            text("reference", "object"),
+            text("generation", upload.target.generation.as_str()),
+            text("identity", "policy_restore_replay"),
+            ("availability_seconds".into(), o::Value::Number(50)),
+        ];
+        let o::Output::Job(job) = parity(
+            &mut service,
+            &scope(),
+            o::Operation::Restore,
+            fields.clone(),
+        )
+        .unwrap() else {
+            panic!("restore");
+        };
+        assert_eq!(job.effects, o::Effects::Accepted);
+        if running {
+            let physical = service
+                .catalogue()
+                .outbox(TENANT)
+                .into_iter()
+                .rev()
+                .find_map(|event| match event.effect {
+                    Effect::RunJob(job) if job.kind == JobKind::Restore => Some(job.id),
+                    _ => None,
+                })
+                .unwrap();
+            service
+                .catalogue_mut()
+                .claim(TENANT, physical, 10, 12)
+                .unwrap();
+        }
+        let mut bounded = limits();
+        bounded.bytes = 1024;
+        service = s::Service::reconnect(
+            service.checkpoint(),
+            Access(auth.clone()),
+            bounded,
+            profile(),
+            10,
+        )
+        .unwrap();
+        let calls = io.order.len();
+        assert_rejection_parity(
+            &mut service,
+            o::Operation::Restore,
+            fields.clone(),
+            o::ErrorCode::QuotaExceeded,
+            o::Effects::Accepted,
+        );
+        auth.denied.borrow_mut().insert("object:Restore".into());
+        assert_rejection_parity(
+            &mut service,
+            o::Operation::Restore,
+            fields,
+            o::ErrorCode::Denied,
+            o::Effects::None,
+        );
+        assert_eq!(io.order.len(), calls);
+    }
 }
 
 #[tokio::test]

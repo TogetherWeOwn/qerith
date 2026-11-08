@@ -107,12 +107,17 @@ unstarted upload can stop before commit; restore cancellation removes only its
 own accepted subscription. An interrupted/uncertain storage attempt retains a
 cleanup/reconciliation obligation instead of claiming no effects. Polling does
 not extend deadlines. Unknown effects remain unknown through fresh commit identities,
-worker early exits, pending NotReady results and deadline Result failures. Retry
-waits after a claimed restore remain logically Running, including after reconnect.
+worker clock failures, record/byte-policy rejection, revision/expiry/cancellation
+fences, pending NotReady results and deadline Result failures. Shared rejection
+projection retains only authorized, scope-bound job effects; missing, foreign or
+revoked handles still return a sanitized denial without job state. Rejected restore
+replays likewise retain the accepted subscription obligation under tighter policy.
+Retry waits after a claimed restore remain logically Running, including after reconnect.
 Native commit receipts are retained before response authorization: losing Read
 during storage denies delivery, not the already-committed reconciliation record.
-Uncommitted upload job access uses
-Write, not an ungranted Read of a not-yet-published object. Restore admission/replay
+Uncommitted upload job access and upload worker reconciliation (including successful
+re-entry after reconnect) use Write. Stat, Status and Result disclosure of committed
+objects still require Read. Restore admission/replay
 and subscription cancellation require Restore; cancellation does not require Write.
 Physical restore completion is projected as success only for the exact subscription
 recorded at publication, never for an excluded logical reference. Native restore

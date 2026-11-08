@@ -208,6 +208,17 @@ fn fail(code: o::ErrorCode) -> o::Failure {
 fn denied() -> o::Failure {
     fail(o::ErrorCode::Denied)
 }
+fn retain_effects(mut failure: o::Failure, effects: o::Effects) -> o::Failure {
+    if failure.effects == o::Effects::None
+        && !matches!(
+            failure.code,
+            o::ErrorCode::Denied | o::ErrorCode::Unauthenticated
+        )
+    {
+        failure.effects = effects;
+    }
+    failure
+}
 fn map(error: c::Error) -> o::Failure {
     use o::ErrorCode as E;
     match error {
@@ -620,6 +631,36 @@ impl<A: Access> Service<A> {
         }
         Ok(None)
     }
+    // Only called after full request authorization. Retain scope-bound obligations
+    // across policy/state rejection; denial itself must never disclose job state.
+    fn retain_request_effects(
+        &self,
+        scope: &o::Scope,
+        request: &o::Request,
+        failure: o::Failure,
+    ) -> o::Failure {
+        let transfer_job = request.opaque("transfer").and_then(|handle| {
+            self.model
+                .uploads
+                .get(handle)
+                .filter(|upload| upload.scope == *scope)
+                .map(|upload| &upload.job)
+        });
+        let replay = self.replay(scope, request).ok().flatten();
+        let replay_job = match &replay {
+            Some(
+                o::Output::Job(job) | o::Output::Upload { job, .. } | o::Output::Cancel { job, .. },
+            ) => Some(&job.handle),
+            _ => None,
+        };
+        let effects = transfer_job
+            .or(request.opaque("job"))
+            .or(replay_job)
+            .and_then(|handle| self.model.jobs.get(handle))
+            .filter(|job| job.scope == *scope)
+            .map_or(o::Effects::None, |job| job.value.effects);
+        retain_effects(failure, effects)
+    }
     fn permit_descriptor(
         &self,
         scope: &o::Scope,
@@ -790,13 +831,13 @@ impl<A: Access> Service<A> {
             .cloned()
             .ok_or_else(denied)?;
         self.permit_descriptor(scope, &upload.descriptor)?;
-        self.set_now(clock.now().map_err(map)?)?;
-        let job = self.job(scope, &upload.job)?;
-        self.check_bytes(upload.descriptor.intent.ciphertext.length)
-            .map_err(|mut failure| {
-                failure.effects = job.value.effects;
-                failure
-            })?;
+        let job = self.job_access(scope, &upload.job, Some(c::Action::Write))?;
+        let result = (|| {
+            self.set_now(clock.now().map_err(|_| fail(o::ErrorCode::Unavailable))?)?;
+            self.check_bytes(upload.descriptor.intent.ciphertext.length)
+        })();
+        result.map_err(|failure| retain_effects(failure, job.value.effects))?;
+        let job = self.job_access(scope, &upload.job, Some(c::Action::Write))?;
         if job.value.state == o::JobState::Succeeded {
             return Ok(job.value);
         }
@@ -985,8 +1026,12 @@ fn metadata(intent: &n::UploadIntent, now: u64) -> Result<c::CiphertextMetadata,
     })
 }
 
-impl<A: Access> o::OperationPort for Service<A> {
-    fn authorize(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+impl<A: Access> Service<A> {
+    fn check_authorization(
+        &mut self,
+        scope: &o::Scope,
+        request: &o::Request,
+    ) -> Result<(), o::Failure> {
         self.tenant(scope)?;
         if !self.access.admit(scope) {
             return Err(denied());
@@ -1066,7 +1111,14 @@ impl<A: Access> o::OperationPort for Service<A> {
         }
         Ok(())
     }
-    fn preconditions(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+}
+
+impl<A: Access> Service<A> {
+    fn check_preconditions(
+        &mut self,
+        scope: &o::Scope,
+        request: &o::Request,
+    ) -> Result<(), o::Failure> {
         if let Some(output) = self.replay(scope, request)? {
             match output {
                 o::Output::Job(job)
@@ -1121,7 +1173,11 @@ impl<A: Access> o::OperationPort for Service<A> {
         }
         Ok(())
     }
-    fn admit(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+    fn check_admission(
+        &mut self,
+        scope: &o::Scope,
+        request: &o::Request,
+    ) -> Result<(), o::Failure> {
         if request
             .number("max_bytes")
             .is_some_and(|b| b > self.limits.bytes)
@@ -1141,12 +1197,8 @@ impl<A: Access> o::OperationPort for Service<A> {
                     .uploads
                     .get(request.opaque("transfer").unwrap())
                     .ok_or_else(denied)?;
-                let job = self.job_access(scope, &upload.job, Some(c::Action::Write))?;
-                self.check_bytes(upload.descriptor.intent.ciphertext.length)
-                    .map_err(|mut failure| {
-                        failure.effects = job.value.effects;
-                        failure
-                    })?;
+                self.job_access(scope, &upload.job, Some(c::Action::Write))?;
+                self.check_bytes(upload.descriptor.intent.ciphertext.length)?;
             }
             o::Operation::Restore | o::Operation::AuthorizeDownload => {
                 let view = self.exact(scope, &Self::target(request))?;
@@ -1168,6 +1220,22 @@ impl<A: Access> o::OperationPort for Service<A> {
             _ => 0,
         };
         self.reserve(additional)
+    }
+}
+
+impl<A: Access> o::OperationPort for Service<A> {
+    fn authorize(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+        self.check_authorization(scope, request)
+    }
+    fn preconditions(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+        self.check_authorization(scope, request)?;
+        self.check_preconditions(scope, request)
+            .map_err(|failure| self.retain_request_effects(scope, request, failure))
+    }
+    fn admit(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+        self.check_authorization(scope, request)?;
+        self.check_admission(scope, request)
+            .map_err(|failure| self.retain_request_effects(scope, request, failure))
     }
     fn resolve_cursor(
         &mut self,
@@ -1227,7 +1295,7 @@ impl<A: Access> o::OperationPort for Service<A> {
             }
             Err(error) => {
                 self.model = before;
-                Err(error)
+                Err(self.retain_request_effects(scope, request, error))
             }
         }
     }
