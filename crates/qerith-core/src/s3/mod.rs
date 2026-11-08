@@ -8,6 +8,7 @@
 
 pub mod archive;
 mod auth;
+pub mod mutation;
 mod read;
 mod restore;
 mod upload;
@@ -41,6 +42,10 @@ pub enum ErrorCode {
     BucketNotEmpty,
     NoSuchKey,
     NoSuchUpload,
+    InvalidPart,
+    InvalidPartOrder,
+    EntityTooSmall,
+    ConditionalRequestConflict,
     RestoreAlreadyInProgress,
     NotImplemented,
     SlowDown,
@@ -59,7 +64,8 @@ impl ErrorCode {
             Self::NoSuchBucket | Self::NoSuchKey | Self::NoSuchUpload => 404,
             Self::RestoreAlreadyInProgress
             | Self::BucketAlreadyOwnedByYou
-            | Self::BucketNotEmpty => 409,
+            | Self::BucketNotEmpty
+            | Self::ConditionalRequestConflict => 409,
             Self::NotImplemented => 501,
             Self::SlowDown => 503,
             Self::InternalError => 500,
