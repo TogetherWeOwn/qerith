@@ -1,6 +1,8 @@
 use super::*;
 use qerith_core::{native as n, operations as o, service as s};
 
+#[path = "service_obligations.rs"]
+mod obligations;
 #[path = "service_qa.rs"]
 mod qa;
 #[path = "service_repairs.rs"]
