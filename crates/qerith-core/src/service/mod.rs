@@ -68,6 +68,51 @@ impl<A: Access> c::Authority for UploadAuthority<'_, A> {
     }
 }
 
+// Mark the retained cleanup obligation at the I/O boundary, not at admission.
+struct UploadStorage<'a, S> {
+    storage: &'a mut S,
+    cleanup: &'a mut bool,
+}
+impl<S: flow::Storage> flow::Storage for UploadStorage<'_, S> {
+    async fn stage_upload(
+        &mut self,
+        upload: &flow::Upload,
+        budget: &flow::Budget,
+        until: u64,
+    ) -> Result<c::CompleteCopy, flow::IoError> {
+        *self.cleanup = true;
+        self.storage.stage_upload(upload, budget, until).await
+    }
+    async fn post(&mut self, work: &flow::Work) -> Result<(), flow::IoError> {
+        self.storage.post(work).await
+    }
+    async fn verify_archive(
+        &mut self,
+        work: &flow::Work,
+    ) -> Result<[flow::Reconstruction; 2], flow::IoError> {
+        self.storage.verify_archive(work).await
+    }
+    async fn retrieve(&mut self, work: &flow::Work) -> Result<(), flow::IoError> {
+        self.storage.retrieve(work).await
+    }
+    async fn complete_restore(
+        &mut self,
+        work: &flow::Work,
+    ) -> Result<c::CompleteCopy, flow::IoError> {
+        self.storage.complete_restore(work).await
+    }
+    async fn verify_completed(
+        &mut self,
+        work: &flow::Work,
+        location: &str,
+    ) -> Result<c::CompleteCopy, flow::IoError> {
+        self.storage.verify_completed(work, location).await
+    }
+    async fn cleanup_incomplete(&mut self, work: &flow::Work) -> Result<(), flow::IoError> {
+        self.storage.cleanup_incomplete(work).await
+    }
+}
+
 #[derive(Clone)]
 struct CopyDescriptor {
     source: n::Object,
@@ -533,7 +578,18 @@ impl<A: Access> Service<A> {
         id: &o::Opaque,
         action: Option<c::Action>,
     ) -> Result<Job, o::Failure> {
-        let mut job = self
+        let job = self.authorized_job(scope, id, action)?;
+        let effects = job.value.effects;
+        self.project_job(scope, job, action)
+            .map_err(|failure| retain_effects(failure, effects))
+    }
+    fn authorized_job(
+        &self,
+        scope: &o::Scope,
+        id: &o::Opaque,
+        action: Option<c::Action>,
+    ) -> Result<Job, o::Failure> {
+        let job = self
             .model
             .jobs
             .get(id)
@@ -551,6 +607,14 @@ impl<A: Access> Service<A> {
                 },
             ),
         )?;
+        Ok(job)
+    }
+    fn project_job(
+        &self,
+        scope: &o::Scope,
+        mut job: Job,
+        action: Option<c::Action>,
+    ) -> Result<Job, o::Failure> {
         if job.restore.is_some()
             || job.requires_live_target && job.value.effects == o::Effects::Committed
         {
@@ -639,27 +703,54 @@ impl<A: Access> Service<A> {
         request: &o::Request,
         failure: o::Failure,
     ) -> o::Failure {
-        let transfer_job = request.opaque("transfer").and_then(|handle| {
-            self.model
-                .uploads
-                .get(handle)
-                .filter(|upload| upload.scope == *scope)
-                .map(|upload| &upload.job)
-        });
-        let replay = self.replay(scope, request).ok().flatten();
-        let replay_job = match &replay {
-            Some(
-                o::Output::Job(job) | o::Output::Upload { job, .. } | o::Output::Cancel { job, .. },
-            ) => Some(&job.handle),
-            _ => None,
+        if matches!(
+            failure.code,
+            o::ErrorCode::Denied | o::ErrorCode::Unauthenticated
+        ) {
+            return failure;
+        }
+        let write = matches!(
+            request.operation(),
+            o::Operation::InitiateUpload
+                | o::Operation::CommitUpload
+                | o::Operation::AbortUpload
+                | o::Operation::Copy
+                | o::Operation::Delete
+        );
+        let action = write.then_some(c::Action::Write);
+        let effects = |handle| match self.job_access(scope, handle, action) {
+            Ok(job) => job.value.effects,
+            Err(failure) => failure.effects,
         };
-        let effects = transfer_job
+        if let Some(handle) = request
+            .opaque("transfer")
+            .and_then(|handle| {
+                self.model
+                    .uploads
+                    .get(handle)
+                    .filter(|upload| upload.scope == *scope)
+                    .map(|upload| &upload.job)
+            })
             .or(request.opaque("job"))
-            .or(replay_job)
-            .and_then(|handle| self.model.jobs.get(handle))
-            .filter(|job| job.scope == *scope)
-            .map_or(o::Effects::None, |job| job.value.effects);
-        retain_effects(failure, effects)
+        {
+            return retain_effects(failure, effects(handle));
+        }
+        // Changed input still conflicts, but the identity's original obligation
+        // survives. Authorize its original binding before exposing any evidence.
+        if let Some((prior, output)) = request
+            .reconciliation(scope)
+            .and_then(|key| self.model.replay.get(&key))
+        {
+            if self.check_authorization(scope, prior).is_ok() {
+                if let o::Output::Job(job)
+                | o::Output::Upload { job, .. }
+                | o::Output::Cancel { job, .. } = output
+                {
+                    return retain_effects(failure, effects(&job.handle));
+                }
+            }
+        }
+        failure
     }
     fn permit_descriptor(
         &self,
@@ -878,10 +969,13 @@ impl<A: Access> Service<A> {
             });
         }
         self.model.uploads.get_mut(handle).unwrap().attempts += 1;
-        self.model.uploads.get_mut(handle).unwrap().cleanup = true;
+        let mut storage = UploadStorage {
+            storage,
+            cleanup: &mut self.model.uploads.get_mut(handle).unwrap().cleanup,
+        };
         if let Err(error) = flow::ingest(
             &mut self.model.catalogue,
-            storage,
+            &mut storage,
             &work,
             budget,
             clock,
@@ -890,7 +984,7 @@ impl<A: Access> Service<A> {
         )
         .await
         {
-            let mut failure = match error {
+            let failure = match error {
                 flow::Failure::Catalogue(error) => map(error),
                 flow::Failure::Io(flow::IoError::Integrity) => fail(o::ErrorCode::IntegrityFailed),
                 flow::Failure::Io(flow::IoError::Uncertain) => o::Failure {
@@ -899,9 +993,16 @@ impl<A: Access> Service<A> {
                 },
                 _ => fail(o::ErrorCode::Unavailable),
             };
-            self.model.jobs.get_mut(&upload.job).unwrap().value.effects = o::Effects::Unknown;
-            failure.effects = o::Effects::Unknown;
-            return Err(failure);
+            let effects = if self.model.uploads.get(handle).unwrap().cleanup {
+                o::Effects::Unknown
+            } else {
+                job.value.effects
+            };
+            self.model.jobs.get_mut(&upload.job).unwrap().value.effects = effects;
+            // Keep physical uncertainty internally even if effect-time revocation
+            // makes the public result an opaque denial.
+            self.permit_descriptor(scope, &upload.descriptor)?;
+            return Err(retain_effects(failure, effects));
         }
         self.model.uploads.get_mut(handle).unwrap().cleanup = false;
         let value = &mut self.model.jobs.get_mut(&upload.job).unwrap().value;
@@ -1028,7 +1129,7 @@ fn metadata(intent: &n::UploadIntent, now: u64) -> Result<c::CiphertextMetadata,
 
 impl<A: Access> Service<A> {
     fn check_authorization(
-        &mut self,
+        &self,
         scope: &o::Scope,
         request: &o::Request,
     ) -> Result<(), o::Failure> {
@@ -1061,7 +1162,21 @@ impl<A: Access> Service<A> {
             }
         }
         if let Some(id) = request.opaque("job") {
-            self.job(scope, id)?;
+            let job = self.authorized_job(scope, id, None)?;
+            if request.operation() == o::Operation::Cancel
+                && !job.value.state.terminal()
+                && job.value.effects != o::Effects::Committed
+            {
+                self.permit(
+                    scope,
+                    &job.value.target.reference,
+                    if job.restore.is_some() {
+                        c::Action::Restore
+                    } else {
+                        c::Action::Write
+                    },
+                )?;
+            }
         }
         if let Some(id) = request.opaque("transfer") {
             let upload = self
@@ -1119,6 +1234,9 @@ impl<A: Access> Service<A> {
         scope: &o::Scope,
         request: &o::Request,
     ) -> Result<(), o::Failure> {
+        if let Some(id) = request.opaque("job") {
+            self.job(scope, id)?;
+        }
         if let Some(output) = self.replay(scope, request)? {
             match output {
                 o::Output::Job(job)

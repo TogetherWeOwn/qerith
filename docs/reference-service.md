@@ -111,7 +111,13 @@ worker clock failures, record/byte-policy rejection, revision/expiry/cancellatio
 fences, pending NotReady results and deadline Result failures. Shared rejection
 projection retains only authorized, scope-bound job effects; missing, foreign or
 revoked handles still return a sanitized denial without job state. Rejected restore
-replays likewise retain the accepted subscription obligation under tighter policy.
+replays and changed-input identity conflicts retain the original bound obligation
+under tighter policy, using the live job projection (including exact-subscription
+publication), not a stale queued snapshot. Old committed job generation fences
+preserve committed evidence only while the corresponding live grant remains.
+Cleanup is marked at the storage invocation boundary: a pre-I/O budget/policy
+rejection retains prior evidence without inventing an uncertain physical copy.
+Effect-time revocation retains that cleanup internally but sanitizes public denial.
 Retry waits after a claimed restore remain logically Running, including after reconnect.
 Native commit receipts are retained before response authorization: losing Read
 during storage denies delivery, not the already-committed reconciliation record.
