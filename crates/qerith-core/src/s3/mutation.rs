@@ -661,6 +661,9 @@ impl MemoryMutations {
         authority: &dyn Authority,
     ) -> Result<Response> {
         permit(authority, reference, Action::Write)?;
+        if reference.name.is_empty() {
+            return Err(ErrorCode::InvalidRequest);
+        }
         let (revision, current) = self
             .catalogue
             .write_target(reference.tenant, &reference.name, now, authority)
@@ -699,6 +702,7 @@ impl MemoryMutations {
         bucket.validate_features()?;
         if bucket.key.is_some()
             || request.keys.is_empty()
+            || request.keys.iter().any(String::is_empty)
             || request.keys.len() > self.policy.batch_keys
         {
             return Err(ErrorCode::InvalidRequest);

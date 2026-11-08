@@ -23,11 +23,15 @@ impl Node {
         Ok(&self.text)
     }
     fn container(&self) -> Result<()> {
-        if !self.text.trim().is_empty() {
+        if !xml_space(&self.text) {
             return Err(ErrorCode::MalformedXML);
         }
         Ok(())
     }
+}
+
+fn xml_space(text: &str) -> bool {
+    text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
 }
 
 fn xml_char(c: char) -> bool {
@@ -73,7 +77,7 @@ fn tree(bytes: &[u8], policy: &Policy) -> Result<Node> {
                 }
                 if let Some(node) = stack.last_mut() {
                     node.text.push_str(&text);
-                } else if !text.trim().is_empty() {
+                } else if !xml_space(&text) {
                     return Err(ErrorCode::MalformedXML);
                 }
             }
@@ -85,15 +89,28 @@ fn tree(bytes: &[u8], policy: &Policy) -> Result<Node> {
                     "gt" => '>',
                     "quot" => '"',
                     "apos" => '\'',
-                    s if s.starts_with("#x") => u32::from_str_radix(&s[2..], 16)
-                        .ok()
-                        .and_then(char::from_u32)
-                        .ok_or(ErrorCode::MalformedXML)?,
-                    s if s.starts_with('#') => s[1..]
-                        .parse::<u32>()
-                        .ok()
-                        .and_then(char::from_u32)
-                        .ok_or(ErrorCode::MalformedXML)?,
+                    s if s.starts_with('#') => {
+                        let (digits, radix) = if let Some(digits) = s.strip_prefix("#x") {
+                            (digits, 16)
+                        } else {
+                            (&s[1..], 10)
+                        };
+                        if digits.is_empty()
+                            || !digits.bytes().all(|b| {
+                                if radix == 16 {
+                                    b.is_ascii_hexdigit()
+                                } else {
+                                    b.is_ascii_digit()
+                                }
+                            })
+                        {
+                            return Err(ErrorCode::MalformedXML);
+                        }
+                        u32::from_str_radix(digits, radix)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or(ErrorCode::MalformedXML)?
+                    }
                     _ => return Err(ErrorCode::InvalidRequest),
                 };
                 if !xml_char(c) {
@@ -275,6 +292,8 @@ pub fn completion_result(status: u16, bytes: &[u8], policy: &Policy) -> Result<S
         return Err(match code {
             "InvalidPart" => ErrorCode::InvalidPart,
             "InvalidPartOrder" => ErrorCode::InvalidPartOrder,
+            "EntityTooSmall" => ErrorCode::EntityTooSmall,
+            "BadDigest" => ErrorCode::BadDigest,
             "AccessDenied" => ErrorCode::AccessDenied,
             "SlowDown" => ErrorCode::SlowDown,
             "PreconditionFailed" => ErrorCode::PreconditionFailed,
@@ -286,9 +305,29 @@ pub fn completion_result(status: u16, bytes: &[u8], policy: &Policy) -> Result<S
     if status != 200 || root.name != "CompleteMultipartUploadResult" {
         return Err(ErrorCode::InternalError);
     }
-    let tags: Vec<_> = root.children.iter().filter(|n| n.name == "ETag").collect();
-    if tags.len() != 1 || tags[0].leaf()?.is_empty() {
-        return Err(ErrorCode::MalformedXML);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut etag = None;
+    for field in &root.children {
+        if !matches!(
+            field.name.as_str(),
+            "Location"
+                | "Bucket"
+                | "Key"
+                | "ETag"
+                | "ChecksumSHA256"
+                | "ChecksumCRC32"
+                | "ChecksumType"
+        ) || !seen.insert(field.name.as_str())
+        {
+            return Err(ErrorCode::MalformedXML);
+        }
+        let text = field.leaf()?;
+        if field.name == "ETag" {
+            if text.is_empty() {
+                return Err(ErrorCode::MalformedXML);
+            }
+            etag = Some(text.to_owned());
+        }
     }
-    Ok(tags[0].leaf()?.to_owned())
+    etag.ok_or(ErrorCode::MalformedXML)
 }

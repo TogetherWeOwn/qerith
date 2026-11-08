@@ -190,7 +190,10 @@ fn body_with(
         "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/fixture/s3/aws4_request\n{}",
         hex(&Sha256::digest(canonical.as_bytes()))
     );
-    let authorization = format!("AWS4-HMAC-SHA256 Credential=fixture/20130524/fixture/s3/aws4_request, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, string.as_bytes())));
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential=fixture/20130524/fixture/s3/aws4_request, SignedHeaders={signed}, Signature={}",
+        hex(&hmac(&key, string.as_bytes()))
+    );
     fields.push(("authorization", &authorization));
     let headers = s3::Headers::new(&fields, &p)?;
     let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &authority)?;
@@ -324,6 +327,65 @@ fn put_empty_binary_overwrite_and_atomic_archival_obligation() {
     assert_eq!(b.availability_until, None);
     assert_eq!(b.metadata.headers, metadata().headers);
     assert_eq!(second.put_response().status, 200);
+}
+
+#[test]
+fn failed_commit_rolls_back_begin_intent_and_generation_reservation() {
+    struct DenyCommit(std::cell::Cell<usize>);
+    impl Authority for DenyCommit {
+        fn is_current(&self) -> bool {
+            true
+        }
+        fn permits(&self, _: &Reference, action: Action) -> bool {
+            assert_eq!(action, Action::Write);
+            let call = self.0.get() + 1;
+            self.0.set(call);
+            // Final target and write_target, then BeginUpload; deny CommitUpload.
+            call <= 3
+        }
+    }
+    let mut m = model();
+    let authority = DenyCommit(std::cell::Cell::new(0));
+    assert_eq!(
+        m.put(prepare(&m, "key"), body(b"data"), 2, &authority),
+        Err(s3::ErrorCode::AccessDenied)
+    );
+    assert_eq!(authority.0.get(), 4);
+    // A fresh catalogue allocates generation 1, begin 2 and commit 3.
+    for operation in [OperationId(2), OperationId(3)] {
+        assert_eq!(
+            m.catalogue().reconcile(T, operation, &auth()),
+            Ok(Reconciliation::Absent)
+        );
+    }
+    assert!(m.catalogue().outbox(T).is_empty());
+    assert!(m.catalogue().lookup(T, "key", 2, &auth()).is_err());
+    assert_eq!(
+        m.catalogue_worker().transact(
+            T,
+            OperationId(4),
+            Mutation::BeginUpload {
+                name: "key".into(),
+                expected_revision: 0,
+                generation: GenerationId(1),
+                metadata: CiphertextMetadata {
+                    identity: CiphertextIdentity {
+                        length: 4,
+                        sha256: Sha256::digest(b"data").into()
+                    },
+                    validator: "fixture-retry".into(),
+                    modified_at: 2,
+                    headers: metadata().headers,
+                    checksums: vec![],
+                    recovery_ref: metadata().recovery_ref,
+                },
+                archive_deadline: 202,
+            },
+            2,
+            &auth(),
+        ),
+        Ok(Outcome::UploadIntent(OperationId(4)))
+    );
 }
 
 #[test]
@@ -883,7 +945,10 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
         assert_eq!(c.parts, vec![p1.checksum.unwrap(), p2.checksum.unwrap()]);
         if mode == MultipartChecksum::CompositeSha256 {
             assert_eq!(c.kind, ChecksumType::Composite);
-            assert_ne!(c.value, Sha256::digest(b"abcd").to_vec());
+            let mut expected = Sha256::new();
+            expected.update(Sha256::digest(b"ab"));
+            expected.update(Sha256::digest(b"cd"));
+            assert_eq!(c.value, expected.finalize().to_vec());
         } else {
             assert_eq!(c.kind, ChecksumType::FullObject);
             assert_eq!(Some(&c.value), full.as_ref());
@@ -1416,6 +1481,127 @@ fn expiry_index_bounds_cleanup_inspection_even_with_many_active_tenants() {
             .len(),
         0
     );
+}
+
+#[test]
+fn typed_deletes_reject_empty_names_and_validate_entire_batch_before_mutation() {
+    let mut m = model();
+    assert_eq!(
+        m.delete(
+            &reference(""),
+            &DestinationConditions::default(),
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidRequest)
+    );
+    assert_eq!(m.catalogue().write_target(T, "", 4, &auth()).unwrap().0, 0);
+    let original = put(&mut m, "archive/keep", b"retained");
+    for quiet in [false, true] {
+        assert_eq!(
+            m.delete_objects(
+                T,
+                &bucket(),
+                DeleteRequest {
+                    keys: vec!["keep".into(), "".into()],
+                    quiet
+                },
+                4,
+                &auth(),
+            ),
+            Err(s3::ErrorCode::InvalidRequest)
+        );
+        assert_eq!(
+            m.catalogue()
+                .lookup(T, "archive/keep", 4, &auth())
+                .unwrap()
+                .generation,
+            original.generation
+        );
+        assert_eq!(
+            m.catalogue()
+                .write_target(T, "archive/", 4, &auth())
+                .unwrap()
+                .0,
+            0
+        );
+    }
+}
+
+#[test]
+fn control_xml_rejects_non_xml_container_space_and_signed_character_references() {
+    let p = policy();
+    for space in ['\u{a0}', '\u{2003}'] {
+        for xml in [
+            format!("<Delete>{space}<Object><Key>a</Key></Object></Delete>"),
+            format!("<Delete><Object>{space}<Key>a</Key></Object></Delete>"),
+            format!("{space}<Delete><Object><Key>a</Key></Object></Delete>"),
+            format!("<Delete><Object><Key>a</Key></Object></Delete>{space}"),
+        ] {
+            assert_eq!(
+                parse_delete(xml.as_bytes(), &p, 10).unwrap_err(),
+                s3::ErrorCode::MalformedXML
+            );
+        }
+    }
+    for entity in [
+        "&#x+41;", "&#+65;", "&#x-41;", "&#-65;", "&#x;", "&#;", "&#xGG;", "&#6a;",
+    ] {
+        let xml = format!("<Delete><Object><Key>{entity}</Key></Object></Delete>");
+        assert!(parse_delete(xml.as_bytes(), &p, 10).is_err(), "{entity}");
+    }
+    let valid = " \t\n<Delete>\r\n<Object>\t<Key>\u{a0}&#x0041;&#00065;\u{2003}</Key>\n</Object></Delete> \n";
+    assert_eq!(
+        parse_delete(valid.as_bytes(), &p, 10).unwrap().keys,
+        ["\u{a0}AA\u{2003}"]
+    );
+}
+
+#[test]
+fn completion_result_preserves_size_and_digest_errors() {
+    for error in [s3::ErrorCode::EntityTooSmall, s3::ErrorCode::BadDigest] {
+        let response = error.response(false, "fixture");
+        for status in [200, response.status] {
+            let result = completion_result(status, &response.body, &policy());
+            assert_eq!(result, Err(error));
+            assert_eq!(result.unwrap_err().status(), 400);
+        }
+    }
+}
+
+#[test]
+fn completion_success_rejects_unknown_nested_and_duplicate_fields() {
+    let p = policy();
+    for fields in [
+        "<Error><Code>BadDigest</Code></Error>",
+        "<Unknown>ignored</Unknown>",
+        "<Key>a</Key><Key>b</Key>",
+        "<Bucket>a</Bucket><Bucket>b</Bucket>",
+        "<Location>a</Location><Location>b</Location>",
+        "<ChecksumSHA256>a</ChecksumSHA256><ChecksumSHA256>b</ChecksumSHA256>",
+        "<ChecksumCRC32>a</ChecksumCRC32><ChecksumCRC32>b</ChecksumCRC32>",
+        "<ChecksumType>FULL_OBJECT</ChecksumType><ChecksumType>COMPOSITE</ChecksumType>",
+        "<Key><Nested>bad</Nested></Key>",
+        "<ETag>duplicate</ETag>",
+    ] {
+        let xml = format!(
+            "<CompleteMultipartUploadResult><ETag>committed</ETag>{fields}</CompleteMultipartUploadResult>"
+        );
+        assert_eq!(
+            completion_result(200, xml.as_bytes(), &p),
+            Err(s3::ErrorCode::MalformedXML),
+            "{fields}"
+        );
+    }
+    for checksum in ["ChecksumSHA256", "ChecksumCRC32"] {
+        let xml = format!(
+            "<CompleteMultipartUploadResult><Location>https://s3.example.invalid/archive/key</Location><Bucket>archive</Bucket><Key>key</Key><ETag>committed</ETag><{checksum}>evidence</{checksum}><ChecksumType>FULL_OBJECT</ChecksumType></CompleteMultipartUploadResult>"
+        );
+        assert_eq!(
+            completion_result(200, xml.as_bytes(), &p),
+            Ok("committed".into())
+        );
+    }
 }
 
 #[test]
