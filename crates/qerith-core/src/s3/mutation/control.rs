@@ -34,7 +34,7 @@ fn xml_space(text: &str) -> bool {
     text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
 }
 
-fn xml_char(c: char) -> bool {
+pub(super) fn xml_char(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }
 

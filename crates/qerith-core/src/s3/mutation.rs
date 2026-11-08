@@ -482,7 +482,9 @@ impl MemoryMutations {
         permit(authority, &reference, Action::Write)?;
         metadata.validate()?;
         storage_class(class)?;
-        if reference.name.is_empty() {
+        // Every destination must round-trip through XML results without changing
+        // its identity, including writes prepared from percent-decoded paths.
+        if reference.name.is_empty() || !reference.name.chars().all(control::xml_char) {
             return Err(ErrorCode::InvalidArgument);
         }
         let (revision, current) = self

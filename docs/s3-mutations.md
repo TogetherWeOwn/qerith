@@ -94,6 +94,11 @@ request idempotency. Success XML is produced only from an accepted commit.
 `copy_response` includes the committed `LastModified`; `complete_response` includes
 `Location`, `Bucket` and decoded `Key`, binding a parsed ingress target back to the
 committed destination and using the trusted policy endpoint (not client Host).
+All destination preparation (PutObject, multipart initiation and CopyObject)
+rejects XML 1.0-forbidden characters with `InvalidArgument` before session creation
+or publication, including percent-decoded NUL, other forbidden controls and
+U+FFFE/U+FFFF. The shared control-XML character predicate defines this restricted
+key profile; valid Unicode and tab/LF/CR remain accepted without identity replacement.
 Accepted results retain their destination and timestamp for identical retries.
 `completion_result` explicitly treats an embedded `<Error>` in HTTP 200 as failure.
 The parsers bound XML and reject unknown fields, DTD/entity expansion, unsupported

@@ -496,11 +496,46 @@ fn worker_deletion_reclaims_only_dispatched_retained_bytes() {
 }
 
 #[test]
+fn decoded_xml_forbidden_destinations_never_publish_or_complete() {
+    for path in [
+        "/archive/a%00b",
+        "/archive/a%01b",
+        "/archive/a%0Bb",
+        "/archive/a%1Fb",
+        "/archive/a%EF%BF%BEb",
+        "/archive/a%EF%BF%BFb",
+    ] {
+        let mut m = model();
+        let target = s3::Target::parse(path, &policy()).unwrap();
+        let name = format!("{}/{}", target.bucket, target.key.as_ref().unwrap());
+        let attempt = (|| -> s3::Result<s3::Response> {
+            let prepared = m.prepare(
+                reference(&name),
+                metadata(),
+                DestinationConditions::default(),
+                None,
+                1,
+                &auth(),
+            )?;
+            let id = m.initiate(prepared, MultipartChecksum::None, 2, &auth())?;
+            let evidence = part(&mut m, &name, id, 1, b"data");
+            m.complete(&reference(&name), id, vec![evidence], None, 4, &auth())?
+                .complete_response(&target, &policy())
+        })();
+        assert_eq!(attempt, Err(s3::ErrorCode::InvalidArgument), "{path}");
+        assert!(m.catalogue().lookup(T, &name, 4, &auth()).is_err());
+        assert!(m.catalogue().outbox(T).is_empty());
+        assert_eq!(m.retained_bytes(T), 0);
+        assert_eq!(m.cleanup(200, 10).unwrap().removed, 0);
+    }
+}
+
+#[test]
 fn operation_specific_xml_round_trips_destination_and_commit_time() {
     let mut m = model();
     let first = put(&mut m, "source", b"source");
     restore(&mut m, "source");
-    let name = "archive/a<&\r/雪";
+    let name = "archive/a<&\t\n\r/雪\u{fffd}\u{10000}";
     let result = m
         .copy_object(
             prepare(&m, name),
@@ -514,7 +549,11 @@ fn operation_specific_xml_round_trips_destination_and_commit_time() {
     let text = String::from_utf8(response.body).unwrap();
     assert!(text.contains("<LastModified>1970-01-01T00:00:08Z</LastModified>"));
     assert!(!text.contains("<Bucket>"));
-    let target = s3::Target::parse("/archive/a%3C%26%0D/%E9%9B%AA?uploadId=1", &policy()).unwrap();
+    let target = s3::Target::parse(
+        "/archive/a%3C%26%09%0A%0D/%E9%9B%AA%EF%BF%BD%F0%90%80%80?uploadId=1",
+        &policy(),
+    )
+    .unwrap();
     let response = result.complete_response(&target, &policy()).unwrap();
     let mut reader = quick_xml::Reader::from_reader(response.body.as_slice());
     let mut fields = BTreeMap::new();
@@ -542,10 +581,10 @@ fn operation_specific_xml_round_trips_destination_and_commit_time() {
         }
     }
     assert_eq!(fields["Bucket"], "archive");
-    assert_eq!(fields["Key"], "a<&\r/雪");
+    assert_eq!(fields["Key"], "a<&\t\n\r/雪\u{fffd}\u{10000}");
     assert_eq!(
         fields["Location"],
-        "https://s3.example.invalid/archive/a%3C%26%0D/%E9%9B%AA"
+        "https://s3.example.invalid/archive/a%3C%26%09%0A%0D/%E9%9B%AA%EF%BF%BD%F0%90%80%80"
     );
     assert_eq!(fields["ETag"], result.etag);
     let wrong = s3::Target::parse("/archive/wrong", &policy()).unwrap();
