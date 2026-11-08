@@ -47,6 +47,7 @@ struct MemoryAuthority {
     selection: Selection,
     upload: UploadRecord,
     object: Object,
+    other_objects: Vec<Object>,
     current: Option<Opaque>,
     cursor: CursorRecord,
     job: JobStatus,
@@ -84,6 +85,7 @@ impl MemoryAuthority {
                 committed: false,
             },
             object,
+            other_objects: vec![],
             current: None,
             cursor: CursorRecord {
                 container: id("container-1"),
@@ -140,7 +142,10 @@ impl Authority for MemoryAuthority {
         (value == &id("object-1")).then(|| self.owned(self.current.clone()))
     }
     fn object(&self, target: &Target) -> Option<Owned<Object>> {
-        (target.object == self.object.target.object).then(|| self.owned(self.object.clone()))
+        std::iter::once(&self.object)
+            .chain(&self.other_objects)
+            .find(|object| target.object == object.target.object)
+            .map(|object| self.owned(object.clone()))
     }
     fn upload(&self, value: &Opaque) -> Option<Owned<UploadRecord>> {
         (value == &id("upload-1")).then(|| self.owned(self.upload.clone()))
@@ -620,6 +625,264 @@ fn restore_progress_is_bound_to_ciphertext_length_and_budget() {
         ),
         Ok(())
     );
+}
+
+#[test]
+fn status_and_cancel_bind_progress_to_resolved_ciphertext_length() {
+    for (kind, outcome) in [
+        (JobKind::Restore, Outcome::Restored),
+        (JobKind::Upload, Outcome::Committed),
+    ] {
+        let mut memory = MemoryAuthority::new();
+        memory.job.kind = kind;
+        let req = request("status");
+        for (completed, total, expected) in [
+            (4, None, Ok(())),
+            (4, Some(10), Ok(())),
+            (11, None, Err(ErrorCode::InvalidState)),
+            (4, Some(20), Err(ErrorCode::InvalidState)),
+        ] {
+            let mut status = memory.job.clone();
+            status.state = JobState::Running;
+            status.completed_bytes = completed;
+            status.total_bytes = total;
+            assert_eq!(
+                validate_response(
+                    &req,
+                    &response(&req, ResponseBody::Status(status.clone())),
+                    &memory.owner,
+                    &policy(),
+                    &memory,
+                    NOW
+                ),
+                expected
+            );
+            let mut recorded = memory.clone();
+            recorded.job = status;
+            for name in ["status", "cancel"] {
+                assert_eq!(check(&request(name), &recorded).map(|_| ()), expected);
+            }
+        }
+        for bytes in [0, 10, 20] {
+            let mut status = memory.job.clone();
+            status.state = JobState::Succeeded;
+            status.outcome = Some(outcome.clone());
+            status.completed_bytes = bytes;
+            status.total_bytes = Some(bytes);
+            let expected = if bytes == 10 {
+                Ok(())
+            } else {
+                Err(ErrorCode::InvalidState)
+            };
+            assert_eq!(
+                validate_response(
+                    &req,
+                    &response(&req, ResponseBody::Status(status.clone())),
+                    &memory.owner,
+                    &policy(),
+                    &memory,
+                    NOW
+                ),
+                expected
+            );
+            let mut recorded = memory.clone();
+            recorded.job = status;
+            for name in ["status", "cancel"] {
+                assert_eq!(check(&request(name), &recorded).map(|_| ()), expected);
+            }
+        }
+        memory.job.target.g = id("wrong-generation");
+        for name in ["status", "cancel"] {
+            assert_eq!(
+                check(&request(name), &memory),
+                Err(ErrorCode::GenerationMismatch)
+            );
+        }
+    }
+}
+
+#[test]
+fn upload_status_without_a_committed_target_cannot_claim_success() {
+    let mut memory = MemoryAuthority::new();
+    memory.job.kind = JobKind::Upload;
+    memory.job.target.object = id("not-yet-committed");
+    for name in ["status", "cancel"] {
+        assert_eq!(check(&request(name), &memory), Ok(Admission::New));
+    }
+    let req = request("status");
+    let mut status = memory.job.clone();
+    status.state = JobState::Succeeded;
+    status.completed_bytes = 10;
+    status.total_bytes = Some(10);
+    status.outcome = Some(Outcome::Committed);
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Status(status.clone())),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::NotAuthorized)
+    );
+    memory.job = status;
+    assert_eq!(check(&req, &memory), Err(ErrorCode::NotAuthorized));
+    memory.job.kind = JobKind::Restore;
+    memory.job.state = JobState::Queued;
+    memory.job.completed_bytes = 0;
+    memory.job.total_bytes = None;
+    memory.job.outcome = None;
+    assert_eq!(check(&req, &memory), Err(ErrorCode::NotAuthorized));
+}
+
+#[test]
+fn supported_read_profiles_can_differ_but_write_intents_stay_session_bound() {
+    let mut memory = MemoryAuthority::new();
+    let mut rules = policy();
+    let mut older = rules.profiles[0].clone();
+    older.profile.format = id("fixture-older-format");
+    older.profile.crypto = id("fixture-older-crypto");
+    older.profile.integrity = id("fixture-older-integrity");
+    older.checksum_hex_chars = 8;
+    rules.profiles.push(older.clone());
+    let mut object = memory.object.clone();
+    object.target.object = id("older-object");
+    object.target.g = id("older-generation");
+    object.ciphertext.c = id("older-ciphertext");
+    object.ciphertext.profile = older.profile.clone();
+    object.ciphertext.checksum_hex = id("0123abcd");
+    memory.other_objects.push(object.clone());
+    let req = request("browse");
+    let page = response(
+        &req,
+        ResponseBody::Browse {
+            entries: vec![memory.object.clone(), object.clone()],
+            cursor: None,
+        },
+    );
+    assert_eq!(
+        validate_response(&req, &page, &memory.owner, &rules, &memory, NOW),
+        Ok(())
+    );
+    assert_eq!(
+        decode_response(&serde_json::to_vec(&page).unwrap()),
+        Ok(page.clone())
+    );
+    for name in ["stat", "download", "restore"] {
+        let mut req = request(name);
+        match &mut req.action {
+            Action::Stat(target) => *target = object.target.clone(),
+            Action::Download(value) => value.target = object.target.clone(),
+            Action::Restore(value) => value.target = object.target.clone(),
+            _ => panic!(),
+        }
+        let body = match name {
+            "stat" => ResponseBody::Stat(object.clone()),
+            "download" => ResponseBody::Download(TransferHandle {
+                handle: id("older-transfer"),
+                object: object.clone(),
+                range: Some(ByteRange { first: 2, last: 5 }),
+                expires_at: 2000,
+            }),
+            "restore" => {
+                let mut status = memory.job.clone();
+                status.target = object.target.clone();
+                ResponseBody::Restore(status)
+            }
+            _ => panic!(),
+        };
+        assert_eq!(
+            validate_request(&req, &memory.owner, &rules, &memory, NOW),
+            Ok(Admission::New)
+        );
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, body),
+                &memory.owner,
+                &rules,
+                &memory,
+                NOW
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_request(&req, &memory.owner, &policy(), &memory, NOW),
+            Err(ErrorCode::UnsupportedProfile)
+        );
+    }
+    assert_eq!(
+        validate_response(
+            &request("browse"),
+            &page,
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::UnsupportedProfile)
+    );
+    for kind in [JobKind::Restore, JobKind::Upload] {
+        memory.job.kind = kind;
+        memory.job.target = object.target.clone();
+        for name in ["status", "cancel"] {
+            assert_eq!(
+                validate_request(&request(name), &memory.owner, &rules, &memory, NOW),
+                Ok(Admission::New)
+            );
+        }
+    }
+    // Redemption rechecks the stored profile, not just authorization issuance.
+    memory.object = object;
+    assert_eq!(
+        validate_transfer(
+            &id("transfer-1"),
+            &request("download"),
+            &memory.owner,
+            &rules,
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::NotAuthorized)
+    );
+    let mut download = request("download");
+    let Action::Download(value) = &mut download.action else {
+        panic!()
+    };
+    value.target = memory.object.target.clone();
+    assert_eq!(
+        validate_transfer(
+            &id("transfer-1"),
+            &download,
+            &memory.owner,
+            &rules,
+            &memory,
+            NOW
+        ),
+        Ok(())
+    );
+    for name in [
+        "initiate_upload",
+        "resume_upload",
+        "commit_upload",
+        "abort_upload",
+    ] {
+        let mut req = request(name);
+        let intent = match &mut req.action {
+            Action::InitiateUpload(intent) => intent,
+            Action::ResumeUpload(value)
+            | Action::CommitUpload(value)
+            | Action::AbortUpload(value) => &mut value.intent,
+            _ => panic!(),
+        };
+        intent.ciphertext.profile = older.profile.clone();
+        intent.ciphertext.checksum_hex = id("0123abcd");
+        assert_eq!(
+            validate_request(&req, &memory.owner, &rules, &memory, NOW),
+            Err(ErrorCode::CapabilityDowngrade)
+        );
+    }
 }
 
 #[test]

@@ -77,6 +77,8 @@
     {"case":"capabilities","pointer":"/body/output/profile/crypto","value":"unreviewed","error":"capability_downgrade"},
     {"case":"restore","pointer":"/body/output/target/g","value":"generation-other","error":"generation_mismatch"},
     {"case":"status","pointer":"/body/output/state","value":"succeeded","error":"invalid_state"},
+    {"case":"status","pointer":"/body/output/completed_bytes","value":11,"error":"invalid_state"},
+    {"case":"status","pointer":"/body/output/total_bytes","value":20,"error":"invalid_state"},
     {"case":"status","pointer":"/body/output/outcome","value":"plaintext_fallback","error":"malformed"},
     {"case":"download","pointer":"/body/output/expires_at","value":1000,"error":"generation_mismatch"}
   ]

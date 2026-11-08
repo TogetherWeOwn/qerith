@@ -37,7 +37,13 @@ are not silently ignored. The first supported offered profile and exact requeste
 limits are selected, or the offer fails. Clients validate the entire selection,
 including order/profile/version/limits, to reject downgrade. A scoped, expiring
 session record pins that selection; every later call rechecks it against current
-policy. There is no default plaintext or weaker-integrity path.
+policy. Upload intents (including resume/commit/abort) must match the selected
+profile exactly. Reads instead accept any currently policy-supported stored
+profile, still enforcing its own checksum length and the session's byte limits.
+Browse/stat and download descriptors preserve the stored profile so clients can
+decide whether they can decrypt it; a rotated write profile does not make old
+supported generations unreadable. Unsupported stored profiles fail closed.
+There is no default plaintext or weaker-integrity path.
 
 A deployment must supply independently accepted format, crypto and integrity
 profile identifiers plus the exact lowercase full-ciphertext checksum length.
@@ -135,10 +141,17 @@ The wire has queued/running/succeeded/failed/cancelled, exact target G, declared
 ciphertext-byte unit, optional total, completed bytes and a closed outcome.
 Unknown totals stay null. Totals cannot change once known; progress cannot go
 backwards or exceed known totals; terminal snapshots are immutable. Success
-requires a known complete total and operation-compatible outcome. Restore response
-progress cannot exceed the resolved target's ciphertext length, and any declared
-total must equal that length within the request's byte budget. Irrecoverable
-key loss is an explicit terminal failure, not automatic recovery, server
+requires a known complete total and operation-compatible outcome. Restore and
+status responses, plus the job snapshots read for status/cancel admission, bind
+progress to the resolved target's ciphertext length: completed bytes cannot exceed
+it, and a declared total must equal it. This applies to both restore and upload
+jobs when their committed generation resolves. An unpublished upload can report
+non-success state using structural progress checks, but cannot claim success
+without a resolved committed generation. Restore always requires that generation;
+its initial response also stays within the request's byte budget. The standalone
+`validate_status` / `validate_status_transition` helpers check structure and
+monotonicity only; adapters use request/response validation for target resolution.
+Irrecoverable key loss is an explicit terminal failure, not automatic recovery, server
 plaintext decryption or a reason to weaken integrity. It can be reported from
 independently authenticated lifecycle/client evidence; this module does not
 invent key-loss detection or key recovery.

@@ -210,9 +210,6 @@ fn metadata(value: &Metadata) -> Check {
 }
 
 fn ciphertext(value: &Ciphertext, selected: &Selection, policy: &Policy) -> Check {
-    if value.profile != selected.profile {
-        return Err(ErrorCode::CapabilityDowngrade);
-    }
     let supported = policy.supported(&value.profile)?;
     if value.length > selected.limits.object_bytes {
         return Err(ErrorCode::LimitExceeded);
@@ -230,6 +227,9 @@ fn ciphertext(value: &Ciphertext, selected: &Selection, policy: &Policy) -> Chec
 }
 
 fn intent(value: &UploadIntent, selected: &Selection, policy: &Policy) -> Check {
+    if value.ciphertext.profile != selected.profile {
+        return Err(ErrorCode::CapabilityDowngrade);
+    }
     ciphertext(&value.ciphertext, selected, policy)?;
     metadata(&value.metadata)
 }
@@ -250,7 +250,20 @@ fn resolved_object(
     policy: &Policy,
     authority: &impl Authority,
 ) -> Check<Object> {
-    let value = owned(authority.object(target), owner)?;
+    checked_object(
+        owned(authority.object(target), owner)?,
+        target,
+        selected,
+        policy,
+    )
+}
+
+fn checked_object(
+    value: Object,
+    target: &Target,
+    selected: &Selection,
+    policy: &Policy,
+) -> Check<Object> {
     if value.target != *target {
         return Err(ErrorCode::GenerationMismatch);
     }
@@ -411,7 +424,7 @@ pub fn validate_request(
             if value.job != *job {
                 return Err(ErrorCode::NotAuthorized);
             }
-            validate_status(&value)?;
+            resolved_status(&value, owner, &selected, policy, authority)?;
         }
     }
     Ok(if replay {
@@ -453,6 +466,30 @@ pub fn validate_status(value: &JobStatus) -> Check {
     } else {
         Err(ErrorCode::InvalidState)
     }
+}
+
+fn status_length(value: &JobStatus, length: u64) -> Check {
+    if value.completed_bytes > length || value.total_bytes.is_some_and(|n| n != length) {
+        return Err(ErrorCode::InvalidState);
+    }
+    Ok(())
+}
+
+fn resolved_status(
+    value: &JobStatus,
+    owner: &Owner,
+    selected: &Selection,
+    policy: &Policy,
+    authority: &impl Authority,
+) -> Check {
+    validate_status(value)?;
+    let record = authority.object(&value.target);
+    // An unfinished upload may not have published its immutable generation yet.
+    if record.is_none() && value.kind == JobKind::Upload && value.state != JobState::Succeeded {
+        return Ok(());
+    }
+    let object = checked_object(owned(record, owner)?, &value.target, selected, policy)?;
+    status_length(value, object.ciphertext.length)
 }
 
 pub fn validate_status_transition(before: &JobStatus, after: &JobStatus) -> Check {
@@ -662,15 +699,12 @@ pub fn validate_response(
                 return Err(ErrorCode::GenerationMismatch);
             }
             let expected = resolved_object(&value.target, owner, &selected, policy, authority)?;
-            let length = expected.ciphertext.length;
-            if status.completed_bytes > length || status.total_bytes.is_some_and(|n| n != length) {
-                return Err(ErrorCode::InvalidState);
-            }
-            Ok(())
+            status_length(status, expected.ciphertext.length)
         }
         (Action::Status { job }, ResponseBody::Status(status)) => {
             let before = owned(authority.job(job), owner)?;
-            validate_status_transition(&before, status)
+            validate_status_transition(&before, status)?;
+            resolved_status(status, owner, &selected, policy, authority)
         }
         _ => Err(ErrorCode::InvalidState),
     }
