@@ -489,7 +489,10 @@ async fn tightened_byte_limit_preserves_uncertain_upload_effects_and_cleanup_aft
         &mut service,
         &scope(),
         o::Operation::Cancel,
-        vec![text("job", job.handle.as_str())],
+        vec![
+            text("job", job.handle.as_str()),
+            text("identity", "limited_uncertain_cancel"),
+        ],
     )
     .unwrap() else {
         panic!("cancel");
