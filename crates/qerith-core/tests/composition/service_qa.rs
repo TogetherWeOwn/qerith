@@ -127,15 +127,13 @@ async fn catalogue_and_service_identities_interleave_without_losing_reconciliati
         text("generation", upload.target.generation.as_str()),
         text("identity", "interleaved_download"),
     ];
-    assert!(
-        parity(
-            &mut service,
-            &scope(),
-            o::Operation::AuthorizeDownload,
-            std::mem::take(&mut download)
-        )
-        .is_ok()
-    );
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::AuthorizeDownload,
+        std::mem::take(&mut download)
+    )
+    .is_ok());
     make_available(&mut service, &mut io, &copy.target, auth.as_ref()).await;
     let mut intent = upload_intent(&io);
     intent.object = nid("new_object");
@@ -276,18 +274,16 @@ async fn write_only_existing_targets_support_replace_copy_and_delete_without_rea
     assert_eq!(io.order.len(), calls);
     assert_eq!(service.catalogue().outbox(TENANT), outbox);
     assert_eq!(service.allocations(), allocations);
-    assert!(
-        parity(
-            &mut service,
-            &scope(),
-            o::Operation::Stat,
-            vec![
-                text("reference", "object"),
-                text("generation", transfer.target.generation.as_str())
-            ]
-        )
-        .is_err()
-    );
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::Stat,
+        vec![
+            text("reference", "object"),
+            text("generation", transfer.target.generation.as_str())
+        ]
+    )
+    .is_err());
     let stale = vec![
         text("reference", "object"),
         text("generation", upload.target.generation.as_str()),
@@ -341,18 +337,16 @@ async fn write_only_existing_targets_support_replace_copy_and_delete_without_rea
             .code,
         o::ErrorCode::PreconditionFailed
     );
-    assert!(
-        parity(
-            &mut service,
-            &scope(),
-            o::Operation::Stat,
-            vec![
-                text("reference", "copy"),
-                text("generation", replaced.target.generation.as_str())
-            ]
-        )
-        .is_err()
-    );
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::Stat,
+        vec![
+            text("reference", "copy"),
+            text("generation", replaced.target.generation.as_str())
+        ]
+    )
+    .is_err());
 }
 
 #[tokio::test]
@@ -757,7 +751,11 @@ async fn authorized_upload_rejections_preserve_uncertain_effects_across_policy_a
 struct ReentryClock(bool);
 impl Clock for ReentryClock {
     fn now(&self) -> qerith_core::catalogue::Result<u64> {
-        if self.0 { Err(Error::Invalid) } else { Ok(9) }
+        if self.0 {
+            Err(Error::Invalid)
+        } else {
+            Ok(9)
+        }
     }
 }
 
