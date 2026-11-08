@@ -1,0 +1,88 @@
+{
+  "fixture_only": "Synthetic profiles and checksums are not approved cryptography or encryption evidence.",
+  "valid": [
+    {
+      "name": "capabilities",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-1","session":null,"action":{"op":"capabilities","input":{"versions":[1],"profiles":[{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"}],"limits":{"object_bytes":1024,"page_entries":2,"transfer_bytes":1024,"job_seconds":60}}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-1","body":{"result":"capabilities","output":{"version":1,"session":"session-1","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"limits":{"object_bytes":1024,"page_entries":2,"transfer_bytes":1024,"job_seconds":60}}}}
+    },
+    {
+      "name": "initiate_upload",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-2","session":"session-1","action":{"op":"initiate_upload","input":{"object":"object-1","precondition":{"condition":"absent"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-2","body":{"result":"upload","output":{"upload":"upload-1","received_bytes":0}}}
+    },
+    {
+      "name": "resume_upload",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-3","session":"session-1","action":{"op":"resume_upload","input":{"upload":"upload-1","intent":{"object":"object-1","precondition":{"condition":"absent"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-3","body":{"result":"upload","output":{"upload":"upload-1","received_bytes":10}}}
+    },
+    {
+      "name": "commit_upload",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-4","session":"session-1","action":{"op":"commit_upload","input":{"upload":"upload-1","intent":{"object":"object-1","precondition":{"condition":"absent"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-4","body":{"result":"committed","output":{"target":{"object":"object-1","g":"generation-1"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}}
+    },
+    {
+      "name": "abort_upload",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-5","session":"session-1","action":{"op":"abort_upload","input":{"upload":"upload-1","intent":{"object":"object-1","precondition":{"condition":"absent"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-5","body":{"result":"aborted","output":"cancelled_before_commit"}}
+    },
+    {
+      "name": "browse",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-6","session":"session-1","action":{"op":"browse","input":{"container":"container-1","page_entries":2,"cursor":"cursor-1"}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-6","body":{"result":"browse","output":{"entries":[{"target":{"object":"object-1","g":"generation-1"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}],"cursor":null}}}
+    },
+    {
+      "name": "stat",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-7","session":"session-1","action":{"op":"stat","input":{"object":"object-1","g":"generation-1"}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-7","body":{"result":"stat","output":{"target":{"object":"object-1","g":"generation-1"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}}}}
+    },
+    {
+      "name": "download",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-8","session":"session-1","action":{"op":"download","input":{"target":{"object":"object-1","g":"generation-1"},"range":{"first":2,"last":5},"max_bytes":4}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-8","body":{"result":"download","output":{"handle":"transfer-1","object":{"target":{"object":"object-1","g":"generation-1"},"ciphertext":{"c":"ciphertext-1","length":10,"checksum_hex":"abcd","profile":{"format":"fixture-format","crypto":"fixture-crypto","integrity":"fixture-integrity"},"key_ref":"key-ref-1","envelope_ref":"envelope-ref-1"},"metadata":{"content_type":"application/octet-stream","content_encoding":"gzip","user":{"CaseSensitive":"é","filename":"雪.bin"}}},"range":{"first":2,"last":5},"expires_at":2000}}}
+    },
+    {
+      "name": "restore",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-9","session":"session-1","action":{"op":"restore","input":{"target":{"object":"object-1","g":"generation-1"},"max_bytes":10,"max_seconds":60}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-9","body":{"result":"restore","output":{"job":"job-1","target":{"object":"object-1","g":"generation-1"},"kind":"restore","state":"queued","completed_bytes":0,"total_bytes":null,"outcome":null}}}
+    },
+    {
+      "name": "status",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-10","session":"session-1","action":{"op":"status","input":{"job":"job-1"}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-10","body":{"result":"status","output":{"job":"job-1","target":{"object":"object-1","g":"generation-1"},"kind":"restore","state":"failed","completed_bytes":0,"total_bytes":null,"outcome":"irrecoverable_key"}}}
+    },
+    {
+      "name": "cancel",
+      "request": {"version":1,"scope":"tenant-a","request_id":"r-11","session":"session-1","action":{"op":"cancel","input":{"job":"job-1"}}},
+      "response": {"version":1,"scope":"tenant-a","request_id":"r-11","body":{"result":"cancel","output":"requested"}}
+    }
+  ],
+  "invalid": [
+    {"name":"unsupported_version","error":"unsupported_version","request":{"version":2,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1"}}}},
+    {"name":"cross_tenant","error":"not_authorized","request":{"version":1,"scope":"tenant-b","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1"}}}},
+    {"name":"unsupported_crypto","error":"unsupported_profile","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":null,"action":{"op":"capabilities","input":{"versions":[1],"profiles":[{"format":"fixture-format","crypto":"unreviewed","integrity":"fixture-integrity"}],"limits":{"object_bytes":1024,"page_entries":2,"transfer_bytes":1024,"job_seconds":60}}}}},
+    {"name":"unknown_requirement","error":"malformed","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1","decrypt_on_server":true}}}},
+    {"name":"plaintext_key","error":"malformed","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1","key":"secret-plaintext"}}}},
+    {"name":"inline_payload","error":"malformed","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1","payload_base64":"YWJj"}}}},
+    {"name":"range_out_of_generation","error":"invalid_range","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"download","input":{"target":{"object":"object-1","g":"generation-1"},"range":{"first":2,"last":10},"max_bytes":10}}}},
+    {"name":"stale_generation","error":"not_authorized","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"stat","input":{"object":"object-1","g":"generation-old"}}}},
+    {"name":"unbounded_page","error":"limit_exceeded","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"browse","input":{"container":"container-1","page_entries":0,"cursor":null}}}},
+    {"name":"invalid_restore_bound","error":"limit_exceeded","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"restore","input":{"target":{"object":"object-1","g":"generation-1"},"max_bytes":10,"max_seconds":61}}}}
+  ],
+  "invalid_response_mutations": [
+    {"case":"stat","pointer":"/scope","value":"tenant-b","error":"replay_conflict"},
+    {"case":"stat","pointer":"/version","value":2,"error":"replay_conflict"},
+    {"case":"stat","pointer":"/body/output/target/g","value":"generation-other","error":"generation_mismatch"},
+    {"case":"stat","pointer":"/body/output/metadata/content_encoding","value":null,"error":"generation_mismatch"},
+    {"case":"capabilities","pointer":"/body/output/profile/crypto","value":"unreviewed","error":"capability_downgrade"},
+    {"case":"capabilities","pointer":"/body/output/session","value":"missing-session","error":"not_authorized"},
+    {"case":"initiate_upload","pointer":"/body/output/upload","value":"missing-upload","error":"not_authorized"},
+    {"case":"download","pointer":"/body/output/handle","value":"missing-handle","error":"not_authorized"},
+    {"case":"restore","pointer":"/body/output/target/g","value":"generation-other","error":"generation_mismatch"},
+    {"case":"status","pointer":"/body/output/state","value":"succeeded","error":"invalid_state"},
+    {"case":"status","pointer":"/body/output/completed_bytes","value":11,"error":"invalid_state"},
+    {"case":"status","pointer":"/body/output/total_bytes","value":20,"error":"invalid_state"},
+    {"case":"status","pointer":"/body/output/outcome","value":"plaintext_fallback","error":"malformed"},
+    {"case":"download","pointer":"/body/output/expires_at","value":1000,"error":"generation_mismatch"}
+  ]
+}
