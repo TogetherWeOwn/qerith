@@ -164,6 +164,8 @@ successful record. Never export keys, credentials, raw customer bytes or opaque
 access-bearing recovery material. Live evidence additionally needs separately
 authorized windows, authenticated independence/readability artifacts and their
 validity; a synthetic record never upgrades to live qualification by relabeling.
+Consumers must parse `valid_until` and compare it with the window and decision
+time; passing the schema is never qualification or authorization.
 
 Full suites, wasm/MSRV/clippy and ci-ok run only in GitHub Actions. No dependency
 or workflow changes are needed for the new integration test. The exact-head PR
