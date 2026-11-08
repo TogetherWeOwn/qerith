@@ -10,6 +10,7 @@
 //! that pin once it merges.
 
 pub mod catalogue;
+pub mod composition;
 pub mod operations;
 
 pub use velmora::{nntp, nzb, segment_identity, transport, transports, yenc};
