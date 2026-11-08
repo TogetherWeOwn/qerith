@@ -1293,6 +1293,21 @@ fn stale_epoch_queued_and_expired_claim_restores_can_retire_without_publication(
             Err(Error::Fenced)
         );
         publish(&mut c, current, G, 12).unwrap();
+        let mut live_cleanup = c.clone();
+        live_cleanup
+            .cancel_unneeded_restore(A, obsolete, 13, &policy())
+            .unwrap();
+        assert_eq!(
+            live_cleanup.job(A, current).unwrap().state,
+            JobState::Complete
+        );
+        assert_eq!(
+            live_cleanup
+                .lookup(A, "object", 13, &policy())
+                .unwrap()
+                .availability_until,
+            Some(42)
+        );
         assert_eq!(
             c.candidate(A, G, DeletionKind::DeliveryCache, 43, 44, &policy()),
             Err(Error::Unsafe)
@@ -1318,7 +1333,7 @@ fn stale_epoch_queued_and_expired_claim_restores_can_retire_without_publication(
             c.lookup(A, "object", 43, &policy())
                 .unwrap()
                 .availability_until,
-            Some(42)
+            None
         );
         assert!(c.outbox(A).is_empty());
         assert!(c
