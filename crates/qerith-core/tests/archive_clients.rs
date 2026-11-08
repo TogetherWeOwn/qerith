@@ -113,7 +113,7 @@ impl Drop for RunnerGuard {
             }
         }
         for survivor in drain_session(self.session_id) {
-            eprintln!("runner session survivor after supervisor drain: {survivor}");
+            eprintln!("runner session survivor after supervisor drain");
             kill_group(survivor);
         }
     }
@@ -193,6 +193,6 @@ async fn pinned_archive_clients() {
     let survivors = drain_session(session_id);
     assert!(
         survivors.is_empty(),
-        "runner session {session_id} still has members after supervised teardown: {survivors:?}"
+        "runner session still has members after supervised teardown"
     );
 }
