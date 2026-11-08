@@ -9,15 +9,34 @@ pub struct StoredChecksum {
     algorithm: ChecksumAlgorithm,
     value: String,
     parts: Vec<String>,
+    composite: bool,
 }
 
 impl StoredChecksum {
     pub fn full(algorithm: ChecksumAlgorithm, value: String) -> Result<Self> {
+        Self::full_with_parts(algorithm, value, Vec::new())
+    }
+
+    /// FULL_OBJECT may retain ordered multipart evidence without becoming a
+    /// composite checksum. Full-C verification belongs to the commit boundary;
+    /// part digests alone cannot reconstruct the SHA256 of the complete body.
+    pub fn full_with_parts(
+        algorithm: ChecksumAlgorithm,
+        value: String,
+        parts: Vec<String>,
+    ) -> Result<Self> {
         digest_value(&value, algorithm.size())?;
+        if parts.len() > 10_000 {
+            return Err(ErrorCode::InvalidDigest);
+        }
+        for part in &parts {
+            digest_value(part, algorithm.size())?;
+        }
         Ok(Self {
             algorithm,
             value,
-            parts: Vec::new(),
+            parts,
+            composite: false,
         })
     }
 
@@ -37,6 +56,7 @@ impl StoredChecksum {
             algorithm: ChecksumAlgorithm::Sha256,
             value,
             parts,
+            composite: true,
         })
     }
 
@@ -47,10 +67,10 @@ impl StoredChecksum {
         &self.parts
     }
     pub fn checksum_type(&self) -> &'static str {
-        if self.parts.is_empty() {
-            "FULL_OBJECT"
-        } else {
+        if self.composite {
             "COMPOSITE"
+        } else {
+            "FULL_OBJECT"
         }
     }
 }
@@ -126,7 +146,7 @@ impl Conditions {
         }
     }
 
-    fn evaluate(&self, metadata: &ObjectMetadata) -> Result<bool> {
+    pub(super) fn evaluate(&self, metadata: &ObjectMetadata) -> Result<bool> {
         if let Some(tags) = &self.if_match {
             if !matches_tag(tags, &metadata.etag, false)? {
                 return Err(ErrorCode::PreconditionFailed);

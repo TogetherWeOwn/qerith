@@ -355,6 +355,25 @@ pub trait MetadataOutbox {
     ) -> Result<GenerationId>;
 }
 
+/// Minimal live-object evidence for write predicates, not read-protected metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriteTarget {
+    pub validator: String,
+}
+
+/// Write-authorized revision inspection, including absent and tombstoned keys.
+/// This is not a read/list grant. Adapters must not turn denied/masked objects
+/// into absence; implementations return an error for prohibited generations.
+pub trait MutationTargets: MetadataOutbox {
+    fn write_target(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<(u64, Option<WriteTarget>)>;
+}
+
 /// Trusted infrastructure port, separate from end-user mutations. Every method
 /// is atomic with its emitted outbox records. No external side effect runs here.
 pub trait JobPort {
@@ -455,6 +474,10 @@ pub trait JobPort {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transition {
+    /// Read-only revalidation under the current claim, moderation epoch and
+    /// authority. A restore must still have a matching authorized subscriber.
+    /// This grants no publication rights and does not consume a checkpoint.
+    Revalidate,
     Checkpoint {
         expected: u64,
         next: u64,

@@ -45,7 +45,7 @@ impl Clock for Time {
 #[derive(Default)]
 struct Rules {
     deny: Cell<bool>,
-    cancelled: Cell<bool>,
+    cancelled: Rc<Cell<bool>>,
 }
 impl Policy for Rules {
     fn admit_upload(&self, _: &Upload, _: &Budget, _: u64) -> bool {
@@ -111,15 +111,32 @@ enum Injection {
     Interrupted,
 }
 
+type RecoveryInventory = (u64, u64, u64, String);
+type AttemptAllocation = (RecoveryInventory, u64);
+type IoHook = Box<dyn FnMut(&Work)>;
+
+fn inventory(work: &Work) -> RecoveryInventory {
+    (
+        work.tenant.0,
+        work.job.generation.0,
+        work.job.id.0,
+        work.inventory_ref.clone(),
+    )
+}
+fn allocation(work: &Work) -> AttemptAllocation {
+    (inventory(work), work.attempt)
+}
+
 /// The only byte source for a cold attempt is the producer's native engine
 /// ARTICLE adapter. The FixtureC value is an immutable assertion oracle, not a
 /// warm read path. Completed copies are private until a catalogue serving pin.
 struct Io {
     fixture: FixtureC,
     archives: [Archive; 2],
-    scratch: MemoryCache,
+    scratch: BTreeMap<AttemptAllocation, MemoryCache>,
     copies: BTreeMap<String, Vec<u8>>,
-    pending: Option<Vec<u8>>,
+    pending: BTreeMap<AttemptAllocation, Vec<u8>>,
+    completed: BTreeMap<RecoveryInventory, String>,
     trace: Trace,
     order: Vec<&'static str>,
     inject: Injection,
@@ -128,6 +145,9 @@ struct Io {
     expire_at_complete: Option<Rc<Time>>,
     expire_at_upload: Option<Rc<Time>>,
     attempts: Vec<(String, u64)>,
+    after_io: Option<IoHook>,
+    cancel_at_complete: Option<Rc<Cell<bool>>>,
+    expire_at_cleanup: Option<Rc<Time>>,
 }
 impl Io {
     async fn new(generation: u64) -> Self {
@@ -156,9 +176,10 @@ impl Io {
         Self {
             fixture,
             archives: [a, b],
-            scratch: MemoryCache::default(),
+            scratch: BTreeMap::new(),
             copies: BTreeMap::new(),
-            pending: None,
+            pending: BTreeMap::new(),
+            completed: BTreeMap::new(),
             trace: Trace::default(),
             order: Vec::new(),
             inject: Injection::None,
@@ -167,6 +188,9 @@ impl Io {
             expire_at_complete: None,
             expire_at_upload: None,
             attempts: Vec::new(),
+            after_io: None,
+            cancel_at_complete: None,
+            expire_at_cleanup: None,
         }
     }
     fn identity(&self) -> CiphertextIdentity {
@@ -225,21 +249,19 @@ impl Io {
     async fn cold_fetch(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         self.check(work)?;
         self.order.push("engine-retrieve");
+        let key = allocation(work);
+        let scratch = self.scratch.entry(key.clone()).or_default();
         let result = self.archives[0]
-            .reconstruct(
-                &self.fixture,
-                &mut self.scratch,
-                self.fault,
-                &mut self.trace,
-            )
+            .reconstruct(&self.fixture, scratch, self.fault, &mut self.trace)
             .await;
         if result.is_err() {
             assert!(self.archives[0].repair_without_retained_source().is_err());
             return Err(IoError::RepairUnavailable);
         }
-        let bytes = self.scratch.delivery(self.fixture.key()).unwrap().to_vec();
-        self.scratch.cleanup(self.fixture.key(), &mut self.trace);
-        self.pending = Some(bytes);
+        let bytes = scratch.delivery(self.fixture.key()).unwrap().to_vec();
+        scratch.cleanup(self.fixture.key(), &mut self.trace);
+        self.scratch.remove(&key);
+        self.pending.insert(key, bytes);
         Ok(())
     }
     fn deliver(
@@ -264,8 +286,9 @@ impl Io {
     }
     fn assert_cold(&self) {
         assert!(self.copies.is_empty());
-        assert!(self.pending.is_none());
-        self.scratch.assert_empty(&mut Trace::default());
+        assert!(self.pending.is_empty());
+        assert!(self.scratch.is_empty());
+        assert!(self.completed.is_empty());
     }
 }
 impl Storage for Io {
@@ -333,6 +356,9 @@ impl Storage for Io {
                     .map_err(|_| IoError::Retryable)?;
             }
         }
+        if let Some(hook) = &mut self.after_io {
+            hook(work);
+        }
         if self.inject == Injection::Interrupted {
             return Err(IoError::Cancelled);
         }
@@ -378,50 +404,88 @@ impl Storage for Io {
         if self.inject == Injection::Interrupted {
             return Err(IoError::Cancelled);
         }
-        if self.inject == Injection::RepairFailure {
-            return Err(IoError::RepairUnavailable);
+        self.check(work)?;
+        // Only the exact scoped inventory or catalogue location is eligible;
+        // arbitrary physical presence is never a recovery/authorization signal.
+        if let Some(location) = self
+            .completed
+            .get(&inventory(work))
+            .cloned()
+            .or_else(|| work.retained_location.clone())
+        {
+            self.verify_completed(work, &location).await?;
+        } else {
+            if self.inject == Injection::RepairFailure {
+                return Err(IoError::RepairUnavailable);
+            }
+            self.cold_fetch(work).await?;
         }
-        self.cold_fetch(work).await
+        if let Some(hook) = &mut self.after_io {
+            hook(work);
+        }
+        Ok(())
     }
     async fn complete_restore(
         &mut self,
         work: &Work,
     ) -> std::result::Result<CompleteCopy, IoError> {
         self.order.push("whole-generation-check");
-        let mut bytes = self.pending.take().ok_or(IoError::Integrity)?;
-        if self.inject == Injection::PartialRestore {
-            bytes.pop();
-        }
-        if self.inject == Injection::BadDigest {
-            bytes[2000] ^= 1;
-        }
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if bytes.len() as u64 != work.metadata.identity.length
-            || digest != work.metadata.identity.sha256
-            || work.metadata.checksums.iter().any(|c| {
-                c.algorithm != "SHA256"
-                    || c.kind != ChecksumType::FullObject
-                    || c.value != digest
-                    || !c.parts.is_empty()
-            })
-        {
-            return Err(IoError::Integrity);
-        }
-        let location = work.retained_location.clone().unwrap_or_else(|| {
-            format!(
+        let retained = self
+            .completed
+            .get(&inventory(work))
+            .cloned()
+            .or_else(|| work.retained_location.clone());
+        let location = if let Some(location) = retained {
+            self.verify_completed(work, &location).await?;
+            // Another attempt may have completed after this attempt staged.
+            // Release only this now-redundant incomplete allocation.
+            self.pending.remove(&allocation(work));
+            self.scratch.remove(&allocation(work));
+            location
+        } else {
+            let mut bytes = self
+                .pending
+                .remove(&allocation(work))
+                .ok_or(IoError::Integrity)?;
+            if self.inject == Injection::PartialRestore {
+                bytes.pop();
+            }
+            if self.inject == Injection::BadDigest {
+                bytes[2000] ^= 1;
+            }
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            if bytes.len() as u64 != work.metadata.identity.length
+                || digest != work.metadata.identity.sha256
+                || work.metadata.checksums.iter().any(|c| {
+                    c.algorithm != "SHA256"
+                        || c.kind != ChecksumType::FullObject
+                        || c.value != digest
+                        || !c.parts.is_empty()
+                })
+            {
+                return Err(IoError::Integrity);
+            }
+            let location = format!(
                 "mock/{}/{}/job-{}-frozen",
                 work.tenant.0, work.job.generation.0, work.job.id.0
-            )
-        });
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.copies.entry(location.clone())
-        {
-            entry.insert(bytes);
-            self.order.push("cache-install");
-        } else {
-            self.verify_completed(work, &location).await?;
-        }
+            );
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.copies.entry(location.clone())
+            {
+                entry.insert(bytes);
+                self.order.push("cache-install");
+            } else {
+                self.verify_completed(work, &location).await?;
+            }
+            location
+        };
+        // Persist completion before acknowledging it; attempt cleanup never
+        // removes this stable entry or its immutable bytes.
+        self.completed.insert(inventory(work), location.clone());
         self.order.push("cache-complete");
+        if let Some(cancelled) = &self.cancel_at_complete {
+            cancelled.set(true);
+        }
         if let Some((auth, name)) = &self.revoke_at_complete {
             auth.denied.borrow_mut().insert(name.clone());
         }
@@ -452,13 +516,19 @@ impl Storage for Io {
         }
         Ok(self.copy(&work.metadata, location.into()))
     }
-    async fn cleanup_incomplete(&mut self, _: &Work) -> std::result::Result<(), IoError> {
+    async fn cleanup_incomplete(&mut self, work: &Work) -> std::result::Result<(), IoError> {
+        if let Some(clock) = &self.expire_at_cleanup {
+            clock.0.set(work.job.deadline);
+        }
         if self.inject == Injection::CleanupFailure {
             return Err(IoError::Retryable);
         }
         self.order.push("cleanup-incomplete");
-        self.pending = None;
-        self.scratch.restart(self.fixture.key(), &mut self.trace);
+        let key = allocation(work);
+        self.pending.remove(&key);
+        if let Some(mut scratch) = self.scratch.remove(&key) {
+            scratch.restart(self.fixture.key(), &mut self.trace);
+        }
         Ok(())
     }
 }
@@ -605,6 +675,9 @@ fn evict(c: &mut impl JobPort, io: &mut Io, time: &Time, auth: &dyn Authority) {
     };
     assert!(io.copies.remove(&location).is_some());
     c.acknowledge_deletion(TENANT, event).unwrap();
+    // Only confirmed exact-version deletion retires completed inventory. An
+    // unexpectedly missing recorded copy still fails closed during retrieval.
+    io.completed.retain(|_, completed| completed != &location);
     io.assert_cold();
 }
 
@@ -659,6 +732,395 @@ impl MetadataOutbox for CommitFault {
     ) -> qerith_core::catalogue::Result<GenerationId> {
         self.inner.validate_pin(tenant, pin, now, authority)
     }
+}
+
+#[tokio::test]
+async fn unneeded_restore_cancels_without_invocation_interruption_or_attempt() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    let job = request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref());
+    c.transact(
+        TENANT,
+        OperationId(1001),
+        Mutation::CancelSubscription {
+            name: "object".into(),
+            job,
+            subscription: OperationId(1000),
+        },
+        10,
+        auth.as_ref(),
+    )
+    .unwrap();
+    let before = io.order.len();
+    assert!(!rules.cancelled.get());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Cancelled);
+    assert_eq!(c.job(TENANT, job).unwrap().checkpoint, 0);
+    assert!(c.outbox(TENANT).is_empty());
+    assert_eq!(io.order.len(), before);
+    assert_eq!(io.copies.len(), 1);
+}
+
+#[tokio::test]
+async fn unneeded_restore_cancellation_does_not_require_resource_admission() {
+    for denied_by in 0..3 {
+        let (mut c, mut io, _, time, auth, rules) = archived().await;
+        let job = request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref());
+        if denied_by == 0 {
+            let fence = c.claim(TENANT, job, 10, 20).unwrap();
+            c.transition(
+                TENANT,
+                fence,
+                Transition::Checkpoint {
+                    expected: 0,
+                    next: 3,
+                    inventory_ref: "lost-final-attempt".into(),
+                },
+                10,
+                auth.as_ref(),
+            )
+            .unwrap();
+            time.0.set(21);
+        }
+        c.transact(
+            TENANT,
+            OperationId(1001),
+            Mutation::CancelSubscription {
+                name: "object".into(),
+                job,
+                subscription: OperationId(1000),
+            },
+            time.0.get(),
+            auth.as_ref(),
+        )
+        .unwrap();
+        let limit = if denied_by == 1 {
+            Budget::new(1, 3, 3, 100).unwrap()
+        } else {
+            budget()
+        };
+        if denied_by == 2 {
+            rules.deny.set(true);
+        }
+        let before = io.order.len();
+        let event = job_event(&c, job);
+        assert_eq!(
+            run_once(
+                &mut c,
+                &mut io,
+                TENANT,
+                event,
+                &limit,
+                time.as_ref(),
+                &rules,
+                &MockQualification,
+                auth.as_ref()
+            )
+            .await,
+            Err(Failure::Io(IoError::Cancelled))
+        );
+        assert_eq!(io.order.len(), before);
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Cancelled);
+        assert_eq!(
+            c.job(TENANT, job).unwrap().checkpoint,
+            if denied_by == 0 { 3 } else { 0 }
+        );
+        assert!(c.outbox(TENANT).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn completed_attempt_adoption_releases_only_its_own_staging() {
+    let (mut c, mut io, _, time, auth, _) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    let old = Work {
+        tenant: TENANT,
+        event: job_event(&c, job),
+        job: c.job(TENANT, job).unwrap(),
+        metadata: c.generation(TENANT, GENERATION).unwrap().metadata,
+        retained_location: None,
+        inventory_ref: "shared-completed-inventory".into(),
+        attempt: 1,
+        claim_until: 20,
+        budget: budget(),
+    };
+    let mut new = old.clone();
+    new.attempt = 2;
+    io.retrieve(&old).await.unwrap();
+    io.retrieve(&new).await.unwrap();
+    let complete = io.complete_restore(&old).await.unwrap();
+    let mut unrelated = new.clone();
+    unrelated.attempt = 3;
+    io.pending
+        .insert(allocation(&unrelated), b"unrelated staging".to_vec());
+    assert_eq!(io.complete_restore(&new).await.unwrap(), complete);
+    assert!(!io.pending.contains_key(&allocation(&new)));
+    assert_eq!(io.pending[&allocation(&unrelated)], b"unrelated staging");
+    assert_eq!(io.copies.len(), 1);
+}
+
+#[tokio::test]
+async fn settled_deletion_allows_a_second_truly_cold_restore() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    for (operation, now) in [(1000, 11), (1001, 100)] {
+        time.0.set(now);
+        if operation == 1001 {
+            evict(&mut c, &mut io, &time, auth.as_ref());
+        }
+        let job = request(
+            &mut c,
+            "object",
+            operation,
+            500,
+            40,
+            time.0.get(),
+            auth.as_ref(),
+        );
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+        assert_eq!(io.copies.len(), 1);
+    }
+    assert_eq!(
+        io.order.iter().filter(|e| **e == "engine-retrieve").count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn deadline_expiry_skips_cleanup_and_survives_cleanup_failure() {
+    for expires_during_cleanup in [false, true] {
+        let mut c = MemoryCatalogue::default();
+        let mut io = Io::new(1).await;
+        let upload = io.upload();
+        let time = Rc::new(Time(Cell::new(10)));
+        let auth = Auth::default();
+        let rules = Rules::default();
+        let job = commit_job(
+            ingest(
+                &mut c,
+                &mut io,
+                &upload,
+                &budget(),
+                time.as_ref(),
+                &rules,
+                &auth,
+            )
+            .await
+            .unwrap(),
+        );
+        io.inject = Injection::CleanupFailure;
+        if expires_during_cleanup {
+            io.expire_at_cleanup = Some(time.clone());
+        } else {
+            let time = time.clone();
+            io.after_io = Some(Box::new(move |work| time.0.set(work.job.deadline)));
+        }
+        let result = run(&mut c, &mut io, job, &time, &rules, &auth).await;
+        assert_eq!(
+            result,
+            Err(if expires_during_cleanup {
+                Failure::Cleanup
+            } else {
+                Failure::Io(IoError::Retryable)
+            })
+        );
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Expired);
+        assert!(c.outbox(TENANT).is_empty());
+        assert_eq!(io.copies.len(), 1, "safety bytes survive expiry");
+        assert!(!io.order.contains(&"cleanup-incomplete"));
+    }
+}
+
+#[tokio::test]
+async fn authority_drift_between_io_boundaries_stops_further_physical_work() {
+    for archive in [false, true] {
+        for stale in [false, true] {
+            // Archive obligations survive per-reference revocation, but an
+            // uncertain authority snapshot must stop either kind of worker.
+            if archive && !stale {
+                continue;
+            }
+            let (mut c, mut io, _, time, auth, rules) = archived().await;
+            let job = if archive {
+                let mut newer = Io::new(2).await;
+                let upload = newer.upload();
+                let job = commit_job(
+                    ingest(
+                        &mut c,
+                        &mut newer,
+                        &upload,
+                        &budget(),
+                        time.as_ref(),
+                        &rules,
+                        auth.as_ref(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                io = newer;
+                job
+            } else {
+                evict(&mut c, &mut io, &time, auth.as_ref());
+                request(&mut c, "object", 1000, 500, 40, time.0.get(), auth.as_ref())
+            };
+            let auth_at_io = auth.clone();
+            io.after_io = Some(Box::new(move |_| {
+                if stale {
+                    auth_at_io.stale.set(true);
+                } else {
+                    auth_at_io.denied.borrow_mut().insert("object".into());
+                }
+            }));
+            assert!(run(&mut c, &mut io, job, &time, &rules, auth.as_ref())
+                .await
+                .is_err());
+            assert!(!io.order.contains(&"whole-generation-check"));
+            if archive {
+                assert!(!io.order.contains(&"engine-verify-pair"));
+            }
+            assert_ne!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_successful_completion_never_publishes() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    io.cancel_at_complete = Some(rules.cancelled.clone());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(
+        c.job(TENANT, job).unwrap().state,
+        JobState::RetryWait { not_before: 13 }
+    );
+    assert_eq!(io.copies.len(), 1);
+    assert!(pin(&mut c, "object", 1001, 11, auth.as_ref()).is_err());
+}
+
+#[tokio::test]
+async fn lost_final_checkpoint_cannot_redispatch_io_before_deadline() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    let job = request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref());
+    let event = job_event(&c, job);
+    let fence = c.claim(TENANT, job, 10, 20).unwrap();
+    c.transition(
+        TENANT,
+        fence,
+        Transition::Checkpoint {
+            expected: 0,
+            next: 3,
+            inventory_ref: "lost-final-attempt".into(),
+        },
+        10,
+        auth.as_ref(),
+    )
+    .unwrap();
+    time.0.set(21);
+    let before = io.order.len();
+    assert_eq!(
+        run_once(
+            &mut c,
+            &mut io,
+            TENANT,
+            event,
+            &budget(),
+            time.as_ref(),
+            &rules,
+            &MockQualification,
+            auth.as_ref()
+        )
+        .await,
+        Err(Failure::Admission)
+    );
+    assert_eq!(before, io.order.len());
+    assert_eq!(c.job(TENANT, job).unwrap().checkpoint, 3);
+    time.0.set(500);
+    assert_eq!(
+        run_once(
+            &mut c,
+            &mut io,
+            TENANT,
+            event,
+            &budget(),
+            time.as_ref(),
+            &rules,
+            &MockQualification,
+            auth.as_ref()
+        )
+        .await,
+        Err(Failure::Catalogue(Error::Expired))
+    );
+    assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Expired);
+}
+
+#[tokio::test]
+async fn old_cleanup_cannot_erase_new_attempt_staging() {
+    let (mut c, mut io, _, time, auth, _) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    let mut old = Work {
+        tenant: TENANT,
+        event: job_event(&c, job),
+        job: c.job(TENANT, job).unwrap(),
+        metadata: c.generation(TENANT, GENERATION).unwrap().metadata,
+        retained_location: None,
+        inventory_ref: "interleaved-attempts".into(),
+        attempt: 1,
+        claim_until: 20,
+        budget: budget(),
+    };
+    let fence = c.claim(TENANT, job, 11, 20).unwrap();
+    c.transition(
+        TENANT,
+        fence.clone(),
+        Transition::Checkpoint {
+            expected: 0,
+            next: 1,
+            inventory_ref: old.inventory_ref.clone(),
+        },
+        11,
+        auth.as_ref(),
+    )
+    .unwrap();
+    io.retrieve(&old).await.unwrap();
+    let mut new = old.clone();
+    new.attempt = 2;
+    new.claim_until = 40;
+    c.claim(TENANT, job, 21, 40).unwrap();
+    io.retrieve(&new).await.unwrap();
+    for work in [&old, &new] {
+        let scratch = io.scratch.entry(allocation(work)).or_default();
+        scratch.begin(io.fixture.key(), &mut io.trace);
+        scratch.append(io.fixture.key(), b"attempt-local partial", &mut io.trace);
+    }
+    // Even a malformed caller snapshot must not affect the allocation key.
+    old.job.checkpoint = 2;
+    io.cleanup_incomplete(&old).await.unwrap();
+    assert!(!io.scratch.contains_key(&allocation(&old)));
+    assert!(io.scratch.contains_key(&allocation(&new)));
+    assert!(io.pending.contains_key(&allocation(&new)));
+    let copy = io.complete_restore(&new).await.unwrap();
+    assert_eq!(io.copies[&copy.location], io.fixture.bytes());
+    assert_eq!(
+        c.transition(
+            TENANT,
+            fence,
+            Transition::PublishRestore { copy },
+            21,
+            auth.as_ref()
+        ),
+        Err(Error::Fenced)
+    );
 }
 
 #[tokio::test]
@@ -877,7 +1339,15 @@ async fn completed_restore_survives_lost_publication_without_replacement() {
                 ),
                 Err(Error::Fenced)
             );
+            // A completed immutable inventory entry must be checked before
+            // attempting ARTICLE, including when its bytes are corrupt.
+            io.inject = Injection::RepairFailure;
+            let retrievals = io.order.iter().filter(|e| **e == "engine-retrieve").count();
             let result = run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await;
+            assert_eq!(
+                io.order.iter().filter(|e| **e == "engine-retrieve").count(),
+                retrievals
+            );
             if corrupt {
                 assert_eq!(result, Err(Failure::Io(IoError::Integrity)));
                 assert!(pin(&mut c, "object", 1001, 21, auth.as_ref()).is_err());
@@ -899,6 +1369,48 @@ async fn completed_restore_survives_lost_publication_without_replacement() {
             assert_eq!(io.copies.len(), 1);
         }
     }
+}
+
+#[tokio::test]
+async fn missing_recorded_completion_is_not_silently_refetched() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    io.expire_at_complete = Some(time.clone());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Catalogue(Error::Expired))
+    );
+    let completed = io.completed.values().next().unwrap().clone();
+    io.copies.remove(&completed).unwrap();
+    io.expire_at_complete = None;
+    let retrievals = io.order.iter().filter(|e| **e == "engine-retrieve").count();
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::Integrity))
+    );
+    assert_eq!(
+        io.order.iter().filter(|e| **e == "engine-retrieve").count(),
+        retrievals
+    );
+    assert!(io.copies.is_empty());
+    assert!(pin(&mut c, "object", 1001, time.0.get(), auth.as_ref()).is_err());
+}
+
+#[tokio::test]
+async fn unrecorded_physical_presence_cannot_authorize_recovery() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    io.copies
+        .insert("unrecorded-orphan".into(), io.fixture.bytes().to_vec());
+    io.inject = Injection::RepairFailure;
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::RepairUnavailable))
+    );
+    assert!(!io.order.contains(&"verify-winning-cache"));
+    assert!(pin(&mut c, "object", 1001, 11, auth.as_ref()).is_err());
 }
 
 #[tokio::test]
@@ -1091,7 +1603,34 @@ async fn worker_interruption_preserves_archive_and_needed_restore_retries() {
 
 // Inject a competing publication after the caller's generation snapshot. Bulk
 // outbox access panics so these worker tests also enforce bounded event lookup.
+#[derive(Clone, Copy)]
+enum BoundaryDrift {
+    Moderation,
+    Prohibited,
+    Fence,
+}
+struct TerminalClock {
+    committed: Rc<Cell<bool>>,
+    lose_ack: bool,
+    now: u64,
+    deadline: u64,
+}
+impl Clock for TerminalClock {
+    fn now(&self) -> qerith_core::catalogue::Result<u64> {
+        if self.committed.get() {
+            if self.lose_ack {
+                Ok(self.deadline)
+            } else {
+                Err(Error::Uncertain)
+            }
+        } else {
+            Ok(self.now)
+        }
+    }
+}
 struct InterleavedCatalogue {
+    terminal: Option<(Rc<Cell<bool>>, bool)>,
+    drift: Option<(Rc<Cell<bool>>, BoundaryDrift)>,
     inner: MemoryCatalogue,
     winner: Option<(Fence, CompleteCopy)>,
     event_reads: Cell<usize>,
@@ -1130,6 +1669,27 @@ impl JobPort for InterleavedCatalogue {
         now: u64,
         authority: &dyn Authority,
     ) -> qerith_core::catalogue::Result<()> {
+        if self.drift.as_ref().is_some_and(|(signal, _)| signal.get()) {
+            let (_, drift) = self.drift.take().unwrap();
+            let generation = self.inner.job(tenant, fence.job)?.generation;
+            match drift {
+                BoundaryDrift::Moderation | BoundaryDrift::Prohibited => {
+                    self.inner.set_moderation(
+                        tenant,
+                        generation,
+                        1,
+                        matches!(drift, BoundaryDrift::Prohibited),
+                    )?
+                }
+                BoundaryDrift::Fence => self.inner.transition(
+                    tenant,
+                    fence.clone(),
+                    Transition::FailUnrecoverable,
+                    now,
+                    authority,
+                )?,
+            }
+        }
         if matches!(transition, Transition::PublishRestore { .. }) {
             if let Some((winner, copy)) = self.winner.take() {
                 self.inner.transition(
@@ -1141,8 +1701,21 @@ impl JobPort for InterleavedCatalogue {
                 )?;
             }
         }
+        let terminal = matches!(
+            transition,
+            Transition::PublishRestore { .. } | Transition::CompleteArchive
+        );
         self.inner
-            .transition(tenant, fence, transition, now, authority)
+            .transition(tenant, fence, transition, now, authority)?;
+        if terminal {
+            if let Some((committed, lose_ack)) = self.terminal.take() {
+                committed.set(true);
+                if lose_ack {
+                    return Err(Error::Uncertain);
+                }
+            }
+        }
+        Ok(())
     }
     forward_job!(write record_verification(tenant: TenantId, evidence: VerificationEvidence, independence: IndependenceEvidence, now: u64) -> qerith_core::catalogue::Result<()>);
     forward_job!(write set_safety_hold(tenant: TenantId, generation: GenerationId, hold: bool) -> qerith_core::catalogue::Result<()>);
@@ -1153,6 +1726,147 @@ impl JobPort for InterleavedCatalogue {
     forward_job!(write cancel_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
     forward_job!(write reconcile_retained_deletion(tenant: TenantId, event: EventId, retained: CompleteCopy, settlement_ref: String, now: u64) -> qerith_core::catalogue::Result<()>);
     forward_job!(write acknowledge_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
+}
+
+#[tokio::test]
+async fn terminal_success_and_uncertainty_survive_post_commit_clock_faults() {
+    for archive in [false, true] {
+        for lose_ack in [false, true] {
+            let (mut c, mut io, _, time, auth, rules) = archived().await;
+            let job = if archive {
+                let mut newer = Io::new(2).await;
+                let upload = newer.upload();
+                let job = commit_job(
+                    ingest(
+                        &mut c,
+                        &mut newer,
+                        &upload,
+                        &budget(),
+                        time.as_ref(),
+                        &rules,
+                        auth.as_ref(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                io = newer;
+                job
+            } else {
+                request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref())
+            };
+            let event = job_event(&c, job);
+            let committed = Rc::new(Cell::new(false));
+            let clock = TerminalClock {
+                committed: committed.clone(),
+                lose_ack,
+                now: 10,
+                deadline: c.job(TENANT, job).unwrap().deadline,
+            };
+            let mut c = InterleavedCatalogue {
+                inner: c,
+                terminal: Some((committed.clone(), lose_ack)),
+                drift: None,
+                winner: None,
+                event_reads: Cell::new(0),
+            };
+            assert_eq!(
+                run_once(
+                    &mut c,
+                    &mut io,
+                    TENANT,
+                    event,
+                    &budget(),
+                    &clock,
+                    &rules,
+                    &MockQualification,
+                    auth.as_ref()
+                )
+                .await,
+                if lose_ack {
+                    Err(Failure::Catalogue(Error::Uncertain))
+                } else {
+                    Ok(())
+                }
+            );
+            assert!(committed.get());
+            assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+            assert!(c.inner.outbox(TENANT).is_empty());
+            assert!(!io.order.contains(&"cleanup-incomplete"));
+            assert_eq!(io.copies.len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalogue_drift_stops_at_next_io_boundary() {
+    for archive in [false, true] {
+        for drift in [
+            BoundaryDrift::Moderation,
+            BoundaryDrift::Prohibited,
+            BoundaryDrift::Fence,
+        ] {
+            let (mut c, mut io, _, time, auth, rules) = archived().await;
+            let job = if archive {
+                let mut newer = Io::new(2).await;
+                let upload = newer.upload();
+                let job = commit_job(
+                    ingest(
+                        &mut c,
+                        &mut newer,
+                        &upload,
+                        &budget(),
+                        time.as_ref(),
+                        &rules,
+                        auth.as_ref(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                io = newer;
+                job
+            } else {
+                evict(&mut c, &mut io, &time, auth.as_ref());
+                request(&mut c, "object", 1000, 500, 40, time.0.get(), auth.as_ref())
+            };
+            let event = job_event(&c, job);
+            let signal = Rc::new(Cell::new(false));
+            let after_io = signal.clone();
+            io.after_io = Some(Box::new(move |_| after_io.set(true)));
+            io.order.clear();
+            let mut c = InterleavedCatalogue {
+                drift: Some((signal, drift)),
+                terminal: None,
+                inner: c,
+                winner: None,
+                event_reads: Cell::new(0),
+            };
+            assert_eq!(
+                run_once(
+                    &mut c,
+                    &mut io,
+                    TENANT,
+                    event,
+                    &budget(),
+                    time.as_ref(),
+                    &rules,
+                    &MockQualification,
+                    auth.as_ref()
+                )
+                .await,
+                Err(Failure::Catalogue(
+                    if matches!(drift, BoundaryDrift::Fence) {
+                        Error::Fenced
+                    } else {
+                        Error::Unavailable
+                    }
+                ))
+            );
+            assert!(c.drift.is_none());
+            assert!(!io.order.contains(&"whole-generation-check"));
+            assert!(!io.order.contains(&"engine-verify-pair"));
+            assert_ne!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1206,6 +1920,8 @@ async fn competing_cold_restores_reconcile_verified_winner_with_one_attempt() {
         }
         let event = job_event(&c, second);
         let mut c = InterleavedCatalogue {
+            drift: None,
+            terminal: None,
             inner: c,
             winner: Some((fence, winner.clone())),
             event_reads: Cell::new(0),
@@ -1282,6 +1998,8 @@ async fn backlog_lookup_is_event_scoped_even_before_failed_admission() {
         Err(Error::Unavailable)
     );
     let mut c = InterleavedCatalogue {
+        drift: None,
+        terminal: None,
         inner: c,
         winner: None,
         event_reads: Cell::new(0),
@@ -1831,10 +2549,20 @@ async fn lost_worker_restart_uses_checkpoint_and_fences_stale_publication() {
     .unwrap();
     // Lose only the worker's incomplete allocation. Do not clone/reimport the
     // authoritative catalogue or describe this as durable database recovery.
-    io.scratch.begin(io.fixture.key(), &mut io.trace);
-    io.scratch
-        .append(io.fixture.key(), b"stale partial", &mut io.trace);
-    io.scratch.restart(io.fixture.key(), &mut io.trace);
+    let key = (
+        (
+            TENANT.0,
+            GENERATION.0,
+            job.0,
+            "retained-inventory-before-worker-loss".into(),
+        ),
+        1,
+    );
+    let scratch = io.scratch.entry(key.clone()).or_default();
+    scratch.begin(io.fixture.key(), &mut io.trace);
+    scratch.append(io.fixture.key(), b"stale partial", &mut io.trace);
+    scratch.restart(io.fixture.key(), &mut io.trace);
+    io.scratch.remove(&key);
     time.0.set(21);
     run_once(
         &mut c,

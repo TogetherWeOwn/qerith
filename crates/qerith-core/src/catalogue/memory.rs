@@ -778,6 +778,35 @@ impl MetadataOutbox for MemoryCatalogue {
     }
 }
 
+impl MutationTargets for MemoryCatalogue {
+    fn write_target(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        _now: u64,
+        authority: &dyn Authority,
+    ) -> Result<(u64, Option<WriteTarget>)> {
+        permit(authority, tenant, name, Action::Write)?;
+        let Some(t) = self.tenants.get(&tenant) else {
+            return Ok((0, None));
+        };
+        let revision = t.current_revision(name);
+        if t.references
+            .get(name)
+            .is_none_or(|r| r.generation.is_none())
+        {
+            return Ok((revision, None));
+        }
+        let (_, g) = t.visible(name)?;
+        Ok((
+            revision,
+            Some(WriteTarget {
+                validator: g.metadata.validator.clone(),
+            }),
+        ))
+    }
+}
+
 impl MemoryCatalogue {
     /// Trusted reference-model projection of this exact subscription's publication.
     /// Shared physical completion alone says nothing about an excluded subscriber.
@@ -794,6 +823,19 @@ impl MemoryCatalogue {
             .and_then(|tenant| tenant.jobs.get(&job))
             .ok_or(Error::Unavailable)?;
         Ok(job.published.contains(&(name.into(), subscription)))
+    }
+
+    /// Trusted fixture identity allocation, shared with all catalogue mutations.
+    /// Monotonic above both replay records and reserved generations, including
+    /// identities supplied by other adapters. Burned unused IDs are intentional;
+    /// a durable adapter must provide its own transactional allocation contract.
+    pub fn allocate_identity(&mut self, tenant: TenantId) -> Result<u64> {
+        let t = self.tenants.entry(tenant).or_default();
+        let operation = t.operations.last_key_value().map_or(0, |(id, _)| id.0);
+        let generation = t.reserved.last().map_or(0, |id| id.0);
+        let id = next(t.sequence.max(operation).max(generation))?;
+        t.sequence = id;
+        Ok(id)
     }
 
     fn atomic<T>(
@@ -1133,6 +1175,14 @@ impl JobPort for MemoryCatalogue {
                 return Err(Error::Unavailable);
             }
             match transition {
+                Transition::Revalidate => {
+                    if j.view.kind == JobKind::Restore
+                        && !t.has_current_subscriber(tenant, &j, authority)
+                    {
+                        return Err(Error::Unavailable);
+                    }
+                    return Ok(());
+                }
                 Transition::Checkpoint {
                     expected,
                     next,

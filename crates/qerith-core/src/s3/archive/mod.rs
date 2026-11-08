@@ -528,9 +528,11 @@ fn wire_metadata(view: &cat::ReferenceView) -> Result<ObjectMetadata> {
                 _ => return Err(ErrorCode::InternalError),
             };
             match c.kind {
-                cat::ChecksumType::FullObject if c.parts.is_empty() => {
-                    StoredChecksum::full(algorithm, STANDARD.encode(&c.value))
-                }
+                cat::ChecksumType::FullObject => StoredChecksum::full_with_parts(
+                    algorithm,
+                    STANDARD.encode(&c.value),
+                    c.parts.iter().map(|p| STANDARD.encode(p)).collect(),
+                ),
                 cat::ChecksumType::Composite if algorithm == ChecksumAlgorithm::Sha256 => {
                     let stored = StoredChecksum::composite_sha256(
                         c.parts.iter().map(|p| STANDARD.encode(p)).collect(),
