@@ -1,5 +1,4 @@
 use super::*;
-use s::Access as _;
 
 #[tokio::test]
 async fn committed_native_reply_survives_session_expiry_at_worker_entry() {
