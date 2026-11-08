@@ -69,6 +69,12 @@ authority. Reconciliation rechecks those retained grants and the live destinatio
 binding/moderation, not the old source's execution-only availability lease or
 continued existence. Repeated uploads of the same C use a distinct stable
 per-upload storage-generation validator; repeatable C is never used as unique G.
+Catalogue operation and storage-generation identities use the catalogue's shared
+allocator, including when infrastructure callers interleave mutations. Public
+handles and logical generations use a separate checkpointed service sequence.
+Write-only replacement, copy destinations and deletion resolve the known logical
+G through the catalogue's write-target contract plus tenant/revision/validator
+binding; they do not acquire Read or treat a denied lookup as absence.
 
 ## Transfer and jobs
 
@@ -101,7 +107,11 @@ unstarted upload can stop before commit; restore cancellation removes only its
 own accepted subscription. An interrupted/uncertain storage attempt retains a
 cleanup/reconciliation obligation instead of claiming no effects. Polling does
 not extend deadlines. Unknown effects remain unknown through fresh commit identities,
-worker early exits and deadline Result failures. Uncommitted upload job access uses
+worker early exits, pending NotReady results and deadline Result failures. Retry
+waits after a claimed restore remain logically Running, including after reconnect.
+Native commit receipts are retained before response authorization: losing Read
+during storage denies delivery, not the already-committed reconciliation record.
+Uncommitted upload job access uses
 Write, not an ungranted Read of a not-yet-published object. Restore admission/replay
 and subscription cancellation require Restore; cancellation does not require Write.
 Physical restore completion is projected as success only for the exact subscription
@@ -112,6 +122,9 @@ A new commit identity cannot clear cleanup-aware cancellation
 or restart storage. Native resume/restore/status replays retain their original,
 already-validated progress/status while still checking current request authority;
 they do not falsely validate historical progress against the latest state.
+The current byte ceiling is checked against retained upload descriptors at commit
+admission and worker entry, and against resolved object lengths at restore/download
+admission and pin redemption, including after reconnect with tighter limits.
 Explicit model record, byte, lifetime and retry ceilings
 are test parameters, not measured product entitlements. Resource reclamation and
 production capacity policy are not implemented by this reference fixture.

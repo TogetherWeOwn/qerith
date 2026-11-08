@@ -1,6 +1,8 @@
 use super::*;
 use qerith_core::{native as n, operations as o, service as s};
 
+#[path = "service_qa.rs"]
+mod qa;
 #[path = "service_repairs.rs"]
 mod repairs;
 
@@ -186,7 +188,7 @@ fn evidence(name: &str, value: serde_json::Value) {
 async fn native_rest_mcp_golden_reconnect_and_cold_restore() {
     let auth = Rc::new(Auth::default());
     let mut service = s::Service::new(Access(auth.clone()), limits(), profile(), 10).unwrap();
-    let mut io = Io::new(2).await;
+    let mut io = Io::new(1).await;
     let time = Time(Cell::new(10));
     let rules = Rules::default();
     let policy = profile();
@@ -365,11 +367,16 @@ async fn native_rest_mcp_golden_reconnect_and_cold_restore() {
     )
     .await
     .unwrap();
+    let storage_generation = service
+        .catalogue()
+        .lookup(TENANT, "object", 10, auth.as_ref())
+        .unwrap()
+        .generation;
     let candidate = service
         .catalogue()
         .candidate(
             TENANT,
-            GenerationId(2),
+            storage_generation,
             DeletionKind::DeliveryCache,
             10,
             11,
@@ -600,7 +607,7 @@ async fn native_rest_mcp_golden_reconnect_and_cold_restore() {
     auth.denied.borrow_mut().clear();
     service
         .catalogue_mut()
-        .set_moderation(TENANT, GenerationId(2), 1, true)
+        .set_moderation(TENANT, storage_generation, 1, true)
         .unwrap();
     assert!(parity(
         &mut service,
@@ -1611,16 +1618,11 @@ async fn committed_upload_and_copy_results_replays_obey_current_moderation() {
         parity(&mut service, &scope(), o::Operation::Copy, fields.clone()).unwrap(),
         copied
     );
-    let generation = GenerationId(
-        transfer
-            .target
-            .generation
-            .as_str()
-            .strip_prefix("g_")
-            .unwrap()
-            .parse()
-            .unwrap(),
-    );
+    let generation = service
+        .catalogue()
+        .lookup(TENANT, "object", 10, service.access().0.as_ref())
+        .unwrap()
+        .generation;
     service
         .catalogue_mut()
         .set_moderation(TENANT, generation, 1, true)

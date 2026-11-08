@@ -161,18 +161,8 @@ impl<A: Access> n::Authority for View<'_, A> {
         self.service
             .permit(self.scope, &id, c::Action::Write)
             .ok()?;
-        let current = match self.service.lookup(self.scope, &id) {
-            Ok(view) => Some(
-                self.service
-                    .bound_object(self.scope, &id, &view)
-                    .ok()?
-                    .object
-                    .target
-                    .g
-                    .clone(),
-            ),
-            Err(_) => None,
-        };
+        let (_, current) = self.service.write_target(self.scope, &id).ok()?;
+        let current = current.map(|bound| bound.object.target.g);
         self.owned(current)
     }
     fn object(&self, target: &n::Target) -> Option<n::Owned<n::Object>> {
@@ -187,7 +177,10 @@ impl<A: Access> n::Authority for View<'_, A> {
         self.service
             .permit_descriptor(self.scope, &upload.descriptor)
             .ok()?;
-        let job = self.service.job(self.scope, &upload.job).ok()?;
+        let job = self
+            .service
+            .job_access(self.scope, &upload.job, Some(c::Action::Write))
+            .ok()?;
         self.owned(n::UploadRecord {
             intent: upload.descriptor.intent.clone(),
             received_bytes: upload.received,
@@ -349,6 +342,29 @@ impl<A: Access> Service<A> {
             },
             self.now,
         )?;
+        match &request.action {
+            n::Action::InitiateUpload(intent) => {
+                self.check_bytes(intent.ciphertext.length).map_err(error)?
+            }
+            n::Action::CommitUpload(upload) | n::Action::ResumeUpload(upload) => self
+                .check_bytes(upload.intent.ciphertext.length)
+                .map_err(error)?,
+            n::Action::Restore(restore) => {
+                let view = self
+                    .exact(scope, &logical(&restore.target).map_err(error)?)
+                    .map_err(error)?;
+                self.check_bytes(view.metadata.identity.length)
+                    .map_err(error)?;
+            }
+            n::Action::Download(download) => {
+                let view = self
+                    .exact(scope, &logical(&download.target).map_err(error)?)
+                    .map_err(error)?;
+                self.check_bytes(view.metadata.identity.length)
+                    .map_err(error)?;
+            }
+            _ => {}
+        }
         if admission == n::Admission::Replay {
             if matches!(request.action, n::Action::InitiateUpload(_)) {
                 let descriptor = self
@@ -493,15 +509,13 @@ impl<A: Access> Service<A> {
                     )
                     .await
                     .map_err(error)?;
-                    n::ResponseBody::Committed(
-                        View {
-                            service: self,
-                            scope,
-                        }
-                        .committed_upload(&value.upload)
-                        .ok_or(n::ErrorCode::Unavailable)?
-                        .value,
-                    )
+                    // Capture the actual committed receipt before fallible delivery
+                    // authorization. check_response below remains the disclosure gate.
+                    n::ResponseBody::Committed(n::Object {
+                        target,
+                        ciphertext: upload.descriptor.intent.ciphertext,
+                        metadata: upload.descriptor.intent.metadata,
+                    })
                 }
             }
             n::Action::Browse(value) => {

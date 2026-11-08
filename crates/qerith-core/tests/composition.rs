@@ -142,6 +142,7 @@ struct Io {
     inject: Injection,
     fault: Fault,
     revoke_at_complete: Option<(Rc<Auth>, String)>,
+    revoke_at_upload: Option<(Rc<Auth>, String)>,
     expire_at_complete: Option<Rc<Time>>,
     expire_at_upload: Option<Rc<Time>>,
     attempts: Vec<(String, u64)>,
@@ -185,6 +186,7 @@ impl Io {
             inject: Injection::None,
             fault: Fault::Healthy,
             revoke_at_complete: None,
+            revoke_at_upload: None,
             expire_at_complete: None,
             expire_at_upload: None,
             attempts: Vec::new(),
@@ -333,6 +335,9 @@ impl Storage for Io {
             entry.insert(self.fixture.bytes().to_vec());
         }
         self.order.push("upload-complete");
+        if let Some((auth, name)) = &self.revoke_at_upload {
+            auth.denied.borrow_mut().insert(name.clone());
+        }
         let mut copy = self.copy(&upload.metadata, location);
         if self.inject == Injection::BadReceipt {
             copy.identity.length -= 1;

@@ -7,7 +7,7 @@ mod bridge;
 pub use bridge::UploadWorker;
 
 use crate::{catalogue as c, composition as flow, native as n, operations as o};
-use c::{JobPort, MetadataOutbox};
+use c::{JobPort, MetadataOutbox, MutationTargets};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Authenticated live policy. Missing/foreign/revoked/banned references all deny.
@@ -134,6 +134,7 @@ struct Upload {
     job: o::Opaque,
     intent: c::OperationId,
     commit: c::OperationId,
+    storage_generation: c::GenerationId,
     expected_revision: u64,
     created_at: u64,
     received: u64,
@@ -224,13 +225,6 @@ fn map(error: c::Error) -> o::Failure {
 }
 fn token(prefix: &str, value: u64) -> o::Opaque {
     o::Opaque::new(format!("{prefix}_{value}")).expect("bounded model identity")
-}
-fn generation(id: &o::Opaque) -> Result<c::GenerationId, o::Failure> {
-    id.as_str()
-        .strip_prefix("g_")
-        .and_then(|s| s.parse().ok())
-        .map(c::GenerationId)
-        .ok_or_else(denied)
 }
 fn native_id(id: &o::Opaque) -> n::Opaque {
     id.as_str()
@@ -336,6 +330,16 @@ impl<A: Access> Service<A> {
             .ok_or(fail(o::ErrorCode::QuotaExceeded))?;
         Ok(self.model.sequence)
     }
+    fn catalogue_identity(&mut self, scope: &o::Scope) -> Result<u64, o::Failure> {
+        let tenant = self.tenant(scope)?;
+        self.model.catalogue.allocate_identity(tenant).map_err(map)
+    }
+    fn check_bytes(&self, bytes: u64) -> Result<(), o::Failure> {
+        if bytes > self.limits.bytes {
+            return Err(fail(o::ErrorCode::QuotaExceeded));
+        }
+        Ok(())
+    }
     fn expiry(&self, seconds: u64) -> Result<u64, o::Failure> {
         self.now
             .checked_add(seconds)
@@ -369,6 +373,54 @@ impl<A: Access> Service<A> {
             .catalogue
             .lookup(auth.tenant, name.as_str(), self.now, &auth)
             .map_err(map)
+    }
+    // Write predicates resolve only a tenant/revision/validator-bound logical G.
+    // A denied or unbound target is never projected as an absent destination.
+    fn write_target(
+        &self,
+        scope: &o::Scope,
+        name: &o::Opaque,
+    ) -> Result<(u64, Option<BoundObject>), o::Failure> {
+        let auth = self.authority(scope)?;
+        let (revision, target) = self
+            .model
+            .catalogue
+            .write_target(auth.tenant, name.as_str(), self.now, &auth)
+            .map_err(map)?;
+        let Some(target) = target else {
+            return Ok((revision, None));
+        };
+        let bound = self
+            .model
+            .objects
+            .iter()
+            .find_map(|((tenant, generation, object), bound)| {
+                (*tenant == auth.tenant
+                    && object == name.as_str()
+                    && bound.storage_generation == *generation
+                    && bound.revision == revision
+                    && bound.object.target.object.as_str() == name.as_str()
+                    && self
+                        .model
+                        .catalogue
+                        .generation(auth.tenant, *generation)
+                        .is_ok_and(|stored| stored.metadata.validator == target.validator))
+                .then_some(bound.clone())
+            })
+            .ok_or_else(denied)?;
+        Ok((revision, Some(bound)))
+    }
+    fn write_exact(
+        &self,
+        scope: &o::Scope,
+        target: &o::LogicalReference,
+    ) -> Result<u64, o::Failure> {
+        let (revision, bound) = self.write_target(scope, &target.reference)?;
+        if !bound.is_some_and(|bound| bound.object.target.g.as_str() == target.generation.as_str())
+        {
+            return Err(fail(o::ErrorCode::PreconditionFailed));
+        }
+        Ok(revision)
     }
     fn exact(
         &self,
@@ -462,6 +514,14 @@ impl<A: Access> Service<A> {
         }
     }
     fn job(&self, scope: &o::Scope, id: &o::Opaque) -> Result<Job, o::Failure> {
+        self.job_access(scope, id, None)
+    }
+    fn job_access(
+        &self,
+        scope: &o::Scope,
+        id: &o::Opaque,
+        action: Option<c::Action>,
+    ) -> Result<Job, o::Failure> {
         let mut job = self
             .model
             .jobs
@@ -472,16 +532,22 @@ impl<A: Access> Service<A> {
         self.permit(
             scope,
             &job.value.target.reference,
-            if job.native_upload && job.value.effects != o::Effects::Committed {
-                c::Action::Write
-            } else {
-                c::Action::Read
-            },
+            action.unwrap_or(
+                if job.native_upload && job.value.effects != o::Effects::Committed {
+                    c::Action::Write
+                } else {
+                    c::Action::Read
+                },
+            ),
         )?;
         if job.restore.is_some()
             || job.requires_live_target && job.value.effects == o::Effects::Committed
         {
-            self.exact(scope, &job.value.target)?;
+            if action == Some(c::Action::Write) {
+                self.write_exact(scope, &job.value.target)?;
+            } else {
+                self.exact(scope, &job.value.target)?;
+            }
         }
         if let Some((id, subscription)) = job
             .restore
@@ -494,8 +560,9 @@ impl<A: Access> Service<A> {
                 .job(self.tenant(scope)?, id)
                 .map_err(map)?;
             job.value.state = match stored.state {
-                c::JobState::Queued | c::JobState::RetryWait { .. } => o::JobState::Queued,
-                c::JobState::Running => o::JobState::Running,
+                c::JobState::Queued => o::JobState::Queued,
+                // RetryWait can only follow a claimed attempt, not fresh admission.
+                c::JobState::RetryWait { .. } | c::JobState::Running => o::JobState::Running,
                 c::JobState::Complete => {
                     if self
                         .model
@@ -723,6 +790,7 @@ impl<A: Access> Service<A> {
             .cloned()
             .ok_or_else(denied)?;
         self.permit_descriptor(scope, &upload.descriptor)?;
+        self.check_bytes(upload.descriptor.intent.ciphertext.length)?;
         self.set_now(clock.now().map_err(map)?)?;
         let job = self.job(scope, &upload.job)?;
         if job.value.state == o::JobState::Succeeded {
@@ -746,7 +814,7 @@ impl<A: Access> Service<A> {
             commit: upload.commit,
             name: upload.transfer.target.reference.as_str().into(),
             expected_revision: upload.expected_revision,
-            generation: generation(&upload.transfer.target.generation)?,
+            generation: upload.storage_generation,
             metadata,
             archive_deadline: job.deadline,
         };
@@ -830,7 +898,8 @@ impl<A: Access> Service<A> {
             .get(handle)
             .filter(|t| t.scope == *scope)
             .ok_or_else(denied)?;
-        self.exact(scope, &transfer.value.target)?;
+        let view = self.exact(scope, &transfer.value.target)?;
+        self.check_bytes(view.metadata.identity.length)?;
         if self.now >= transfer.value.expires_at {
             return Err(fail(o::ErrorCode::NotAvailable));
         }
@@ -848,14 +917,14 @@ impl<A: Access> Service<A> {
     fn fence(&self, scope: &o::Scope, request: &o::Request) -> Result<u64, o::Failure> {
         let name = request.opaque("reference").unwrap();
         if request.if_absent() {
-            if self.lookup(scope, name).is_ok() {
+            let (revision, current) = self.write_target(scope, name)?;
+            // Recreating a tombstone still needs a known revision contract.
+            if revision != 0 || current.is_some() {
                 return Err(fail(o::ErrorCode::PreconditionFailed));
             }
-            // The reference model intentionally disallows recreating a tombstone
-            // without its revision; no guessed revision or ABA generation reuse.
             Ok(0)
         } else {
-            Ok(self.exact(scope, &Self::target(request))?.revision)
+            self.write_exact(scope, &Self::target(request))
         }
     }
     fn new_job(
@@ -999,7 +1068,15 @@ impl<A: Access> o::OperationPort for Service<A> {
                 o::Output::Job(job)
                 | o::Output::Upload { job, .. }
                 | o::Output::Cancel { job, .. } => {
-                    self.job(scope, &job.handle)?;
+                    let write = matches!(
+                        request.operation(),
+                        o::Operation::InitiateUpload
+                            | o::Operation::CommitUpload
+                            | o::Operation::AbortUpload
+                            | o::Operation::Copy
+                            | o::Operation::Delete
+                    );
+                    self.job_access(scope, &job.handle, write.then_some(c::Action::Write))?;
                 }
                 o::Output::Download(transfer) => {
                     self.redeem(scope, &transfer.handle)?;
@@ -1021,10 +1098,10 @@ impl<A: Access> o::OperationPort for Service<A> {
             o::Operation::InitiateUpload | o::Operation::Copy => {
                 self.fence(scope, request)?;
             }
-            o::Operation::Stat
-            | o::Operation::Restore
-            | o::Operation::Delete
-            | o::Operation::AuthorizeDownload => {
+            o::Operation::Delete => {
+                self.write_exact(scope, &Self::target(request))?;
+            }
+            o::Operation::Stat | o::Operation::Restore | o::Operation::AuthorizeDownload => {
                 self.exact(scope, &Self::target(request))?;
             }
             _ => {}
@@ -1052,6 +1129,21 @@ impl<A: Access> o::OperationPort for Service<A> {
                 .is_some_and(|s| s > self.limits.job_seconds)
         {
             return Err(fail(o::ErrorCode::QuotaExceeded));
+        }
+        match request.operation() {
+            o::Operation::CommitUpload => {
+                let upload = self
+                    .model
+                    .uploads
+                    .get(request.opaque("transfer").unwrap())
+                    .ok_or_else(denied)?;
+                self.check_bytes(upload.descriptor.intent.ciphertext.length)?;
+            }
+            o::Operation::Restore | o::Operation::AuthorizeDownload => {
+                let view = self.exact(scope, &Self::target(request))?;
+                self.check_bytes(view.metadata.identity.length)?;
+            }
+            _ => {}
         }
         if self.replay(scope, request)?.is_some() {
             return Ok(());
@@ -1187,8 +1279,9 @@ impl<A: Access> Service<A> {
                     scope: scope.clone(),
                     transfer: transfer.clone(),
                     job: job.value.handle.clone(),
-                    intent: c::OperationId(self.next()?),
-                    commit: c::OperationId(self.next()?),
+                    storage_generation: c::GenerationId(self.catalogue_identity(scope)?),
+                    intent: c::OperationId(self.catalogue_identity(scope)?),
+                    commit: c::OperationId(self.catalogue_identity(scope)?),
                     expected_revision,
                     created_at: self.now,
                     received: 0,
@@ -1210,7 +1303,7 @@ impl<A: Access> Service<A> {
             Op::CommitUpload | Op::AbortUpload => {
                 let handle = request.opaque("transfer").unwrap();
                 let upload = self.model.uploads.get(handle).cloned().ok_or_else(denied)?;
-                let mut job = self.job(scope, &upload.job)?;
+                let mut job = self.job_access(scope, &upload.job, Some(c::Action::Write))?;
                 if request.operation() == Op::AbortUpload {
                     return self.cancel(scope, job);
                 }
@@ -1225,21 +1318,15 @@ impl<A: Access> Service<A> {
                 {
                     return Err(fail(o::ErrorCode::Conflict));
                 }
-                let current = match &upload.descriptor.intent.precondition {
-                    n::Precondition::Absent => self
-                        .lookup(scope, &upload.transfer.target.reference)
-                        .is_err(),
-                    n::Precondition::Matches(g) => self
-                        .exact(
-                            scope,
-                            &o::LogicalReference {
-                                reference: upload.transfer.target.reference.clone(),
-                                generation: operation_id(g)?,
-                            },
-                        )
-                        .is_ok(),
+                let (revision, current) =
+                    self.write_target(scope, &upload.transfer.target.reference)?;
+                let matches = match &upload.descriptor.intent.precondition {
+                    n::Precondition::Absent => revision == 0 && current.is_none(),
+                    n::Precondition::Matches(g) => {
+                        current.is_some_and(|bound| bound.object.target.g == *g)
+                    }
                 };
-                if !current {
+                if revision != upload.expected_revision || !matches {
                     return Err(fail(o::ErrorCode::PreconditionFailed));
                 }
                 self.model.uploads.get_mut(handle).unwrap().submitted = true;
@@ -1351,6 +1438,7 @@ impl<A: Access> Service<A> {
                     return Err(fail(o::ErrorCode::NotAvailable));
                 }
                 let id = self.next()?;
+                let operation = c::OperationId(self.catalogue_identity(scope)?);
                 let auth = Authority {
                     access: &self.access,
                     scope,
@@ -1361,7 +1449,7 @@ impl<A: Access> Service<A> {
                     .catalogue
                     .transact(
                         tenant,
-                        c::OperationId(id),
+                        operation,
                         c::Mutation::AcquireServingPin {
                             name: target.reference.as_str().into(),
                             until: expires_at,
@@ -1404,6 +1492,7 @@ impl<A: Access> Service<A> {
                 if let Some(seconds) = request.number("max_seconds") {
                     job.deadline = self.expiry(seconds)?.min(job.deadline);
                 }
+                let operation = c::OperationId(self.catalogue_identity(scope)?);
                 let auth = Authority {
                     access: &self.access,
                     scope,
@@ -1414,7 +1503,7 @@ impl<A: Access> Service<A> {
                     .catalogue
                     .transact(
                         tenant,
-                        c::OperationId(id),
+                        operation,
                         c::Mutation::RequestRestore {
                             name: target.reference.as_str().into(),
                             expected_revision: view.revision,
@@ -1429,7 +1518,7 @@ impl<A: Access> Service<A> {
                 else {
                     return Err(fail(o::ErrorCode::Internal));
                 };
-                job.restore = Some((restore, c::OperationId(id)));
+                job.restore = Some((restore, operation));
                 job.value.effects = o::Effects::Accepted;
                 self.model
                     .jobs
@@ -1453,11 +1542,15 @@ impl<A: Access> Service<A> {
                         Err(job.value.error.unwrap_or(fail(o::ErrorCode::Unavailable)))
                     }
                     o::JobState::Cancelled => Err(fail(o::ErrorCode::Cancelled)),
-                    _ => Err(fail(o::ErrorCode::NotReady)),
+                    _ => Err(o::Failure {
+                        code: o::ErrorCode::NotReady,
+                        effects: job.value.effects,
+                    }),
                 }
             }
             Op::Copy | Op::Delete => {
                 let id = self.next()?;
+                let operation = c::OperationId(self.catalogue_identity(scope)?);
                 let name = request.opaque("reference").unwrap();
                 let revision = self.fence(scope, request)?;
                 let copy = if request.operation() == Op::Copy {
@@ -1500,7 +1593,7 @@ impl<A: Access> Service<A> {
                 let result = self
                     .model
                     .catalogue
-                    .transact(tenant, c::OperationId(id), mutation, self.now, authority)
+                    .transact(tenant, operation, mutation, self.now, authority)
                     .map_err(map)?;
                 if let Some(descriptor) = &copy {
                     let mut object = descriptor.source.clone();
@@ -1580,7 +1673,7 @@ impl<A: Access> Service<A> {
             }
             if let Some((restore, subscription)) = job.restore {
                 let tenant = self.tenant(scope)?;
-                let id = self.next()?;
+                let operation = c::OperationId(self.catalogue_identity(scope)?);
                 let auth = Authority {
                     access: &self.access,
                     scope,
@@ -1590,7 +1683,7 @@ impl<A: Access> Service<A> {
                     .catalogue
                     .transact(
                         tenant,
-                        c::OperationId(id),
+                        operation,
                         c::Mutation::CancelSubscription {
                             name: job.value.target.reference.as_str().into(),
                             job: restore,
