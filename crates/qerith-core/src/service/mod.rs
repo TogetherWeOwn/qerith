@@ -4,6 +4,7 @@
 //! Access and storage are trusted live ports; neither is restored from a checkpoint.
 
 mod bridge;
+mod delivery;
 #[cfg(test)]
 mod tests;
 pub use bridge::UploadWorker;

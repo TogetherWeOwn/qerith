@@ -102,6 +102,20 @@ binding; they do not acquire Read or treat a denied lookup as absence.
    the logical availability lease. `redeem` rechecks scope, current grant,
    generation, moderation, expiry and pin. Physical bytes alone grant nothing.
 
+`read_download` is the opt-in buffered full-ciphertext delivery seam for those
+native/REST/MCP handles. It consumes the same `s3::archive::QualifiedCache` port as
+the S3-facing adapter, with no archive fetch, decryption or profile conversion.
+The current service byte limit is checked before cache I/O. The exact tenant,
+storage generation, immutable cache location, whole-C identity and serving pin
+are resolved from the authenticated catalogue, never supplied by the caller.
+An advancing trusted clock and current reference/key-envelope grants are checked
+again after I/O, before either bytes or a cache failure can be returned. Returned
+length and full SHA-256 must match the committed ciphertext. Transfer handles and
+pins retain their original lifetime; delivery does not renew availability. Native
+ciphertext ranges remain unsupported; S3 ranges use the existing S3 read planner.
+This is consumer preparation, not a new archive backend, durable cache or cache
+retention/eviction implementation.
+
 Cancellation is non-rollback: a committed job reports already committed; an
 unstarted upload can stop before commit; restore cancellation removes only its
 own accepted subscription. An interrupted/uncertain storage attempt retains a

@@ -7,6 +7,8 @@ mod obligations;
 mod qa;
 #[path = "service_repairs.rs"]
 mod repairs;
+#[path = "service_delivery.rs"]
+mod delivery;
 
 #[derive(Clone)]
 struct Access(Rc<Auth>);
