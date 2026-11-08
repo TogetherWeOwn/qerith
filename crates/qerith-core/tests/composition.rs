@@ -1529,10 +1529,11 @@ async fn cold_restore_coalesces_twenty_scoped_subscribers_before_delivery() {
         .unwrap();
     io.order.push("catalogue-published");
     assert_eq!(
-        &io.order[io.order.len() - 4..],
+        &io.order[io.order.len() - 5..],
         &[
             "engine-retrieve",
             "whole-generation-check",
+            "cache-install",
             "cache-complete",
             "catalogue-published"
         ]
