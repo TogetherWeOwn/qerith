@@ -16,6 +16,10 @@ here. No live providers, credentials, customer data or deployment are involved.
    combines repeated list values in order, and rejects singleton duplicates.
    SigV4 whitespace folding occurs only in canonical signing input. All retained
    content/cache metadata fields must be signed, with a shared field classifier.
+   `ObjectMetadata` shares the ingress token-name and value-byte validators, requires
+   lowercase names, and retains semantic values verbatim through GET/HEAD plans.
+   Interior TAB and token punctuation are allowed; CR/LF, other controls, DEL and
+   non-ASCII header bytes are rejected at both ingress and stored-metadata boundaries.
    HTTP/2 adapters map
    the trusted `:authority` to one Host field and reject conflicting authority.
 2. `verify` validates local SigV4 header/presign authentication against an explicit

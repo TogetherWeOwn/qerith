@@ -208,6 +208,42 @@
     "canonical_only": false
   },
   {
+    "name": "metadata-token-name",
+    "method": "PUT",
+    "target": "/bucket/key",
+    "headers": [
+      [
+        "Content-Length",
+        "3"
+      ],
+      [
+        "X-Amz-Meta-File_Name!#$%&'*+-.^`|~",
+        "  a\t b   c  "
+      ],
+      [
+        "X-Amz-Date",
+        "20130524T000000Z"
+      ],
+      [
+        "X-Amz-Content-SHA256",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      ],
+      [
+        "Host",
+        "s3.us-east-1.amazonaws.com"
+      ],
+      [
+        "Authorization",
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=content-length;host;x-amz-content-sha256;x-amz-date;x-amz-meta-file_name!#$%&'*+-.^`|~, Signature=6648aba425c2725f7152175edd06ecc6c0efd0d35d8a13c1c1fe6e0776d50c05"
+      ]
+    ],
+    "signed_headers": "content-length;host;x-amz-content-sha256;x-amz-date;x-amz-meta-file_name!#$%&'*+-.^`|~",
+    "canonical": "PUT\n/bucket/key\n\ncontent-length:3\nhost:s3.us-east-1.amazonaws.com\nx-amz-content-sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\nx-amz-date:20130524T000000Z\nx-amz-meta-file_name!#$%&'*+-.^`|~:a b c\n\ncontent-length;host;x-amz-content-sha256;x-amz-date;x-amz-meta-file_name!#$%&'*+-.^`|~\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "body": "abc",
+    "presigned": false,
+    "canonical_only": false
+  },
+  {
     "name": "signed-metadata",
     "method": "PUT",
     "target": "/bucket/key",

@@ -27,6 +27,7 @@ CASES = [
     ("empty-query", "GET", "/bucket/key?uploads", {}, b"", False, False),
     ("repeated-query", "GET", "/bucket/key?z=2&z=1&Z=&=x&&plus=+&percent=%25", {}, b"", False, True),
     ("header-whitespace", "PUT", "/bucket/key", {"Content-Length": "3", "X-Amz-Meta-Name": "  a\t b   c  "}, b"abc", False, False),
+    ("metadata-token-name", "PUT", "/bucket/key", {"Content-Length": "3", "X-Amz-Meta-File_Name!#$%&'*+-.^`|~": "  a\t b   c  "}, b"abc", False, False),
     ("signed-metadata", "PUT", "/bucket/key", {"Content-Length": "3", "Content-Disposition": 'attachment; filename="a  b.txt"', "Cache-Control": "private, no-store", "Expires": "Sat, 25 May 2013 00:00:00 GMT", "Content-Language": "en"}, b"abc", False, False),
     ("presign-get", "GET", "/bucket/key", {}, b"", True, False),
     ("presign-put", "PUT", "/bucket/key", {"Content-Length": "3", "Content-MD5": "kAFQmDzST7DWlj99KOF/cg=="}, b"abc", True, False),

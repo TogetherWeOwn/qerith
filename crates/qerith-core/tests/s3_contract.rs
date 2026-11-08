@@ -550,6 +550,107 @@ fn header<'a>(plan: &'a ReadPlan, name: &str) -> Option<&'a str> {
 }
 
 #[test]
+fn authenticated_metadata_survives_commit_and_read_without_whitespace_folding() {
+    for (name, expected) in [
+        ("header-whitespace", vec![("x-amz-meta-name", "a\t b   c")]),
+        (
+            "metadata-token-name",
+            vec![("x-amz-meta-file_name!#$%&'*+-.^`|~", "a\t b   c")],
+        ),
+        (
+            "signed-metadata",
+            vec![
+                ("content-disposition", "attachment; filename=\"a  b.txt\""),
+                ("cache-control", "private, no-store"),
+                ("expires", "Sat, 25 May 2013 00:00:00 GMT"),
+                ("content-language", "en"),
+            ],
+        ),
+    ] {
+        let v = fixture(name);
+        let h = headers(&fields(&v));
+        let t = Target::parse(v["target"].as_str().unwrap(), &policy()).unwrap();
+        let auth = verify("PUT", &t, &h, true, NOW, &policy(), &authority()).unwrap();
+        let mut upload = UploadValidator::new(&h, &auth, &policy()).unwrap();
+        upload
+            .push_decoded(v["body"].as_str().unwrap().as_bytes())
+            .unwrap();
+        let receipt = upload.finish().unwrap();
+        let content_headers = expected
+            .iter()
+            .map(|(k, value)| {
+                assert_eq!(h.get(k), Some(*value));
+                (k.to_string(), h.get(k).unwrap().to_owned())
+            })
+            .collect();
+        let m = ObjectMetadata::new(
+            "g".into(),
+            receipt.length(),
+            "\"opaque\"".into(),
+            NOW,
+            content_headers,
+            None,
+        )
+        .unwrap();
+        for head in [false, true] {
+            for range in [None, Some("bytes=0-1")] {
+                let plan = plan_read(&m, head, &Conditions::default(), range, true, false).unwrap();
+                for (k, value) in &expected {
+                    assert_eq!(header(&plan, k), Some(*value), "{name}: {k}");
+                }
+                assert_eq!(plan.body.is_none(), head);
+            }
+        }
+    }
+}
+
+#[test]
+fn metadata_rejects_unsafe_header_bytes_at_ingress_and_storage() {
+    let stored = |name: &str, value: &str| {
+        ObjectMetadata::new(
+            "g".into(),
+            3,
+            "\"opaque\"".into(),
+            NOW,
+            vec![(name.into(), value.into())],
+            None,
+        )
+    };
+    for byte in (0u8..=31).filter(|b| *b != b'\t').chain([127]) {
+        let value = format!("a{}b", char::from(byte));
+        assert!(Headers::new(&[("x-amz-meta-name", &value)], &policy()).is_err());
+        assert_eq!(
+            stored("x-amz-meta-name", &value).unwrap_err(),
+            ErrorCode::InvalidArgument
+        );
+    }
+    for value in ["a\r\nb", "café", "雪"] {
+        assert!(Headers::new(&[("x-amz-meta-name", value)], &policy()).is_err());
+        assert!(stored("x-amz-meta-name", value).is_err());
+    }
+    for suffix in [
+        " ", "\t", "\r", "\n", "\0", "\u{7f}", "(", ")", "<", ">", "@", ",", ";", ":", "\\", "\"",
+        "/", "[", "]", "?", "=", "{", "}", "雪",
+    ] {
+        let name = format!("x-amz-meta-file{suffix}name");
+        assert!(
+            Headers::new(&[(&name, "value")], &policy()).is_err(),
+            "{name:?}"
+        );
+        assert!(stored(&name, "value").is_err(), "{name:?}");
+    }
+    for name in [
+        "x-amz-meta-",
+        "x-amz-meta-Name",
+        "X-Amz-Meta-Name",
+        "etag",
+        "content-length",
+    ] {
+        assert!(stored(name, "value").is_err(), "{name}");
+    }
+}
+
+#[test]
 fn condition_precedence_and_range_validation_precede_cold_state() {
     let m = metadata(None);
     let c = Conditions {

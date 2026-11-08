@@ -180,6 +180,17 @@ pub(crate) fn persistent_metadata(name: &str) -> bool {
         )
 }
 
+pub(crate) fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
+}
+
+pub(crate) fn valid_header_value(value: &str) -> bool {
+    value.bytes().all(|c| c == b'\t' || (32..=126).contains(&c))
+}
+
 impl Headers {
     pub fn new(fields: &[(&str, &str)], policy: &Policy) -> Result<Self> {
         if fields.len() > policy.limits.header_count {
@@ -193,11 +204,8 @@ impl Headers {
                 .and_then(|n| n.checked_add(value.len()))
                 .ok_or(ErrorCode::InvalidRequest)?;
             if bytes > policy.limits.header_bytes
-                || name.is_empty()
-                || !name
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
-                || !value.bytes().all(|c| c == b'\t' || (32..=126).contains(&c))
+                || !valid_header_name(name)
+                || !valid_header_value(value)
             {
                 return Err(ErrorCode::InvalidRequest);
             }

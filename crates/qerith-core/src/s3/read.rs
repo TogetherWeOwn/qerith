@@ -81,10 +81,9 @@ impl ObjectMetadata {
             || DateTime::from_timestamp(modified, 0).is_none()
             || content_headers.iter().any(|(k, v)| {
                 !super::wire::persistent_metadata(k)
-                    || !k
-                        .bytes()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                    || !v.bytes().all(|c| (32..=126).contains(&c))
+                    || !super::wire::valid_header_name(k)
+                    || k.bytes().any(|c| c.is_ascii_uppercase())
+                    || !super::wire::valid_header_value(v)
             })
         {
             return Err(ErrorCode::InvalidArgument);
