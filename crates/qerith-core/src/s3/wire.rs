@@ -244,7 +244,7 @@ impl Headers {
     pub fn get(&self, name: &str) -> Option<&str> {
         self.combined
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
 

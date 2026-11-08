@@ -426,6 +426,31 @@ fn header_duplicates_bounds_case_and_signed_order() {
 }
 
 #[test]
+fn public_header_lookup_is_case_insensitive_without_changing_signing() {
+    let h = Headers::new(
+        &[
+            ("Host", "s3.us-east-1.amazonaws.com"),
+            ("Cache-Control", "public"),
+            ("CACHE-control", "no-store"),
+        ],
+        &policy(),
+    )
+    .unwrap();
+    for name in ["host", "Host", "HOST", "hOsT"] {
+        assert_eq!(h.get(name), Some("s3.us-east-1.amazonaws.com"));
+    }
+    for name in ["cache-control", "Cache-Control", "CACHE-CONTROL"] {
+        assert_eq!(h.get(name), Some("public,no-store"));
+    }
+    assert_eq!(h.get("Missing"), None);
+    let t = Target::parse("/bucket/key", &policy()).unwrap();
+    let canonical =
+        canonical_request("GET", &t, &h, "cache-control;host", EMPTY_SHA, false).unwrap();
+    assert!(canonical.contains("cache-control:public,no-store\nhost:s3.us-east-1.amazonaws.com\n"));
+    assert!(canonical_request("GET", &t, &h, "Cache-Control;Host", EMPTY_SHA, false).is_err());
+}
+
+#[test]
 fn upload_validates_decoded_bytes_length_sha256_md5_and_crc32() {
     let v = fixture("header-put");
     let f = fields(&v);
@@ -830,6 +855,77 @@ fn all_http_date_forms_enforce_conditions_before_cold_state() {
         assert_eq!(
             plan_read(&m, false, &c, None, false, false).unwrap_err(),
             ErrorCode::PreconditionFailed,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn pre_epoch_dates_enforce_conditions_before_cold_state() {
+    let m = metadata(None);
+    for value in [
+        "Wed, 31 Dec 1969 23:59:59 GMT",
+        "Wed Dec 31 23:59:59 1969",
+        "Mon, 01 Jan 1900 00:00:00 GMT",
+        "Mon Jan  1 00:00:00 1900",
+        "Thu, 29 Feb 1968 00:00:00 GMT",
+    ] {
+        let c = Conditions {
+            if_unmodified_since: Some(value.into()),
+            ..Default::default()
+        };
+        for head in [false, true] {
+            for available in [false, true] {
+                assert_eq!(
+                    plan_read(&m, head, &c, None, available, false).unwrap_err(),
+                    ErrorCode::PreconditionFailed,
+                    "{value}: head={head}, available={available}"
+                );
+            }
+        }
+        let c = Conditions {
+            if_match: Some(m.etag().into()),
+            ..c
+        };
+        assert_eq!(
+            plan_read(&m, false, &c, None, true, false).unwrap().status,
+            200
+        );
+    }
+    let m = ObjectMetadata::new("g".into(), 10, "\"opaque\"".into(), -2, vec![], None).unwrap();
+    let value = "Wed, 31 Dec 1969 23:59:59 GMT";
+    let c = Conditions {
+        if_modified_since: Some(value.into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        plan_read(&m, false, &c, None, false, false).unwrap().status,
+        304
+    );
+    let c = Conditions {
+        if_unmodified_since: Some(value.into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        plan_read(&m, false, &c, None, true, false).unwrap().status,
+        200
+    );
+    for value in [
+        "Thu, 31 Dec 1969 23:59:59 GMT",
+        "Wed, 31 Dec 1969 23:59:59 UTC",
+        "Mon, 29 Feb 1900 00:00:00 GMT",
+        "Wed, 31 Dec 1969 23:59:60 GMT",
+        "Wed, 31 Dec 1969 23:59:59 GMT trailing",
+    ] {
+        let c = Conditions {
+            if_unmodified_since: Some(value.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan_read(&metadata(None), false, &c, None, true, false)
+                .unwrap()
+                .status,
+            200,
             "{value}"
         );
     }

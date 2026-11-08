@@ -199,9 +199,24 @@ fn matches_tag(list: &str, etag: &str, weak: bool) -> Result<bool> {
 }
 
 fn http_date(value: &str) -> Option<i64> {
-    let parsed = httpdate::parse_http_date(value).ok()?;
-    let seconds = parsed.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    i64::try_from(seconds).ok()
+    if let Ok(parsed) = httpdate::parse_http_date(value) {
+        let seconds = parsed.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        return i64::try_from(seconds).ok();
+    }
+    // httpdate 1.0.3 rejects years before 1970 before producing SystemTime.
+    // Use the existing calendar parser for the four-digit pre-epoch forms;
+    // round-trip to retain the HTTP grammar, weekday and non-leap-second rules.
+    let value = value.trim();
+    ["%a, %d %b %Y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
+        .iter()
+        .find_map(|format| {
+            let parsed = chrono::NaiveDateTime::parse_from_str(value, format).ok()?;
+            let utc = parsed.and_utc();
+            (utc.timestamp() < 0
+                && utc.timestamp_subsec_nanos() == 0
+                && parsed.format(format).to_string() == value)
+                .then_some(utc.timestamp())
+        })
 }
 
 fn format_date(value: i64) -> String {

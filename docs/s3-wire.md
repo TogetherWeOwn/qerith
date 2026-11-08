@@ -47,6 +47,9 @@ here. No live providers, credentials, customer data or deployment are involved.
    conditions, range and only then cold state. A matching ETag suppresses
    If-Unmodified-Since; If-None-Match suppresses If-Modified-Since. HTTP-date
    parsing supports IMF-fixdate, RFC 850 and asctime; invalid dates are ignored.
+   The existing chrono calendar parser handles four-digit pre-1970 dates that
+   httpdate 1.0.3 cannot represent, retaining signed epoch seconds, weekday and
+   grammar validation. The normal three-format parser is unchanged.
    Bodyless 304 retains the corresponding Cache-Control and Expires metadata. Applicable 304/412/416 precede cold 403. Multiple ranges are 400.
    HEAD is always bodyless; satisfiable HEAD Range changes Content-Length but
    keeps status 200. GET range is inclusive, clamped, 206 and exact slice of C.
@@ -132,6 +135,12 @@ properties. No online/hot-only or plaintext-gateway profile is introduced.
   [RestoreObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_RestoreObject.html).
   Those moving docs are background, not pinned runtime evidence. The executable
   assertions define this restricted profile; no observed AWS-equivalence claim.
+
+`tests/fixtures/published-crypto.json` keeps the RFC and pinned Botocore public
+keys and expected outputs as data, decoded by the two unit tests. No runtime key
+literal is embedded at a cryptographic call site; both independent known-answer
+assertions remain active. CodeQL configuration, queries and required gates are
+unchanged; no alert dismissal or analysis exclusion is used.
 
 Fixture secrets are public documentation examples, not usable credentials.
 There is no AWS CLI, Boto3, rclone, CRT, shipped-client, default-settings or live

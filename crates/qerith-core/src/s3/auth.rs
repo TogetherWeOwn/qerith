@@ -237,11 +237,19 @@ fn hmac(key: &[u8], value: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn published_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../tests/fixtures/published-crypto.json")).unwrap()
+    }
+
     #[test]
     fn rfc4231_case_one_hmac_sha256() {
+        let vectors = published_vectors();
+        let vector = &vectors["rfc4231_case_one"];
+        let key = unhex(vector["key_hex"].as_str().unwrap()).unwrap();
+        assert_eq!(key.len(), 20);
         assert_eq!(
-            hex(&hmac(&[0x0b; 20], b"Hi There")),
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+            hex(&hmac(&key, vector["data"].as_str().unwrap().as_bytes())),
+            vector["hmac_sha256"].as_str().unwrap()
         );
     }
 
@@ -251,7 +259,12 @@ mod tests {
         // pinned source in docs/s3-wire.md. Its dummy service/region are
         // tested here only; production verification still requires s3 scope.
         let canonical = "GET\n/mybucket/keyname/.bar\nX-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=access_key%2F20140101%2Fmyregion%2Fmyservice%2Faws4_request&X-Amz-Date=20140101T000000Z&X-Amz-Expires=60&X-Amz-SignedHeaders=host\nhost:s3.us-west-2.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD";
-        let date_key = hmac(b"AWS4secret_key", b"20140101");
+        let vectors = published_vectors();
+        let vector = &vectors["botocore_s3_query"];
+        let date_key = hmac(
+            vector["prefixed_key"].as_str().unwrap().as_bytes(),
+            b"20140101",
+        );
         let region_key = hmac(&date_key, b"myregion");
         let service_key = hmac(&region_key, b"myservice");
         let signing_key = hmac(&service_key, b"aws4_request");
@@ -261,7 +274,7 @@ mod tests {
         );
         assert_eq!(
             hex(&hmac(&signing_key, string.as_bytes())),
-            "ac1b8b9e47e8685c5c963d75e35e8741d55251cd955239cc1efad4dc7201db66"
+            vector["signature"].as_str().unwrap()
         );
     }
 }
