@@ -270,6 +270,14 @@ pub async fn run_once<C: JobPort, S: Storage>(
         catalogue.expire_job(tenant, job.id, now)?;
         return Err(Error::Expired.into());
     }
+    // Retiring an unneeded obligation requires no physical-work admission.
+    if job.kind == JobKind::Restore {
+        match catalogue.cancel_unneeded_restore(tenant, job.id, now, authority) {
+            Ok(()) => return Err(Failure::Io(IoError::Cancelled)),
+            Err(Error::Unsafe) => {} // A current subscriber still needs this job.
+            Err(error) => return Err(error.into()),
+        }
+    }
     if job.checkpoint >= budget.max_attempts {
         return Err(Failure::Admission);
     }
@@ -300,13 +308,6 @@ pub async fn run_once<C: JobPort, S: Storage>(
     {
         return Err(Failure::Admission);
     }
-    if work.job.kind == JobKind::Restore {
-        match catalogue.cancel_unneeded_restore(tenant, work.job.id, now, authority) {
-            Ok(()) => return Err(Failure::Io(IoError::Cancelled)),
-            Err(Error::Unsafe) => {} // A current subscriber still needs this job.
-            Err(error) => return Err(error.into()),
-        }
-    }
     if policy.cancelled(&work) {
         // Invocation interruption is not cancellation of a logical obligation.
         // A needed restore or archive stays queued without consuming an attempt.
@@ -330,10 +331,16 @@ pub async fn run_once<C: JobPort, S: Storage>(
         catalogue, storage, &work, &fence, clock, policy, qualifier, authority,
     )
     .await;
+    // A terminal commit needs no further fallible housekeeping. An uncertain
+    // catalogue transition may also have committed: preserve its reconciliation
+    // signal rather than guessing that deadline expiry can replace it.
+    if result.is_ok() || matches!(result, Err(Failure::Catalogue(Error::Uncertain))) {
+        return result;
+    }
     // Expiry is a catalogue obligation, even if I/O or a guard failed. Never
     // begin cleanup outside the invocation, or let cleanup failure delay expiry.
     let now = clock.now()?;
-    if result.is_err() && now >= work.job.deadline {
+    if now >= work.job.deadline {
         catalogue.expire_job(tenant, work.job.id, now)?;
         return result;
     }

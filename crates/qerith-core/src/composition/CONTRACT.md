@@ -109,7 +109,8 @@ attempt. An interrupted claimed archive, or restore with a current subscriber,
 uses the explicit retry policy and attempt cap, not a restore-only cancellation
 transition. Only catalogue-confirmed unneeded restores become Cancelled. This
 conditional cancellation is attempted independently of invocation interruption,
-before claiming or consuming a bounded attempt.
+before claiming or consuming a bounded attempt, even if the attempt budget is
+exhausted, the byte budget has shrunk or resource admission is denied.
 The producer coalesces same-tenant/generation/profile/**fixed-deadline** requests;
 each reference has its own scope, subscription operation ID and availability
 period. A differing deadline is a separate physical job, not silently widened or
@@ -126,6 +127,12 @@ and outbox removal occur before cleanup or even after cleanup fails across the
 deadline; `Failure::Cleanup` remains explicit. The synthetic fixture keys scratch
 and pending bytes by tenant/generation/job/inventory/immutable attempt, not a
 mutable checkpoint snapshot; old cleanup cannot erase new staging or completion.
+Adopting a completion discovered after staging releases only that attempt's
+redundant incomplete bytes. Confirmed exact-version deletion retires its inventory
+entry, allowing a later truly cold restore; unexpected absence is not deletion
+settlement. Terminal success returns without further fallible housekeeping, and
+an uncertain catalogue transition returns its original uncertainty for reconciliation
+instead of attempting expiry against a possibly committed job.
 No retry is disguised as success. Ordinary
 catalogue/admission failures leave the claim to expire and preserve bytes. An
 uncertain metadata commit must be reconciled with the original operation IDs;
