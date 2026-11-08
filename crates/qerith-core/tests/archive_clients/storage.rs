@@ -52,6 +52,12 @@ impl Io {
             },
         )
         .await;
+        // Trusted bridge of the exact committed retained version. Reusing it for
+        // an early restore must preserve its storage identity, not orphan it.
+        self.delivery.insert(
+            format!("fixture/1/{}/retained", generation.0),
+            fixture.bytes().to_vec(),
+        );
         self.spools.insert(
             generation,
             Spool {
@@ -84,6 +90,36 @@ impl Io {
             receipt: "synthetic-whole-C-verified-not-crypto-readability".into(),
             location,
         }
+    }
+
+    pub fn forget_location(&mut self, location: &str) {
+        self.delivery.remove(location);
+        self.completed.retain(|_, value| value != location);
+    }
+
+    pub fn delete_delivery(
+        &mut self,
+        catalogue: &mut MemoryCatalogue,
+        tenant: TenantId,
+        event: EventId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> qerith_core::catalogue::Result<()> {
+        let mut staged = catalogue.clone();
+        let dispatch = staged.dispatch_deletion(tenant, event, now, authority)?;
+        let DeletionTarget::StorageVersion(location) = &dispatch.target else {
+            return Err(qerith_core::catalogue::Error::Unsafe);
+        };
+        if now >= dispatch.valid_until
+            || !location.starts_with("synthetic/")
+            || !self.delivery.contains_key(location)
+        {
+            return Err(qerith_core::catalogue::Error::Unsafe);
+        }
+        staged.acknowledge_deletion(tenant, event)?;
+        self.forget_location(location);
+        *catalogue = staged;
+        Ok(())
     }
 
     pub fn assert_empty(&self) {

@@ -33,9 +33,8 @@ impl Fixture {
             token: "fixture-control".into(),
         }
     }
-    async fn control(&mut self, command: &str, body: &[u8]) -> serde_json::Value {
-        let response = self
-            .state
+    async fn control_response(&mut self, command: &str, body: &[u8]) -> Response {
+        self.state
             .handle(
                 Request {
                     method: "POST".into(),
@@ -45,8 +44,16 @@ impl Fixture {
                 },
                 &self.token,
             )
-            .await;
-        assert_eq!(response.status, 200);
+            .await
+    }
+    async fn control(&mut self, command: &str, body: &[u8]) -> serde_json::Value {
+        let response = self.control_response(command, body).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
         serde_json::from_slice(&response.body).unwrap()
     }
     async fn call(
@@ -136,6 +143,95 @@ fn error(response: &Response, status: u16, name: &str) {
 }
 
 #[tokio::test]
+async fn retained_restore_reuses_version_then_both_cache_kinds_can_be_evicted() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    assert_eq!(
+        f.call("PUT", "/archive/key", b"exact retained bytes", &[])
+            .await
+            .status,
+        200
+    );
+    f.control("post", b"").await;
+    let restore = b"<RestoreRequest><Days>1</Days></RestoreRequest>";
+    assert_eq!(
+        f.call("POST", "/archive/key?restore", restore, &[])
+            .await
+            .status,
+        202
+    );
+    // A pending job makes eviction unlawful: refusal must not panic or dispatch.
+    error(
+        &f.control_response("evict", b"").await,
+        403,
+        "InvalidObjectState",
+    );
+    assert_eq!(f.control("restore", b"").await["cold_retrievals"], 0);
+    assert_eq!(
+        f.call("GET", "/archive/key", b"", &[]).await.body,
+        b"exact retained bytes"
+    );
+    f.control("expire", b"").await;
+    assert_eq!(f.control("evict", b"").await["retained_bytes"], 0);
+    // Repeated archive control on an already cold generation is idempotent.
+    f.control("archive", b"").await;
+    assert_eq!(
+        f.call("POST", "/archive/key?restore", restore, &[])
+            .await
+            .status,
+        202
+    );
+    assert_eq!(f.control("restore", b"").await["cold_retrievals"], 1);
+    assert_eq!(
+        f.call("GET", "/archive/key", b"", &[]).await.body,
+        b"exact retained bytes"
+    );
+    // A restored delivery cache is deleted through its own exact storage fence.
+    f.control("expire", b"").await;
+    f.control("evict", b"").await;
+}
+
+#[tokio::test]
+async fn completion_sha256_header_is_rejected_not_ignored() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    let init = f
+        .call(
+            "POST",
+            "/archive/key?uploads",
+            b"",
+            &[("x-amz-checksum-algorithm", "SHA256")],
+        )
+        .await;
+    assert_eq!(init.status, 200);
+    let xml = String::from_utf8(init.body).unwrap();
+    let id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap();
+    let target = format!("/archive/key?uploadId={id}");
+    error(
+        &f.call(
+            "POST",
+            &target,
+            b"<CompleteMultipartUpload/>",
+            &[(
+                "x-amz-checksum-sha256",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            )],
+        )
+        .await,
+        400,
+        "InvalidRequest",
+    );
+}
+
+#[tokio::test]
 async fn atomic_s3_commit_real_post_cold_restore_and_failed_expiry_states() {
     let mut f = Fixture::new();
     f.control("configure", br#"{"host":"localhost:443"}"#).await;
@@ -218,6 +314,27 @@ async fn atomic_s3_commit_real_post_cold_restore_and_failed_expiry_states() {
     assert!(header(&head, "x-amz-restore")
         .unwrap()
         .starts_with("ongoing-request=\"false\""));
+    let copied = f
+        .call(
+            "PUT",
+            "/archive/copy",
+            b"",
+            &[("x-amz-copy-source", "/archive/opaque")],
+        )
+        .await;
+    assert_eq!(
+        copied.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&copied.body)
+    );
+    let copy_head = f.call("HEAD", "/archive/copy", b"", &[]).await;
+    assert_eq!(header(&copy_head, "x-amz-meta-fixture"), Some("preserved"));
+    error(
+        &f.call("GET", "/archive/copy", b"", &[]).await,
+        403,
+        "InvalidObjectState",
+    );
     f.control("expire", b"").await;
     error(
         &f.call("GET", "/archive/opaque", b"", &[]).await,

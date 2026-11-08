@@ -392,6 +392,8 @@ fn permit(authority: &dyn Authority, reference: &Reference, action: Action) -> R
 pub struct MemoryMutations {
     catalogue: MemoryCatalogue,
     retained: BTreeMap<(TenantId, GenerationId), Retained>,
+    // Format context is generation metadata, not a property of a transient cache.
+    contexts: BTreeMap<(TenantId, GenerationId), String>,
     sessions: BTreeMap<(TenantId, UploadId), Session>,
     expiry: BTreeSet<(u64, TenantId, UploadId)>,
     policy: MutationPolicy,
@@ -404,6 +406,7 @@ impl MemoryMutations {
         Ok(Self {
             catalogue: MemoryCatalogue::default(),
             retained: BTreeMap::new(),
+            contexts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             expiry: BTreeSet::new(),
             policy,
@@ -661,6 +664,10 @@ impl MemoryMutations {
         if !matches!(result, Outcome::Committed { .. }) {
             return Err(ErrorCode::InternalError);
         }
+        self.contexts.insert(
+            (prepared.reference.tenant, generation),
+            prepared.metadata.encryption_context.clone(),
+        );
         self.retained.insert(
             (prepared.reference.tenant, generation),
             Retained {
@@ -1210,11 +1217,12 @@ impl Authority for CopyAuthority<'_> {
 
 impl MemoryMutations {
     fn source(
-        &self,
+        &mut self,
         source: &CopySource,
         context: &str,
         now: u64,
         authority: &dyn Authority,
+        cache: Option<&mut dyn super::archive::QualifiedCache>,
     ) -> Result<(ValidatedBody, ReferenceView)> {
         permit(authority, &source.reference, Action::Read)?;
         let view = self
@@ -1245,26 +1253,84 @@ impl MemoryMutations {
         if view.availability_until.is_none() {
             return Err(ErrorCode::InvalidObjectState);
         }
-        let retained = self
-            .retained
-            .get(&(source.reference.tenant, source.generation))
-            .ok_or(ErrorCode::InternalError)?;
-        if retained.context != context {
+        let key = (source.reference.tenant, source.generation);
+        if self.contexts.get(&key).map(String::as_str) != Some(context) {
             return Err(ErrorCode::InvalidRequest);
         }
         let generation = self
             .catalogue
             .generation(source.reference.tenant, source.generation)
             .map_err(map_error)?;
-        if generation.cache_location.is_none()
-            || retained.bytes.len() as u64 != view.metadata.identity.length
-            || <[u8; 32]>::from(Sha256::digest(&retained.bytes)) != view.metadata.identity.sha256
+        let location = generation.cache_location.ok_or(ErrorCode::InternalError)?;
+        let bytes = if let Some(retained) = self.retained.get(&key) {
+            if retained.context != context
+                || location != format!("fixture/{}/{}/retained", key.0 .0, key.1 .0)
+            {
+                return Err(ErrorCode::InternalError);
+            }
+            retained.bytes.clone()
+        } else {
+            let cache = cache.ok_or(ErrorCode::InternalError)?;
+            // Exact-generation serving authority also fences server-side copy.
+            // Exclusive model access keeps the clock/catalogue stable during I/O;
+            // a production asynchronous adapter needs its own completion clock.
+            let operation =
+                OperationId(self.catalogue.allocate_identity(key.0).map_err(map_error)?);
+            let until = now.checked_add(30).ok_or(ErrorCode::InvalidArgument)?.min(
+                view.availability_until
+                    .ok_or(ErrorCode::InvalidObjectState)?,
+            );
+            let outcome = self
+                .catalogue
+                .transact(
+                    key.0,
+                    operation,
+                    Mutation::AcquireServingPin {
+                        name: source.reference.name.clone(),
+                        until,
+                    },
+                    now,
+                    authority,
+                )
+                .map_err(map_error)?;
+            let Outcome::Pin(pin) = outcome else {
+                return Err(ErrorCode::InternalError);
+            };
+            let result = (|| {
+                if self
+                    .catalogue
+                    .validate_pin(key.0, pin, now, authority)
+                    .map_err(map_error)?
+                    != key.1
+                {
+                    return Err(ErrorCode::PreconditionFailed);
+                }
+                let bytes =
+                    cache.read(key.0, key.1, &view.metadata.identity, &location, pin, None)?;
+                permit(authority, &source.reference, Action::Read)?;
+                if self
+                    .catalogue
+                    .validate_pin(key.0, pin, now, authority)
+                    .map_err(map_error)?
+                    != key.1
+                {
+                    return Err(ErrorCode::PreconditionFailed);
+                }
+                Ok(bytes)
+            })();
+            self.catalogue
+                .release_serving_pin(key.0, pin)
+                .map_err(map_error)?;
+            result?
+        };
+        if bytes.len() as u64 != view.metadata.identity.length
+            || <[u8; 32]>::from(Sha256::digest(&bytes)) != view.metadata.identity.sha256
         {
             return Err(ErrorCode::InternalError);
         }
         Ok((
             ValidatedBody {
-                bytes: retained.bytes.clone(),
+                bytes,
                 sha256: view.metadata.identity.sha256,
                 checksum: None,
             },
@@ -1274,11 +1340,26 @@ impl MemoryMutations {
 
     pub fn copy_object(
         &mut self,
+        destination: PreparedWrite,
+        source: CopySource,
+        directive: MetadataDirective,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<CommitResult> {
+        self.copy_object_with_cache(destination, source, directive, now, authority, None)
+    }
+
+    /// A trusted verified-cache port, never source bytes supplied by a caller.
+    /// The catalogue lease, pin, identity and format context are checked here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_object_with_cache(
+        &mut self,
         mut destination: PreparedWrite,
         source: CopySource,
         directive: MetadataDirective,
         now: u64,
         authority: &dyn Authority,
+        cache: Option<&mut dyn super::archive::QualifiedCache>,
     ) -> Result<CommitResult> {
         self.final_target(&destination, now, authority)?;
         let (body, view) = self.source(
@@ -1286,6 +1367,7 @@ impl MemoryMutations {
             &destination.metadata.encryption_context,
             now,
             authority,
+            cache,
         )?;
         if matches!(directive, MetadataDirective::Copy) {
             destination.metadata.headers = view.metadata.headers;
@@ -1309,17 +1391,28 @@ impl MemoryMutations {
         now: u64,
         authority: &dyn Authority,
     ) -> Result<PartEvidence> {
+        self.upload_part_copy_with_cache(reference, id, number, source, range, now, authority, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_part_copy_with_cache(
+        &mut self,
+        reference: &Reference,
+        id: UploadId,
+        number: u16,
+        source: CopySource,
+        range: Option<(usize, usize)>,
+        now: u64,
+        authority: &dyn Authority,
+        cache: Option<&mut dyn super::archive::QualifiedCache>,
+    ) -> Result<PartEvidence> {
         let session = self.session(reference, id, now, authority)?;
         if session.result.is_some() {
             return Err(ErrorCode::NoSuchUpload);
         }
         let checksum = session.checksum;
-        let (mut body, _) = self.source(
-            &source,
-            &session.prepared.metadata.encryption_context,
-            now,
-            authority,
-        )?;
+        let context = session.prepared.metadata.encryption_context.clone();
+        let (mut body, _) = self.source(&source, &context, now, authority, cache)?;
         if let Some((start, end)) = range {
             if start > end || end >= body.bytes.len() {
                 return Err(ErrorCode::InvalidRange);

@@ -418,7 +418,21 @@ impl State {
             if method == "POST" {
                 self.admit_commit()?;
                 let checksum = *self.checksum.get(&id).ok_or(s3::ErrorCode::NoSuchUpload)?;
-                let _ = ValidatedBody::new(request.body.clone(), &headers, &verified, &p)?;
+                // The producer's composite SHA256 contract accepts per-part XML
+                // evidence, not a full-object SHA256 completion header. Never drop it.
+                if headers.get("x-amz-checksum-sha256").is_some() {
+                    return Err(s3::ErrorCode::InvalidRequest);
+                }
+                let payload_fields: Vec<_> = fields
+                    .iter()
+                    .copied()
+                    .filter(|(n, _)| {
+                        !n.eq_ignore_ascii_case("x-amz-checksum-crc32")
+                            && !n.eq_ignore_ascii_case("x-amz-checksum-type")
+                    })
+                    .collect();
+                let payload_headers = s3::Headers::new(&payload_fields, &p)?;
+                let _ = ValidatedBody::new(request.body.clone(), &payload_headers, &verified, &p)?;
                 let parts = parse_complete(&request.body, &p, 100, checksum)?;
                 let full = headers
                     .get("x-amz-checksum-crc32")
@@ -460,12 +474,13 @@ impl State {
                         .map_err(|_| s3::ErrorCode::AccessDenied)?;
                     let source = CopySource::from_headers(tenant, view.generation, &headers, &p)?;
                     self.mutations
-                        .copy_object(
+                        .copy_object_with_cache(
                             prepared,
                             source,
                             MetadataDirective::parse(headers.get("x-amz-metadata-directive"))?,
                             self.time.0,
                             &access,
+                            Some(&mut self.io),
                         )?
                         .copy_response()
                 } else {
@@ -508,6 +523,48 @@ impl State {
         }
     }
 
+    fn evict(&mut self, access: &Access) -> qerith_core::catalogue::Result<()> {
+        // Validate every candidate before publishing a deletion or touching bytes.
+        let mut candidates = Vec::new();
+        for &generation in self.io.spools.keys() {
+            let view = self.mutations.catalogue().generation(TENANT, generation)?;
+            let Some(location) = view.cache_location else {
+                continue;
+            };
+            let candidate = self.mutations.catalogue().candidate(
+                TENANT,
+                generation,
+                DeletionKind::DeliveryCache,
+                self.time.0,
+                self.time.0 + 1,
+                access,
+            )?;
+            candidates.push((location, candidate));
+        }
+        self.time.0 += 1;
+        for (location, candidate) in candidates {
+            let event = self.mutations.catalogue_worker().finalize_deletion(
+                candidate,
+                self.time.0,
+                access,
+            )?;
+            if location.starts_with("fixture/") {
+                self.mutations
+                    .delete_retained(TENANT, event, self.time.0, access)?;
+                self.io.forget_location(&location);
+            } else {
+                self.io.delete_delivery(
+                    self.mutations.catalogue_worker(),
+                    TENANT,
+                    event,
+                    self.time.0,
+                    access,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     async fn control(&mut self, command: &str, body: &[u8]) -> s3::Response {
         let access = Access {
             tenant: TENANT,
@@ -523,7 +580,7 @@ impl State {
                 }
                 self.host = Some(host.into());
             }
-            "archive" => {
+            "archive" | "post" => {
                 let events = self.mutations.catalogue().outbox(TENANT);
                 for event in events {
                     let Effect::RunJob(job) = event.effect else {
@@ -569,44 +626,21 @@ impl State {
                         JobState::Complete
                     );
                 }
-                // The catalogue's minimum seven-day retention AND exact-G pair
-                // proof are both required. This changes only the fixture clock.
-                self.time.0 += 7 * 86400 + 1;
-                let generations: Vec<_> = self.io.spools.keys().copied().collect();
-                for generation in generations {
-                    if self
-                        .mutations
-                        .retained_for_archive(TENANT, generation)
-                        .is_err()
-                    {
-                        continue;
+                if command == "archive" {
+                    // The catalogue's minimum seven-day retention AND exact-G
+                    // pair proof are required. Only the fixture clock advances.
+                    self.time.0 += 7 * 86400 + 1;
+                    if let Err(error) = self.evict(&access) {
+                        self.events.push(
+                            json!({"control":"archive", "eviction_refused":format!("{error:?}")}),
+                        );
+                        return s3::ErrorCode::InvalidObjectState
+                            .response(false, "eviction-refused");
                     }
-                    let now = self.time.0;
-                    let candidate = self
-                        .mutations
-                        .catalogue()
-                        .candidate(
-                            TENANT,
-                            generation,
-                            DeletionKind::DeliveryCache,
-                            now,
-                            now + 1,
-                            &access,
-                        )
-                        .unwrap();
-                    self.time.0 += 1;
-                    let event = self
-                        .mutations
-                        .catalogue_worker()
-                        .finalize_deletion(candidate, self.time.0, &access)
-                        .unwrap();
-                    self.mutations
-                        .delete_retained(TENANT, event, self.time.0, &access)
-                        .unwrap();
+                    assert_eq!(self.mutations.retained_bytes(TENANT), 0);
+                    self.io.assert_empty();
+                    self.events.push(json!({"control":"archive", "empty_cache":true, "independence":"SIMULATED", "generations":self.io.spools.len()}));
                 }
-                assert_eq!(self.mutations.retained_bytes(TENANT), 0);
-                self.io.assert_empty();
-                self.events.push(json!({"control":"archive", "empty_cache":true, "independence":"SIMULATED", "generations":self.io.spools.len()}));
             }
             "restore" => {
                 let events = self.mutations.catalogue().outbox(TENANT);
@@ -641,6 +675,14 @@ impl State {
                     .await;
                     self.events.push(json!({"control":"restore", "generation":job.generation.0, "result":format!("{result:?}")}));
                 }
+            }
+            "evict" => {
+                if let Err(error) = self.evict(&access) {
+                    self.events
+                        .push(json!({"control":"evict", "eviction_refused":format!("{error:?}")}));
+                    return s3::ErrorCode::InvalidObjectState.response(false, "eviction-refused");
+                }
+                self.io.assert_empty();
             }
             "expire" => self.time.0 += 8 * 86400,
             "restart" => {
