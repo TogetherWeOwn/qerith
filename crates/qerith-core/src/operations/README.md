@@ -24,10 +24,18 @@ MCP descriptors use the same names but include only implemented operations, matc
 capabilities. REST retains recognized unimplemented routes for explicit Unsupported
 responses; direct calls to an unimplemented MCP name also return Unsupported.
 These are internal projection contracts, not an assertion of S3/HTTP caching or MCP
-wire conformance. The future wire adapter must reject duplicate JSON keys and bound
-raw request bytes, nesting, field names
-and aggregate parsing work **before** allocation into `Fields`. Unknown fields
-are never discarded. Serializers must preserve unsigned integers exactly (no
+wire conformance. The in-process `rest_request` and `mcp_request` wrappers decode
+only a flat JSON argument object, not an HTTP request or JSON-RPC envelope. They
+bound raw input (including whitespace/escapes) to `MAX_MESSAGE_BYTES` (65,536),
+reject nested/null values, duplicate decoded keys, unknown fields, signed/floating
+or overflowing numbers, and trailing data. A streaming visitor rejects unknown
+keys before reading their values; only bounded scalar values enter `Fields`.
+Existing registry validation still owns required fields, token syntax, numeric
+ranges and destination fences. Scope and MCP session/mode are trusted caller
+inputs, never JSON fields. Authentication, unsupported routes and experimental
+MCP modes keep the existing projection precedence without parsing arguments or
+entering the port. Parse errors use the same sanitized InvalidInput projections.
+Unknown fields are never discarded. Serializers must preserve unsigned integers exactly (no
 JavaScript floating-point rounding), absent totals as null/absence, and the
 closed enum discriminants. Output schemas are the Rust `Output` variants, not
 arbitrary backend JSON. A later wire serializer/schema emitter must project
@@ -155,8 +163,12 @@ isolation, cursor query/operation/scope binding and invalidation, logical cold
 state, unsupported tasks and monotonic unknown-total progress. Regression cases
 also cover publication-time destination fences, fresh replacement generations,
 unique accepted handles, immutable cursor receipts, authorized parent membership,
-and terminal failed/cancelled results (never a perpetual NotReady). Full suites run in
-GitHub Actions via the existing native, wasm, MSRV and dependency gates.
+and terminal failed/cancelled results (never a perpetual NotReady).
+`tests/operation_wire.rs` compares wire and typed calls for every implemented
+operation, exact unsigned integers, malformed/duplicate/nested/forbidden inputs,
+byte/token bounds, caller-scope isolation, replay, all domain error projections
+and unchanged side-effect/hook counts. Full suites run in GitHub Actions via the
+existing native, wasm, MSRV and dependency gates.
 
 These are contract tests, not production conformance, cryptographic qualification,
 real provider/cold-restore evidence or an approval to select a database/supplier.
