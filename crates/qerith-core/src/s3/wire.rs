@@ -23,15 +23,16 @@ impl Target {
             .split_once('/')
             .map_or((&path[1..], None), |(b, k)| (b, Some(k)));
         // Explicit path-style addressing; a bucket cannot be percent-aliased.
-        if bucket.len() < 3
-            || bucket.len() > 63
-            || !bucket
-                .bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b".-".contains(&c))
-            || !bucket.as_bytes()[0].is_ascii_alphanumeric()
-            || !bucket.as_bytes()[bucket.len() - 1].is_ascii_alphanumeric()
-            || bucket.contains("..")
-            || bucket.parse::<std::net::Ipv4Addr>().is_ok()
+        if (!bucket.is_empty() || key.is_some())
+            && (bucket.len() < 3
+                || bucket.len() > 63
+                || !bucket
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b".-".contains(&c))
+                || !bucket.as_bytes()[0].is_ascii_alphanumeric()
+                || !bucket.as_bytes()[bucket.len() - 1].is_ascii_alphanumeric()
+                || bucket.contains("..")
+                || bucket.parse::<std::net::Ipv4Addr>().is_ok())
         {
             return Err(ErrorCode::InvalidRequest);
         }
@@ -114,6 +115,7 @@ impl Target {
                     | "uploadId"
                     | "partNumber"
                     | "restore"
+                    | "location"
                     | "delete"
                     | "list-type"
                     | "prefix"
