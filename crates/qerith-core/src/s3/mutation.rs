@@ -429,15 +429,14 @@ impl MemoryMutations {
         authority: &dyn Authority,
     ) -> cat::Result<()> {
         let mut staged = self.catalogue.clone();
-        let dispatch =
-            cat::DeletionPort::dispatch_deletion(&mut staged, tenant, event, now, authority)?;
+        let dispatch = cat::JobPort::dispatch_deletion(&mut staged, tenant, event, now, authority)?;
         if now >= dispatch.valid_until {
             return Err(cat::Error::Expired);
         }
         match &dispatch.target {
             cat::DeletionTarget::StorageVersion(location) => {
                 let expected = format!("fixture/{}/{}/retained", tenant.0, dispatch.generation.0);
-                if location != &expected
+                if location.as_str() != expected.as_str()
                     || !self.retained.contains_key(&(tenant, dispatch.generation))
                 {
                     return Err(cat::Error::Unsafe);
@@ -451,7 +450,7 @@ impl MemoryMutations {
         }
         // Validate ack on the unpublished snapshot first; nothing fallible remains
         // after the in-memory storage operation. Real storage needs reconciliation.
-        cat::DeletionPort::acknowledge_deletion(&mut staged, tenant, event)?;
+        cat::JobPort::acknowledge_deletion(&mut staged, tenant, event)?;
         self.retained.remove(&(tenant, dispatch.generation));
         self.catalogue = staged;
         Ok(())
