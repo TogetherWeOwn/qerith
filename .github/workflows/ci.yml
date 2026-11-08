@@ -57,6 +57,7 @@ jobs:
         run: |
           test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-positive.json"
           test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-negative.json"
+          test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-revocation.json"
           printf '%s\n' "$QERITH_EVIDENCE_HEAD" > "$QERITH_SERVICE_EVIDENCE_DIR/head-sha.txt"
       - name: Upload reference-service invariant evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

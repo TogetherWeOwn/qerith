@@ -34,6 +34,33 @@ result variant. Native status exposes the same job; REST/MCP result exposes its
 committed logical target. Native ciphertext ranges are explicitly unsupported by
 this adapter, rather than silently expanded to whole-object downloads.
 
+Upload descriptor ingress uses the native stored-ciphertext and metadata validator,
+including canonical lowercase checksum syntax. Bound key/envelope and parent grants
+are rechecked on initiation, staged progress, resume, verification, commit and worker
+entry, including replays. The ingest authority also rechecks them at catalogue effects,
+so a grant revoked while storage runs cannot authorize publication.
+
+## Copy identities and contexts
+
+Copy requires a currently available exact source, source key/envelope grants and
+access to every source parent inherited by the destination. A deployment must also
+explicitly qualify unchanged-C reuse through `Access::copy_compatible`; the default
+is false. A supported profile or key grant alone does not prove compatibility with
+a new logical target. The synthetic fixture opts in only for `unqualified_mock`.
+
+Every accepted new copy reserves a fresh **logical** destination generation. Its
+persisted bound descriptor contains the unchanged C/metadata, underlying catalogue
+storage generation and destination reference revision. All lookup, browse, native,
+job, restore and transfer boundaries resolve that binding, never accept a storage
+ID as an alternate logical ID, and fail closed after an out-of-band revision change.
+Copy uses a real catalogue Link, retaining one physical ciphertext lifecycle for
+verification, moderation, pins and deletion. It does not clone storage evidence or
+inherit source availability. The destination requires its own explicit restore.
+Re-copying the same physical ciphertext still changes logical G and reference
+revision, fencing old jobs and pins. Bindings survive checkpoint/reconnect and are
+bounded with the other service records. Model-transaction rollback includes Link,
+binding, job, identity allocation, membership and accepted-response replay.
+
 ## Transfer and jobs
 
 1. Initiation reserves a scoped reference-model handle and generation with a
@@ -42,6 +69,10 @@ this adapter, rather than silently expanded to whole-object downloads.
    `staged`. `resume` reconciles the same handle after disconnect/reconnect.
 3. A trusted full-byte verifier supplies `verify_staged` with a complete-copy
    receipt. Syntax or client checksum assertions do not establish this receipt.
+   The current service profile carries only the full length/SHA-256 identity;
+   auxiliary `CompleteCopy.checksums` must be empty because no auxiliary checksum
+   algorithm/parts were negotiated. Nonempty lists are rejected, not verified or
+   silently discarded.
 4. Commit accepts a bounded job. `finish_upload` explicitly invokes the delivered
    `composition::ingest` against storage and policy ports. Storage must reconcile
    the staged inventory identified by the scoped intent, verify length/digest,
@@ -60,7 +91,11 @@ Cancellation is non-rollback: a committed job reports already committed; an
 unstarted upload can stop before commit; restore cancellation removes only its
 own accepted subscription. An interrupted/uncertain storage attempt retains a
 cleanup/reconciliation obligation instead of claiming no effects. Polling does
-not extend deadlines. Explicit model record, byte, lifetime and retry ceilings
+not extend deadlines. A new commit identity cannot clear cleanup-aware cancellation
+or restart storage. Native resume/restore/status replays retain their original,
+already-validated progress/status while still checking current request authority;
+they do not falsely validate historical progress against the latest state.
+Explicit model record, byte, lifetime and retry ceilings
 are test parameters, not measured product entitlements. Resource reclamation and
 production capacity policy are not implemented by this reference fixture.
 

@@ -247,6 +247,11 @@ fn stored_ciphertext(value: &Ciphertext, policy: &Policy) -> Check {
     Ok(())
 }
 
+pub(crate) fn validate_stored_upload(value: &UploadIntent, policy: &Policy) -> Check {
+    stored_ciphertext(&value.ciphertext, policy)?;
+    metadata(&value.metadata)
+}
+
 fn intent(value: &UploadIntent, selected: &Selection, policy: &Policy) -> Check {
     if value.ciphertext.profile != selected.profile {
         return Err(ErrorCode::CapabilityDowngrade);

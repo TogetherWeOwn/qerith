@@ -18,6 +18,16 @@ pub trait Access {
     fn container(&self, scope: &o::Scope, parent: &str) -> bool;
     fn admit(&self, scope: &o::Scope) -> bool;
     fn key_envelope(&self, scope: &o::Scope, key: &n::Opaque, envelope: &n::Opaque) -> bool;
+    /// Trusted profile/context qualification for reusing C under a fresh logical G.
+    /// A key grant alone does not prove compatibility with a destination context.
+    fn copy_compatible(
+        &self,
+        _scope: &o::Scope,
+        _source: &n::Object,
+        _destination: &o::Opaque,
+    ) -> bool {
+        false
+    }
 }
 
 struct Authority<'a, A> {
@@ -33,6 +43,28 @@ impl<A: Access> c::Authority for Authority<'_, A> {
         reference.tenant == self.tenant
             && self.is_current()
             && self.access.permits(self.scope, &reference.name, action)
+    }
+}
+
+struct UploadAuthority<'a, A> {
+    authority: Authority<'a, A>,
+    descriptor: &'a Descriptor,
+}
+impl<A: Access> c::Authority for UploadAuthority<'_, A> {
+    fn is_current(&self) -> bool {
+        self.authority.is_current()
+            && self
+                .authority
+                .access
+                .container(self.authority.scope, self.descriptor.parent.as_str())
+            && self.authority.access.key_envelope(
+                self.authority.scope,
+                &self.descriptor.intent.ciphertext.key_ref,
+                &self.descriptor.intent.ciphertext.envelope_ref,
+            )
+    }
+    fn permits(&self, reference: &c::Reference, action: c::Action) -> bool {
+        self.is_current() && self.authority.permits(reference, action)
     }
 }
 
@@ -99,6 +131,13 @@ struct Cursor {
     entries: Vec<o::Entry>,
 }
 
+#[derive(Clone)]
+struct BoundObject {
+    object: n::Object,
+    storage_generation: c::GenerationId,
+    revision: u64,
+}
+
 /// Explicit, non-durable reference checkpoint, including reconciliation and outbox.
 /// Clone/import simulates process loss; no DB or persistence qualification is claimed.
 #[derive(Clone, Default)]
@@ -110,7 +149,7 @@ pub struct ReferenceModel {
     uploads: BTreeMap<o::Opaque, Upload>,
     transfers: BTreeMap<o::Opaque, Transfer>,
     jobs: BTreeMap<o::Opaque, Job>,
-    objects: BTreeMap<(c::TenantId, c::GenerationId, String), n::Object>,
+    objects: BTreeMap<(c::TenantId, c::GenerationId, String), BoundObject>,
     members: BTreeSet<(c::TenantId, o::Opaque, o::Opaque)>,
     cursors: BTreeMap<o::Opaque, Cursor>,
     replay: BTreeMap<o::Reconciliation, (o::Request, o::Output)>,
@@ -211,7 +250,8 @@ impl<A: Access> Service<A> {
             + self.model.jobs.len()
             + self.model.transfers.len()
             + self.model.cursors.len()
-            + self.model.replay.len();
+            + self.model.replay.len()
+            + self.model.objects.len();
         if count.saturating_add(additional) > self.limits.records {
             return Err(fail(o::ErrorCode::QuotaExceeded));
         }
@@ -289,10 +329,69 @@ impl<A: Access> Service<A> {
     ) -> Result<c::ReferenceView, o::Failure> {
         self.permit(scope, &target.reference, c::Action::Read)?;
         let value = self.lookup(scope, &target.reference)?;
-        if value.generation != generation(&target.generation)? {
+        let bound = self.bound_object(scope, &target.reference, &value)?;
+        if bound.object.target.g.as_str() != target.generation.as_str() {
             return Err(fail(o::ErrorCode::PreconditionFailed));
         }
         Ok(value)
+    }
+    fn bound_object(
+        &self,
+        scope: &o::Scope,
+        name: &o::Opaque,
+        view: &c::ReferenceView,
+    ) -> Result<&BoundObject, o::Failure> {
+        self.model
+            .objects
+            .get(&(self.tenant(scope)?, view.generation, name.as_str().into()))
+            .filter(|bound| {
+                bound.storage_generation == view.generation
+                    && bound.revision == view.revision
+                    && bound.object.target.object.as_str() == name.as_str()
+            })
+            .ok_or_else(denied)
+    }
+    fn permit_copy(&self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+        let source = request.opaque("source").unwrap();
+        let view = self.exact(
+            scope,
+            &o::LogicalReference {
+                reference: source.clone(),
+                generation: request.opaque("source_generation").unwrap().clone(),
+            },
+        )?;
+        let object = &self.bound_object(scope, source, &view)?.object;
+        if !self.access.key_envelope(
+            scope,
+            &object.ciphertext.key_ref,
+            &object.ciphertext.envelope_ref,
+        ) {
+            return Err(denied());
+        }
+        if !self
+            .access
+            .copy_compatible(scope, object, request.opaque("reference").unwrap())
+        {
+            return Err(fail(o::ErrorCode::Unsupported));
+        }
+        let tenant = self.tenant(scope)?;
+        for (_, parent, _) in self
+            .model
+            .members
+            .iter()
+            .filter(|(t, _, name)| *t == tenant && name == source)
+        {
+            if !self.access.container(scope, parent.as_str()) {
+                return Err(denied());
+            }
+        }
+        if !view
+            .availability_until
+            .is_some_and(|until| until > self.now)
+        {
+            return Err(fail(o::ErrorCode::NotAvailable));
+        }
+        Ok(())
     }
     fn target(request: &o::Request) -> o::LogicalReference {
         o::LogicalReference {
@@ -362,6 +461,27 @@ impl<A: Access> Service<A> {
         }
         Ok(None)
     }
+    fn permit_descriptor(
+        &self,
+        scope: &o::Scope,
+        descriptor: &Descriptor,
+    ) -> Result<(), o::Failure> {
+        self.permit(
+            scope,
+            &operation_id(&descriptor.intent.object)?,
+            c::Action::Write,
+        )?;
+        if !self.access.container(scope, descriptor.parent.as_str())
+            || !self.access.key_envelope(
+                scope,
+                &descriptor.intent.ciphertext.key_ref,
+                &descriptor.intent.ciphertext.envelope_ref,
+            )
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
     /// Trusted descriptor ingress, after native validation/key-envelope resolution.
     /// REST/MCP initiate references this scoped descriptor using the same identity.
     /// This does not authenticate a client, approve a crypto suite or verify C.
@@ -377,6 +497,13 @@ impl<A: Access> Service<A> {
         if !self.access.container(scope, parent.as_str()) {
             return Err(denied());
         }
+        n::validate_stored_upload(&intent, &self.profile).map_err(|error| {
+            fail(match error {
+                n::ErrorCode::UnsupportedProfile => o::ErrorCode::Unsupported,
+                n::ErrorCode::LimitExceeded => o::ErrorCode::QuotaExceeded,
+                _ => o::ErrorCode::InvalidInput,
+            })
+        })?;
         if intent.ciphertext.length > self.limits.bytes {
             return Err(fail(o::ErrorCode::QuotaExceeded));
         }
@@ -422,7 +549,7 @@ impl<A: Access> Service<A> {
         received: u64,
     ) -> Result<(), o::Failure> {
         let upload = self.model.uploads.get(handle).cloned().ok_or_else(denied)?;
-        self.permit(scope, &upload.transfer.target.reference, c::Action::Write)?;
+        self.permit_descriptor(scope, &upload.descriptor)?;
         if upload.scope != *scope {
             return Err(denied());
         }
@@ -476,7 +603,7 @@ impl<A: Access> Service<A> {
             .get(handle)
             .filter(|u| u.scope == *scope)
             .ok_or_else(denied)?;
-        self.permit(scope, &upload.transfer.target.reference, c::Action::Write)?;
+        self.permit_descriptor(scope, &upload.descriptor)?;
         if self.now >= upload.transfer.expires_at
             || self.job(scope, &upload.job)?.value.state.terminal()
         {
@@ -503,7 +630,7 @@ impl<A: Access> Service<A> {
             .filter(|u| u.scope == *scope)
             .cloned()
             .ok_or_else(denied)?;
-        self.permit(scope, &upload.transfer.target.reference, c::Action::Write)?;
+        self.permit_descriptor(scope, &upload.descriptor)?;
         let job = self.job(scope, &upload.job)?;
         if job.value.state == o::JobState::Succeeded {
             return Ok(job.value);
@@ -514,6 +641,7 @@ impl<A: Access> Service<A> {
         {
             return Err(fail(o::ErrorCode::Conflict));
         }
+        self.reserve(1)?;
         self.set_now(clock.now().map_err(map)?)?;
         let metadata = metadata(&upload.descriptor.intent, upload.created_at)?;
         let tenant = self.tenant(scope)?;
@@ -527,10 +655,13 @@ impl<A: Access> Service<A> {
             metadata,
             archive_deadline: job.deadline,
         };
-        let authority = Authority {
-            access: &self.access,
-            scope,
-            tenant,
+        let authority = UploadAuthority {
+            authority: Authority {
+                access: &self.access,
+                scope,
+                tenant,
+            },
+            descriptor: &upload.descriptor,
         };
         if upload.attempts >= self.limits.attempts {
             return Err(fail(o::ErrorCode::QuotaExceeded));
@@ -573,9 +704,14 @@ impl<A: Access> Service<A> {
             ciphertext: upload.descriptor.intent.ciphertext,
             metadata: upload.descriptor.intent.metadata,
         };
-        self.model
-            .objects
-            .insert((tenant, work.generation, work.name), object);
+        self.model.objects.insert(
+            (tenant, work.generation, work.name),
+            BoundObject {
+                object,
+                storage_generation: work.generation,
+                revision: upload.expected_revision + 1,
+            },
+        );
         self.model.members.insert((
             tenant,
             upload.descriptor.parent,
@@ -606,7 +742,7 @@ impl<A: Access> Service<A> {
             .catalogue
             .validate_pin(auth.tenant, transfer.pin, self.now, &auth)
             .map_err(map)?;
-        if g != generation(&transfer.value.target.generation)? {
+        if g != self.exact(scope, &transfer.value.target)?.generation {
             return Err(denied());
         }
         Ok((g, transfer.pin))
@@ -719,6 +855,18 @@ impl<A: Access> o::OperationPort for Service<A> {
             if !request.matches_target(&upload.transfer.target) {
                 return Err(denied());
             }
+            self.permit_descriptor(scope, &upload.descriptor)?;
+        }
+        if request.operation() == o::Operation::Copy {
+            self.permit_copy(scope, request)?;
+        }
+        if request.operation() == o::Operation::InitiateUpload {
+            let descriptor = self
+                .model
+                .descriptors
+                .get(&(scope.clone(), request.opaque("identity").unwrap().clone()))
+                .ok_or(fail(o::ErrorCode::InvalidInput))?;
+            self.permit_descriptor(scope, descriptor)?;
         }
         Ok(())
     }
@@ -786,10 +934,8 @@ impl<A: Access> o::OperationPort for Service<A> {
         // Read-only browse reserves a cursor at the insertion point instead.
         let additional = match request.operation() {
             o::Operation::InitiateUpload => 3,
-            o::Operation::Copy
-            | o::Operation::Delete
-            | o::Operation::Restore
-            | o::Operation::AuthorizeDownload => 2,
+            o::Operation::Copy => 3,
+            o::Operation::Delete | o::Operation::Restore | o::Operation::AuthorizeDownload => 2,
             o::Operation::CommitUpload | o::Operation::AbortUpload | o::Operation::Cancel => 1,
             _ => 0,
         };
@@ -933,6 +1079,7 @@ impl<A: Access> Service<A> {
                     return Ok(Out::Job(job.value));
                 }
                 if job.value.state.terminal()
+                    || job.value.state == o::JobState::CancelRequested
                     || self.now >= upload.transfer.expires_at
                     || upload.received != upload.transfer.max_bytes
                     || !upload.verified
@@ -944,8 +1091,14 @@ impl<A: Access> Service<A> {
                         .lookup(scope, &upload.transfer.target.reference)
                         .is_err(),
                     n::Precondition::Matches(g) => self
-                        .lookup(scope, &upload.transfer.target.reference)
-                        .is_ok_and(|r| native_id(&token("g", r.generation.0)) == *g),
+                        .exact(
+                            scope,
+                            &o::LogicalReference {
+                                reference: upload.transfer.target.reference.clone(),
+                                generation: operation_id(g)?,
+                            },
+                        )
+                        .is_ok(),
                 };
                 if !current {
                     return Err(fail(o::ErrorCode::PreconditionFailed));
@@ -987,7 +1140,15 @@ impl<A: Access> Service<A> {
                             Some(o::Entry {
                                 target: o::LogicalReference {
                                     reference: name.clone(),
-                                    generation: token("g", view.generation.0),
+                                    generation: operation_id(
+                                        &self
+                                            .bound_object(scope, name, &view)
+                                            .ok()?
+                                            .object
+                                            .target
+                                            .g,
+                                    )
+                                    .ok()?,
                                 },
                                 bytes: view.metadata.identity.length,
                                 available: view.availability_until.is_some_and(|t| t > self.now),
@@ -1140,11 +1301,19 @@ impl<A: Access> Service<A> {
                 let id = self.next()?;
                 let name = request.opaque("reference").unwrap();
                 let revision = self.fence(scope, request)?;
-                if request.operation() == Op::Copy
-                    && request.opaque("generation") == request.opaque("source_generation")
-                {
-                    return Err(fail(o::ErrorCode::Conflict));
-                }
+                let source_object = if request.operation() == Op::Copy {
+                    self.permit_copy(scope, request)?;
+                    let source = request.opaque("source").unwrap();
+                    let view = self.lookup(scope, source)?;
+                    Some(self.bound_object(scope, source, &view)?.object.clone())
+                } else {
+                    None
+                };
+                let logical_generation = if source_object.is_some() {
+                    token("g", id)
+                } else {
+                    request.opaque("generation").unwrap().clone()
+                };
                 let auth = Authority {
                     access: &self.access,
                     scope,
@@ -1167,19 +1336,43 @@ impl<A: Access> Service<A> {
                     .catalogue
                     .transact(tenant, c::OperationId(id), mutation, self.now, &auth)
                     .map_err(map)?;
-                let g = match result {
-                    c::Outcome::Reference { generation, .. } => generation,
-                    _ => generation(
-                        request
-                            .opaque("generation")
-                            .ok_or(fail(o::ErrorCode::Internal))?,
-                    )?,
-                };
+                if let Some(mut object) = source_object {
+                    let c::Outcome::Reference {
+                        generation: storage_generation,
+                        revision,
+                    } = result
+                    else {
+                        return Err(fail(o::ErrorCode::Internal));
+                    };
+                    object.target = n::Target {
+                        object: native_id(name),
+                        g: native_id(&logical_generation),
+                    };
+                    self.model.objects.insert(
+                        (tenant, storage_generation, name.as_str().into()),
+                        BoundObject {
+                            object,
+                            storage_generation,
+                            revision,
+                        },
+                    );
+                    let source = request.opaque("source").unwrap();
+                    let parents = self
+                        .model
+                        .members
+                        .iter()
+                        .filter(|(t, _, n)| *t == tenant && n == source)
+                        .map(|(_, parent, _)| parent.clone())
+                        .collect::<Vec<_>>();
+                    for parent in parents {
+                        self.model.members.insert((tenant, parent, name.clone()));
+                    }
+                }
                 let mut job = self.new_job(
                     scope,
                     o::LogicalReference {
                         reference: name.clone(),
-                        generation: token("g", g.0),
+                        generation: logical_generation,
                     },
                     id,
                     None,
@@ -1190,29 +1383,6 @@ impl<A: Access> Service<A> {
                 self.model
                     .jobs
                     .insert(job.value.handle.clone(), job.clone());
-                if request.operation() == Op::Copy {
-                    let source = request.opaque("source").unwrap();
-                    let mut object = self
-                        .model
-                        .objects
-                        .get(&(tenant, g, source.as_str().into()))
-                        .cloned()
-                        .ok_or_else(denied)?;
-                    object.target.object = native_id(name);
-                    self.model
-                        .objects
-                        .insert((tenant, g, name.as_str().into()), object);
-                    let parents = self
-                        .model
-                        .members
-                        .iter()
-                        .filter(|(t, _, n)| *t == tenant && n == source)
-                        .map(|(_, p, _)| p.clone())
-                        .collect::<Vec<_>>();
-                    for parent in parents {
-                        self.model.members.insert((tenant, parent, name.clone()));
-                    }
-                }
                 Ok(Out::Job(job.value))
             }
             Op::Capabilities | Op::Versions => Err(fail(o::ErrorCode::Unsupported)),

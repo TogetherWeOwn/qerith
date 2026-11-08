@@ -32,15 +32,13 @@ impl<A: Access> View<'_, A> {
     fn object_value(&self, target: &n::Target) -> Option<n::Object> {
         let target = logical(target).ok()?;
         let view = self.service.exact(self.scope, &target).ok()?;
-        self.service
-            .model
-            .objects
-            .get(&(
-                self.service.tenant(self.scope).ok()?,
-                view.generation,
-                target.reference.as_str().into(),
-            ))
-            .cloned()
+        Some(
+            self.service
+                .bound_object(self.scope, &target.reference, &view)
+                .ok()?
+                .object
+                .clone(),
+        )
     }
 }
 fn owner(scope: &o::Scope) -> n::Owner {
@@ -163,12 +161,19 @@ impl<A: Access> n::Authority for View<'_, A> {
         self.service
             .permit(self.scope, &id, c::Action::Write)
             .ok()?;
-        self.owned(
-            self.service
-                .lookup(self.scope, &id)
-                .ok()
-                .map(|r| native_id(&token("g", r.generation.0))),
-        )
+        let current = match self.service.lookup(self.scope, &id) {
+            Ok(view) => Some(
+                self.service
+                    .bound_object(self.scope, &id, &view)
+                    .ok()?
+                    .object
+                    .target
+                    .g
+                    .clone(),
+            ),
+            Err(_) => None,
+        };
+        self.owned(current)
     }
     fn object(&self, target: &n::Target) -> Option<n::Owned<n::Object>> {
         self.owned(self.object_value(target)?)
@@ -180,11 +185,7 @@ impl<A: Access> n::Authority for View<'_, A> {
             return None;
         }
         self.service
-            .permit(
-                self.scope,
-                &upload.transfer.target.reference,
-                c::Action::Write,
-            )
+            .permit_descriptor(self.scope, &upload.descriptor)
             .ok()?;
         let job = self.service.job(self.scope, &upload.job).ok()?;
         self.owned(n::UploadRecord {
@@ -339,9 +340,15 @@ impl<A: Access> Service<A> {
                 .ok_or(n::ErrorCode::Unavailable)?
                 .1
                 .clone();
-            // Replay is reconciliation, not execution, but current authority and
-            // response invariants must still hold before exposing its result.
-            self.check_response(scope, request, body.clone())?;
+            // Admission above rechecks live authority. Progress/status replies were
+            // validated at issuance and are immutable history, not current state.
+            // Other replies still need live response checks (e.g. transfer expiry).
+            if !matches!(
+                request.action,
+                n::Action::ResumeUpload(_) | n::Action::Restore(_) | n::Action::Status { .. }
+            ) {
+                self.check_response(scope, request, body.clone())?;
+            }
             return Ok(body);
         }
         if self.model.native.replay.len() + self.model.native.sessions.len() >= self.limits.records
