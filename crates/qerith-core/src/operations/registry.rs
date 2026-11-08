@@ -197,6 +197,14 @@ pub static REGISTRY: &[Definition] = &[
             REF,
             GEN,
             number("availability_seconds", 1, u32::MAX as u64),
+            Field {
+                name: "max_seconds",
+                kind: FieldKind::Number {
+                    min: 1,
+                    max: u32::MAX as u64,
+                },
+                required: false,
+            },
             ID,
         ],
         output: OutputSchema::Job,
