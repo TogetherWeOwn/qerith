@@ -1112,7 +1112,9 @@ fn typed_delete_rejects_all_invalid_keys_before_any_mutation() {
             .replace("DeleteResult", "Delete")
             .replace("Deleted", "Object");
         assert_eq!(
-            parse_delete(delete.as_bytes(), &policy()).unwrap().keys,
+            parse_delete(delete.as_bytes(), &policy(), mutation_policy().batch_keys)
+                .unwrap()
+                .keys,
             vec![key]
         );
         assert!(m
