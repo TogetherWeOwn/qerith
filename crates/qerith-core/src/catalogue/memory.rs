@@ -1156,6 +1156,14 @@ impl JobPort for MemoryCatalogue {
                 return Err(Error::Unavailable);
             }
             match transition {
+                Transition::Revalidate => {
+                    if j.view.kind == JobKind::Restore
+                        && !t.has_current_subscriber(tenant, &j, authority)
+                    {
+                        return Err(Error::Unavailable);
+                    }
+                    return Ok(());
+                }
                 Transition::Checkpoint {
                     expected,
                     next,

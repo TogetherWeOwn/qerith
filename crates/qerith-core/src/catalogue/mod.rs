@@ -474,6 +474,10 @@ pub trait JobPort {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transition {
+    /// Read-only revalidation under the current claim, moderation epoch and
+    /// authority. A restore must still have a matching authorized subscriber.
+    /// This grants no publication rights and does not consume a checkpoint.
+    Revalidate,
     Checkpoint {
         expected: u64,
         next: u64,
