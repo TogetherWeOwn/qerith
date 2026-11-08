@@ -126,7 +126,7 @@ impl Conditions {
         }
     }
 
-    fn evaluate(&self, metadata: &ObjectMetadata) -> Result<bool> {
+    pub(super) fn evaluate(&self, metadata: &ObjectMetadata) -> Result<bool> {
         if let Some(tags) = &self.if_match {
             if !matches_tag(tags, &metadata.etag, false)? {
                 return Err(ErrorCode::PreconditionFailed);

@@ -1,0 +1,1074 @@
+use std::collections::BTreeMap;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+use hmac::{Hmac, KeyInit, Mac};
+use qerith_core::{
+    catalogue::*,
+    s3::{self, mutation::*},
+};
+use sha2::{Digest, Sha256};
+
+const NOW: i64 = 1369353600;
+const T: TenantId = TenantId(1);
+
+struct Auth {
+    read: bool,
+    write: bool,
+    active: bool,
+    denied: Option<String>,
+}
+impl Authority for Auth {
+    fn is_current(&self) -> bool {
+        self.active
+    }
+    fn permits(&self, r: &Reference, a: Action) -> bool {
+        self.active
+            && r.tenant == T
+            && self.denied.as_ref() != Some(&r.name)
+            && match a {
+                Action::Read => self.read,
+                Action::Write => self.write,
+                Action::Restore => self.read,
+            }
+    }
+}
+fn auth() -> Auth {
+    Auth {
+        read: true,
+        write: true,
+        active: true,
+        denied: None,
+    }
+}
+struct WireAuth;
+impl s3::Authority for WireAuth {
+    fn credential(&self, _: &str) -> Option<s3::Credential<'_>> {
+        Some(s3::Credential {
+            principal: "fixture",
+            secret: b"fixture-secret",
+        })
+    }
+    fn authorize(&self, _: &str, _: &str, _: &s3::Target) -> bool {
+        true
+    }
+}
+fn policy() -> s3::Policy {
+    s3::Policy::new(
+        "s3.example.invalid".into(),
+        "fixture".into(),
+        s3::Limits {
+            target_bytes: 8192,
+            control_xml_bytes: 8192,
+            header_bytes: 16384,
+            header_count: 64,
+            query_pairs: 64,
+            upload_bytes: 1024,
+            min_restore_days: 1,
+            max_restore_days: 7,
+            clock_skew_seconds: 900,
+            presign_seconds: 60,
+        },
+    )
+    .unwrap()
+}
+fn mutation_policy() -> MutationPolicy {
+    MutationPolicy {
+        object_bytes: 32,
+        part_bytes: 16,
+        min_part_bytes: 2,
+        parts: 10,
+        sessions: 8,
+        staged_bytes: 64,
+        batch_keys: 10,
+        lifetime: 100,
+        result_retention: 30,
+        max_attempts: 10,
+    }
+}
+fn model() -> MemoryMutations {
+    MemoryMutations::new(mutation_policy()).unwrap()
+}
+fn reference(name: &str) -> Reference {
+    Reference {
+        tenant: T,
+        name: name.into(),
+    }
+}
+fn metadata() -> UploadMetadata {
+    UploadMetadata {
+        headers: BTreeMap::from([
+            ("content-type".into(), "application/octet-stream".into()),
+            ("x-amz-meta-fixture".into(), "preserved".into()),
+        ]),
+        recovery_ref: "fixture/recovery".into(),
+        encryption_context: "fixture/context".into(),
+    }
+}
+fn prepare(m: &MemoryMutations, name: &str) -> PreparedWrite {
+    m.prepare(
+        reference(name),
+        metadata(),
+        DestinationConditions::default(),
+        None,
+        1,
+        &auth(),
+    )
+    .unwrap()
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+fn body_with(
+    bytes: &[u8],
+    algorithm: Option<s3::ChecksumAlgorithm>,
+    extra: &[(&str, &str)],
+) -> s3::Result<ValidatedBody> {
+    let length = bytes.len().to_string();
+    let digest = match algorithm {
+        Some(s3::ChecksumAlgorithm::Sha256) => STANDARD.encode(Sha256::digest(bytes)),
+        Some(s3::ChecksumAlgorithm::Crc32) => STANDARD.encode(crc32fast::hash(bytes).to_be_bytes()),
+        None => String::new(),
+    };
+    let mut fields = vec![
+        ("host", "s3.example.invalid"),
+        ("content-length", &length),
+        ("x-amz-date", "20130524T000000Z"),
+        ("x-amz-content-sha256", "UNSIGNED-PAYLOAD"),
+    ];
+    if let Some(a) = algorithm {
+        fields.push((a.header(), &digest));
+    }
+    fields.extend_from_slice(extra);
+    let p = policy();
+    let unsigned = s3::Headers::new(&fields, &p)?;
+    let target = s3::Target::parse("/bucket/key", &p)?;
+    let mut names: Vec<_> = fields.iter().map(|(name, _)| *name).collect();
+    names.sort_unstable();
+    let signed = names.join(";");
+    let canonical = s3::canonical_request("PUT", &target, &unsigned, &signed, "UNSIGNED-PAYLOAD")?;
+    let key = hmac(
+        &hmac(
+            &hmac(&hmac(b"AWS4fixture-secret", b"20130524"), b"fixture"),
+            b"s3",
+        ),
+        b"aws4_request",
+    );
+    let string = format!(
+        "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/fixture/s3/aws4_request\n{}",
+        hex(&Sha256::digest(canonical.as_bytes()))
+    );
+    let authorization = format!("AWS4-HMAC-SHA256 Credential=fixture/20130524/fixture/s3/aws4_request, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, string.as_bytes())));
+    fields.push(("authorization", &authorization));
+    let headers = s3::Headers::new(&fields, &p)?;
+    let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &WireAuth)?;
+    ValidatedBody::new(bytes.to_vec(), &headers, &verified, &p)
+}
+fn body(bytes: &[u8]) -> ValidatedBody {
+    body_with(bytes, None, &[]).unwrap()
+}
+fn put(m: &mut MemoryMutations, name: &str, bytes: &[u8]) -> CommitResult {
+    m.put(prepare(m, name), body(bytes), 2, &auth()).unwrap()
+}
+fn initiate(m: &mut MemoryMutations, name: &str, checksum: MultipartChecksum) -> UploadId {
+    m.initiate(prepare(m, name), checksum, 2, &auth()).unwrap()
+}
+fn part(
+    m: &mut MemoryMutations,
+    name: &str,
+    id: UploadId,
+    number: u16,
+    bytes: &[u8],
+) -> PartEvidence {
+    m.upload_part(&reference(name), id, number, body(bytes), 3, &auth())
+        .unwrap()
+}
+fn restore(m: &mut MemoryMutations, name: &str) {
+    let c = m.catalogue_worker();
+    let view = c.lookup(T, name, 3, &auth()).unwrap();
+    let archive = c
+        .outbox(T)
+        .into_iter()
+        .find_map(|e| match e.effect {
+            Effect::RunJob(j) if j.generation == view.generation && j.kind == JobKind::Archive => {
+                Some(j.id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    // Synthetic assertions only: not a live qualification or eviction proof.
+    for backbone in [1, 2] {
+        c.record_verification(
+            T,
+            VerificationEvidence {
+                generation: view.generation,
+                backbone: BackboneId(backbone),
+                reconstructed: view.metadata.identity.clone(),
+                verified_at: 3,
+                valid_until: 90,
+                verifier_version: "fixture".into(),
+                provenance_ref: "fixture/reconstruction".into(),
+                readability_ref: "fixture/readability".into(),
+            },
+            IndependenceEvidence {
+                backbones: [BackboneId(1), BackboneId(2)],
+                assessor_ref: "fixture".into(),
+                decision_ref: "fixture-not-real-qualification".into(),
+                valid_until: 90,
+            },
+            3,
+        )
+        .unwrap();
+    }
+    let fence = c.claim(T, archive, 3, 90).unwrap();
+    c.transition(T, fence, Transition::CompleteArchive, 4, &auth())
+        .unwrap();
+    let Outcome::Restore(job) = c
+        .transact(
+            T,
+            OperationId(10_000 + view.generation.0),
+            Mutation::RequestRestore {
+                name: name.into(),
+                expected_revision: view.revision,
+                profile: "fixture".into(),
+                deadline: 90,
+                availability_for: 30,
+            },
+            5,
+            &auth(),
+        )
+        .unwrap()
+    else {
+        panic!("restore")
+    };
+    let fence = c.claim(T, job, 6, 80).unwrap();
+    c.transition(
+        T,
+        fence,
+        Transition::PublishRestore {
+            copy: CompleteCopy {
+                identity: view.metadata.identity,
+                checksums: view.metadata.checksums,
+                location: format!("fixture/{}/{}/retained", T.0, view.generation.0),
+                receipt: "fixture/verified".into(),
+            },
+        },
+        7,
+        &auth(),
+    )
+    .unwrap();
+}
+fn source(result: &CommitResult, name: &str) -> CopySource {
+    CopySource {
+        reference: reference(name),
+        generation: result.generation,
+        conditions: s3::Conditions::default(),
+    }
+}
+
+#[test]
+fn put_empty_binary_overwrite_and_atomic_archival_obligation() {
+    let mut m = model();
+    let first = put(&mut m, "key", b"");
+    let a = m.catalogue().lookup(T, "key", 2, &auth()).unwrap();
+    assert_eq!(a.metadata.identity.length, 0);
+    assert_eq!(a.availability_until, None);
+    assert_eq!(m.catalogue().outbox(T).len(), 1);
+    restore(&mut m, "key");
+    let second = m
+        .put(prepare(&m, "key"), body(&[0, 255, 128]), 8, &auth())
+        .unwrap();
+    let b = m.catalogue().lookup(T, "key", 8, &auth()).unwrap();
+    assert_ne!(first.generation, second.generation);
+    assert_ne!(first.etag, second.etag);
+    assert_eq!(
+        b.metadata.identity.sha256,
+        <[u8; 32]>::from(Sha256::digest([0, 255, 128]))
+    );
+    assert_eq!(b.availability_until, None);
+    assert_eq!(b.metadata.headers, metadata().headers);
+    assert_eq!(second.put_response().status, 200);
+}
+
+#[test]
+fn decoded_validation_rejects_integrity_framing_and_encryption_before_commit() {
+    for extra in [
+        vec![("content-md5", "AAAA")],
+        vec![("transfer-encoding", "chunked")],
+        vec![("content-encoding", "aws-chunked")],
+        vec![("x-amz-server-side-encryption", "AES256")],
+        vec![("x-amz-checksum-crc64nvme", "AAAA")],
+        vec![("x-amz-checksum-type", "COMPOSITE")],
+    ] {
+        assert!(body_with(b"abc", None, &extra).is_err(), "{extra:?}");
+    }
+    assert_eq!(
+        body_with(b"abc", None, &[("content-md5", "AAAAAAAAAAAAAAAAAAAAAA==")]).unwrap_err(),
+        s3::ErrorCode::BadDigest
+    );
+    let mut m = model();
+    let result = m
+        .put(
+            prepare(&m, "checked"),
+            body_with(b"abc", Some(s3::ChecksumAlgorithm::Crc32), &[]).unwrap(),
+            2,
+            &auth(),
+        )
+        .unwrap();
+    let view = m.catalogue().lookup(T, "checked", 2, &auth()).unwrap();
+    assert_eq!(view.metadata.checksums[0].algorithm, "CRC32");
+    assert_eq!(result.checksum.unwrap().kind, ChecksumType::FullObject);
+}
+
+#[test]
+fn predicates_fail_412_but_competing_unconditional_commit_fails_409() {
+    let mut m = model();
+    let pending = prepare(&m, "key");
+    let first = put(&mut m, "key", b"first");
+    assert_eq!(
+        m.put(pending, body(b"stale"), 3, &auth()),
+        Err(s3::ErrorCode::ConditionalRequestConflict)
+    );
+    assert_eq!(s3::ErrorCode::ConditionalRequestConflict.status(), 409);
+    let condition = DestinationConditions {
+        if_match: Some(first.etag),
+        if_none_match: false,
+    };
+    let pending = m
+        .prepare(reference("key"), metadata(), condition, None, 3, &auth())
+        .unwrap();
+    put(&mut m, "key", b"next");
+    assert_eq!(
+        m.put(pending, body(b"stale"), 4, &auth()),
+        Err(s3::ErrorCode::PreconditionFailed)
+    );
+    assert_eq!(s3::ErrorCode::PreconditionFailed.status(), 412);
+    assert!(m
+        .prepare(
+            reference("key"),
+            metadata(),
+            DestinationConditions {
+                if_match: None,
+                if_none_match: true
+            },
+            None,
+            3,
+            &auth()
+        )
+        .is_err());
+}
+
+#[test]
+fn tombstones_preserve_revision_and_write_only_authority() {
+    let mut m = model();
+    let write_only = Auth {
+        read: false,
+        ..auth()
+    };
+    let p = m
+        .prepare(
+            reference("key"),
+            metadata(),
+            DestinationConditions::default(),
+            None,
+            1,
+            &write_only,
+        )
+        .unwrap();
+    m.put(p, body(b"one"), 2, &write_only).unwrap();
+    assert!(m.catalogue().lookup(T, "key", 3, &write_only).is_err());
+    assert_eq!(
+        m.delete(
+            &reference("key"),
+            &DestinationConditions::default(),
+            3,
+            &write_only
+        )
+        .unwrap()
+        .status,
+        204
+    );
+    let (revision, view) = m
+        .catalogue()
+        .write_target(T, "key", 3, &write_only)
+        .unwrap();
+    assert_eq!(revision, 2);
+    assert!(view.is_none());
+    let p = m
+        .prepare(
+            reference("key"),
+            metadata(),
+            DestinationConditions::default(),
+            None,
+            4,
+            &write_only,
+        )
+        .unwrap();
+    m.put(p, body(b"two"), 5, &write_only).unwrap();
+    assert_eq!(
+        m.catalogue().lookup(T, "key", 5, &auth()).unwrap().revision,
+        3
+    );
+    assert_eq!(
+        m.delete(
+            &reference("missing"),
+            &DestinationConditions::default(),
+            5,
+            &auth()
+        )
+        .unwrap()
+        .status,
+        204
+    );
+}
+
+#[test]
+fn revoked_authority_and_moderation_never_become_absence() {
+    let mut m = model();
+    let p = prepare(&m, "key");
+    assert_eq!(
+        m.put(
+            p,
+            body(b"no"),
+            2,
+            &Auth {
+                active: false,
+                ..auth()
+            }
+        ),
+        Err(s3::ErrorCode::AccessDenied)
+    );
+    assert!(m.catalogue().outbox(T).is_empty());
+    let r = put(&mut m, "key", b"yes");
+    m.catalogue_worker()
+        .set_moderation(T, r.generation, 1, true)
+        .unwrap();
+    assert!(m.catalogue().write_target(T, "key", 3, &auth()).is_err());
+    assert!(m
+        .prepare(
+            reference("key"),
+            metadata(),
+            DestinationConditions::default(),
+            None,
+            3,
+            &auth()
+        )
+        .is_err());
+}
+
+#[test]
+fn out_of_order_arrival_replaced_and_duplicate_part_evidence() {
+    let mut m = model();
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p2 = part(&mut m, "key", id, 2, b"two");
+    let stale = part(&mut m, "key", id, 1, b"old");
+    let p1 = part(&mut m, "key", id, 1, b"new");
+    assert_ne!(stale.etag, p1.etag);
+    assert_eq!(
+        m.complete(
+            &reference("key"),
+            id,
+            vec![stale, p2.clone()],
+            None,
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidPart)
+    );
+    assert_eq!(
+        m.complete(
+            &reference("key"),
+            id,
+            vec![p2.clone(), p1.clone()],
+            None,
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidPartOrder)
+    );
+    assert_eq!(
+        m.complete(
+            &reference("key"),
+            id,
+            vec![p1.clone(), p1.clone()],
+            None,
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidPartOrder)
+    );
+    let result = m
+        .complete(&reference("key"), id, vec![p1, p2], None, 4, &auth())
+        .unwrap();
+    assert_eq!(
+        m.catalogue()
+            .generation(T, result.generation)
+            .unwrap()
+            .metadata
+            .identity
+            .sha256,
+        <[u8; 32]>::from(Sha256::digest(b"newtwo"))
+    );
+}
+
+#[test]
+fn concurrent_parts_are_serializable_and_completion_never_splices_replacements() {
+    let m = std::sync::Arc::new(std::sync::Mutex::new(model()));
+    let id = initiate(&mut m.lock().unwrap(), "key", MultipartChecksum::None);
+    let mut threads = vec![];
+    for number in [3, 1, 2] {
+        let m = m.clone();
+        threads.push(std::thread::spawn(move || {
+            part(
+                &mut m.lock().unwrap(),
+                "key",
+                id,
+                number,
+                &[number as u8; 2],
+            )
+        }));
+    }
+    let mut evidence: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    evidence.sort_by_key(|p| p.number);
+    let mut m = m.lock().unwrap();
+    let result = m
+        .complete(&reference("key"), id, evidence, None, 4, &auth())
+        .unwrap();
+    assert_eq!(
+        m.catalogue()
+            .generation(T, result.generation)
+            .unwrap()
+            .metadata
+            .identity
+            .sha256,
+        <[u8; 32]>::from(Sha256::digest([1, 1, 2, 2, 3, 3]))
+    );
+}
+
+#[test]
+fn completion_abort_and_overwrite_have_one_publication_winner() {
+    let mut m = model();
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p = part(&mut m, "key", id, 1, b"bytes");
+    assert_eq!(
+        m.abort(&reference("key"), id, 4, &auth()).unwrap().status,
+        204
+    );
+    assert_eq!(
+        m.complete(&reference("key"), id, vec![p], None, 5, &auth()),
+        Err(s3::ErrorCode::NoSuchUpload)
+    );
+    assert!(m.catalogue().outbox(T).is_empty());
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p = part(&mut m, "key", id, 1, b"parts");
+    let winner = put(&mut m, "key", b"overwrite");
+    assert_eq!(
+        m.complete(&reference("key"), id, vec![p], None, 5, &auth()),
+        Err(s3::ErrorCode::ConditionalRequestConflict)
+    );
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "key", 5, &auth())
+            .unwrap()
+            .generation,
+        winner.generation
+    );
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p = part(&mut m, "key", id, 1, b"complete");
+    let winner = m
+        .complete(&reference("key"), id, vec![p], None, 6, &auth())
+        .unwrap();
+    assert_eq!(
+        m.abort(&reference("key"), id, 7, &auth()).unwrap_err(),
+        s3::ErrorCode::NoSuchUpload
+    );
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "key", 7, &auth())
+            .unwrap()
+            .generation,
+        winner.generation
+    );
+}
+
+#[test]
+fn lost_completion_response_reconciles_exact_request_after_overwrite() {
+    let mut m = model();
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p = part(&mut m, "key", id, 1, b"complete");
+    let accepted = m
+        .complete(&reference("key"), id, vec![p.clone()], None, 4, &auth())
+        .unwrap();
+    let mut recovered = m.clone();
+    let successor = put(&mut recovered, "key", b"successor");
+    assert_eq!(
+        recovered
+            .complete(&reference("key"), id, vec![p.clone()], None, 6, &auth())
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(
+        recovered
+            .catalogue()
+            .lookup(T, "key", 6, &auth())
+            .unwrap()
+            .generation,
+        successor.generation
+    );
+    let mut changed = p;
+    changed.etag = "\"wrong\"".into();
+    assert_eq!(
+        recovered.complete(&reference("key"), id, vec![changed], None, 6, &auth()),
+        Err(s3::ErrorCode::InvalidPart)
+    );
+}
+
+#[test]
+fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
+    for mode in [
+        MultipartChecksum::Full(s3::ChecksumAlgorithm::Sha256),
+        MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32),
+        MultipartChecksum::CompositeSha256,
+    ] {
+        let mut m = model();
+        let id = initiate(&mut m, "key", mode);
+        let algorithm = if mode == MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32) {
+            s3::ChecksumAlgorithm::Crc32
+        } else {
+            s3::ChecksumAlgorithm::Sha256
+        };
+        let p1 = m
+            .upload_part(
+                &reference("key"),
+                id,
+                1,
+                body_with(b"ab", Some(algorithm), &[]).unwrap(),
+                3,
+                &auth(),
+            )
+            .unwrap();
+        let p2 = m
+            .upload_part(
+                &reference("key"),
+                id,
+                2,
+                body_with(b"cd", Some(algorithm), &[]).unwrap(),
+                3,
+                &auth(),
+            )
+            .unwrap();
+        let full = match mode {
+            MultipartChecksum::Full(s3::ChecksumAlgorithm::Sha256) => {
+                Some(Sha256::digest(b"abcd").to_vec())
+            }
+            MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32) => {
+                Some(crc32fast::hash(b"abcd").to_be_bytes().to_vec())
+            }
+            _ => None,
+        };
+        let result = m
+            .complete(
+                &reference("key"),
+                id,
+                vec![p1.clone(), p2.clone()],
+                full.clone(),
+                4,
+                &auth(),
+            )
+            .unwrap();
+        let c = result.checksum.as_ref().unwrap();
+        assert_eq!(c.parts, vec![p1.checksum.unwrap(), p2.checksum.unwrap()]);
+        if mode == MultipartChecksum::CompositeSha256 {
+            assert_eq!(c.kind, ChecksumType::Composite);
+            assert_ne!(c.value, Sha256::digest(b"abcd").to_vec());
+        } else {
+            assert_eq!(c.kind, ChecksumType::FullObject);
+            assert_eq!(Some(&c.value), full.as_ref());
+        }
+        let response = result.response("CompleteMultipartUploadResult").unwrap();
+        assert_eq!(
+            completion_result(response.status, &response.body, &policy()).unwrap(),
+            result.etag
+        );
+        assert_eq!(
+            m.catalogue()
+                .lookup(T, "key", 4, &auth())
+                .unwrap()
+                .metadata
+                .checksums,
+            vec![c.clone()]
+        );
+    }
+}
+
+#[test]
+fn checksum_missing_wrong_parts_and_wrong_full_digest_never_publish() {
+    let mut m = model();
+    let id = initiate(
+        &mut m,
+        "key",
+        MultipartChecksum::Full(s3::ChecksumAlgorithm::Sha256),
+    );
+    assert_eq!(
+        m.upload_part(&reference("key"), id, 1, body(b"ab"), 3, &auth())
+            .unwrap_err(),
+        s3::ErrorCode::InvalidRequest
+    );
+    let p = m
+        .upload_part(
+            &reference("key"),
+            id,
+            1,
+            body_with(b"ab", Some(s3::ChecksumAlgorithm::Sha256), &[]).unwrap(),
+            3,
+            &auth(),
+        )
+        .unwrap();
+    let mut wrong = p.clone();
+    wrong.checksum = Some(vec![0; 32]);
+    assert_eq!(
+        m.complete(
+            &reference("key"),
+            id,
+            vec![wrong],
+            Some(vec![0; 32]),
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidPart)
+    );
+    assert_eq!(
+        m.complete(
+            &reference("key"),
+            id,
+            vec![p.clone()],
+            Some(vec![0; 32]),
+            4,
+            &auth()
+        ),
+        Err(s3::ErrorCode::BadDigest)
+    );
+    assert_eq!(
+        m.complete(&reference("key"), id, vec![p], None, 4, &auth()),
+        Err(s3::ErrorCode::BadDigest)
+    );
+    assert!(m.catalogue().outbox(T).is_empty());
+}
+
+#[test]
+fn bounded_geometry_pages_retry_budget_and_expiry_cleanup() {
+    let mut p = mutation_policy();
+    p.max_attempts = 1;
+    let mut m = MemoryMutations::new(p).unwrap();
+    let id = initiate(&mut m, "key", MultipartChecksum::None);
+    let p1 = part(&mut m, "key", id, 1, b"a");
+    let p2 = part(&mut m, "key", id, 2, b"bb");
+    let page = m
+        .list_parts(&reference("key"), id, 0, 1, 4, &auth())
+        .unwrap();
+    assert_eq!(page.entries[0].evidence, p1);
+    assert_eq!(page.next, Some(1));
+    assert_eq!(
+        m.list_parts(&reference("key"), id, 1, 1, 4, &auth())
+            .unwrap()
+            .entries[0]
+            .evidence,
+        p2
+    );
+    assert_eq!(
+        m.complete(&reference("key"), id, vec![p1, p2], None, 4, &auth()),
+        Err(s3::ErrorCode::EntityTooSmall)
+    );
+    assert_eq!(
+        m.complete(&reference("key"), id, vec![], None, 4, &auth()),
+        Err(s3::ErrorCode::SlowDown)
+    );
+    assert_eq!(
+        m.list_uploads(T, "", 0, 8, 5, &auth())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert!(m
+        .list_uploads(
+            T,
+            "",
+            0,
+            8,
+            5,
+            &Auth {
+                denied: Some("key".into()),
+                ..auth()
+            }
+        )
+        .unwrap()
+        .entries
+        .is_empty());
+    assert_eq!(m.cleanup(101, 1).unwrap(), 1);
+    assert_eq!(
+        m.abort(&reference("key"), id, 102, &auth()).unwrap_err(),
+        s3::ErrorCode::NoSuchUpload
+    );
+    let mut p = mutation_policy();
+    p.parts = 0;
+    assert!(MemoryMutations::new(p).is_err());
+}
+
+#[test]
+fn copy_requires_active_source_and_owns_new_generation_metadata_and_archive() {
+    let mut m = model();
+    let first = put(&mut m, "source", b"source");
+    assert_eq!(
+        m.copy_object(
+            prepare(&m, "dest"),
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            3,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidObjectState)
+    );
+    restore(&mut m, "source");
+    let copied = m
+        .copy_object(
+            prepare(&m, "dest"),
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            8,
+            &auth(),
+        )
+        .unwrap();
+    assert_ne!(copied.generation, first.generation);
+    let view = m.catalogue().lookup(T, "dest", 8, &auth()).unwrap();
+    assert_eq!(view.availability_until, None);
+    assert_eq!(view.metadata.headers, metadata().headers);
+    let archive = m.catalogue().outbox(T).into_iter().filter(|e| matches!(&e.effect, Effect::RunJob(j) if j.kind == JobKind::Archive && j.generation == copied.generation)).count();
+    assert_eq!(archive, 1);
+    let mut replacement = metadata();
+    replacement
+        .headers
+        .insert("x-amz-meta-fixture".into(), "replaced".into());
+    replacement.recovery_ref = "own-recovery".into();
+    let p = m
+        .prepare(
+            reference("replacement"),
+            replacement.clone(),
+            DestinationConditions::default(),
+            None,
+            8,
+            &auth(),
+        )
+        .unwrap();
+    m.copy_object(
+        p,
+        source(&first, "source"),
+        MetadataDirective::Replace,
+        8,
+        &auth(),
+    )
+    .unwrap();
+    let view = m.catalogue().lookup(T, "replacement", 8, &auth()).unwrap();
+    assert_eq!(view.metadata.headers, replacement.headers);
+    assert_eq!(view.metadata.recovery_ref, "own-recovery");
+}
+
+#[test]
+fn copy_source_generation_predicates_context_and_both_authorizations_are_final() {
+    let mut m = model();
+    let first = put(&mut m, "source", b"source");
+    restore(&mut m, "source");
+    let mut s = source(&first, "source");
+    s.conditions.if_match = Some("\"wrong\"".into());
+    assert_eq!(
+        m.copy_object(prepare(&m, "dest"), s, MetadataDirective::Copy, 8, &auth()),
+        Err(s3::ErrorCode::PreconditionFailed)
+    );
+    for denied in ["source", "dest"] {
+        assert_eq!(
+            m.copy_object(
+                prepare(&m, "dest"),
+                source(&first, "source"),
+                MetadataDirective::Copy,
+                8,
+                &Auth {
+                    denied: Some(denied.into()),
+                    ..auth()
+                }
+            ),
+            Err(s3::ErrorCode::AccessDenied)
+        );
+    }
+    let mut different = metadata();
+    different.encryption_context = "other".into();
+    let p = m
+        .prepare(
+            reference("dest"),
+            different,
+            DestinationConditions::default(),
+            None,
+            8,
+            &auth(),
+        )
+        .unwrap();
+    assert_eq!(
+        m.copy_object(
+            p,
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            8,
+            &auth()
+        ),
+        Err(s3::ErrorCode::InvalidRequest)
+    );
+    put(&mut m, "source", b"successor");
+    assert_eq!(
+        m.copy_object(
+            prepare(&m, "dest"),
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            8,
+            &auth()
+        ),
+        Err(s3::ErrorCode::PreconditionFailed)
+    );
+    assert!(m.catalogue().lookup(T, "dest", 8, &auth()).is_err());
+}
+
+#[test]
+fn part_copy_uses_exact_source_range_and_negotiated_part_checksum() {
+    let mut m = model();
+    let first = put(&mut m, "source", b"012345");
+    restore(&mut m, "source");
+    let id = initiate(&mut m, "dest", MultipartChecksum::CompositeSha256);
+    let p = m
+        .upload_part_copy(
+            &reference("dest"),
+            id,
+            1,
+            source(&first, "source"),
+            Some((1, 3)),
+            8,
+            &auth(),
+        )
+        .unwrap();
+    assert_eq!(p.checksum, Some(Sha256::digest(b"123").to_vec()));
+    let result = m
+        .complete(&reference("dest"), id, vec![p], None, 9, &auth())
+        .unwrap();
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "dest", 9, &auth())
+            .unwrap()
+            .metadata
+            .identity
+            .sha256,
+        <[u8; 32]>::from(Sha256::digest(b"123"))
+    );
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "dest", 9, &auth())
+            .unwrap()
+            .generation,
+        result.generation
+    );
+}
+
+#[test]
+fn deletion_is_per_key_quiet_and_never_erases_referenced_generation() {
+    let mut m = model();
+    let original = put(&mut m, "source", b"retained");
+    m.catalogue_worker()
+        .transact(
+            T,
+            OperationId(9000),
+            Mutation::Link {
+                source: "source".into(),
+                destination: "alias".into(),
+                expected_revision: 0,
+            },
+            3,
+            &auth(),
+        )
+        .unwrap();
+    let response = m
+        .delete_objects(
+            T,
+            DeleteRequest {
+                keys: vec!["source".into(), "denied".into(), "missing".into()],
+                quiet: true,
+            },
+            4,
+            &Auth {
+                denied: Some("denied".into()),
+                ..auth()
+            },
+        )
+        .unwrap();
+    let text = String::from_utf8(response.body).unwrap();
+    assert!(!text.contains("<Deleted>"));
+    assert!(text.contains("<Key>denied</Key><Code>AccessDenied</Code>"));
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "alias", 4, &auth())
+            .unwrap()
+            .generation,
+        original.generation
+    );
+    assert!(m
+        .catalogue()
+        .generation(T, original.generation)
+        .unwrap()
+        .cache_location
+        .is_some());
+}
+
+#[test]
+fn strict_control_xml_handles_entities_and_rejects_unknown_evidence() {
+    let p = policy();
+    let delete = parse_delete(
+        b"<Delete><Object><Key> a&amp;&lt;&#x96ea; </Key></Object><Quiet>true</Quiet></Delete>",
+        &p,
+        10,
+    )
+    .unwrap();
+    assert_eq!(delete.keys, [" a&<雪 "]);
+    assert!(delete.quiet);
+    for bytes in [
+        b"<!DOCTYPE Delete><Delete></Delete>".as_slice(),
+        b"<Delete><Object><Key>a</Key><VersionId>1</VersionId></Object></Delete>",
+        b"<Delete><Quiet>true</Quiet><Quiet>false</Quiet></Delete>",
+        b"<Delete><Object><Key>&evil;</Key></Object></Delete>",
+        b"<Delete><Object><Key>&#0;</Key></Object></Delete>",
+    ] {
+        assert!(parse_delete(bytes, &p, 10).is_err());
+    }
+    let parts = parse_complete(b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>&quot;opaque&quot;</ETag></Part></CompleteMultipartUpload>", &p, 10, MultipartChecksum::None).unwrap();
+    assert_eq!(parts[0].etag, "\"opaque\"");
+    assert!(parse_complete(b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>x</ETag><ChecksumCRC64NVME>x</ChecksumCRC64NVME></Part></CompleteMultipartUpload>", &p, 10, MultipartChecksum::None).is_err());
+}
+
+#[test]
+fn embedded_completion_error_is_failure_even_in_http_200() {
+    assert_eq!(
+        completion_result(
+            200,
+            b"<Error><Code>InvalidPart</Code><Message>bad</Message></Error>",
+            &policy()
+        ),
+        Err(s3::ErrorCode::InvalidPart)
+    );
+    assert_eq!(
+        completion_result(
+            200,
+            b"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>",
+            &policy()
+        ),
+        Err(s3::ErrorCode::MalformedXML)
+    );
+    assert!(completion_result(500, b"<CompleteMultipartUploadResult><ETag>&quot;tag&quot;</ETag></CompleteMultipartUploadResult>", &policy()).is_err());
+}

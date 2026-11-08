@@ -7,6 +7,7 @@
 //! prove encryption nor grant a restore lease or durable commit.
 
 mod auth;
+pub mod mutation;
 mod read;
 mod restore;
 mod upload;
@@ -37,6 +38,10 @@ pub enum ErrorCode {
     InvalidObjectState,
     NoSuchKey,
     NoSuchUpload,
+    InvalidPart,
+    InvalidPartOrder,
+    EntityTooSmall,
+    ConditionalRequestConflict,
     RestoreAlreadyInProgress,
     NotImplemented,
     SlowDown,
@@ -53,7 +58,7 @@ impl ErrorCode {
             Self::PreconditionFailed => 412,
             Self::InvalidRange => 416,
             Self::NoSuchKey | Self::NoSuchUpload => 404,
-            Self::RestoreAlreadyInProgress => 409,
+            Self::RestoreAlreadyInProgress | Self::ConditionalRequestConflict => 409,
             Self::NotImplemented => 501,
             Self::SlowDown => 503,
             Self::InternalError => 500,

@@ -337,6 +337,19 @@ pub trait MetadataOutbox {
     ) -> Result<GenerationId>;
 }
 
+/// Write-authorized revision inspection, including absent and tombstoned keys.
+/// This is not a read/list grant. Adapters must not turn denied/masked objects
+/// into absence; implementations return an error for prohibited generations.
+pub trait MutationTargets: MetadataOutbox {
+    fn write_target(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<(u64, Option<ReferenceView>)>;
+}
+
 /// Trusted infrastructure port, separate from end-user mutations. Every method
 /// is atomic with its emitted outbox records. No external side effect runs here.
 pub trait JobPort {
