@@ -36,8 +36,12 @@ HTTP precheck. These read-side ports do not claim a live multi-service transacti
 
 `CapacityPort::reserve` returns only after exact-reference/generation capacity is
 committed through the requested expiry. The catalogue validates the scoped receipt
-and atomically extends an existing lease without shortening it. A failed/uncertain
-lease transaction must retain/reconcile its reservation. At initial restore
+and atomically extends an existing lease without shortening it. The adapter rechecks
+current bucket Restore authority after reservation, before the catalogue rechecks
+reference Restore authority at mutation. A durable integration must preserve both
+policy dimensions at its mutation boundary. A failed/uncertain lease transaction or
+post-reservation authorization rejection must retain/reconcile its reservation;
+rejection leaves the existing availability unchanged. At initial restore
 publication, the trusted worker must reserve the admitted availability period and
 provide the existing complete-copy proof before `PublishRestore`. Synthetic receipts
 are assertions at a trusted boundary, not cryptographic or physical qualification.
@@ -48,7 +52,11 @@ are assertions at a trusted boundary, not cryptographic or physical qualificatio
   quoted ETag, modification time, content/user headers and checksum type/part proof
   are preserved. Unsupported or inconsistent stored checksum evidence fails closed.
 - Preconditions (using the merged precedence rules) and range validation precede
-  cold state. HEAD is metadata-only, including ranged HEAD; it never reads cache,
+  cold state. The qualified preconditions are If-Match, If-None-Match,
+  If-Modified-Since and If-Unmodified-Since. If-Range is outside this restricted
+  profile and explicitly returns 400 InvalidRequest, never an unconditional slice
+  under an ignored validator; HEAD errors stay bodyless.
+  HEAD is metadata-only, including ranged HEAD; it never reads cache,
   pins a transfer, requests capacity or queues work. Metadata and predicates remain
   visible while delivery-cache deletion is pending or completed. Status lookup
   checks the requested Read or Restore action without treating either as the other.
@@ -106,10 +114,12 @@ render before a continuation token is allocated; rejected pages consume no token
 capacity. `encoding-type=url` percent-encodes UTF-8 bytes using
 RFC 3986 unreserved characters only, including slash, space, percent and plus.
 Keys not representable in XML 1.0 require URL encoding, never replacement characters
-or silently changed names. Region and unsupported options are validated before
-bucket mutation. The catalogue reference is deliberately not a production-scale
-indexed store; the durable port must supply bounded indexed scans and resource
-admission.
+or silently changed names. LocationConstraint decodes numeric and predefined XML
+references before region comparison; unknown entities and DTDs remain rejected,
+with the existing request-body bound unchanged. Region and unsupported options are
+validated before bucket mutation. The catalogue reference is deliberately not a
+production-scale indexed store; the durable port must supply bounded indexed scans
+and resource admission.
 
 ## Verification boundary
 

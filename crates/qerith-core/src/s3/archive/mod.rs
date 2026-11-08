@@ -58,7 +58,9 @@ pub trait Clock {
 pub trait CapacityPort {
     /// Commit capacity before returning. Bind receipt to tenant, reference, G and
     /// operation; reconcile failed/uncertain catalogue outcomes, never free an
-    /// advertised guarantee on a disconnect. Failure must not extend the lease.
+    /// advertised guarantee on a disconnect. Retain/reconcile reservations even
+    /// when post-reservation authorization rejects renewal before the transaction.
+    /// Failure must not extend the lease.
     fn reserve(
         &mut self,
         tenant: cat::TenantId,
@@ -419,6 +421,11 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                 view.reference.generation,
                 until,
             )?;
+            self.authorize(
+                session,
+                Operation::Restore,
+                name.split_once('/').ok_or(ErrorCode::InternalError)?.0,
+            )?;
             self.catalogue
                 .transact(
                     session.tenant(),
@@ -556,6 +563,11 @@ fn wire_metadata(view: &cat::ReferenceView) -> Result<ObjectMetadata> {
 fn validate_request(operation: Operation, target: &Target, headers: &Headers) -> Result<()> {
     target.validate_features()?;
     headers.validate_features()?;
+    // This restricted S3 profile qualifies the four object preconditions, not
+    // HTTP If-Range. Never silently serve a slice under an ignored validator.
+    if headers.get("if-range").is_some() {
+        return Err(ErrorCode::InvalidRequest);
+    }
     for (name, _) in target.query() {
         let name = std::str::from_utf8(name).map_err(|_| ErrorCode::InvalidRequest)?;
         if name.starts_with("X-Amz-") {
@@ -635,6 +647,16 @@ fn create_region(body: &[u8], policy: &Policy) -> Result<String> {
                 stage = 2
             }
             Event::Text(e) if stage == 2 => region.push_str(e.as_ref()),
+            Event::GeneralRef(e) if stage == 2 => {
+                if let Some(c) = e.resolve_char_ref().map_err(|_| ErrorCode::MalformedXML)? {
+                    region.push(c);
+                } else {
+                    region.push_str(
+                        quick_xml::escape::resolve_xml_entity(e.as_ref())
+                            .ok_or(ErrorCode::MalformedXML)?,
+                    );
+                }
+            }
             Event::End(_) if stage == 2 => stage = 3,
             Event::End(_) if stage == 3 => stage = 4,
             Event::Eof if stage == 4 && !region.is_empty() => return Ok(region),

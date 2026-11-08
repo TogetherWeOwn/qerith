@@ -19,6 +19,7 @@ struct Access {
     denied: Option<String>,
     read: bool,
     bucket_read: Rc<Cell<bool>>,
+    bucket_restore: Rc<Cell<bool>>,
 }
 impl qerith_core::catalogue::Authority for Access {
     fn is_current(&self) -> bool {
@@ -40,6 +41,7 @@ impl Session for Access {
     fn allows(&self, op: Operation, _: &str) -> bool {
         (op != Operation::ListObjects || self.list)
             && (op != Operation::Read || self.bucket_read.get())
+            && (op != Operation::Restore || self.bucket_restore.get())
     }
 }
 fn access() -> Access {
@@ -51,6 +53,7 @@ fn access() -> Access {
         denied: None,
         read: true,
         bucket_read: Rc::new(Cell::new(true)),
+        bucket_restore: Rc::new(Cell::new(true)),
     }
 }
 fn policy() -> s3::Policy {
@@ -135,6 +138,7 @@ impl QualifiedCache for Cache {
 #[derive(Default)]
 struct Capacity {
     deny: bool,
+    revoke: Option<Rc<Cell<bool>>>,
     reservations: Vec<CapacityReservation>,
 }
 impl CapacityPort for Capacity {
@@ -158,6 +162,9 @@ impl CapacityPort for Capacity {
             receipt: "fixture-capacity-committed".into(),
         };
         self.reservations.push(receipt.clone());
+        if let Some(current) = &self.revoke {
+            current.set(false);
+        }
         Ok(receipt)
     }
 }
@@ -640,6 +647,164 @@ fn explicit_restore_verified_publication_restart_renewal_and_expiry() {
         "InvalidObjectState",
     );
     assert_eq!(f.restore(1, extended).status, 202);
+}
+
+#[test]
+fn renewal_rechecks_bucket_restore_after_capacity_without_changing_lease() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    assert_eq!(f.restore(1, 6).status, 202);
+    let job = restore_job(&f.adapter.catalogue, &f.access);
+    publish(&mut f.adapter.catalogue, &f.access, job, G, 7);
+    let before = f
+        .adapter
+        .catalogue
+        .lookup(TENANT, "bucket/key", 8, &f.access)
+        .unwrap();
+    let outbox = f.adapter.catalogue.outbox(TENANT);
+    f.capacity.revoke = Some(f.access.bucket_restore.clone());
+    error(&f.restore(7, 8), "AccessDenied");
+    assert!(f.access.current.get());
+    for action in [Action::Restore, Action::Read] {
+        assert!(qerith_core::catalogue::Authority::permits(
+            &f.access,
+            &Reference {
+                tenant: TENANT,
+                name: "bucket/key".into()
+            },
+            action,
+        ));
+    }
+    assert_eq!(
+        f.adapter
+            .catalogue
+            .lookup(TENANT, "bucket/key", 8, &f.access)
+            .unwrap(),
+        before
+    );
+    assert_eq!(f.adapter.catalogue.outbox(TENANT), outbox);
+    // Committed capacity stays available for reconciliation, not silently freed.
+    assert_eq!(f.capacity.reservations.len(), 1);
+    let reserved = &f.capacity.reservations[0];
+    assert_eq!(reserved.tenant, TENANT);
+    assert_eq!(reserved.name, "bucket/key");
+    assert_eq!(reserved.generation, G);
+    assert_eq!(reserved.operation, OperationId(f.op));
+    assert_eq!(reserved.until, archive_expiry(8, 7).unwrap());
+    assert_eq!(f.call("GET", "/bucket/key", &[], b"", 9).body, C);
+    error(
+        &f.call(
+            "GET",
+            "/bucket/key",
+            &[],
+            b"",
+            before.availability_until.unwrap(),
+        ),
+        "InvalidObjectState",
+    );
+    // A later newly authorized renewal can still use the normal commit path.
+    f.capacity.revoke = None;
+    f.access.bucket_restore.set(true);
+    assert_eq!(f.restore(7, 10).status, 200);
+    assert_eq!(
+        f.adapter
+            .catalogue
+            .lookup(TENANT, "bucket/key", 10, &f.access)
+            .unwrap()
+            .availability_until,
+        Some(archive_expiry(10, 7).unwrap())
+    );
+}
+
+#[test]
+fn if_range_is_explicitly_rejected_without_cache_or_restore_work() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    let outbox = f.adapter.catalogue.outbox(TENANT);
+    for validator in [
+        "\"stale\"",
+        "\"opaque-not-md5-10\"",
+        "Thu, 01 Jan 1970 00:00:01 GMT",
+    ] {
+        for method in ["GET", "HEAD"] {
+            let r = f.call(
+                method,
+                "/bucket/key",
+                &[("range", "bytes=0-3"), ("if-range", validator)],
+                b"",
+                6,
+            );
+            assert_eq!(r.status, 400);
+            if method == "HEAD" {
+                assert!(r.body.is_empty());
+            } else {
+                error(&r, "InvalidRequest");
+            }
+        }
+    }
+    assert_eq!(f.cache.calls, 0);
+    assert!(f.capacity.reservations.is_empty());
+    assert_eq!(f.adapter.catalogue.outbox(TENANT), outbox);
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    assert_eq!(f.restore(1, 6).status, 202);
+    let job = restore_job(&f.adapter.catalogue, &f.access);
+    publish(&mut f.adapter.catalogue, &f.access, job, G, 7);
+    let outbox = f.adapter.catalogue.outbox(TENANT);
+    let r = f.call(
+        "GET",
+        "/bucket/key",
+        &[("range", "bytes=0-3"), ("if-range", "\"stale\"")],
+        b"",
+        8,
+    );
+    assert_eq!(r.status, 400);
+    error(&r, "InvalidRequest");
+    assert_eq!(f.cache.calls, 0);
+    assert_eq!(f.adapter.catalogue.outbox(TENANT), outbox);
+    let range = f.call("GET", "/bucket/key", &[("range", "bytes=0-3")], b"", 8);
+    assert_eq!(range.status, 206);
+    assert_eq!(range.body, &C[..4]);
+}
+
+#[test]
+fn bucket_region_decodes_xml_references_before_validation() {
+    let mut f = Fixture::new();
+    for region in [
+        "fixture&#45;1",
+        "fixture&#x2D;1",
+        "&#102;ixture-1",
+        "fixture-&#49;",
+    ] {
+        let config = format!("<CreateBucketConfiguration><LocationConstraint>{region}</LocationConstraint></CreateBucketConfiguration>");
+        assert_eq!(
+            f.call("PUT", "/bucket", &[], config.as_bytes(), 0).status,
+            200
+        );
+        assert_eq!(
+            header(
+                &f.call("HEAD", "/bucket", &[], b"", 0),
+                "x-amz-bucket-region"
+            ),
+            Some("fixture-1")
+        );
+        assert_eq!(f.call("DELETE", "/bucket", &[], b"", 0).status, 204);
+    }
+    for region in [
+        "fixture&#0;1",
+        "fixture&#x110000;1",
+        "fixture&unknown;1",
+        "fixture&#no;1",
+        "fixture&amp;1",
+        "wrong&#45;1",
+    ] {
+        let config = format!("<CreateBucketConfiguration><LocationConstraint>{region}</LocationConstraint></CreateBucketConfiguration>");
+        assert_eq!(
+            f.call("PUT", "/bucket", &[], config.as_bytes(), 0).status,
+            400
+        );
+        assert!(f.adapter.catalogue.buckets(TENANT).is_empty());
+    }
 }
 
 #[test]
