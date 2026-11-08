@@ -20,7 +20,7 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
     loop {
         match reader.read_event().map_err(|_| ErrorCode::MalformedXML)? {
             Event::Start(e) => {
-                let name = e.name().as_ref().to_vec();
+                let name = e.name().as_ref().as_bytes().to_vec();
                 let parent = stack.last().map(Vec::as_slice);
                 let allowed = match (parent, name.as_slice()) {
                     (None, b"RestoreRequest") if !root_seen => {
@@ -41,8 +41,8 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
                 for attr in e.attributes() {
                     let attr = attr.map_err(|_| ErrorCode::MalformedXML)?;
                     if !stack.is_empty()
-                        || attr.key.as_ref() != b"xmlns"
-                        || attr.value.as_ref() != b"http://s3.amazonaws.com/doc/2006-03-01/"
+                        || attr.key.as_ref() != "xmlns"
+                        || attr.value.as_ref() != "http://s3.amazonaws.com/doc/2006-03-01/"
                     {
                         return Err(ErrorCode::InvalidRequest);
                     }
@@ -54,7 +54,7 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
                 if !matches!(stack.last().map(Vec::as_slice), Some(b"Days" | b"Tier")) {
                     return Err(ErrorCode::InvalidRequest);
                 }
-                text.push_str(&e.decode().map_err(|_| ErrorCode::MalformedXML)?);
+                text.push_str(e.as_ref());
             }
             Event::End(_) => {
                 let name = stack.pop().ok_or(ErrorCode::MalformedXML)?;
