@@ -38,9 +38,16 @@ limits are selected, or the offer fails. Clients validate the entire selection,
 including order/profile/version/limits, to reject downgrade. A scoped, expiring
 session record pins that selection; every later call rechecks it against current
 policy. Capability success must resolve an owned, unexpired session whose complete
-selection equals the response. Initiation success resolves an owned, unexpired,
+selection equals the response. New initiation success resolves an owned, unexpired,
 active upload with the exact intent and the acknowledged zero-byte checkpoint;
-committed or abort-marked uploads cannot be issued as new active uploads. Download
+committed or abort-marked uploads cannot be issued as new active uploads. An
+identical initiation replay instead uses the owned request-ID replay record's
+immutable action and `initiated_upload` result. Adapters atomically retain that
+original ID with the action before acknowledgement, for their full replay window.
+The original checkpoint remains zero even after progress, commit, abort or upload
+expiry; replay never reactivates the upload. Missing issuance history or a different
+ID fails closed. Current session, policy, key/envelope and destination grants are
+still rechecked. Download
 issuance resolves its owned transfer ID and requires the complete stored handle
 (object, range and expiry included) to equal the response. Adapters persist these
 records before validation and acknowledgement; invented IDs fail closed. Upload intents (including resume/commit/abort) must match the selected

@@ -73,6 +73,9 @@ pub struct CursorRecord {
 #[derive(Clone, Debug)]
 pub struct ReplayRecord {
     pub action: Action,
+    /// Original zero-byte initiation result, retained with its immutable action.
+    /// Required for initiation replay even after the live upload advances or expires.
+    pub initiated_upload: Option<Opaque>,
 }
 
 /// Trusted authorization/resolution port, not a wire payload or persistence API.
@@ -605,7 +608,7 @@ pub fn validate_response(
             _ => Ok(()),
         };
     }
-    admission?;
+    let admission = admission?;
     if let (Action::Capabilities(offer), ResponseBody::Capabilities(value)) =
         (&request.action, &response.body)
     {
@@ -628,6 +631,16 @@ pub fn validate_response(
                 received_bytes,
             },
         ) => {
+            if admission == Admission::Replay {
+                let retained = owned(authority.replay(owner, &request.request_id), owner)?;
+                if retained.action != request.action
+                    || retained.initiated_upload.as_ref() != Some(upload)
+                    || *received_bytes != 0
+                {
+                    return Err(ErrorCode::InvalidState);
+                }
+                return Ok(());
+            }
             let record = owned(authority.upload(upload), owner)?;
             if record.intent != *value
                 || *received_bytes != 0

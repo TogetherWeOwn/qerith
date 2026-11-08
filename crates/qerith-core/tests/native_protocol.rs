@@ -59,6 +59,8 @@ struct MemoryAuthority {
     cursor: CursorRecord,
     job: JobStatus,
     replay: Option<(Opaque, Action)>,
+    initiated_upload: Option<Opaque>,
+    replay_override: Option<Owned<ReplayRecord>>,
 }
 
 impl MemoryAuthority {
@@ -120,6 +122,8 @@ impl MemoryAuthority {
                 outcome: None,
             },
             replay: None,
+            initiated_upload: None,
+            replay_override: None,
         }
     }
 
@@ -224,12 +228,16 @@ impl Authority for MemoryAuthority {
         })
     }
     fn replay(&self, _owner: &Owner, request: &Opaque) -> Option<Owned<ReplayRecord>> {
+        if let Some(record) = &self.replay_override {
+            return Some(record.clone());
+        }
         self.replay
             .as_ref()
             .filter(|(key, _)| key == request)
             .map(|(_, action)| {
                 self.owned(ReplayRecord {
                     action: action.clone(),
+                    initiated_upload: self.initiated_upload.clone(),
                 })
             })
     }
@@ -850,6 +858,120 @@ fn initiate_response_requires_an_owned_live_active_matching_upload() {
     };
     value.upload = id("upload-1");
     assert_eq!(check(&continuation, &memory), Ok(Admission::New));
+}
+
+#[test]
+fn initiation_replay_retains_its_issued_id_after_upload_state_changes() {
+    let req = request("initiate_upload");
+    let reply = response(
+        &req,
+        ResponseBody::Upload {
+            upload: id("upload-1"),
+            received_bytes: 0,
+        },
+    );
+    for mutation in 0..5 {
+        let mut memory = MemoryAuthority::for_case("initiate_upload");
+        match mutation {
+            0 => memory.upload.received_bytes = 5,
+            1 => {
+                memory.upload.received_bytes = 10;
+                memory.upload.committed = true;
+            }
+            2 => memory.upload.abort_outcome = Some(CancelOutcome::CancelledBeforeCommit),
+            3 => memory.upload.abort_outcome = Some(CancelOutcome::CleanupRequired),
+            _ => memory.upload.expires_at = NOW,
+        }
+        // A newly issued acknowledgement must still reject these live states.
+        assert_eq!(check(&req, &memory), Ok(Admission::New));
+        assert!(validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW).is_err());
+        memory.replay = Some((req.request_id.clone(), req.action.clone()));
+        memory.initiated_upload = Some(id("upload-1"));
+        if memory.upload.committed {
+            memory.current = Some(memory.object.target.g.clone());
+        }
+        assert_eq!(check(&req, &memory), Ok(Admission::Replay));
+        assert_eq!(
+            validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+            Ok(())
+        );
+    }
+}
+
+#[test]
+fn initiation_replay_requires_owned_request_bound_issuance_history() {
+    let req = request("initiate_upload");
+    let mut memory = MemoryAuthority::for_case("initiate_upload");
+    memory.replay = Some((req.request_id.clone(), req.action.clone()));
+    memory.initiated_upload = Some(id("upload-1"));
+    let reply = response(
+        &req,
+        ResponseBody::Upload {
+            upload: id("upload-1"),
+            received_bytes: 0,
+        },
+    );
+    assert_eq!(
+        validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    for mutation in 0..6 {
+        let mut changed = memory.clone();
+        let mut retained = memory.replay(&memory.owner, &req.request_id).unwrap();
+        let mut candidate = reply.clone();
+        let expected = match mutation {
+            0 => {
+                retained.value.initiated_upload = None;
+                ErrorCode::InvalidState
+            }
+            1 => {
+                retained.value.initiated_upload = Some(id("another-issued-upload"));
+                ErrorCode::InvalidState
+            }
+            2 => {
+                retained.owner.principal = id("foreign-principal");
+                ErrorCode::NotAuthorized
+            }
+            3 => {
+                retained.owner.scope = id("foreign-tenant");
+                ErrorCode::NotAuthorized
+            }
+            4 => {
+                let Action::InitiateUpload(intent) = &mut retained.value.action else {
+                    panic!()
+                };
+                intent.ciphertext.c = id("another-ciphertext");
+                ErrorCode::ReplayConflict
+            }
+            _ => {
+                let ResponseBody::Upload { received_bytes, .. } = &mut candidate.body else {
+                    panic!()
+                };
+                *received_bytes = 5;
+                ErrorCode::InvalidState
+            }
+        };
+        changed.replay_override = Some(retained);
+        assert_eq!(
+            validate_response(&req, &candidate, &changed.owner, &policy(), &changed, NOW),
+            Err(expected)
+        );
+    }
+    let mut changed_request = req.clone();
+    changed_request.request_id = id("new-request-id");
+    memory.upload.received_bytes = 5;
+    assert_eq!(check(&changed_request, &memory), Ok(Admission::New));
+    assert_eq!(
+        validate_response(
+            &changed_request,
+            &response(&changed_request, reply.body.clone()),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::InvalidState)
+    );
 }
 
 #[test]
