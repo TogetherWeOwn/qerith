@@ -415,6 +415,92 @@ async fn restore_retry_wait_never_projects_running_back_to_queued_after_reconnec
 }
 
 #[tokio::test]
+async fn tightened_byte_limit_preserves_uncertain_upload_effects_and_cleanup_after_reconnect() {
+    let (mut service, mut io, transfer, job, auth) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    io.inject = Injection::PartialUpload;
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &time,
+                &rules,
+            )
+            .await
+            .unwrap_err()
+            .effects,
+        o::Effects::Unknown
+    );
+    let mut small = limits();
+    small.bytes = 1024;
+    let mut service =
+        s::Service::reconnect(service.checkpoint(), Access(auth), small, profile(), 10).unwrap();
+    let before = service.allocations();
+    let outbox = service.catalogue().outbox(TENANT);
+    let calls = io.order.len();
+    let mut fresh = commit_fields(&transfer);
+    fresh.retain(|(name, _)| name != "identity");
+    fresh.push(text("identity", "limited_uncertain_commit"));
+    let direct = o::dispatch(
+        &mut service,
+        Some(&scope()),
+        o::VERSION,
+        o::Operation::CommitUpload,
+        fresh.clone(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        parity(&mut service, &scope(), o::Operation::CommitUpload, fresh).unwrap_err(),
+        direct
+    );
+    let worker = service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules,
+        )
+        .await
+        .unwrap_err();
+    for failure in [direct, worker] {
+        assert_eq!(failure.code, o::ErrorCode::QuotaExceeded);
+        assert_eq!(failure.effects, o::Effects::Unknown);
+        assert!(!failure.retryable());
+        assert!(failure.reconciliation_required());
+    }
+    assert_eq!(service.allocations(), before);
+    assert_eq!(service.catalogue().outbox(TENANT), outbox);
+    assert_eq!(io.order.len(), calls);
+    let o::Output::Cancel { outcome, job } = parity(
+        &mut service,
+        &scope(),
+        o::Operation::Cancel,
+        vec![text("job", job.handle.as_str())],
+    )
+    .unwrap() else {
+        panic!("cancel");
+    };
+    assert_eq!(outcome, o::CancelOutcome::Requested);
+    assert_eq!(job.state, o::JobState::CancelRequested);
+    assert_eq!(job.effects, o::Effects::Unknown);
+    assert_eq!(io.order.len(), calls);
+}
+
+#[tokio::test]
 async fn tightened_byte_limit_blocks_retained_upload_and_existing_restore_download_before_effects()
 {
     for submitted in [false, true] {

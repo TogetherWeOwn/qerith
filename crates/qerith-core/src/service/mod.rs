@@ -790,9 +790,13 @@ impl<A: Access> Service<A> {
             .cloned()
             .ok_or_else(denied)?;
         self.permit_descriptor(scope, &upload.descriptor)?;
-        self.check_bytes(upload.descriptor.intent.ciphertext.length)?;
         self.set_now(clock.now().map_err(map)?)?;
         let job = self.job(scope, &upload.job)?;
+        self.check_bytes(upload.descriptor.intent.ciphertext.length)
+            .map_err(|mut failure| {
+                failure.effects = job.value.effects;
+                failure
+            })?;
         if job.value.state == o::JobState::Succeeded {
             return Ok(job.value);
         }
@@ -1137,7 +1141,12 @@ impl<A: Access> o::OperationPort for Service<A> {
                     .uploads
                     .get(request.opaque("transfer").unwrap())
                     .ok_or_else(denied)?;
-                self.check_bytes(upload.descriptor.intent.ciphertext.length)?;
+                let job = self.job_access(scope, &upload.job, Some(c::Action::Write))?;
+                self.check_bytes(upload.descriptor.intent.ciphertext.length)
+                    .map_err(|mut failure| {
+                        failure.effects = job.value.effects;
+                        failure
+                    })?;
             }
             o::Operation::Restore | o::Operation::AuthorizeDownload => {
                 let view = self.exact(scope, &Self::target(request))?;
