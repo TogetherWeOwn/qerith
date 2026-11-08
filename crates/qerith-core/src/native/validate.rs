@@ -298,6 +298,16 @@ fn session(
     now: u64,
 ) -> Check<Selection> {
     let id = request.session.as_ref().ok_or(ErrorCode::NotAuthorized)?;
+    resolved_session(id, owner, policy, authority, now)
+}
+
+fn resolved_session(
+    id: &Opaque,
+    owner: &Owner,
+    policy: &Policy,
+    authority: &impl Authority,
+    now: u64,
+) -> Check<Selection> {
     let session = owned(authority.session(id), owner)?;
     if session.expires_at <= now || session.selection.session != *id {
         return Err(ErrorCode::NotAuthorized);
@@ -376,7 +386,8 @@ pub fn validate_request(
             if record.received_bytes > record.intent.ciphertext.length
                 || !replay
                     && (record.expires_at <= now
-                        || record.committed && !matches!(request.action, Action::AbortUpload(_)))
+                        || (record.committed || record.abort_outcome.is_some())
+                            && !matches!(request.action, Action::AbortUpload(_)))
             {
                 return Err(ErrorCode::InvalidState);
             }
@@ -598,7 +609,11 @@ pub fn validate_response(
     if let (Action::Capabilities(offer), ResponseBody::Capabilities(value)) =
         (&request.action, &response.body)
     {
-        return validate_selection(offer, value, policy);
+        validate_selection(offer, value, policy)?;
+        if resolved_session(&value.session, owner, policy, authority, now)? != *value {
+            return Err(ErrorCode::InvalidState);
+        }
+        return Ok(());
     }
     let selected = session(request, owner, policy, authority, now)?;
     let object_check = |object: &Object| -> Check {
@@ -606,10 +621,24 @@ pub fn validate_response(
         metadata(&object.metadata)
     };
     match (&request.action, &response.body) {
-        (Action::InitiateUpload(value), ResponseBody::Upload { received_bytes, .. })
-            if *received_bytes == 0 =>
-        {
-            intent(value, &selected, policy)
+        (
+            Action::InitiateUpload(value),
+            ResponseBody::Upload {
+                upload,
+                received_bytes,
+            },
+        ) => {
+            let record = owned(authority.upload(upload), owner)?;
+            if record.intent != *value
+                || *received_bytes != 0
+                || record.received_bytes != *received_bytes
+                || record.expires_at <= now
+                || record.committed
+                || record.abort_outcome.is_some()
+            {
+                return Err(ErrorCode::InvalidState);
+            }
+            Ok(())
         }
         (
             Action::ResumeUpload(value),
@@ -710,7 +739,10 @@ pub fn validate_response(
         }
         (Action::Download(value), ResponseBody::Download(handle)) => {
             let expected = resolved_object(&value.target, owner, &selected, policy, authority)?;
-            if handle.object != expected || handle.range != value.range || handle.expires_at <= now
+            if handle.object != expected
+                || handle.range != value.range
+                || handle.expires_at <= now
+                || owned(authority.transfer(&handle.handle), owner)? != *handle
             {
                 return Err(ErrorCode::GenerationMismatch);
             }
@@ -730,9 +762,12 @@ pub fn validate_response(
             Ok(())
         }
         (Action::Status { job }, ResponseBody::Status(status)) => {
-            let before = owned(authority.job(job), owner)?;
-            validate_status_transition(&before.status, status)?;
-            resolved_status(status, owner, policy, authority)
+            let record = owned(authority.job(job), owner)?;
+            resolved_status(status, owner, policy, authority)?;
+            if record.status != *status {
+                return Err(ErrorCode::InvalidState);
+            }
+            Ok(())
         }
         _ => Err(ErrorCode::InvalidState),
     }

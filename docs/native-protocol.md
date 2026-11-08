@@ -37,7 +37,13 @@ are not silently ignored. The first supported offered profile and exact requeste
 limits are selected, or the offer fails. Clients validate the entire selection,
 including order/profile/version/limits, to reject downgrade. A scoped, expiring
 session record pins that selection; every later call rechecks it against current
-policy. Upload intents (including resume/commit/abort) must match the selected
+policy. Capability success must resolve an owned, unexpired session whose complete
+selection equals the response. Initiation success resolves an owned, unexpired,
+active upload with the exact intent and the acknowledged zero-byte checkpoint;
+committed or abort-marked uploads cannot be issued as new active uploads. Download
+issuance resolves its owned transfer ID and requires the complete stored handle
+(object, range and expiry included) to equal the response. Adapters persist these
+records before validation and acknowledgement; invented IDs fail closed. Upload intents (including resume/commit/abort) must match the selected
 profile exactly. Reads instead accept any currently policy-supported stored
 profile, still enforcing its own checksum length. New reads/transfers enforce the
 session's byte limits; status/cancel only resolve existing work and do not apply a
@@ -114,8 +120,11 @@ precondition, C/length/checksum/profile/key/envelope and metadata). The resolver
 returns an owned upload receipt with expiration and received bytes. Resume returns
 the authoritative offset, never a caller-asserted offset. Commit requires complete
 bytes plus a **trusted** full-byte integrity receipt. That receipt is not proof
-of correct encryption or two-backbone durability. Resume/commit reject an already
-committed session; identical retained commit replay reconciles its result.
+of correct encryption or two-backbone durability. Fresh resume/commit reject an
+already committed session or any recorded abort outcome, including cancellation
+pending external cleanup. An abort cannot reactivate the upload or publish it.
+Identical retained resume/commit replay still reconciles its checkpoint/result,
+never authorizes re-execution, even after abort or expiry.
 `Authority::committed_upload` resolves the retained object actually published by
 that upload; the response must equal that whole descriptor, not just an object
 with matching ciphertext and metadata. The adapter persists this receipt atomically
@@ -159,7 +168,12 @@ non-success state using structural progress checks, but cannot claim success
 without a resolved committed generation. Restore always requires that generation;
 its initial response also stays within the request's byte budget and must equal an
 owned persisted `Authority::job` snapshot, so its job ID cannot address different
-work or disappear on the first poll. Resolving status/cancel rechecks ownership,
+work or disappear on the first poll. Status responses likewise equal the complete
+owned persisted job snapshot, not merely a plausible forward transition: progress
+or success must be recorded before acknowledgement. Adapters enforce monotonic
+transitions when updating the retained job and supply one consistent snapshot for
+admission/response validation; the validator does not mutate it.
+Resolving status/cancel rechecks ownership,
 exact G, metadata, stored profile/checksum and progress, but not a new session's
 object-byte budget: these calls transfer no ciphertext. New download/restore
 admission and handle redemption retain their byte ceilings. The standalone

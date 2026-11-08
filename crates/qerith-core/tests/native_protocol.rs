@@ -46,6 +46,9 @@ struct MemoryAuthority {
     owner: Owner,
     selection: Selection,
     session_expires_at: u64,
+    session_override: Option<Owned<SessionRecord>>,
+    upload_override: Option<Owned<UploadRecord>>,
+    transfer_override: Option<Owned<TransferHandle>>,
     upload: UploadRecord,
     committed_result: Option<Object>,
     object: Object,
@@ -82,6 +85,9 @@ impl MemoryAuthority {
             },
             selection,
             session_expires_at: 2000,
+            session_override: None,
+            upload_override: None,
+            transfer_override: None,
             committed_result: Some(object.clone()),
             object_override: None,
             cleanup_required: false,
@@ -91,7 +97,7 @@ impl MemoryAuthority {
                 integrity_verified: true,
                 expires_at: 2000,
                 committed: false,
-                abort_outcome: Some(CancelOutcome::CancelledBeforeCommit),
+                abort_outcome: None,
             },
             object,
             other_objects: vec![],
@@ -117,6 +123,25 @@ impl MemoryAuthority {
         }
     }
 
+    fn for_case(name: &str) -> Self {
+        let mut memory = Self::new();
+        match name {
+            "initiate_upload" => {
+                memory.upload.received_bytes = 0;
+                memory.upload.integrity_verified = false;
+            }
+            "abort_upload" => {
+                memory.upload.abort_outcome = Some(CancelOutcome::CancelledBeforeCommit);
+            }
+            "status" => {
+                memory.job.state = JobState::Failed;
+                memory.job.outcome = Some(Outcome::IrrecoverableKey);
+            }
+            _ => {}
+        }
+        memory
+    }
+
     fn owned<T>(&self, value: T) -> Owned<T> {
         Owned {
             owner: self.owner.clone(),
@@ -127,6 +152,9 @@ impl MemoryAuthority {
 
 impl Authority for MemoryAuthority {
     fn session(&self, value: &Opaque) -> Option<Owned<SessionRecord>> {
+        if let Some(record) = &self.session_override {
+            return Some(record.clone());
+        }
         (value == &self.selection.session).then(|| {
             self.owned(SessionRecord {
                 selection: self.selection.clone(),
@@ -138,6 +166,9 @@ impl Authority for MemoryAuthority {
         (key == &id("key-ref-1") && envelope == &id("envelope-ref-1")).then(|| self.owned(()))
     }
     fn transfer(&self, value: &Opaque) -> Option<Owned<TransferHandle>> {
+        if let Some(record) = &self.transfer_override {
+            return Some(record.clone());
+        }
         (value == &id("transfer-1")).then(|| {
             self.owned(TransferHandle {
                 handle: value.clone(),
@@ -160,6 +191,9 @@ impl Authority for MemoryAuthority {
             .map(|object| self.owned(object.clone()))
     }
     fn upload(&self, value: &Opaque) -> Option<Owned<UploadRecord>> {
+        if let Some(record) = &self.upload_override {
+            return Some(record.clone());
+        }
         (value == &id("upload-1")).then(|| self.owned(self.upload.clone()))
     }
     fn committed_upload(&self, value: &Opaque) -> Option<Owned<Object>> {
@@ -223,8 +257,8 @@ fn check(request: &Request, memory: &MemoryAuthority) -> Result<Admission, Error
 
 #[test]
 fn golden_requests_responses_round_trip_and_validate() {
-    let memory = MemoryAuthority::new();
     for case in golden().valid {
+        let memory = MemoryAuthority::for_case(&case.name);
         let request = decode_request(&serde_json::to_vec(&case.request).unwrap()).unwrap();
         let response = decode_response(&serde_json::to_vec(&case.response).unwrap()).unwrap();
         assert_eq!(
@@ -266,9 +300,9 @@ fn invalid_golden_requests_fail_closed() {
 
 #[test]
 fn invalid_golden_responses_fail_closed() {
-    let memory = MemoryAuthority::new();
     let fixtures = golden();
     for mutation in fixtures.invalid_response_mutations {
+        let memory = MemoryAuthority::for_case(&mutation.case);
         let case = fixtures
             .valid
             .iter()
@@ -582,6 +616,292 @@ fn response(request: &Request, body: ResponseBody) -> Response {
 }
 
 #[test]
+fn aborted_uploads_reject_fresh_resume_and_commit_but_allow_reconciliation() {
+    for outcome in [
+        CancelOutcome::Requested,
+        CancelOutcome::CancelledBeforeCommit,
+        CancelOutcome::CleanupRequired,
+        CancelOutcome::AlreadyCommitted,
+        CancelOutcome::AlreadyFinished,
+    ] {
+        let mut memory = MemoryAuthority::new();
+        memory.upload.abort_outcome = Some(outcome.clone());
+        for name in ["resume_upload", "commit_upload"] {
+            let req = request(name);
+            assert_eq!(check(&req, &memory), Err(ErrorCode::InvalidState));
+            memory.replay = Some((req.request_id.clone(), req.action.clone()));
+            memory.upload.expires_at = NOW;
+            assert_eq!(check(&req, &memory), Ok(Admission::Replay));
+            memory.replay = None;
+            memory.upload.expires_at = 2000;
+        }
+        let req = request("abort_upload");
+        assert_eq!(check(&req, &memory), Ok(Admission::New));
+        if matches!(
+            outcome,
+            CancelOutcome::CancelledBeforeCommit | CancelOutcome::CleanupRequired
+        ) {
+            assert_eq!(
+                validate_response(
+                    &req,
+                    &response(&req, ResponseBody::Aborted(outcome)),
+                    &memory.owner,
+                    &policy(),
+                    &memory,
+                    NOW
+                ),
+                Ok(())
+            );
+        }
+        memory.upload.abort_outcome = None;
+        for name in ["resume_upload", "commit_upload"] {
+            assert_eq!(check(&request(name), &memory), Ok(Admission::New));
+        }
+    }
+}
+
+#[test]
+fn status_responses_require_the_persisted_snapshot_for_both_job_kinds() {
+    for (kind, outcome) in [
+        (JobKind::Upload, Outcome::Committed),
+        (JobKind::Restore, Outcome::Restored),
+    ] {
+        let mut memory = MemoryAuthority::new();
+        memory.job.kind = kind;
+        let req = request("status");
+        let before = memory.job.clone();
+        let mut after = before.clone();
+        after.state = JobState::Succeeded;
+        after.completed_bytes = 10;
+        after.total_bytes = Some(10);
+        after.outcome = Some(outcome);
+        assert_eq!(validate_status_transition(&before, &after), Ok(()));
+        for state in [JobState::Running, JobState::Succeeded] {
+            let mut claimed = after.clone();
+            claimed.state = state;
+            if claimed.state == JobState::Running {
+                claimed.outcome = None;
+            }
+            let reply = response(&req, ResponseBody::Status(claimed.clone()));
+            assert_eq!(
+                validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+                Err(ErrorCode::InvalidState)
+            );
+            memory.job = claimed;
+            assert_eq!(
+                validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+                Ok(())
+            );
+            let stale = response(&req, ResponseBody::Status(before.clone()));
+            assert_eq!(
+                validate_response(&req, &stale, &memory.owner, &policy(), &memory, NOW),
+                Err(ErrorCode::InvalidState)
+            );
+            memory.job = before.clone();
+        }
+        memory.job = after.clone();
+        let mut foreign = memory.owner.clone();
+        foreign.principal = id("foreign-principal");
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Status(after)),
+                &foreign,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Err(ErrorCode::NotAuthorized)
+        );
+        let mut missing = req.clone();
+        missing.action = Action::Status {
+            job: id("missing-job"),
+        };
+        assert_eq!(
+            validate_response(
+                &missing,
+                &response(&missing, ResponseBody::Status(memory.job.clone())),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Err(ErrorCode::NotAuthorized)
+        );
+    }
+}
+
+#[test]
+fn capability_response_requires_an_owned_live_matching_session() {
+    let memory = MemoryAuthority::new();
+    let req = request("capabilities");
+    let reply = response(&req, ResponseBody::Capabilities(memory.selection.clone()));
+    assert_eq!(
+        validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    let mut missing = memory.selection.clone();
+    missing.session = id("missing-session");
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Capabilities(missing)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::NotAuthorized)
+    );
+    for mutation in 0..6 {
+        let mut changed = memory.clone();
+        let mut record = memory.session(&memory.selection.session).unwrap();
+        let expected = match mutation {
+            0 => {
+                record.owner.principal = id("foreign-principal");
+                ErrorCode::NotAuthorized
+            }
+            1 => {
+                record.value.expires_at = NOW;
+                ErrorCode::NotAuthorized
+            }
+            2 => {
+                record.value.selection.session = id("wrong-session");
+                ErrorCode::NotAuthorized
+            }
+            3 => {
+                record.value.selection.version = 2;
+                ErrorCode::UnsupportedVersion
+            }
+            4 => {
+                record.value.selection.profile.crypto = id("unsupported");
+                ErrorCode::UnsupportedProfile
+            }
+            _ => {
+                record.value.selection.limits.page_entries = 1;
+                ErrorCode::InvalidState
+            }
+        };
+        changed.session_override = Some(record);
+        assert_eq!(
+            validate_response(&req, &reply, &changed.owner, &policy(), &changed, NOW),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
+fn initiate_response_requires_an_owned_live_active_matching_upload() {
+    let memory = MemoryAuthority::for_case("initiate_upload");
+    let req = request("initiate_upload");
+    let reply = response(
+        &req,
+        ResponseBody::Upload {
+            upload: id("upload-1"),
+            received_bytes: 0,
+        },
+    );
+    assert_eq!(
+        validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    let missing = response(
+        &req,
+        ResponseBody::Upload {
+            upload: id("missing-upload"),
+            received_bytes: 0,
+        },
+    );
+    assert_eq!(
+        validate_response(&req, &missing, &memory.owner, &policy(), &memory, NOW),
+        Err(ErrorCode::NotAuthorized)
+    );
+    for mutation in 0..13 {
+        let mut changed = memory.clone();
+        let mut record = memory.owned(memory.upload.clone());
+        match mutation {
+            0 => record.owner.principal = id("foreign-principal"),
+            1 => record.value.expires_at = NOW,
+            2 => record.value.committed = true,
+            3 => record.value.abort_outcome = Some(CancelOutcome::CancelledBeforeCommit),
+            4 => record.value.abort_outcome = Some(CancelOutcome::CleanupRequired),
+            5 => record.value.received_bytes = 1,
+            6 => record.value.intent.object = id("wrong-object"),
+            7 => record.value.intent.precondition = Precondition::Matches(id("wrong-generation")),
+            8 => record.value.intent.ciphertext.c = id("wrong-ciphertext"),
+            9 => record.value.intent.ciphertext.length = 9,
+            10 => record.value.intent.ciphertext.checksum_hex = id("0123"),
+            11 => record.value.intent.ciphertext.envelope_ref = id("wrong-envelope"),
+            _ => record.value.intent.metadata.content_encoding = None,
+        }
+        changed.upload_override = Some(record);
+        assert_eq!(
+            validate_response(&req, &reply, &changed.owner, &policy(), &changed, NOW),
+            Err(if mutation == 0 {
+                ErrorCode::NotAuthorized
+            } else {
+                ErrorCode::InvalidState
+            })
+        );
+    }
+    let mut continuation = request("resume_upload");
+    let Action::ResumeUpload(value) = &mut continuation.action else {
+        panic!()
+    };
+    value.upload = id("upload-1");
+    assert_eq!(check(&continuation, &memory), Ok(Admission::New));
+}
+
+#[test]
+fn download_response_requires_the_owned_live_exact_transfer_record() {
+    let memory = MemoryAuthority::new();
+    let req = request("download");
+    let handle = memory.transfer(&id("transfer-1")).unwrap().value;
+    let reply = response(&req, ResponseBody::Download(handle.clone()));
+    assert_eq!(
+        validate_response(&req, &reply, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    let mut missing = handle.clone();
+    missing.handle = id("missing-handle");
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Download(missing)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::NotAuthorized)
+    );
+    for mutation in 0..9 {
+        let mut changed = memory.clone();
+        let mut record = memory.owned(handle.clone());
+        match mutation {
+            0 => record.owner.principal = id("foreign-principal"),
+            1 => record.value.handle = id("wrong-handle"),
+            2 => record.value.expires_at = NOW,
+            3 => record.value.expires_at += 1,
+            4 => record.value.object.target.g = id("wrong-generation"),
+            5 => record.value.object.ciphertext.c = id("wrong-ciphertext"),
+            6 => record.value.object.metadata.content_encoding = None,
+            7 => record.value.range = None,
+            _ => record.value.range = Some(ByteRange { first: 0, last: 3 }),
+        }
+        changed.transfer_override = Some(record);
+        assert_eq!(
+            validate_response(&req, &reply, &changed.owner, &policy(), &changed, NOW),
+            Err(if mutation == 0 {
+                ErrorCode::NotAuthorized
+            } else {
+                ErrorCode::GenerationMismatch
+            })
+        );
+    }
+}
+
+#[test]
 fn capabilities_share_the_cross_operation_replay_namespace() {
     let mut memory = MemoryAuthority::new();
     let req = request("capabilities");
@@ -708,19 +1028,19 @@ fn status_and_cancel_bind_progress_to_resolved_ciphertext_length() {
             status.state = JobState::Running;
             status.completed_bytes = completed;
             status.total_bytes = total;
+            let mut recorded = memory.clone();
+            recorded.job = status.clone();
             assert_eq!(
                 validate_response(
                     &req,
                     &response(&req, ResponseBody::Status(status.clone())),
-                    &memory.owner,
+                    &recorded.owner,
                     &policy(),
-                    &memory,
+                    &recorded,
                     NOW
                 ),
                 expected
             );
-            let mut recorded = memory.clone();
-            recorded.job = status;
             for name in ["status", "cancel"] {
                 assert_eq!(check(&request(name), &recorded).map(|_| ()), expected);
             }
@@ -736,19 +1056,19 @@ fn status_and_cancel_bind_progress_to_resolved_ciphertext_length() {
             } else {
                 Err(ErrorCode::InvalidState)
             };
+            let mut recorded = memory.clone();
+            recorded.job = status.clone();
             assert_eq!(
                 validate_response(
                     &req,
                     &response(&req, ResponseBody::Status(status.clone())),
-                    &memory.owner,
+                    &recorded.owner,
                     &policy(),
-                    &memory,
+                    &recorded,
                     NOW
                 ),
                 expected
             );
-            let mut recorded = memory.clone();
-            recorded.job = status;
             for name in ["status", "cancel"] {
                 assert_eq!(check(&request(name), &recorded).map(|_| ()), expected);
             }
@@ -844,12 +1164,16 @@ fn supported_read_profiles_can_differ_but_write_intents_stay_session_bound() {
         }
         let body = match name {
             "stat" => ResponseBody::Stat(object.clone()),
-            "download" => ResponseBody::Download(TransferHandle {
-                handle: id("older-transfer"),
-                object: object.clone(),
-                range: Some(ByteRange { first: 2, last: 5 }),
-                expires_at: 2000,
-            }),
+            "download" => {
+                let handle = TransferHandle {
+                    handle: id("older-transfer"),
+                    object: object.clone(),
+                    range: Some(ByteRange { first: 2, last: 5 }),
+                    expires_at: 2000,
+                };
+                memory.transfer_override = Some(memory.owned(handle.clone()));
+                ResponseBody::Download(handle)
+            }
             "restore" => {
                 let mut status = memory.job.clone();
                 status.target = object.target.clone();
@@ -900,6 +1224,7 @@ fn supported_read_profiles_can_differ_but_write_intents_stay_session_bound() {
         }
     }
     // Redemption rechecks the stored profile, not just authorization issuance.
+    memory.transfer_override = None;
     memory.object = object;
     assert_eq!(
         validate_transfer(
