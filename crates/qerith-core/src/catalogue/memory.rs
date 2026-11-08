@@ -711,6 +711,14 @@ impl JobPort for MemoryCatalogue {
             .map_or_else(Vec::new, |t| t.events.values().cloned().collect())
     }
 
+    fn outbox_event(&self, tenant: TenantId, event: EventId) -> Result<OutboxEvent> {
+        self.tenants
+            .get(&tenant)
+            .and_then(|t| t.events.get(&event))
+            .cloned()
+            .ok_or(Error::Unavailable)
+    }
+
     fn job(&self, tenant: TenantId, job: JobId) -> Result<JobView> {
         Ok(self
             .tenants
@@ -1003,6 +1011,13 @@ impl JobPort for MemoryCatalogue {
                 || independence.decision_ref.is_empty()
             {
                 return Err(Error::Unsafe);
+            }
+            // An authenticated, still-valid exact replay is a no-op. Same-time
+            // changed content or attribution remains a conflict, not a refresh.
+            if g.verification.get(&evidence.backbone) == Some(&evidence)
+                && g.independence.as_ref() == Some(&independence)
+            {
+                return Ok(());
             }
             if g.verification
                 .get(&evidence.backbone)

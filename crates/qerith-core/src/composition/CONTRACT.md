@@ -26,12 +26,21 @@ service, deployment or launch is supplied.
    and external independence qualification -> record both proofs -> fenced archive
    completion. Two identical backbone IDs fail before evidence recording. A partial
    pair or an expired/missing/uncertain proof never allows completion/eviction.
+   Exact, still-valid evidence and independence replay is an atomic no-op in the
+   catalogue, permitting restart after either proof write without refreshing its
+   expiry. Changed same-time content/attribution still conflicts.
 4. Restore: engine retrieval to invisible staged cache -> whole-generation digest,
    length and supported-checksum verification -> cache object completion -> trusted
    complete-copy receipt -> fenced `PublishRestore`. The existing catalogue checks
    archival qualification, live moderation epoch, current per-reference authority,
    revision/generation and each accepted subscription again in that transaction.
    A completed physical object is not a public URL and grants no authorization.
+   When a competing job installed a different immutable version after the snapshot,
+   reconcile at most once: read the current winning location, verify that exact
+   completed version through Storage within the remaining invocation budget, then
+   publish using its receipt under the original fence and current subscriber checks.
+   Preserve the losing completed copy in the recoverable inventory for separate
+   orphan reconciliation; never replace the winner or delete either inline.
 5. Serving is outside this worker: acquire and continuously validate a scoped
    catalogue serving pin, read only its exact immutable completed cache version,
    and serve C or exact slices of C. No direct NNTP-to-user stream exists here.
@@ -53,7 +62,11 @@ these ports are not cryptographic capabilities or proof-carrying data types.
 limits. Zero-length objects remain possible within a positive allocation budget.
 The composition checks committed N before allocation, policy admission before
 claims and every I/O boundary, checked time arithmetic, an absolute job deadline,
-and claim expiry before publication. `Clock` must reject rollback/uncertainty;
+and claim expiry before publication. Upload staging receives an explicit absolute
+invocation deadline `min(now + claim_for, archive_deadline)` in the same trusted
+clock epoch. Storage must enforce that deadline and its cancellation signal inside
+staging; a late successful receipt still cannot commit or authorize cleanup.
+`Clock` must reject rollback/uncertainty;
 `Policy` must acquire account-wide resource reservations and fail closed if that
 resource authority is unavailable. Unit limits mean adapter-defined engine units
 (e.g. articles/stripes); the Storage adapter enforces them, not a claimed Workers
@@ -71,9 +84,16 @@ deadline and within the total attempt budget. Integrity/repair failures in the
 fixture are terminal, not an infinite retry. A lost final-attempt claim is left
 fenced and can be expired at its absolute deadline; it cannot restart I/O. A
 scheduler adapter is responsible for dispatching the existing outbox and explicit
-expiry/cleanup, not this module. Outbox delivery remains at-least-once.
+expiry/cleanup, not this module. Outbox delivery remains at-least-once. A worker
+reads only its scoped `outbox_event`, never materializes the tenant backlog before
+admission. The reference catalogue's other operations still use non-durable
+clone-and-swap and are not a production scaling claim.
 
 Cancellation never cancels an archive obligation or another authorized subscriber.
+Pre-claim invocation interruption leaves needed jobs queued without consuming an
+attempt. An interrupted claimed archive, or restore with a current subscriber,
+uses the explicit retry policy and attempt cap, not a restore-only cancellation
+transition. Only catalogue-confirmed unneeded restores become Cancelled.
 The producer coalesces same-tenant/generation/profile/**fixed-deadline** requests;
 each reference has its own scope, subscription operation ID and availability
 period. A differing deadline is a separate physical job, not silently widened or

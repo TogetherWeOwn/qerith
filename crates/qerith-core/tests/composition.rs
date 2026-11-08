@@ -51,7 +51,11 @@ impl Policy for Rules {
         self.cancelled.get()
     }
     fn retry_at(&self, _: &Work, error: &IoError, now: u64) -> Option<u64> {
-        matches!(error, IoError::Retryable | IoError::Uncertain).then_some(now + 2)
+        matches!(
+            error,
+            IoError::Retryable | IoError::Uncertain | IoError::Cancelled
+        )
+        .then_some(now + 2)
     }
     fn cleanup_incomplete(&self, _: &Work, _: &IoError) -> bool {
         true
@@ -97,6 +101,7 @@ enum Injection {
     RepairFailure,
     SameBackbone,
     CleanupFailure,
+    Interrupted,
 }
 
 /// The only byte source for a cold attempt is the producer's native engine
@@ -115,6 +120,7 @@ struct Io {
     complete_location: Option<String>,
     revoke_at_complete: Option<(Rc<Auth>, String)>,
     expire_at_complete: Option<Rc<Time>>,
+    expire_at_upload: Option<Rc<Time>>,
     attempts: Vec<(String, u64)>,
 }
 impl Io {
@@ -154,6 +160,7 @@ impl Io {
             complete_location: None,
             revoke_at_complete: None,
             expire_at_complete: None,
+            expire_at_upload: None,
             attempts: Vec::new(),
         }
     }
@@ -258,8 +265,13 @@ impl Storage for Io {
         &mut self,
         upload: &Upload,
         _: &Budget,
+        until: u64,
     ) -> std::result::Result<CompleteCopy, IoError> {
         self.order.push("upload-stage");
+        assert!(until <= upload.archive_deadline);
+        if let Some(clock) = &self.expire_at_upload {
+            clock.0.set(until);
+        }
         if self.inject == Injection::PartialUpload {
             return Err(IoError::Retryable);
         }
@@ -292,6 +304,9 @@ impl Storage for Io {
                     .await
                     .map_err(|_| IoError::Retryable)?;
             }
+        }
+        if self.inject == Injection::Interrupted {
+            return Err(IoError::Cancelled);
         }
         if self.inject == Injection::Uncertain {
             return Err(IoError::Uncertain);
@@ -332,6 +347,9 @@ impl Storage for Io {
     async fn retrieve(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         self.attempts
             .push((work.inventory_ref.clone(), work.attempt));
+        if self.inject == Injection::Interrupted {
+            return Err(IoError::Cancelled);
+        }
         if self.inject == Injection::RepairFailure {
             return Err(IoError::RepairUnavailable);
         }
@@ -377,6 +395,29 @@ impl Storage for Io {
             clock.0.set(work.claim_until);
         }
         Ok(self.copy(&work.metadata, location))
+    }
+    async fn verify_completed(
+        &mut self,
+        work: &Work,
+        location: &str,
+    ) -> std::result::Result<CompleteCopy, IoError> {
+        self.check(work)?;
+        self.order.push("verify-winning-cache");
+        let bytes = self.copies.get(location).ok_or(IoError::Integrity)?;
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        if bytes.len() as u64 != work.metadata.identity.length
+            || digest != work.metadata.identity.sha256
+            || work.metadata.checksums.iter().any(|c| {
+                c.algorithm != "SHA256"
+                    || c.kind != ChecksumType::FullObject
+                    || c.value != digest
+                    || !c.parts.is_empty()
+            })
+        {
+            return Err(IoError::Integrity);
+        }
+        self.complete_location = Some(location.into());
+        Ok(self.copy(&work.metadata, location.into()))
     }
     async fn cleanup_incomplete(&mut self, _: &Work) -> std::result::Result<(), IoError> {
         if self.inject == Injection::CleanupFailure {
@@ -584,6 +625,414 @@ impl MetadataOutbox for CommitFault {
         authority: &dyn Authority,
     ) -> qerith_core::catalogue::Result<GenerationId> {
         self.inner.validate_pin(tenant, pin, now, authority)
+    }
+}
+
+#[tokio::test]
+async fn upload_invocation_expiry_prevents_commit_but_retains_completed_bytes() {
+    let mut c = MemoryCatalogue::default();
+    let mut io = Io::new(1).await;
+    let upload = io.upload();
+    let time = Rc::new(Time(Cell::new(10)));
+    io.expire_at_upload = Some(time.clone());
+    let auth = Auth::default();
+    assert_eq!(
+        ingest(
+            &mut c,
+            &mut io,
+            &upload,
+            &budget(),
+            time.as_ref(),
+            &Rules::default(),
+            &auth
+        )
+        .await,
+        Err(Failure::Admission)
+    );
+    assert_eq!(time.0.get(), 110, "invocation limit, not archive deadline");
+    assert_eq!(io.copies.len(), 1);
+    assert!(c.outbox(TENANT).is_empty());
+    assert_eq!(
+        c.reconcile(TENANT, upload.commit, &auth).unwrap(),
+        Reconciliation::Absent
+    );
+}
+
+#[tokio::test]
+async fn worker_interruption_preserves_archive_and_needed_restore_retries() {
+    let mut c = MemoryCatalogue::default();
+    let mut io = Io::new(1).await;
+    let upload = io.upload();
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    let auth = Auth::default();
+    let archive = commit_job(
+        ingest(&mut c, &mut io, &upload, &budget(), &time, &rules, &auth)
+            .await
+            .unwrap(),
+    );
+    rules.cancelled.set(true);
+    assert_eq!(
+        run(&mut c, &mut io, archive, &time, &rules, &auth).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(c.job(TENANT, archive).unwrap().checkpoint, 0);
+    assert_eq!(c.job(TENANT, archive).unwrap().state, JobState::Queued);
+    rules.cancelled.set(false);
+    io.inject = Injection::Interrupted;
+    assert_eq!(
+        run(&mut c, &mut io, archive, &time, &rules, &auth).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(
+        c.job(TENANT, archive).unwrap().state,
+        JobState::RetryWait { not_before: 12 }
+    );
+    assert_eq!(io.copies.len(), 1);
+    time.0.set(12);
+    io.inject = Injection::None;
+    run(&mut c, &mut io, archive, &time, &rules, &auth)
+        .await
+        .unwrap();
+    let restore = request(&mut c, "object", 1000, 500, 50, 12, &auth);
+    rules.cancelled.set(true);
+    assert_eq!(
+        run(&mut c, &mut io, restore, &time, &rules, &auth).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(c.job(TENANT, restore).unwrap().checkpoint, 0);
+    rules.cancelled.set(false);
+    io.inject = Injection::Interrupted;
+    assert_eq!(
+        run(&mut c, &mut io, restore, &time, &rules, &auth).await,
+        Err(Failure::Io(IoError::Cancelled))
+    );
+    assert_eq!(
+        c.job(TENANT, restore).unwrap().state,
+        JobState::RetryWait { not_before: 14 }
+    );
+    time.0.set(14);
+    io.inject = Injection::None;
+    run(&mut c, &mut io, restore, &time, &rules, &auth)
+        .await
+        .unwrap();
+    assert!(pin(&mut c, "object", 1001, 14, &auth).is_ok());
+}
+
+// Inject a competing publication after the caller's generation snapshot. Bulk
+// outbox access panics so these worker tests also enforce bounded event lookup.
+struct InterleavedCatalogue {
+    inner: MemoryCatalogue,
+    winner: Option<(Fence, CompleteCopy)>,
+    event_reads: Cell<usize>,
+}
+macro_rules! forward_job {
+    (read $name:ident ($($arg:ident: $ty:ty),*) -> $out:ty) => {
+        fn $name(&self, $($arg: $ty),*) -> $out { self.inner.$name($($arg),*) }
+    };
+    (write $name:ident ($($arg:ident: $ty:ty),*) -> $out:ty) => {
+        fn $name(&mut self, $($arg: $ty),*) -> $out { self.inner.$name($($arg),*) }
+    };
+}
+impl JobPort for InterleavedCatalogue {
+    fn outbox(&self, _: TenantId) -> Vec<OutboxEvent> {
+        panic!("worker must not materialize tenant backlog")
+    }
+    fn outbox_event(
+        &self,
+        tenant: TenantId,
+        event: EventId,
+    ) -> qerith_core::catalogue::Result<OutboxEvent> {
+        self.event_reads.set(self.event_reads.get() + 1);
+        self.inner.outbox_event(tenant, event)
+    }
+    forward_job!(read job(tenant: TenantId, job: JobId) -> qerith_core::catalogue::Result<JobView>);
+    forward_job!(read generation(tenant: TenantId, generation: GenerationId) -> qerith_core::catalogue::Result<GenerationView>);
+    forward_job!(write retire_upload_intent(tenant: TenantId, intent: OperationId, now: u64) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write claim(tenant: TenantId, job: JobId, now: u64, until: u64) -> qerith_core::catalogue::Result<Fence>);
+    forward_job!(write expire_job(tenant: TenantId, job: JobId, now: u64) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write cancel_unneeded_restore(tenant: TenantId, job: JobId, now: u64, authority: &dyn Authority) -> qerith_core::catalogue::Result<()>);
+    fn transition(
+        &mut self,
+        tenant: TenantId,
+        fence: Fence,
+        transition: Transition,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> qerith_core::catalogue::Result<()> {
+        if matches!(transition, Transition::PublishRestore { .. }) {
+            if let Some((winner, copy)) = self.winner.take() {
+                self.inner.transition(
+                    tenant,
+                    winner,
+                    Transition::PublishRestore { copy },
+                    now,
+                    authority,
+                )?;
+            }
+        }
+        self.inner
+            .transition(tenant, fence, transition, now, authority)
+    }
+    forward_job!(write record_verification(tenant: TenantId, evidence: VerificationEvidence, independence: IndependenceEvidence, now: u64) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write set_safety_hold(tenant: TenantId, generation: GenerationId, hold: bool) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write set_moderation(tenant: TenantId, generation: GenerationId, epoch: u64, prohibited: bool) -> qerith_core::catalogue::Result<()>);
+    forward_job!(read candidate(tenant: TenantId, generation: GenerationId, kind: DeletionKind, now: u64, not_before: u64, authority: &dyn Authority) -> qerith_core::catalogue::Result<DeletionCandidate>);
+    forward_job!(write finalize_deletion(candidate: DeletionCandidate, now: u64, authority: &dyn Authority) -> qerith_core::catalogue::Result<EventId>);
+    forward_job!(write dispatch_deletion(tenant: TenantId, event: EventId, now: u64, authority: &dyn Authority) -> qerith_core::catalogue::Result<DeletionDispatch>);
+    forward_job!(write cancel_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write reconcile_retained_deletion(tenant: TenantId, event: EventId, retained: CompleteCopy, settlement_ref: String, now: u64) -> qerith_core::catalogue::Result<()>);
+    forward_job!(write acknowledge_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
+}
+
+#[tokio::test]
+async fn competing_cold_restores_reconcile_verified_winner_with_one_attempt() {
+    for corrupt_winner in [false, true] {
+        let (mut c, mut io, _, time, auth, rules) = archived().await;
+        evict(&mut c, &mut io, &time, auth.as_ref());
+        c.transact(
+            TENANT,
+            OperationId(900),
+            Mutation::Link {
+                source: "object".into(),
+                destination: "other".into(),
+                expected_revision: 0,
+            },
+            11,
+            auth.as_ref(),
+        )
+        .unwrap();
+        let first = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+        let second = request(&mut c, "other", 1001, 600, 60, 11, auth.as_ref());
+        assert_ne!(first, second);
+        let work = Work {
+            tenant: TENANT,
+            event: job_event(&c, first),
+            job: c.job(TENANT, first).unwrap(),
+            metadata: c.generation(TENANT, GENERATION).unwrap().metadata,
+            retained_location: None,
+            inventory_ref: "first-cold-restore".into(),
+            attempt: 1,
+            claim_until: 111,
+            budget: budget(),
+        };
+        let fence = c.claim(TENANT, first, 11, 111).unwrap();
+        c.transition(
+            TENANT,
+            fence.clone(),
+            Transition::Checkpoint {
+                expected: 0,
+                next: 1,
+                inventory_ref: work.inventory_ref.clone(),
+            },
+            11,
+            auth.as_ref(),
+        )
+        .unwrap();
+        io.retrieve(&work).await.unwrap();
+        let winner = io.complete_restore(&work).await.unwrap();
+        if corrupt_winner {
+            io.copies.get_mut(&winner.location).unwrap()[0] ^= 1;
+        }
+        let event = job_event(&c, second);
+        let mut c = InterleavedCatalogue {
+            inner: c,
+            winner: Some((fence, winner.clone())),
+            event_reads: Cell::new(0),
+        };
+        assert_eq!(
+            c.generation(TENANT, GENERATION).unwrap().cache_location,
+            None
+        );
+        let single = Budget::new(4096, 3, 1, 100).unwrap();
+        let result = run_once(
+            &mut c,
+            &mut io,
+            TENANT,
+            event,
+            &single,
+            time.as_ref(),
+            &rules,
+            &MockQualification,
+            auth.as_ref(),
+        )
+        .await;
+        assert_eq!(c.event_reads.get(), 1);
+        assert_eq!(
+            c.generation(TENANT, GENERATION).unwrap().cache_location,
+            Some(winner.location.clone())
+        );
+        assert_eq!(
+            io.copies.len(),
+            2,
+            "losing completed copy requires separate orphan reconciliation"
+        );
+        assert!(io.order.contains(&"verify-winning-cache"));
+        assert_eq!(c.job(TENANT, second).unwrap().checkpoint, 1);
+        if corrupt_winner {
+            assert_eq!(result, Err(Failure::Io(IoError::Integrity)));
+            assert!(pin(&mut c.inner, "other", 1002, 11, auth.as_ref()).is_err());
+        } else {
+            result.unwrap();
+            assert_eq!(c.job(TENANT, first).unwrap().state, JobState::Complete);
+            assert_eq!(c.job(TENANT, second).unwrap().state, JobState::Complete);
+            let pin = pin(&mut c.inner, "other", 1002, 11, auth.as_ref()).unwrap();
+            assert_eq!(
+                io.deliver(&c.inner, pin, 11, auth.as_ref()).unwrap(),
+                io.fixture.bytes()
+            );
+            assert_eq!(io.complete_location, Some(winner.location));
+        }
+    }
+}
+
+#[tokio::test]
+async fn backlog_lookup_is_event_scoped_even_before_failed_admission() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    let mut job = None;
+    for n in 0..200 {
+        job = Some(request(
+            &mut c,
+            "object",
+            1000 + n,
+            1000 + n,
+            40,
+            10,
+            auth.as_ref(),
+        ));
+    }
+    assert_eq!(c.outbox(TENANT).len(), 200);
+    let event = job_event(&c, job.unwrap());
+    assert_eq!(c.outbox_event(TenantId(2), event), Err(Error::Unavailable));
+    assert_eq!(
+        c.outbox_event(TENANT, EventId(u64::MAX)),
+        Err(Error::Unavailable)
+    );
+    let mut c = InterleavedCatalogue {
+        inner: c,
+        winner: None,
+        event_reads: Cell::new(0),
+    };
+    rules.deny.set(true);
+    assert_eq!(
+        run_once(
+            &mut c,
+            &mut io,
+            TENANT,
+            event,
+            &budget(),
+            time.as_ref(),
+            &rules,
+            &MockQualification,
+            auth.as_ref()
+        )
+        .await,
+        Err(Failure::Admission)
+    );
+    assert_eq!(c.event_reads.get(), 1);
+}
+
+struct FrozenQualification(Qualification);
+impl Qualifier for FrozenQualification {
+    fn qualify(
+        &self,
+        _: &Work,
+        _: &[Reconstruction; 2],
+        _: u64,
+    ) -> qerith_core::catalogue::Result<Qualification> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn partial_and_complete_proof_pair_replay_survives_lost_worker() {
+    for recorded in [1, 2] {
+        let mut c = MemoryCatalogue::default();
+        let mut io = Io::new(1).await;
+        let upload = io.upload();
+        let time = Time(Cell::new(10));
+        let rules = Rules::default();
+        let auth = Auth::default();
+        let archive = commit_job(
+            ingest(&mut c, &mut io, &upload, &budget(), &time, &rules, &auth)
+                .await
+                .unwrap(),
+        );
+        let event = job_event(&c, archive);
+        let work = Work {
+            tenant: TENANT,
+            event,
+            job: c.job(TENANT, archive).unwrap(),
+            metadata: upload.metadata.clone(),
+            retained_location: c.generation(TENANT, GENERATION).unwrap().cache_location,
+            inventory_ref: "recoverable-lost-worker".into(),
+            attempt: 1,
+            claim_until: 110,
+            budget: budget(),
+        };
+        let fence = c.claim(TENANT, archive, 10, 110).unwrap();
+        c.transition(
+            TENANT,
+            fence,
+            Transition::Checkpoint {
+                expected: 0,
+                next: 1,
+                inventory_ref: work.inventory_ref.clone(),
+            },
+            10,
+            &auth,
+        )
+        .unwrap();
+        io.post(&work).await.unwrap();
+        let retrieved = io.verify_archive(&work).await.unwrap();
+        let pair = MockQualification.qualify(&work, &retrieved, 10).unwrap();
+        for proof in pair.verification.iter().take(recorded) {
+            c.record_verification(TENANT, proof.clone(), pair.independence.clone(), 10)
+                .unwrap();
+        }
+        // Same timestamp but different authenticated content is not an idempotent replay.
+        let mut changed = pair.verification[0].clone();
+        changed.readability_ref.push_str("-different");
+        assert_eq!(
+            c.record_verification(TENANT, changed, pair.independence.clone(), 111),
+            Err(Error::Conflict)
+        );
+        let mut changed_attribution = pair.independence.clone();
+        changed_attribution.decision_ref.push_str("-different");
+        assert_eq!(
+            c.record_verification(
+                TENANT,
+                pair.verification[0].clone(),
+                changed_attribution,
+                111
+            ),
+            Err(Error::Conflict)
+        );
+        assert_eq!(
+            c.record_verification(
+                TENANT,
+                pair.verification[0].clone(),
+                pair.independence.clone(),
+                pair.verification[0].valid_until
+            ),
+            Err(Error::Unsafe)
+        );
+        time.0.set(111);
+        run_once(
+            &mut c,
+            &mut io,
+            TENANT,
+            event,
+            &budget(),
+            &time,
+            &rules,
+            &FrozenQualification(pair),
+            &auth,
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.job(TENANT, archive).unwrap().state, JobState::Complete);
+        assert_eq!(c.job(TENANT, archive).unwrap().checkpoint, 2);
     }
 }
 

@@ -136,6 +136,8 @@ pub trait Storage {
         &mut self,
         upload: &Upload,
         budget: &Budget,
+        // Absolute invocation deadline, bounded by the upload archive deadline.
+        until: u64,
     ) -> std::result::Result<CompleteCopy, IoError>;
     async fn post(&mut self, work: &Work) -> std::result::Result<(), IoError>;
     async fn verify_archive(
@@ -145,6 +147,14 @@ pub trait Storage {
     async fn retrieve(&mut self, work: &Work) -> std::result::Result<(), IoError>;
     async fn complete_restore(&mut self, work: &Work)
         -> std::result::Result<CompleteCopy, IoError>;
+    /// Verify the exact immutable completed winner, under the remaining Work
+    /// budget/deadline. Do not alias or delete the losing completed allocation;
+    /// record it in the stable inventory for separate orphan reconciliation.
+    async fn verify_completed(
+        &mut self,
+        work: &Work,
+        location: &str,
+    ) -> std::result::Result<CompleteCopy, IoError>;
     async fn cleanup_incomplete(&mut self, work: &Work) -> std::result::Result<(), IoError>;
 }
 
@@ -191,6 +201,10 @@ pub async fn ingest<C: MetadataOutbox, S: Storage>(
     {
         return Err(Failure::Admission);
     }
+    let until = now
+        .checked_add(budget.claim_for)
+        .ok_or(Error::Invalid)?
+        .min(upload.archive_deadline);
     catalogue.transact(
         upload.tenant,
         upload.intent,
@@ -205,12 +219,12 @@ pub async fn ingest<C: MetadataOutbox, S: Storage>(
         authority,
     )?;
     let copy = storage
-        .stage_upload(upload, budget)
+        .stage_upload(upload, budget, until)
         .await
         .map_err(Failure::Io)?;
     complete(&upload.metadata, &copy)?;
     let now = clock.now()?;
-    if now >= upload.archive_deadline || !policy.admit_upload(upload, budget, now) {
+    if now >= until || !policy.admit_upload(upload, budget, now) {
         return Err(Failure::Admission);
     }
     Ok(catalogue.transact(
@@ -241,11 +255,7 @@ pub async fn run_once<C: JobPort, S: Storage>(
     qualifier: &impl Qualifier,
     authority: &dyn Authority,
 ) -> RunResult<()> {
-    let notification = catalogue
-        .outbox(tenant)
-        .into_iter()
-        .find(|e| e.id == event)
-        .ok_or(Error::Unavailable)?;
+    let notification = catalogue.outbox_event(tenant, event)?;
     let Effect::RunJob(notification) = notification.effect else {
         return Err(Error::Invalid.into());
     };
@@ -286,7 +296,14 @@ pub async fn run_once<C: JobPort, S: Storage>(
         return Err(Failure::Admission);
     }
     if policy.cancelled(&work) {
-        catalogue.cancel_unneeded_restore(tenant, work.job.id, now, authority)?;
+        if work.job.kind == JobKind::Restore {
+            match catalogue.cancel_unneeded_restore(tenant, work.job.id, now, authority) {
+                Ok(()) | Err(Error::Unsafe) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // Invocation interruption is not cancellation of a logical obligation.
+        // A needed restore or archive stays queued without consuming an attempt.
         return Err(Failure::Io(IoError::Cancelled));
     }
     let fence = catalogue.claim(tenant, work.job.id, now, claim_until)?;
@@ -321,9 +338,20 @@ pub async fn run_once<C: JobPort, S: Storage>(
         if now >= work.job.deadline {
             catalogue.expire_job(tenant, work.job.id, now)?;
         } else if now < work.claim_until {
-            let transition = if matches!(error, IoError::Cancelled) {
-                Transition::CancelIfUnneeded
-            } else if work.attempt < budget.max_attempts {
+            if matches!(error, IoError::Cancelled) && work.job.kind == JobKind::Restore {
+                match catalogue.transition(
+                    tenant,
+                    fence.clone(),
+                    Transition::CancelIfUnneeded,
+                    now,
+                    authority,
+                ) {
+                    Ok(()) => return result,
+                    Err(Error::Unsafe) => {} // A live subscriber still needs this job.
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let transition = if work.attempt < budget.max_attempts {
                 match policy.retry_at(&work, error, now) {
                     Some(at) if at > now && at < work.job.deadline => {
                         Transition::Retry { not_before: at }
@@ -427,13 +455,42 @@ async fn execute<C: JobPort, S: Storage>(
             guard(work, clock, policy)?;
             let copy = storage.complete_restore(work).await.map_err(Failure::Io)?;
             complete(&work.metadata, &copy)?;
-            catalogue.transition(
+            let result = catalogue.transition(
                 work.tenant,
                 fence.clone(),
-                Transition::PublishRestore { copy },
+                Transition::PublishRestore { copy: copy.clone() },
                 guard(work, clock, policy)?,
                 authority,
-            )?;
+            );
+            if result == Err(Error::Conflict) {
+                // Another viable job may have installed its immutable version
+                // after this attempt's snapshot. Reconcile once, not a retry loop.
+                let winner = catalogue
+                    .generation(work.tenant, work.job.generation)?
+                    .cache_location
+                    .ok_or(Error::Conflict)?;
+                if winner == copy.location {
+                    return Err(Error::Conflict.into());
+                }
+                guard(work, clock, policy)?;
+                let receipt = storage
+                    .verify_completed(work, &winner)
+                    .await
+                    .map_err(Failure::Io)?;
+                complete(&work.metadata, &receipt)?;
+                if receipt.location != winner {
+                    return Err(Error::IncompleteCopy.into());
+                }
+                catalogue.transition(
+                    work.tenant,
+                    fence.clone(),
+                    Transition::PublishRestore { copy: receipt },
+                    guard(work, clock, policy)?,
+                    authority,
+                )?;
+            } else {
+                result?;
+            }
         }
     }
     Ok(())
