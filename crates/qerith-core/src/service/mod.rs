@@ -545,6 +545,9 @@ impl<A: Access> Service<A> {
                 return Err(denied());
             }
         }
+        // New inputs are authorized before a bound identity takes precedence
+        // over source availability. Retention separately rechecks the original.
+        self.replay(scope, request)?;
         if !view
             .availability_until
             .is_some_and(|until| until > self.now)
@@ -722,6 +725,42 @@ impl<A: Access> Service<A> {
             Ok(job) => job.value.effects,
             Err(failure) => failure.effects,
         };
+        // An existing identity owns the obligation, never a replacement handle.
+        // Both its original request and live output must remain authorized.
+        if let Some((prior, output)) = request
+            .reconciliation(scope)
+            .and_then(|key| self.model.replay.get(&key))
+        {
+            if self.check_authorization(scope, prior).is_err() {
+                return denied();
+            }
+            return match output {
+                o::Output::Job(job)
+                | o::Output::Upload { job, .. }
+                | o::Output::Cancel { job, .. } => {
+                    match self.job_access(scope, &job.handle, action) {
+                        Ok(job) => o::Failure {
+                            effects: job.value.effects,
+                            ..failure
+                        },
+                        Err(projection) => {
+                            if matches!(
+                                projection.code,
+                                o::ErrorCode::Denied | o::ErrorCode::Unauthenticated
+                            ) {
+                                projection
+                            } else {
+                                o::Failure {
+                                    effects: projection.effects,
+                                    ..failure
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => failure,
+            };
+        }
         if let Some(handle) = request
             .opaque("transfer")
             .and_then(|handle| {
@@ -734,21 +773,6 @@ impl<A: Access> Service<A> {
             .or(request.opaque("job"))
         {
             return retain_effects(failure, effects(handle));
-        }
-        // Changed input still conflicts, but the identity's original obligation
-        // survives. Authorize its original binding before exposing any evidence.
-        if let Some((prior, output)) = request
-            .reconciliation(scope)
-            .and_then(|key| self.model.replay.get(&key))
-        {
-            if self.check_authorization(scope, prior).is_ok() {
-                if let o::Output::Job(job)
-                | o::Output::Upload { job, .. }
-                | o::Output::Cancel { job, .. } = output
-                {
-                    return retain_effects(failure, effects(&job.handle));
-                }
-            }
         }
         failure
     }
@@ -986,6 +1010,7 @@ impl<A: Access> Service<A> {
         {
             let failure = match error {
                 flow::Failure::Catalogue(error) => map(error),
+                flow::Failure::Clock(_) => fail(o::ErrorCode::Unavailable),
                 flow::Failure::Io(flow::IoError::Integrity) => fail(o::ErrorCode::IntegrityFailed),
                 flow::Failure::Io(flow::IoError::Uncertain) => o::Failure {
                     code: o::ErrorCode::Unavailable,
@@ -1162,7 +1187,11 @@ impl<A: Access> Service<A> {
             }
         }
         if let Some(id) = request.opaque("job") {
-            let job = self.authorized_job(scope, id, None)?;
+            let job = if request.operation() == o::Operation::Cancel {
+                self.job_access(scope, id, None)?
+            } else {
+                self.authorized_job(scope, id, None)?
+            };
             if request.operation() == o::Operation::Cancel
                 && !job.value.state.terminal()
                 && job.value.effects != o::Effects::Committed
@@ -1198,7 +1227,12 @@ impl<A: Access> Service<A> {
             )?;
         }
         if request.operation() == o::Operation::Copy {
-            if let Some(o::Output::Job(job)) = self.replay(scope, request)? {
+            if let Some(o::Output::Job(job)) = request
+                .reconciliation(scope)
+                .and_then(|key| self.model.replay.get(&key))
+                .filter(|(prior, _)| prior == request)
+                .map(|(_, output)| output)
+            {
                 let stored = self
                     .model
                     .jobs
@@ -1344,6 +1378,7 @@ impl<A: Access> Service<A> {
 impl<A: Access> o::OperationPort for Service<A> {
     fn authorize(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
         self.check_authorization(scope, request)
+            .map_err(|failure| self.retain_request_effects(scope, request, failure))
     }
     fn preconditions(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
         self.check_preconditions(scope, request).map_err(|failure| {

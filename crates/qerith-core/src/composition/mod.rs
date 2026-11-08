@@ -83,6 +83,7 @@ pub enum IoError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure {
     Catalogue(Error),
+    Clock(Error),
     Io(IoError),
     Admission,
     Cleanup,
@@ -198,7 +199,7 @@ pub async fn ingest<C: MetadataOutbox, S: Storage>(
     policy: &impl Policy,
     authority: &dyn Authority,
 ) -> RunResult<Outcome> {
-    let now = clock.now()?;
+    let now = clock.now().map_err(Failure::Clock)?;
     if !authority.is_current()
         || upload.metadata.identity.length > budget.max_bytes
         || upload.archive_deadline <= now
@@ -228,7 +229,7 @@ pub async fn ingest<C: MetadataOutbox, S: Storage>(
         .await
         .map_err(Failure::Io)?;
     complete(&upload.metadata, &copy)?;
-    let now = clock.now()?;
+    let now = clock.now().map_err(Failure::Clock)?;
     if now >= until || !policy.admit_upload(upload, budget, now) {
         return Err(Failure::Admission);
     }
@@ -265,7 +266,7 @@ pub async fn run_once<C: JobPort, S: Storage>(
         return Err(Error::Invalid.into());
     };
     let job = catalogue.job(tenant, notification.id)?;
-    let now = clock.now()?;
+    let now = clock.now().map_err(Failure::Clock)?;
     if now >= job.deadline {
         catalogue.expire_job(tenant, job.id, now)?;
         return Err(Error::Expired.into());
@@ -339,7 +340,7 @@ pub async fn run_once<C: JobPort, S: Storage>(
     }
     // Expiry is a catalogue obligation, even if I/O or a guard failed. Never
     // begin cleanup outside the invocation, or let cleanup failure delay expiry.
-    let now = clock.now()?;
+    let now = clock.now().map_err(Failure::Clock)?;
     if now >= work.job.deadline {
         catalogue.expire_job(tenant, work.job.id, now)?;
         return result;
@@ -353,7 +354,7 @@ pub async fn run_once<C: JobPort, S: Storage>(
         let cleanup_failed = !matches!(error, IoError::Uncertain)
             && policy.cleanup_incomplete(&work, error)
             && storage.cleanup_incomplete(&work).await.is_err();
-        let now = clock.now()?.max(now);
+        let now = clock.now().map_err(Failure::Clock)?.max(now);
         if now >= work.job.deadline {
             catalogue.expire_job(tenant, work.job.id, now)?;
         }
@@ -398,7 +399,7 @@ fn guard(
     policy: &impl Policy,
     authority: &dyn Authority,
 ) -> RunResult<u64> {
-    let now = clock.now()?;
+    let now = clock.now().map_err(Failure::Clock)?;
     if now >= work.claim_until || now >= work.job.deadline {
         return Err(Error::Expired.into());
     }
