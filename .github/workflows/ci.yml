@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      QERITH_SERVICE_EVIDENCE_DIR: ${{ runner.temp }}/product-service
+      QERITH_SERVICE_EVIDENCE_DIR: /tmp/qerith-product-service-evidence
       QERITH_EVIDENCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,7 +62,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: product-service-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/product-service/
+          path: ${{ env.QERITH_SERVICE_EVIDENCE_DIR }}/
           if-no-files-found: error
           retention-days: 7
 
