@@ -45,9 +45,13 @@ fn golden() -> Golden {
 struct MemoryAuthority {
     owner: Owner,
     selection: Selection,
+    session_expires_at: u64,
     upload: UploadRecord,
+    committed_result: Option<Object>,
     object: Object,
+    object_override: Option<Object>,
     other_objects: Vec<Object>,
+    cleanup_required: bool,
     current: Option<Opaque>,
     cursor: CursorRecord,
     job: JobStatus,
@@ -77,12 +81,17 @@ impl MemoryAuthority {
                 principal: id("principal-a"),
             },
             selection,
+            session_expires_at: 2000,
+            committed_result: Some(object.clone()),
+            object_override: None,
+            cleanup_required: false,
             upload: UploadRecord {
                 intent,
                 received_bytes: 10,
                 integrity_verified: true,
                 expires_at: 2000,
                 committed: false,
+                abort_outcome: Some(CancelOutcome::CancelledBeforeCommit),
             },
             object,
             other_objects: vec![],
@@ -121,7 +130,7 @@ impl Authority for MemoryAuthority {
         (value == &self.selection.session).then(|| {
             self.owned(SessionRecord {
                 selection: self.selection.clone(),
-                expires_at: 2000,
+                expires_at: self.session_expires_at,
             })
         })
     }
@@ -142,13 +151,22 @@ impl Authority for MemoryAuthority {
         (value == &id("object-1")).then(|| self.owned(self.current.clone()))
     }
     fn object(&self, target: &Target) -> Option<Owned<Object>> {
+        if let Some(object) = &self.object_override {
+            return Some(self.owned(object.clone()));
+        }
         std::iter::once(&self.object)
             .chain(&self.other_objects)
-            .find(|object| target.object == object.target.object)
+            .find(|object| *target == object.target)
             .map(|object| self.owned(object.clone()))
     }
     fn upload(&self, value: &Opaque) -> Option<Owned<UploadRecord>> {
         (value == &id("upload-1")).then(|| self.owned(self.upload.clone()))
+    }
+    fn committed_upload(&self, value: &Opaque) -> Option<Owned<Object>> {
+        self.committed_result
+            .as_ref()
+            .filter(|_| value == &id("upload-1"))
+            .map(|object| self.owned(object.clone()))
     }
     fn container(&self, value: &Opaque) -> Option<Owned<()>> {
         (value == &id("container-1")).then(|| self.owned(()))
@@ -163,8 +181,13 @@ impl Authority for MemoryAuthority {
     fn cursor(&self, value: &Opaque) -> Option<Owned<CursorRecord>> {
         (value == &id("cursor-1")).then(|| self.owned(self.cursor.clone()))
     }
-    fn job(&self, value: &Opaque) -> Option<Owned<JobStatus>> {
-        (value == &self.job.job).then(|| self.owned(self.job.clone()))
+    fn job(&self, value: &Opaque) -> Option<Owned<JobRecord>> {
+        (value == &self.job.job).then(|| {
+            self.owned(JobRecord {
+                status: self.job.clone(),
+                cleanup_required: self.cleanup_required,
+            })
+        })
     }
     fn replay(&self, _owner: &Owner, request: &Opaque) -> Option<Owned<ReplayRecord>> {
         self.replay
@@ -268,7 +291,7 @@ fn invalid_golden_responses_fail_closed() {
 
 #[test]
 fn transfer_redemption_rechecks_owner_generation_and_range() {
-    let memory = MemoryAuthority::new();
+    let mut memory = MemoryAuthority::new();
     let req = request("download");
     assert_eq!(
         validate_transfer(
@@ -314,6 +337,18 @@ fn transfer_redemption_rechecks_owner_generation_and_range() {
         ),
         Err(ErrorCode::NotAuthorized)
     );
+    memory.session_expires_at = 2001;
+    assert_eq!(
+        validate_transfer(
+            &id("transfer-1"),
+            &req,
+            &memory.owner,
+            &policy(),
+            &memory,
+            2000
+        ),
+        Err(ErrorCode::GenerationMismatch)
+    );
 }
 
 #[test]
@@ -354,6 +389,21 @@ fn resume_commit_abort_bind_every_intent_field_and_owner() {
             .user
             .insert("filename".into(), "changed".into());
         assert_eq!(check(&req, &memory), Err(ErrorCode::ReplayConflict));
+        for field in ["c", "checksum_hex"] {
+            let mut changed = request(op);
+            let intent = match &mut changed.action {
+                Action::ResumeUpload(a) | Action::CommitUpload(a) | Action::AbortUpload(a) => {
+                    &mut a.intent
+                }
+                _ => panic!(),
+            };
+            if field == "c" {
+                intent.ciphertext.c = id("different-ciphertext");
+            } else {
+                intent.ciphertext.checksum_hex = id("0123");
+            }
+            assert_eq!(check(&changed, &memory), Err(ErrorCode::ReplayConflict));
+        }
         let mut foreign = memory.owner.clone();
         foreign.principal = id("principal-other");
         assert_eq!(
@@ -414,6 +464,14 @@ fn profiles_limits_and_selection_cannot_downgrade() {
             },
             id("session-1")
         ),
+        Err(ErrorCode::UnsupportedProfile)
+    );
+    let mut mixed_offer = offer.clone();
+    let mut unsupported = mixed_offer.profiles[0].clone();
+    unsupported.integrity = id("unknown");
+    mixed_offer.profiles.push(unsupported);
+    assert_eq!(
+        negotiate(&mixed_offer, &policy(), id("session-1")),
         Err(ErrorCode::UnsupportedProfile)
     );
     let mut req = request("initiate_upload");
@@ -540,6 +598,7 @@ fn cancellation_preserves_cleanup_and_publication_outcomes() {
     req.action = Action::Cancel { job: id("job-1") };
     memory.job.state = JobState::Cancelled;
     memory.job.outcome = Some(Outcome::CleanupRequired);
+    memory.cleanup_required = true;
     for (outcome, expected) in [
         (
             CancelOutcome::CancelledBeforeCommit,
@@ -564,6 +623,7 @@ fn cancellation_preserves_cleanup_and_publication_outcomes() {
             expected
         );
     }
+    memory.cleanup_required = false;
     memory.job.state = JobState::Succeeded;
     memory.job.outcome = Some(Outcome::Restored);
     memory.job.completed_bytes = 10;
@@ -583,7 +643,7 @@ fn cancellation_preserves_cleanup_and_publication_outcomes() {
 
 #[test]
 fn restore_progress_is_bound_to_ciphertext_length_and_budget() {
-    let memory = MemoryAuthority::new();
+    let mut memory = MemoryAuthority::new();
     let mut req = request("restore");
     let Action::Restore(value) = &mut req.action else {
         panic!()
@@ -595,6 +655,7 @@ fn restore_progress_is_bound_to_ciphertext_length_and_budget() {
         status.outcome = Some(Outcome::Restored);
         status.completed_bytes = bytes;
         status.total_bytes = Some(bytes);
+        memory.job = status.clone();
         assert_eq!(
             validate_response(
                 &req,
@@ -611,9 +672,10 @@ fn restore_progress_is_bound_to_ciphertext_length_and_budget() {
             }
         );
     }
-    let mut status = memory.job.clone();
+    let mut status = MemoryAuthority::new().job;
     status.state = JobState::Running;
     status.completed_bytes = 4;
+    memory.job = status.clone();
     assert_eq!(
         validate_response(
             &req,
@@ -693,10 +755,13 @@ fn status_and_cancel_bind_progress_to_resolved_ciphertext_length() {
         }
         memory.job.target.g = id("wrong-generation");
         for name in ["status", "cancel"] {
-            assert_eq!(
-                check(&request(name), &memory),
-                Err(ErrorCode::GenerationMismatch)
-            );
+            let expected = if memory.job.kind == JobKind::Upload {
+                // An unpublished, unfinished upload has no committed target yet.
+                Ok(Admission::New)
+            } else {
+                Err(ErrorCode::NotAuthorized)
+            };
+            assert_eq!(check(&request(name), &memory), expected);
         }
     }
 }
@@ -788,6 +853,7 @@ fn supported_read_profiles_can_differ_but_write_intents_stay_session_bound() {
             "restore" => {
                 let mut status = memory.job.clone();
                 status.target = object.target.clone();
+                memory.job = status.clone();
                 ResponseBody::Restore(status)
             }
             _ => panic!(),
@@ -883,6 +949,257 @@ fn supported_read_profiles_can_differ_but_write_intents_stay_session_bound() {
             Err(ErrorCode::CapabilityDowngrade)
         );
     }
+}
+
+#[test]
+fn reconnect_limits_do_not_hide_owned_status_or_cancellation() {
+    let mut memory = MemoryAuthority::new();
+    memory.selection.limits.object_bytes = 5;
+    memory.selection.limits.transfer_bytes = 5;
+    for kind in [JobKind::Restore, JobKind::Upload] {
+        memory.job.kind = kind;
+        let req = request("status");
+        assert_eq!(check(&req, &memory), Ok(Admission::New));
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Status(memory.job.clone())),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Ok(())
+        );
+        let req = request("cancel");
+        assert_eq!(check(&req, &memory), Ok(Admission::New));
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Cancel(CancelOutcome::Requested)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Ok(())
+        );
+        memory.job.completed_bytes = 11;
+        assert_eq!(check(&req, &memory), Err(ErrorCode::InvalidState));
+        memory.job.completed_bytes = 0;
+    }
+    for name in ["download", "restore"] {
+        assert_eq!(
+            check(&request(name), &memory),
+            Err(ErrorCode::LimitExceeded)
+        );
+    }
+    memory.object.ciphertext.profile.crypto = id("unsupported");
+    assert_eq!(
+        check(&request("status"), &memory),
+        Err(ErrorCode::UnsupportedProfile)
+    );
+}
+
+#[test]
+fn commit_response_requires_the_authoritative_published_result() {
+    let mut memory = MemoryAuthority::new();
+    let req = request("commit_upload");
+    let valid = response(&req, ResponseBody::Committed(memory.object.clone()));
+    assert_eq!(
+        validate_response(&req, &valid, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    let mut unpublished = memory.object.clone();
+    unpublished.target.g = id("unpublished-generation");
+    memory.other_objects.push(unpublished.clone());
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Committed(unpublished)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::GenerationMismatch)
+    );
+    memory.committed_result = None;
+    assert_eq!(
+        validate_response(&req, &valid, &memory.owner, &policy(), &memory, NOW),
+        Err(ErrorCode::NotAuthorized)
+    );
+}
+
+#[test]
+fn abort_response_requires_the_recorded_cleanup_outcome() {
+    let mut memory = MemoryAuthority::new();
+    let req = request("abort_upload");
+    memory.upload.abort_outcome = Some(CancelOutcome::CleanupRequired);
+    for (outcome, expected) in [
+        (
+            CancelOutcome::CancelledBeforeCommit,
+            Err(ErrorCode::InvalidState),
+        ),
+        (CancelOutcome::Requested, Err(ErrorCode::InvalidState)),
+        (CancelOutcome::CleanupRequired, Ok(())),
+    ] {
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Aborted(outcome)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            expected
+        );
+    }
+    memory.upload.abort_outcome = None;
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(
+                &req,
+                ResponseBody::Aborted(CancelOutcome::CancelledBeforeCommit)
+            ),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::InvalidState)
+    );
+    memory.upload.committed = true;
+    memory.upload.abort_outcome = Some(CancelOutcome::AlreadyCommitted);
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Aborted(CancelOutcome::AlreadyCommitted)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn cleanup_obligation_does_not_replace_terminal_failure() {
+    let mut memory = MemoryAuthority::new();
+    memory.job.kind = JobKind::Upload;
+    memory.job.state = JobState::Failed;
+    memory.job.completed_bytes = 4;
+    memory.job.outcome = Some(Outcome::IntegrityFailure);
+    memory.cleanup_required = true;
+    let before = memory.job.clone();
+    let req = request("cancel");
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Cancel(CancelOutcome::CleanupRequired)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Ok(())
+    );
+    for outcome in [
+        CancelOutcome::Requested,
+        CancelOutcome::CancelledBeforeCommit,
+        CancelOutcome::AlreadyCommitted,
+    ] {
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Cancel(outcome)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Err(ErrorCode::InvalidState)
+        );
+    }
+    assert_eq!(memory.job, before);
+    memory.cleanup_required = false;
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Cancel(CancelOutcome::CleanupRequired)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::InvalidState)
+    );
+}
+
+#[test]
+fn restore_response_requires_an_owned_persisted_job_snapshot() {
+    let memory = MemoryAuthority::new();
+    let req = request("restore");
+    let mut status = memory.job.clone();
+    status.job = id("missing-job");
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Restore(status)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Err(ErrorCode::NotAuthorized)
+    );
+    let valid = response(&req, ResponseBody::Restore(memory.job.clone()));
+    for mutation in [0, 1, 2] {
+        let mut changed = memory.clone();
+        match mutation {
+            0 => changed.job.target.g = id("another-generation"),
+            1 => changed.job.kind = JobKind::Upload,
+            _ => changed.job.completed_bytes = 1,
+        }
+        assert_eq!(
+            validate_response(&req, &valid, &changed.owner, &policy(), &changed, NOW),
+            Err(ErrorCode::InvalidState)
+        );
+    }
+}
+
+#[test]
+fn retained_generations_resolve_exactly_and_malformed_resolvers_fail() {
+    let mut memory = MemoryAuthority::new();
+    let mut older = memory.object.clone();
+    older.target.g = id("retained-generation");
+    memory.other_objects.push(older.clone());
+    for object in [memory.object.clone(), older] {
+        let mut req = request("stat");
+        req.action = Action::Stat(object.target.clone());
+        assert_eq!(check(&req, &memory), Ok(Admission::New));
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Stat(object)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            Ok(())
+        );
+    }
+    memory.object_override = Some(memory.object.clone());
+    let mut req = request("stat");
+    req.action = Action::Stat(Target {
+        object: id("object-1"),
+        g: id("unretained-generation"),
+    });
+    assert_eq!(check(&req, &memory), Err(ErrorCode::GenerationMismatch));
 }
 
 #[test]

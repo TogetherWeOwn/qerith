@@ -65,7 +65,7 @@
     {"name":"plaintext_key","error":"malformed","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1","key":"secret-plaintext"}}}},
     {"name":"inline_payload","error":"malformed","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"status","input":{"job":"job-1","payload_base64":"YWJj"}}}},
     {"name":"range_out_of_generation","error":"invalid_range","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"download","input":{"target":{"object":"object-1","g":"generation-1"},"range":{"first":2,"last":10},"max_bytes":10}}}},
-    {"name":"stale_generation","error":"generation_mismatch","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"stat","input":{"object":"object-1","g":"generation-old"}}}},
+    {"name":"stale_generation","error":"not_authorized","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"stat","input":{"object":"object-1","g":"generation-old"}}}},
     {"name":"unbounded_page","error":"limit_exceeded","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"browse","input":{"container":"container-1","page_entries":0,"cursor":null}}}},
     {"name":"invalid_restore_bound","error":"limit_exceeded","request":{"version":1,"scope":"tenant-a","request_id":"r-x","session":"session-1","action":{"op":"restore","input":{"target":{"object":"object-1","g":"generation-1"},"max_bytes":10,"max_seconds":61}}}}
   ],

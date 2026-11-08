@@ -39,7 +39,9 @@ including order/profile/version/limits, to reject downgrade. A scoped, expiring
 session record pins that selection; every later call rechecks it against current
 policy. Upload intents (including resume/commit/abort) must match the selected
 profile exactly. Reads instead accept any currently policy-supported stored
-profile, still enforcing its own checksum length and the session's byte limits.
+profile, still enforcing its own checksum length. New reads/transfers enforce the
+session's byte limits; status/cancel only resolve existing work and do not apply a
+replacement session's object-byte budget to the retained target.
 Browse/stat and download descriptors preserve the stored profile so clients can
 decide whether they can decrypt it; a rotated write profile does not make old
 supported generations unreadable. Unsupported stored profiles fail closed.
@@ -113,8 +115,15 @@ returns an owned upload receipt with expiration and received bytes. Resume retur
 the authoritative offset, never a caller-asserted offset. Commit requires complete
 bytes plus a **trusted** full-byte integrity receipt. That receipt is not proof
 of correct encryption or two-backbone durability. Resume/commit reject an already
-committed session; identical retained commit replay reconciles its result. Abort
-can report already committed rather than claiming rollback.
+committed session; identical retained commit replay reconciles its result.
+`Authority::committed_upload` resolves the retained object actually published by
+that upload; the response must equal that whole descriptor, not just an object
+with matching ciphertext and metadata. The adapter persists this receipt atomically
+with publication and supplies it alongside the admission checkpoint (or replay
+state) to response validation. A missing/foreign receipt fails closed. Abort
+reconciles `UploadRecord::abort_outcome`, a trusted result of the abort attempt,
+including outstanding cleanup; `committed` alone cannot establish clean abort.
+It can report already committed rather than claiming rollback.
 
 `Authority::replay` is scoped to owner + request ID **across all operations** and
 retains the complete typed action. A changed operation, argument or precondition
@@ -148,7 +157,12 @@ it, and a declared total must equal it. This applies to both restore and upload
 jobs when their committed generation resolves. An unpublished upload can report
 non-success state using structural progress checks, but cannot claim success
 without a resolved committed generation. Restore always requires that generation;
-its initial response also stays within the request's byte budget. The standalone
+its initial response also stays within the request's byte budget and must equal an
+owned persisted `Authority::job` snapshot, so its job ID cannot address different
+work or disappear on the first poll. Resolving status/cancel rechecks ownership,
+exact G, metadata, stored profile/checksum and progress, but not a new session's
+object-byte budget: these calls transfer no ciphertext. New download/restore
+admission and handle redemption retain their byte ceilings. The standalone
 `validate_status` / `validate_status_transition` helpers check structure and
 monotonicity only; adapters use request/response validation for target resolution.
 Irrecoverable key loss is an explicit terminal failure, not automatic recovery, server
@@ -163,9 +177,14 @@ portable resolution semantics only and **does not claim persistence or durabilit
 Cancellation is an explicit request, with outcomes requested, cancelled before
 commit, already committed, or cleanup required. Acknowledging a request is not
 proof that all side effects stopped. Cancel responses reconcile the authoritative
-outcome: cleanup cannot be reported as clean cancellation, and successful upload
-or restore publication is reported as already committed. `requested` applies only
-to queued/running work. Adapters reconcile actual terminal effects;
+record: `JobRecord::cleanup_required` is a trusted obligation independent of the
+immutable terminal status. It takes precedence over other cancel replies, so an
+integrity-failed upload can retain `integrity_failure` while cancel reports
+`cleanup_required`. Cleanup completion clears that separate obligation, never
+rewrites the terminal failure. Without cleanup outstanding, successful upload or
+restore publication is reported as already committed. `requested` applies only
+to queued/running work. Adapters read status and cleanup from one consistent
+snapshot and reconcile actual terminal effects;
 one waiter's cancellation must not erase another waiter's demand. Nothing can
 recall already propagated Usenet articles or promise remote byte erasure.
 

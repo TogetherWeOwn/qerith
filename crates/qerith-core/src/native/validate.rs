@@ -52,6 +52,15 @@ pub struct UploadRecord {
     pub integrity_verified: bool,
     pub expires_at: u64,
     pub committed: bool,
+    /// Trusted result of an abort attempt, including outstanding external cleanup.
+    pub abort_outcome: Option<CancelOutcome>,
+}
+
+#[derive(Clone, Debug)]
+pub struct JobRecord {
+    pub status: JobStatus,
+    /// Independent of the immutable terminal failure; never inferred from the client.
+    pub cleanup_required: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -81,10 +90,12 @@ pub trait Authority {
     fn destination(&self, id: &Opaque) -> Option<Owned<Option<Opaque>>>;
     fn object(&self, target: &Target) -> Option<Owned<Object>>;
     fn upload(&self, id: &Opaque) -> Option<Owned<UploadRecord>>;
+    /// Retained result actually published by this upload, not any matching object.
+    fn committed_upload(&self, id: &Opaque) -> Option<Owned<Object>>;
     fn container(&self, id: &Opaque) -> Option<Owned<()>>;
     fn listed_object(&self, container: &Opaque, target: &Target) -> Option<Owned<Object>>;
     fn cursor(&self, id: &Opaque) -> Option<Owned<CursorRecord>>;
-    fn job(&self, id: &Opaque) -> Option<Owned<JobStatus>>;
+    fn job(&self, id: &Opaque) -> Option<Owned<JobRecord>>;
     fn replay(&self, owner: &Owner, request_id: &Opaque) -> Option<Owned<ReplayRecord>>;
 }
 
@@ -210,8 +221,15 @@ fn metadata(value: &Metadata) -> Check {
 }
 
 fn ciphertext(value: &Ciphertext, selected: &Selection, policy: &Policy) -> Check {
-    let supported = policy.supported(&value.profile)?;
     if value.length > selected.limits.object_bytes {
+        return Err(ErrorCode::LimitExceeded);
+    }
+    stored_ciphertext(value, policy)
+}
+
+fn stored_ciphertext(value: &Ciphertext, policy: &Policy) -> Check {
+    let supported = policy.supported(&value.profile)?;
+    if value.length > (1_u64 << 50) {
         return Err(ErrorCode::LimitExceeded);
     }
     if value.checksum_hex.as_str().len() != usize::from(supported.checksum_hex_chars)
@@ -250,24 +268,16 @@ fn resolved_object(
     policy: &Policy,
     authority: &impl Authority,
 ) -> Check<Object> {
-    checked_object(
-        owned(authority.object(target), owner)?,
-        target,
-        selected,
-        policy,
-    )
+    let value = checked_object(owned(authority.object(target), owner)?, target, policy)?;
+    ciphertext(&value.ciphertext, selected, policy)?;
+    Ok(value)
 }
 
-fn checked_object(
-    value: Object,
-    target: &Target,
-    selected: &Selection,
-    policy: &Policy,
-) -> Check<Object> {
+fn checked_object(value: Object, target: &Target, policy: &Policy) -> Check<Object> {
     if value.target != *target {
         return Err(ErrorCode::GenerationMismatch);
     }
-    ciphertext(&value.ciphertext, selected, policy)?;
+    stored_ciphertext(&value.ciphertext, policy)?;
     metadata(&value.metadata)?;
     Ok(value)
 }
@@ -420,11 +430,11 @@ pub fn validate_request(
             }
         }
         Action::Status { job } | Action::Cancel { job } => {
-            let value = owned(authority.job(job), owner)?;
-            if value.job != *job {
+            let record = owned(authority.job(job), owner)?;
+            if record.status.job != *job {
                 return Err(ErrorCode::NotAuthorized);
             }
-            resolved_status(&value, owner, &selected, policy, authority)?;
+            resolved_status(&record.status, owner, policy, authority)?;
         }
     }
     Ok(if replay {
@@ -478,7 +488,6 @@ fn status_length(value: &JobStatus, length: u64) -> Check {
 fn resolved_status(
     value: &JobStatus,
     owner: &Owner,
-    selected: &Selection,
     policy: &Policy,
     authority: &impl Authority,
 ) -> Check {
@@ -488,7 +497,7 @@ fn resolved_status(
     if record.is_none() && value.kind == JobKind::Upload && value.state != JobState::Succeeded {
         return Ok(());
     }
-    let object = checked_object(owned(record, owner)?, &value.target, selected, policy)?;
+    let object = checked_object(owned(record, owner)?, &value.target, policy)?;
     status_length(value, object.ciphertext.length)
 }
 
@@ -621,6 +630,7 @@ pub fn validate_response(
                 || object.ciphertext != value.intent.ciphertext
                 || object.metadata != value.intent.metadata
                 || matches!(&value.intent.precondition, Precondition::Matches(g) if g == &object.target.g)
+                || owned(authority.committed_upload(&value.upload), owner)? != *object
             {
                 return Err(ErrorCode::GenerationMismatch);
             }
@@ -628,13 +638,23 @@ pub fn validate_response(
         }
         (Action::AbortUpload(value), ResponseBody::Aborted(outcome)) => {
             let record = owned(authority.upload(&value.upload), owner)?;
-            if record.committed != matches!(outcome, CancelOutcome::AlreadyCommitted) {
+            if record.committed != matches!(outcome, CancelOutcome::AlreadyCommitted)
+                || record.abort_outcome.as_ref() != Some(outcome)
+            {
                 return Err(ErrorCode::InvalidState);
             }
             Ok(())
         }
         (Action::Cancel { job }, ResponseBody::Cancel(outcome)) => {
-            let status = owned(authority.job(job), owner)?;
+            let record = owned(authority.job(job), owner)?;
+            let status = &record.status;
+            if record.cleanup_required {
+                return if *outcome == CancelOutcome::CleanupRequired {
+                    Ok(())
+                } else {
+                    Err(ErrorCode::InvalidState)
+                };
+            }
             let valid = match outcome {
                 CancelOutcome::Requested => {
                     matches!(status.state, JobState::Queued | JobState::Running)
@@ -645,7 +665,7 @@ pub fn validate_response(
                 CancelOutcome::AlreadyCommitted => {
                     matches!(status.outcome, Some(Outcome::Committed | Outcome::Restored))
                 }
-                CancelOutcome::CleanupRequired => status.outcome == Some(Outcome::CleanupRequired),
+                CancelOutcome::CleanupRequired => false,
             };
             if valid {
                 Ok(())
@@ -699,12 +719,17 @@ pub fn validate_response(
                 return Err(ErrorCode::GenerationMismatch);
             }
             let expected = resolved_object(&value.target, owner, &selected, policy, authority)?;
-            status_length(status, expected.ciphertext.length)
+            status_length(status, expected.ciphertext.length)?;
+            let record = owned(authority.job(&status.job), owner)?;
+            if record.status != *status {
+                return Err(ErrorCode::InvalidState);
+            }
+            Ok(())
         }
         (Action::Status { job }, ResponseBody::Status(status)) => {
             let before = owned(authority.job(job), owner)?;
-            validate_status_transition(&before, status)?;
-            resolved_status(status, owner, &selected, policy, authority)
+            validate_status_transition(&before.status, status)?;
+            resolved_status(status, owner, policy, authority)
         }
         _ => Err(ErrorCode::InvalidState),
     }
