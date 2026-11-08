@@ -10,14 +10,14 @@
 mod control;
 pub use control::{completion_result, parse_complete, parse_delete, DeleteRequest};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 
 use super::{
-    hex, storage_class, xml, ChecksumAlgorithm, Conditions, ErrorCode, Headers, ObjectMetadata,
-    Policy, Response, Result, StoredChecksum, UploadValidator, VerifiedRequest,
+    hex, storage_class, xml as escape_xml, ChecksumAlgorithm, Conditions, ErrorCode, Headers,
+    ObjectMetadata, Policy, Response, Result, StoredChecksum, UploadValidator, VerifiedRequest,
 };
 use crate::catalogue::{
     self as cat, Action, Authority, Checksum, ChecksumType, CiphertextIdentity, CiphertextMetadata,
@@ -211,6 +211,12 @@ pub struct UploadView {
     pub expires: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanupPass {
+    pub examined: usize,
+    pub removed: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Page<T> {
     pub entries: Vec<T>,
@@ -314,6 +320,11 @@ fn checksum_value(c: &Checksum) -> String {
     }
 }
 
+fn xml(value: &str) -> String {
+    // XML 1.0 normalizes literal CR; a character reference preserves the key.
+    escape_xml(value).replace('\r', "&#13;")
+}
+
 fn xml_response(body: String) -> Response {
     Response {
         status: 200,
@@ -355,6 +366,7 @@ pub struct MemoryMutations {
     catalogue: MemoryCatalogue,
     retained: BTreeMap<(TenantId, GenerationId), Retained>,
     sessions: BTreeMap<(TenantId, UploadId), Session>,
+    expiry: BTreeSet<(u64, TenantId, UploadId)>,
     policy: MutationPolicy,
     sequence: u64,
 }
@@ -366,6 +378,7 @@ impl MemoryMutations {
             catalogue: MemoryCatalogue::default(),
             retained: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            expiry: BTreeSet::new(),
             policy,
             sequence: 0,
         })
@@ -469,9 +482,22 @@ impl MemoryMutations {
         if body.bytes.len() > self.policy.object_bytes {
             return Err(ErrorCode::EntityTooLarge);
         }
-        let generation = GenerationId(self.allocate()?);
-        let begin = OperationId(self.allocate()?);
-        let commit = OperationId(self.allocate()?);
+        let tenant = prepared.reference.tenant;
+        let generation = GenerationId(
+            self.catalogue
+                .allocate_identity(tenant)
+                .map_err(map_error)?,
+        );
+        let begin = OperationId(
+            self.catalogue
+                .allocate_identity(tenant)
+                .map_err(map_error)?,
+        );
+        let commit = OperationId(
+            self.catalogue
+                .allocate_identity(tenant)
+                .map_err(map_error)?,
+        );
         let etag = format!("\"g-{}-{}\"", prepared.reference.tenant.0, generation.0);
         let identity = CiphertextIdentity {
             length: body.bytes.len() as u64,
@@ -555,7 +581,11 @@ impl MemoryMutations {
             .write_target(reference.tenant, &reference.name, now, authority)
             .map_err(map_error)?;
         conditions.evaluate(current.as_ref())?;
-        let operation = OperationId(self.allocate()?);
+        let operation = OperationId(
+            self.catalogue
+                .allocate_identity(reference.tenant)
+                .map_err(map_error)?,
+        );
         self.catalogue
             .transact(
                 reference.tenant,
@@ -576,18 +606,23 @@ impl MemoryMutations {
     pub fn delete_objects(
         &mut self,
         tenant: TenantId,
+        bucket: &super::Target,
         request: DeleteRequest,
         now: u64,
         authority: &dyn Authority,
     ) -> Result<Response> {
-        if request.keys.is_empty() || request.keys.len() > self.policy.batch_keys {
+        bucket.validate_features()?;
+        if bucket.key.is_some()
+            || request.keys.is_empty()
+            || request.keys.len() > self.policy.batch_keys
+        {
             return Err(ErrorCode::InvalidRequest);
         }
         let mut body = String::from("<DeleteResult>");
         for key in request.keys {
             let reference = Reference {
                 tenant,
-                name: key.clone(),
+                name: format!("{}/{key}", bucket.bucket),
             };
             match self.delete(
                 &reference,
@@ -622,6 +657,7 @@ impl MemoryMutations {
             return Err(ErrorCode::SlowDown);
         }
         let id = UploadId(self.allocate()?);
+        self.expiry.insert((prepared.expires, tenant, id));
         self.sessions.insert(
             (tenant, id),
             Session {
@@ -910,6 +946,9 @@ impl MemoryMutations {
             .sessions
             .get_mut(&(reference.tenant, id))
             .ok_or(ErrorCode::InternalError)?;
+        self.expiry
+            .remove(&(s.prepared.expires, reference.tenant, id));
+        self.expiry.insert((until, reference.tenant, id));
         s.parts.clear();
         s.result = Some((evidence, result.clone(), until));
         Ok(result)
@@ -926,32 +965,37 @@ impl MemoryMutations {
         if s.result.is_some() {
             return Err(ErrorCode::NoSuchUpload);
         }
+        let expires = s.prepared.expires;
+        self.expiry.remove(&(expires, reference.tenant, id));
         self.sessions.remove(&(reference.tenant, id));
         Ok(empty_response())
     }
 
-    /// Explicit bounded pass over expired staging/result evidence only. It never
-    /// deletes retained generations or promises erasure from an archival system.
-    pub fn cleanup(&mut self, now: u64, limit: usize) -> Result<usize> {
+    /// Inspect at most limit expiry-index entries, with O(log N) removals.
+    /// Never scan active tenants or delete retained generations/archival bytes.
+    pub fn cleanup(&mut self, now: u64, limit: usize) -> Result<CleanupPass> {
         if limit == 0 || limit > self.policy.sessions {
             return Err(ErrorCode::InvalidArgument);
         }
+        let mut examined = 0;
         let expired: Vec<_> = self
-            .sessions
+            .expiry
             .iter()
-            .filter(|(_, s)| {
-                now >= s
-                    .result
-                    .as_ref()
-                    .map_or(s.prepared.expires, |(_, _, until)| *until)
-            })
             .take(limit)
-            .map(|(id, _)| *id)
+            .take_while(|(expires, _, _)| {
+                examined += 1;
+                *expires <= now
+            })
+            .copied()
             .collect();
-        for id in &expired {
-            self.sessions.remove(id);
+        for (expires, tenant, id) in &expired {
+            self.sessions.remove(&(*tenant, *id));
+            self.expiry.remove(&(*expires, *tenant, *id));
         }
-        Ok(expired.len())
+        Ok(CleanupPass {
+            examined,
+            removed: expired.len(),
+        })
     }
 }
 

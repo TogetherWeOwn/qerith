@@ -720,6 +720,19 @@ impl MutationTargets for MemoryCatalogue {
 }
 
 impl MemoryCatalogue {
+    /// Trusted fixture identity allocation, shared with all catalogue mutations.
+    /// Monotonic above both replay records and reserved generations, including
+    /// identities supplied by other adapters. Burned unused IDs are intentional;
+    /// a durable adapter must provide its own transactional allocation contract.
+    pub fn allocate_identity(&mut self, tenant: TenantId) -> Result<u64> {
+        let t = self.tenants.entry(tenant).or_default();
+        let operation = t.operations.last_key_value().map_or(0, |(id, _)| id.0);
+        let generation = t.reserved.last().map_or(0, |id| id.0);
+        let id = next(t.sequence.max(operation).max(generation))?;
+        t.sequence = id;
+        Ok(id)
+    }
+
     fn atomic<T>(
         &mut self,
         tenant: TenantId,

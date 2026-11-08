@@ -67,12 +67,12 @@ fn tree(bytes: &[u8], policy: &Policy) -> Result<Node> {
                 });
             }
             Event::Text(e) => {
-                let text = e.as_ref();
+                let text = e.xml10_content();
                 if !text.chars().all(xml_char) {
                     return Err(ErrorCode::MalformedXML);
                 }
                 if let Some(node) = stack.last_mut() {
-                    node.text.push_str(text);
+                    node.text.push_str(&text);
                 } else if !text.trim().is_empty() {
                     return Err(ErrorCode::MalformedXML);
                 }

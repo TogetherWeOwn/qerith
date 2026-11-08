@@ -85,6 +85,9 @@ fn mutation_policy() -> MutationPolicy {
         max_attempts: 10,
     }
 }
+fn bucket() -> s3::Target {
+    s3::Target::parse("/archive?delete", &policy()).unwrap()
+}
 fn model() -> MemoryMutations {
     MemoryMutations::new(mutation_policy()).unwrap()
 }
@@ -150,7 +153,14 @@ fn body_with(
     let mut names: Vec<_> = fields.iter().map(|(name, _)| *name).collect();
     names.sort_unstable();
     let signed = names.join(";");
-    let canonical = s3::canonical_request("PUT", &target, &unsigned, &signed, "UNSIGNED-PAYLOAD")?;
+    let canonical = s3::canonical_request(
+        "PUT",
+        &target,
+        &unsigned,
+        &signed,
+        "UNSIGNED-PAYLOAD",
+        false,
+    )?;
     let key = hmac(
         &hmac(
             &hmac(&hmac(b"AWS4fixture-secret", b"20130524"), b"fixture"),
@@ -809,7 +819,7 @@ fn bounded_geometry_pages_retry_budget_and_expiry_cleanup() {
         .unwrap()
         .entries
         .is_empty());
-    assert_eq!(m.cleanup(101, 1).unwrap(), 1);
+    assert_eq!(m.cleanup(101, 1).unwrap().removed, 1);
     assert_eq!(
         m.abort(&reference("key"), id, 102, &auth()).unwrap_err(),
         s3::ErrorCode::NoSuchUpload
@@ -981,13 +991,13 @@ fn part_copy_uses_exact_source_range_and_negotiated_part_checksum() {
 #[test]
 fn deletion_is_per_key_quiet_and_never_erases_referenced_generation() {
     let mut m = model();
-    let original = put(&mut m, "source", b"retained");
+    let original = put(&mut m, "archive/source", b"retained");
     m.catalogue_worker()
         .transact(
             T,
             OperationId(9000),
             Mutation::Link {
-                source: "source".into(),
+                source: "archive/source".into(),
                 destination: "alias".into(),
                 expected_revision: 0,
             },
@@ -998,13 +1008,14 @@ fn deletion_is_per_key_quiet_and_never_erases_referenced_generation() {
     let response = m
         .delete_objects(
             T,
+            &bucket(),
             DeleteRequest {
                 keys: vec!["source".into(), "denied".into(), "missing".into()],
                 quiet: true,
             },
             4,
             &Auth {
-                denied: Some("denied".into()),
+                denied: Some("archive/denied".into()),
                 ..auth()
             },
         )
@@ -1050,6 +1061,167 @@ fn strict_control_xml_handles_entities_and_rejects_unknown_evidence() {
     let parts = parse_complete(b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>&quot;opaque&quot;</ETag></Part></CompleteMultipartUpload>", &p, 10, MultipartChecksum::None).unwrap();
     assert_eq!(parts[0].etag, "\"opaque\"");
     assert!(parse_complete(b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>x</ETag><ChecksumCRC64NVME>x</ChecksumCRC64NVME></Part></CompleteMultipartUpload>", &p, 10, MultipartChecksum::None).is_err());
+}
+
+#[test]
+fn batch_delete_qualifies_references_without_changing_wire_keys() {
+    let mut m = model();
+    put(&mut m, "archive/report", b"target");
+    put(&mut m, "archive/other/secret", b"nested");
+    let unrelated = put(&mut m, "other/secret", b"keep");
+    let response = m
+        .delete_objects(
+            T,
+            &bucket(),
+            DeleteRequest {
+                keys: vec!["report".into(), "other/secret".into()],
+                quiet: false,
+            },
+            4,
+            &auth(),
+        )
+        .unwrap();
+    assert!(m
+        .catalogue()
+        .lookup(T, "archive/report", 4, &auth())
+        .is_err());
+    assert!(m
+        .catalogue()
+        .lookup(T, "archive/other/secret", 4, &auth())
+        .is_err());
+    assert_eq!(
+        m.catalogue()
+            .lookup(T, "other/secret", 4, &auth())
+            .unwrap()
+            .generation,
+        unrelated.generation
+    );
+    let xml = String::from_utf8(response.body).unwrap();
+    assert!(xml.contains("<Key>report</Key>"));
+    assert!(xml.contains("<Key>other/secret</Key>"));
+    assert!(!xml.contains("<Key>archive/"));
+}
+
+#[test]
+fn catalogue_and_adapter_share_collision_free_operation_identity_allocation() {
+    let mut m = model();
+    put(&mut m, "source", b"first");
+    m.catalogue_worker()
+        .transact(
+            T,
+            OperationId(5),
+            Mutation::Link {
+                source: "source".into(),
+                destination: "alias".into(),
+                expected_revision: 0,
+            },
+            3,
+            &auth(),
+        )
+        .unwrap();
+    put(&mut m, "destination", b"second");
+    // An arbitrary later infrastructure operation must not cause a false 409.
+    m.catalogue_worker()
+        .transact(
+            T,
+            OperationId(1_000_000),
+            Mutation::Tombstone {
+                name: "unused".into(),
+                expected_revision: 0,
+            },
+            3,
+            &auth(),
+        )
+        .unwrap();
+    assert_eq!(
+        m.delete(
+            &reference("destination"),
+            &DestinationConditions::default(),
+            4,
+            &auth()
+        )
+        .unwrap()
+        .status,
+        204
+    );
+    put(&mut m, "destination", b"third");
+}
+
+#[test]
+fn xml_line_endings_and_explicit_cr_references_target_distinct_correct_keys() {
+    let request = parse_delete(b"<Delete><Object><Key>a\r\nb\rc</Key></Object><Object><Key>a&#13;b</Key></Object></Delete>", &policy(), 10).unwrap();
+    assert_eq!(request.keys, ["a\nb\nc", "a\rb"]);
+    let mut m = model();
+    put(&mut m, "archive/a\nb\nc", b"literal");
+    put(&mut m, "archive/a\rb", b"reference");
+    let response = m.delete_objects(T, &bucket(), request, 4, &auth()).unwrap();
+    assert!(m
+        .catalogue()
+        .lookup(T, "archive/a\nb\nc", 4, &auth())
+        .is_err());
+    assert!(m.catalogue().lookup(T, "archive/a\rb", 4, &auth()).is_err());
+    let xml = String::from_utf8(response.body).unwrap();
+    assert!(xml.contains("<Key>a&#13;b</Key>"));
+    assert!(!xml.contains('\r'));
+}
+
+#[test]
+fn expiry_index_bounds_cleanup_inspection_even_with_many_active_tenants() {
+    struct AllTenants;
+    impl Authority for AllTenants {
+        fn is_current(&self) -> bool {
+            true
+        }
+        fn permits(&self, _: &Reference, _: Action) -> bool {
+            true
+        }
+    }
+    let mut m = model();
+    for tenant in 1..=32 {
+        let p = m
+            .prepare(
+                Reference {
+                    tenant: TenantId(tenant),
+                    name: "archive/key".into(),
+                },
+                metadata(),
+                DestinationConditions::default(),
+                None,
+                10,
+                &AllTenants,
+            )
+            .unwrap();
+        m.initiate(p, MultipartChecksum::None, 11, &AllTenants)
+            .unwrap();
+    }
+    let p = m
+        .prepare(
+            Reference {
+                tenant: TenantId(100),
+                name: "archive/expired".into(),
+            },
+            metadata(),
+            DestinationConditions::default(),
+            None,
+            1,
+            &AllTenants,
+        )
+        .unwrap();
+    m.initiate(p, MultipartChecksum::None, 2, &AllTenants)
+        .unwrap();
+    let pass = m.cleanup(101, 1).unwrap();
+    assert_eq!(pass.examined, 1);
+    assert_eq!(pass.removed, 1);
+    let pass = m.cleanup(101, 1).unwrap();
+    assert_eq!(pass.examined, 1);
+    assert_eq!(pass.removed, 0);
+    assert_eq!(
+        m.list_uploads(TenantId(100), "", 0, 8, 101, &AllTenants)
+            .unwrap()
+            .entries
+            .len(),
+        0
+    );
 }
 
 #[test]

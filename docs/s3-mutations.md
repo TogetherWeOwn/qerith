@@ -16,6 +16,11 @@ It never uses `Mutation::Link` as a copy shortcut. The only new catalogue port i
 revision, including a deleted key. It does not grant read/list access. Prohibited
 or deleting generations return errors, not an invented absent key.
 
+Fixture operation/generation identities are allocated by the shared catalogue
+above its replay ledger, reserved generations and infrastructure sequence. The
+mutation adapter's private sequence is only for upload/part tokens; it cannot
+collide with legitimate restore/link/tombstone operation identities.
+
 An authenticated ingress adapter must bind a verified principal to a trusted
 catalogue `Authority`, tenant and bucket/key mapping, and recheck the original
 `VerifiedRequest` at admission. Typed reference names must include the bucket
@@ -89,7 +94,9 @@ request idempotency. Success XML is produced only from an accepted commit;
 `completion_result` explicitly treats an embedded `<Error>` in HTTP 200 as failure.
 The parsers bound XML and reject unknown fields, DTD/entity expansion, unsupported
 versions and duplicate fields. XML predefined/numeric escapes preserve Unicode
-keys and opaque quoted ETags.
+keys and opaque quoted ETags. Literal text follows XML 1.0 CRLF/CR normalization;
+explicit numeric CR references remain distinct and response keys encode CR as
+`&#13;` rather than a literal character that clients would normalize.
 
 ## Copy and deletion
 
@@ -110,7 +117,9 @@ part checksum evidence for the negotiated mode. Its resulting part must still
 participate in a successful atomic completion.
 
 `delete` is an authorized logical tombstone and returns 204, including an absent
-key. `delete_objects` returns per-key results, suppressing successful keys in quiet
+key. `delete_objects` takes the shared parsed bucket target separately from
+bucket-relative XML keys, qualifies catalogue references, and echoes only the
+original keys. It returns per-key results, suppressing successful keys in quiet
 mode while retaining errors. It never deletes shared byte versions. The shared
 catalogue deletion worker and its serving pins, reference counts and integrity
 proofs remain the sole physical-cleanup authority; there is no Usenet erasure
@@ -125,8 +134,11 @@ completion result retention and completion attempt ceiling. Zero/contradictory
 limits are rejected. Replacement subtracts the replaced bytes before admission.
 Polls and replacements do not extend lifetime. Expired sessions do not gain more
 capacity until the caller explicitly invokes bounded `cleanup(now, limit)`.
-Cleanup removes only expired session/result evidence, never retained generations
-or recovery obligations. There is no hidden retry loop or background collector.
+An expiry-ordered index bounds inspection as well as removals, across all
+tenants: `CleanupPass` reports `examined <= limit` and removed entries. Completion
+and abort update this index together with their session state. Cleanup removes
+only expired session/result evidence, never retained generations or recovery
+obligations. There is no hidden retry loop or background collector.
 
 These are fixture inputs, not selected production numbers or a production quota
 system. Production retained-byte/backlog admission, tenant/global budgets, durable
