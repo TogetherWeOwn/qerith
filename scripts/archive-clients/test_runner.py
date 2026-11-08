@@ -74,6 +74,15 @@ class ManifestTests(unittest.TestCase):
             })
 
 
+class WorkflowTests(unittest.TestCase):
+    def test_runner_context_is_not_used_in_job_environment(self):
+        workflow = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+        job = workflow.read_text().split("  archive-clients:\n", 1)[1]
+        header = job.split("    steps:\n", 1)[0]
+        self.assertNotIn("${{ runner.", header)
+        self.assertIn('export QERITH_CLIENT_PRIVATE_DIR="$RUNNER_TEMP/', job)
+
+
 class IsolationTests(unittest.TestCase):
     def test_environment_strips_ambient_credentials_proxies_and_plugins(self):
         with tempfile.TemporaryDirectory() as directory:

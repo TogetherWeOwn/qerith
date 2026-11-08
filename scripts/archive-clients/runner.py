@@ -27,9 +27,13 @@ def write_json(path, value):
 
 
 def artifact_hashes(evidence):
-    return {str(p.relative_to(evidence)): hashlib.file_digest(p.open("rb"), "sha256").hexdigest()
-            for p in sorted(evidence.rglob("*")) if p.is_file() and p.name != "manifest.json"
-            and "private" not in p.relative_to(evidence).parts}
+    hashes = {}
+    for path in sorted(evidence.rglob("*")):
+        relative = path.relative_to(evidence)
+        if path.is_file() and path.name != "manifest.json" and "private" not in relative.parts:
+            with path.open("rb") as stream:
+                hashes[str(relative)] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return hashes
 
 
 def run_bounded(command, env, output, seconds):

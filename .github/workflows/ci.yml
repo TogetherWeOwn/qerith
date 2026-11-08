@@ -193,8 +193,6 @@ jobs:
     env:
       QERITH_EVIDENCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       QERITH_CLIENT_RUNNER: ${{ github.workspace }}/scripts/archive-clients/runner.py
-      QERITH_CLIENT_EVIDENCE_DIR: ${{ runner.temp }}/archive-client-evidence
-      QERITH_CLIENT_PRIVATE_DIR: ${{ runner.temp }}/archive-client-private-${{ github.run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -207,6 +205,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$QERITH_EVIDENCE_HEAD"
+          # runner context is unavailable in job-level env; bind these at runtime.
+          export QERITH_CLIENT_EVIDENCE_DIR="$RUNNER_TEMP/archive-client-evidence"
+          export QERITH_CLIENT_PRIVATE_DIR="$RUNNER_TEMP/archive-client-private-$GITHUB_RUN_ID"
+          printf 'QERITH_CLIENT_EVIDENCE_DIR=%s\n' "$QERITH_CLIENT_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          printf 'QERITH_CLIENT_PRIVATE_DIR=%s\n' "$QERITH_CLIENT_PRIVATE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$QERITH_CLIENT_EVIDENCE_DIR"
           python3 -I - <<'PY'
           import pathlib, sys
