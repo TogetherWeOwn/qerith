@@ -4,6 +4,8 @@
 //! Access and storage are trusted live ports; neither is restored from a checkpoint.
 
 mod bridge;
+#[cfg(test)]
+mod tests;
 pub use bridge::UploadWorker;
 
 use crate::{catalogue as c, composition as flow, native as n, operations as o};
@@ -698,8 +700,8 @@ impl<A: Access> Service<A> {
         }
         Ok(None)
     }
-    // Only called after full request authorization. Retain scope-bound obligations
-    // across policy/state rejection; denial itself must never disclose job state.
+    // Also called on authorization failure. Independently authorize scope-bound
+    // obligations before retaining effects; denial must never disclose job state.
     fn retain_request_effects(
         &self,
         scope: &o::Scope,
@@ -731,8 +733,23 @@ impl<A: Access> Service<A> {
             .reconciliation(scope)
             .and_then(|key| self.model.replay.get(&key))
         {
-            if self.check_authorization(scope, prior).is_err() {
-                return denied();
+            if let Err(authorization) = self.check_authorization(scope, prior) {
+                if matches!(
+                    authorization.code,
+                    o::ErrorCode::Denied | o::ErrorCode::Unauthenticated
+                ) {
+                    return authorization;
+                }
+                // Cancel authorization includes live projection. A projection
+                // failure is not a denial, but still needs original-job Read.
+                if prior.operation() != o::Operation::Cancel {
+                    return denied();
+                }
+                if let Err(denial) =
+                    self.authorized_job(scope, prior.opaque("job").unwrap(), Some(c::Action::Read))
+                {
+                    return denial;
+                }
             }
             return match output {
                 o::Output::Job(job)
@@ -1879,6 +1896,15 @@ impl<A: Access> Service<A> {
     }
     fn cancel(&mut self, scope: &o::Scope, mut job: Job) -> Result<o::Output, o::Failure> {
         let outcome = if job.value.effects == o::Effects::Committed {
+            if job.restore.is_some() && job.value.state == o::JobState::Succeeded {
+                // Retain only this freshly authorized terminal observation, not
+                // new authority or bindings. Status/projection remain read-only.
+                self.model
+                    .jobs
+                    .get_mut(&job.value.handle)
+                    .ok_or_else(denied)?
+                    .value = job.value.clone();
+            }
             o::CancelOutcome::AlreadyCommitted
         } else if job.value.state.terminal() {
             o::CancelOutcome::AlreadyTerminal
