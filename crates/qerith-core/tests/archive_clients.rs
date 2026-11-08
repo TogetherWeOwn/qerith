@@ -3,6 +3,8 @@
 
 #[path = "archive_clients/http.rs"]
 mod http;
+#[path = "archive_clients/lifecycle.rs"]
+mod lifecycle;
 #[path = "archive_clients/router.rs"]
 mod router;
 #[path = "archive_clients/storage.rs"]

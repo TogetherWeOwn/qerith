@@ -37,8 +37,7 @@ impl FixtureC {
         // a stale prefix relabelled as a new generation cannot pass verification.
         bytes[..8].copy_from_slice(&key.object.to_le_bytes());
         bytes[8..16].copy_from_slice(&key.generation.to_le_bytes());
-        let digest = Sha256::digest(&bytes).into();
-        Self { key, bytes, digest }
+        Self::committed(key, bytes)
     }
 
     /// Bind actual S3-committed fixture octets, not a separately generated oracle.
@@ -281,6 +280,21 @@ impl Archive {
             articles,
             server,
             delayed: fault == Fault::Timeout,
+        }
+    }
+
+    /// Empty remote spool: no ARTICLE exists until the engine really POSTs it.
+    pub async fn unposted(fixture: &FixtureC, identity: MockBackbone) -> Self {
+        let mut config = ServerConfig::for_test();
+        config.group = GROUP.into();
+        config.articles.clear();
+        config.missing_ids.clear();
+        Self {
+            fixture: fixture.clone(),
+            identity,
+            articles: articles(fixture),
+            server: Some(TestNntpServer::spawn(config).await),
+            delayed: false,
         }
     }
 

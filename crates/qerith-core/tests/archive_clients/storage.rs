@@ -34,24 +34,22 @@ impl Io {
             },
             bytes,
         );
-        // Servers start with a synthetic corpus, but post() below still performs
-        // actual NNTP POST of every committed segment before verification.
-        let a = Archive::spawn(
+        // Empty spools make successful engine POST a prerequisite of full
+        // ARTICLE verification, rather than pre-seeding a warm archive oracle.
+        let a = Archive::unposted(
             &fixture,
             MockBackbone {
                 label: "simulated-a",
                 provenance: "synthetic-spool-a",
             },
-            Fault::Healthy,
         )
         .await;
-        let b = Archive::spawn(
+        let b = Archive::unposted(
             &fixture,
             MockBackbone {
                 label: "simulated-b",
                 provenance: "synthetic-spool-b",
             },
-            Fault::Healthy,
         )
         .await;
         self.spools.insert(
