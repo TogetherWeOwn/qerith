@@ -86,9 +86,17 @@ impl ArchiveCache for Io {
 
 struct Current {
     auth: Rc<Auth>,
+    events: tokio::sync::watch::Sender<Option<a::Failure>>,
+    deadline: tokio::time::Instant,
 }
 impl Control for Current {
     fn check(&self, target: &a::Target, _: a::Action) -> a::Result<()> {
+        if let Some(error) = *self.events.borrow() {
+            return Err(error);
+        }
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(a::Failure::Deadline);
+        }
         if target.tenant.as_str() != TENANT.0.to_string()
             || !self.auth.is_current()
             || !self.auth.permits(
@@ -103,6 +111,24 @@ impl Control for Current {
         }
         Ok(())
     }
+    async fn cancelled<'a>(&'a self, target: &'a a::Target, action: a::Action) -> a::Failure {
+        // Subscribe before the policy check. watch retains changes in the gap
+        // between that check and polling changed(), even with stalled I/O.
+        let mut events = self.events.subscribe();
+        loop {
+            if let Err(error) = self.check(target, action) {
+                return error;
+            }
+            tokio::select! {
+                result = events.changed() => {
+                    if result.is_err() {
+                        return a::Failure::Denied;
+                    }
+                }
+                _ = tokio::time::sleep_until(self.deadline) => return a::Failure::Deadline,
+            }
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum Fault {
@@ -110,6 +136,7 @@ enum Fault {
     Missing,
     Corrupt,
     Revoke,
+    Stall,
 }
 struct Provider {
     backend: a::Backend,
@@ -180,6 +207,14 @@ impl a::ArchiveProvider for Provider {
         let mut bytes = self.bytes.clone();
         if matches!(self.fault, Fault::Corrupt) {
             bytes[0] ^= 1;
+        }
+        if matches!(self.fault, Fault::Stall) {
+            sink.write(&bytes[..bytes.len() / 2]).await?;
+            // No I/O wake or completion after this invisible prefix. Only the
+            // invocation's event/timer can make this generated provider finish.
+            return Err(control
+                .cancelled(&record.identity.target, a::Action::Read)
+                .await);
         }
         sink.write(&bytes).await?;
         if matches!(self.fault, Fault::Revoke) {
@@ -254,7 +289,11 @@ fn bridge(
         nntp: make(a::Backend::Nntp),
         s3: make(a::Backend::S3),
         cache: io,
-        control: Current { auth },
+        control: Current {
+            auth,
+            events: tokio::sync::watch::channel(None).0,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        },
     }
 }
 struct ReadCache<'a>(&'a Io);
@@ -412,6 +451,124 @@ async fn provider_restore_errors_never_publish_or_fall_back() {
         assert!(storage.cache.copies.is_empty());
         assert!(storage.cache.pending.is_empty());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_publication() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for stop in [
+            a::Failure::Denied,
+            a::Failure::Cancelled,
+            a::Failure::Deadline,
+        ] {
+            let (mut service, mut io, _, _, auth) = hot_upload().await;
+            let time = Time(Cell::new(60));
+            evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+            io.provider_record = Some(record(&io, backend));
+            let mut storage = bridge(io, backend, auth.clone(), Fault::Stall);
+            let events = storage.control.events.clone();
+            let restore = request_restore(
+                service.catalogue_mut(),
+                "object",
+                903,
+                1000,
+                50,
+                60,
+                auth.as_ref(),
+            );
+            let event = job_event(service.catalogue(), restore);
+            let rules = Rules::default();
+            let limits = budget();
+            {
+                let run = run_once(
+                    service.catalogue_mut(),
+                    &mut storage,
+                    TENANT,
+                    event,
+                    &limits,
+                    &time,
+                    &rules,
+                    &MockQualification,
+                    auth.as_ref(),
+                );
+                let mut run = std::pin::pin!(run);
+                let wakes = Arc::new(Wakes::default());
+                let waker = wakes.clone().into();
+                let mut cx = Context::from_waker(&waker);
+                assert!(run.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+                match stop {
+                    a::Failure::Denied => {
+                        auth.denied.borrow_mut().insert("object:Restore".into());
+                        // A policy-change event, not a cached authority boolean.
+                        events.send_replace(None);
+                    }
+                    a::Failure::Cancelled => {
+                        events.send_replace(Some(stop));
+                    }
+                    a::Failure::Deadline => tokio::time::advance(Duration::from_secs(31)).await,
+                    _ => unreachable!(),
+                }
+                assert!(wakes.0.load(Ordering::SeqCst) > 0, "missing {stop:?} wake");
+                assert!(tokio::time::timeout(Duration::from_secs(1), run)
+                    .await
+                    .expect("stalled provider must be interrupted")
+                    .is_err());
+            }
+            assert_eq!(storage.nntp.reads, usize::from(backend == a::Backend::Nntp));
+            assert_eq!(storage.s3.reads, usize::from(backend == a::Backend::S3));
+            assert!(storage.cache.pending.is_empty());
+            assert!(storage.cache.copies.is_empty());
+            assert!(service
+                .catalogue()
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .is_none());
+            assert_ne!(
+                service.catalogue().job(TENANT, restore).unwrap().state,
+                JobState::Complete
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn provider_control_observes_events_before_wait_registration() {
+    let (_, io, _, _, auth) = hot_upload().await;
+    let target = record(&io, a::Backend::S3).identity.target;
+    let storage = bridge(io, a::Backend::S3, auth.clone(), Fault::None);
+    storage
+        .control
+        .events
+        .send_replace(Some(a::Failure::Cancelled));
+    assert_eq!(
+        storage.control.cancelled(&target, a::Action::Read).await,
+        a::Failure::Cancelled
+    );
+    storage.control.events.send_replace(None);
+    auth.denied.borrow_mut().insert("object:Restore".into());
+    assert_eq!(
+        storage.control.cancelled(&target, a::Action::Read).await,
+        a::Failure::Denied
+    );
 }
 
 #[tokio::test]

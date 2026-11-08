@@ -66,6 +66,10 @@ pub struct ProviderStorage<L, N, S, C> {
     pub s3: S,
     /// Trusted current authority/deadline/cancellation; not request booleans.
     /// Both transports must enforce it during I/O, not only at these boundaries.
+    /// `Control::cancelled` must register an actual invocation/policy/deadline
+    /// wake source before rechecking current policy. A pending socket must not
+    /// prevent that wake. Caller retains physical leases until proved settled;
+    /// dropping an operation is not evidence of remote rollback or closure.
     pub control: C,
 }
 

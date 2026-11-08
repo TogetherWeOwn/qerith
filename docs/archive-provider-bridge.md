@@ -8,10 +8,12 @@ charged fallback, media decryption, durable database or production qualification
 ## Immutable source
 
 Both engine packages are pinned to experimental Velmora source
-`e8fb2adeda386a38d74fc77c7aaa0a05a1b70bf3` (PR #19). This is an integration
-checkpoint, **not an accepted production pin**. Its native Actions run
-`42507436449` failed on an unused test helper during feature-on clippy; do not
-report the shared tests passing. The product dependency bump must settle through
+`40dba9a8cedb27748fa22e8a1d63cb2132067efd` (PR #19). This is an integration
+checkpoint, **not an accepted production pin**. Shared exact-head Actions run
+`42509015484` passed, including the corrected invocation-control source. Shared
+native Crypto/Security/QA acceptance is still a separate gate. The product
+previous-head run `42508625487` passed all three generated restore tests; that
+is not evidence for this new consumer head. The dependency bump must settle through
 shared review and the product's applicable independent Security/Crypto/QA gates
 before this PR is ready.
 
@@ -54,7 +56,20 @@ Only the existing catalogue transition can publish that receipt. Provider or
 cache presence is never a lease, public ETag, dedupe signal or authorization.
 
 Trusted `Control` and the injected transports must enforce current authority,
-resource bounds, cancellation and deadlines during I/O. An error prefix stays
+resource bounds, cancellation and deadlines during I/O. The canonical
+`Control::cancelled` future must register an actual event source before checking
+policy and wake even when the socket never progresses. Polling-only checks or a
+never-woken pending future do not satisfy this requirement. Shared `ClientIo`
+interrupts pending operations and attempts shutdown without QUIT; this does not
+prove physical closure/settlement or permit releasing the product's pool lease.
+The production runtime control binding is not shipped here. Generated consumer
+tests bind a retained watch event source to the same current authority and a
+Tokio deadline timer; paused-time tests assert an actual registered-task wake
+for policy revocation, cancellation and deadline during stalled NNTP/S3 fake
+reads, plus pre-registration events. They also check incomplete cleanup and no
+publication/fallback. These are not socket/lease-close qualification.
+
+An error prefix stays
 invisible. Cleanup removes only incomplete attempt-local cache allocations; it
 never aborts/deletes provider objects, uncertain writes, safety copies or another
 attempt's completed version. Existing serving pins and protocol-specific range,
@@ -94,7 +109,17 @@ also compile the default-off bridge explicitly.
 
 ## Dependency supply-chain record
 
-No local dependency-source fetch, installation, build or suite ran. The first
+The event-control pin change has no engine Cargo manifest changes from the
+previous pinned checkpoint. Only the three git source coordinates move in the
+lock; no package versions/dependency edges change. The product additionally
+enables Tokio's existing dev-only `test-util` feature for deterministic paused
+deadline tests; no new package, script or build-hook exception is introduced.
+Selective ordinary control/client source was inspected through the GitHub API,
+not by fetching a source tree or opening provider/media/NZB fixtures. The actual
+new git source, locked freshness and clean build/tests are verified in Actions,
+not by a local dependency install or source execution.
+
+Before this correction, no local dependency-source fetch, installation, build or suite ran. The first
 composed lock graph failed Actions freshness on head `a0d1ea3` (run
 `42508369021`): it accidentally retained an engine dev-dependency as a normal
 synthetic-server dependency. A subsequent manifest-only Cargo resolution used
