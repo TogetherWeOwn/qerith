@@ -23,7 +23,7 @@ pub struct Key {
 
 #[derive(Clone, Debug)]
 pub struct FixtureC {
-    pub key: Key,
+    key: Key,
     bytes: Vec<u8>,
     digest: [u8; 32],
 }
@@ -39,6 +39,11 @@ impl FixtureC {
         bytes[8..16].copy_from_slice(&key.generation.to_le_bytes());
         let digest = Sha256::digest(&bytes).into();
         Self { key, bytes, digest }
+    }
+
+    /// Returns a copy; changing it cannot relabel the committed bytes/digest.
+    pub fn key(&self) -> Key {
+        self.key
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -220,6 +225,7 @@ pub struct Archive {
     identity: MockBackbone,
     articles: Vec<Article>,
     server: Option<TestNntpServer>,
+    delayed: bool,
 }
 
 impl Archive {
@@ -264,7 +270,15 @@ impl Archive {
             identity,
             articles,
             server,
+            delayed: fault == Fault::Timeout,
         }
+    }
+
+    /// Discard owned sessions/spool and create a fresh server for another attempt.
+    /// Reset is explicit: retained-source POST state is not carried forward.
+    pub async fn reset(&mut self, fault: Fault) {
+        self.shutdown();
+        *self = Self::spawn(&self.fixture, self.identity.clone(), fault).await;
     }
 
     async fn connect(&self) -> Result<NntpClient<NativeTlsTransport>, Failure> {
@@ -289,7 +303,7 @@ impl Archive {
     /// No safety/delivery read occurs here: every byte comes from ARTICLE.
     /// A failed/cancelled/timed-out attempt leaves no newly published delivery.
     pub async fn reconstruct(
-        &self,
+        &mut self,
         expected: &FixtureC,
         cache: &mut MemoryCache,
         fault: Fault,
@@ -303,6 +317,12 @@ impl Archive {
         let result = tokio::time::timeout(deadline, self.fetch(expected, cache, fault, trace))
             .await
             .unwrap_or(Err(Failure::Timeout));
+        // The pinned server's ARTICLE delay ignores client disconnect. End the
+        // entire delayed server after one attempt, releasing its auth slots via
+        // upstream shutdown rather than accumulating sleeping sessions on retry.
+        if self.delayed {
+            self.shutdown();
+        }
         if let Err(err) = &result {
             trace.0.push(Event::Failed(err.clone()));
         }

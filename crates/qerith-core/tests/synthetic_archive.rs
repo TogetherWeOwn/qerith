@@ -24,18 +24,18 @@ async fn empty_cache_reconstruction_preserves_c_and_replays() {
     let c = fixture(7);
     let expected = vec![
         Event::EmptyCache,
-        Event::Begin(c.key),
+        Event::Begin(c.key()),
         Event::Article(0),
         Event::Staged(1024),
         Event::Article(1),
         Event::Staged(2048),
         Event::Article(2),
         Event::Staged(3072),
-        Event::Verified(c.key, 3072, c.digest()),
-        Event::Published(c.key),
+        Event::Verified(c.key(), 3072, c.digest()),
+        Event::Published(c.key()),
     ];
     for _ in 0..2 {
-        let archive = Archive::spawn(&c, identity("label-a", "spool-a"), Fault::Healthy).await;
+        let mut archive = Archive::spawn(&c, identity("label-a", "spool-a"), Fault::Healthy).await;
         let mut cache = MemoryCache::default();
         let mut trace = Trace::default();
         cache.assert_empty(&mut trace);
@@ -43,10 +43,10 @@ async fn empty_cache_reconstruction_preserves_c_and_replays() {
             .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
             .await
             .unwrap();
-        assert_eq!(cache.delivery(c.key), Some(c.bytes()));
-        assert_eq!(cache.staged_len(c.key), 0);
+        assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+        assert_eq!(cache.staged_len(c.key()), 0);
         trace.assert_replay(&expected);
-        cache.cleanup(c.key, &mut trace);
+        cache.cleanup(c.key(), &mut trace);
         cache.assert_empty(&mut trace);
     }
 }
@@ -65,18 +65,18 @@ async fn faults_never_publish_partial_bytes_or_use_warm_safety() {
         (Fault::CancelAfter(0), Failure::Cancelled, 1024),
     ];
     for (fault, failure, staged) in cases {
-        let archive = Archive::spawn(&c, identity("label-a", "spool-a"), fault).await;
+        let mut archive = Archive::spawn(&c, identity("label-a", "spool-a"), fault).await;
         let mut cache = MemoryCache::default();
         let mut trace = Trace::default();
         cache.assert_empty(&mut trace);
         cache.retain_safety(&c);
         let result = archive.reconstruct(&c, &mut cache, fault, &mut trace).await;
         assert_eq!(result.unwrap_err(), failure, "fault {fault:?}");
-        assert_eq!(cache.delivery(c.key), None, "fault {fault:?}");
-        assert_eq!(cache.safety(c.key), Some(c.bytes()));
-        assert_eq!(cache.staged_len(c.key), staged);
+        assert_eq!(cache.delivery(c.key()), None, "fault {fault:?}");
+        assert_eq!(cache.safety(c.key()), Some(c.bytes()));
+        assert_eq!(cache.staged_len(c.key()), staged);
         assert_eq!(trace.0.last(), Some(&Event::Failed(failure)));
-        cache.cleanup(c.key, &mut trace);
+        cache.cleanup(c.key(), &mut trace);
         cache.assert_empty(&mut trace);
     }
 }
@@ -85,7 +85,7 @@ async fn faults_never_publish_partial_bytes_or_use_warm_safety() {
 async fn restart_discards_partial_write_without_splicing_generations() {
     let c = fixture(7);
     let next = fixture(8);
-    let archive = Archive::spawn(&c, identity("label-a", "spool-a"), Fault::Healthy).await;
+    let mut archive = Archive::spawn(&c, identity("label-a", "spool-a"), Fault::Healthy).await;
     let mut cache = MemoryCache::default();
     let mut trace = Trace::default();
     cache.retain_safety(&next);
@@ -96,9 +96,9 @@ async fn restart_discards_partial_write_without_splicing_generations() {
             .unwrap_err(),
         Failure::Cancelled
     );
-    assert_eq!(cache.staged_len(c.key), 2048);
-    cache.restart(c.key, &mut trace);
-    assert_eq!(cache.staged_len(c.key), 0);
+    assert_eq!(cache.staged_len(c.key()), 2048);
+    cache.restart(c.key(), &mut trace);
+    assert_eq!(cache.staged_len(c.key()), 0);
     assert_eq!(
         archive
             .reconstruct(&next, &mut cache, Fault::Healthy, &mut trace)
@@ -110,11 +110,11 @@ async fn restart_discards_partial_write_without_splicing_generations() {
         .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
         .await
         .unwrap();
-    assert_eq!(cache.delivery(c.key), Some(c.bytes()));
-    assert_eq!(cache.delivery(next.key), None);
-    cache.cleanup(c.key, &mut trace);
-    assert_eq!(cache.safety(next.key), Some(next.bytes()));
-    cache.cleanup(next.key, &mut trace);
+    assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+    assert_eq!(cache.delivery(next.key()), None);
+    cache.cleanup(c.key(), &mut trace);
+    assert_eq!(cache.safety(next.key()), Some(next.bytes()));
+    cache.cleanup(next.key(), &mut trace);
     cache.assert_empty(&mut trace);
 }
 
@@ -123,31 +123,123 @@ fn publication_checks_full_length_digest_and_preserves_prior_delivery() {
     let c = fixture(7);
     let mut cache = MemoryCache::default();
     let mut trace = Trace::default();
-    cache.begin(c.key, &mut trace);
-    cache.append(c.key, &c.bytes()[..1024], &mut trace);
+    cache.begin(c.key(), &mut trace);
+    cache.append(c.key(), &c.bytes()[..1024], &mut trace);
     assert_eq!(cache.publish(&c, &mut trace), Err(Failure::Integrity));
-    assert_eq!(cache.delivery(c.key), None);
-    cache.begin(c.key, &mut trace);
-    cache.append(c.key, c.bytes(), &mut trace);
+    assert_eq!(cache.delivery(c.key()), None);
+    cache.begin(c.key(), &mut trace);
+    cache.append(c.key(), c.bytes(), &mut trace);
     cache.publish(&c, &mut trace).unwrap();
     let mut corrupt = c.bytes().to_vec();
     corrupt[2000] ^= 1;
-    cache.begin(c.key, &mut trace);
-    cache.append(c.key, &corrupt, &mut trace);
+    cache.begin(c.key(), &mut trace);
+    cache.append(c.key(), &corrupt, &mut trace);
     assert_eq!(cache.publish(&c, &mut trace), Err(Failure::Integrity));
-    assert_eq!(cache.delivery(c.key), Some(c.bytes()));
-    cache.begin(c.key, &mut trace);
-    cache.append(c.key, c.bytes(), &mut trace);
-    cache.append(c.key, &[0], &mut trace);
+    assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+    cache.begin(c.key(), &mut trace);
+    cache.append(c.key(), c.bytes(), &mut trace);
+    cache.append(c.key(), &[0], &mut trace);
     assert_eq!(cache.publish(&c, &mut trace), Err(Failure::Integrity));
     let next = fixture(8);
     assert_ne!(c.bytes(), next.bytes());
     assert_ne!(c.digest(), next.digest());
-    cache.begin(next.key, &mut trace);
-    cache.append(next.key, c.bytes(), &mut trace);
+    cache.begin(next.key(), &mut trace);
+    cache.append(next.key(), c.bytes(), &mut trace);
     assert_eq!(cache.publish(&next, &mut trace), Err(Failure::Integrity));
-    assert_eq!(cache.delivery(next.key), None);
-    assert_eq!(cache.delivery(c.key), Some(c.bytes()));
+    assert_eq!(cache.delivery(next.key()), None);
+    assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+}
+
+#[test]
+fn copied_fixture_key_cannot_relabel_construction_identity() {
+    let c = fixture(7);
+    let mut key = c.key();
+    key.generation = 8;
+    assert_eq!(c.key(), fixture(7).key());
+    let next = FixtureC::new(key);
+    let mut cache = MemoryCache::default();
+    let mut trace = Trace::default();
+    cache.begin(key, &mut trace);
+    cache.append(key, c.bytes(), &mut trace);
+    assert_eq!(cache.publish(&c, &mut trace), Err(Failure::Integrity));
+    assert_eq!(cache.publish(&next, &mut trace), Err(Failure::Integrity));
+    assert_eq!(cache.delivery(key), None);
+    assert!(!trace
+        .0
+        .iter()
+        .any(|event| matches!(event, Event::Verified(..) | Event::Published(_))));
+    cache.begin(c.key(), &mut trace);
+    cache.append(c.key(), c.bytes(), &mut trace);
+    cache.publish(&c, &mut trace).unwrap();
+    assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+    assert_eq!(cache.delivery(key), None);
+}
+
+#[tokio::test]
+async fn timeout_retries_reset_sessions_and_restart_without_publication() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let c = fixture(7);
+        let mut archive = Archive::spawn(&c, identity("label-a", "spool-a"), Fault::Timeout).await;
+        let mut cache = MemoryCache::default();
+        let mut trace = Trace::default();
+        cache.assert_empty(&mut trace);
+        for _ in 0..3 {
+            let mut observer = BufReader::new(
+                tokio::net::TcpStream::connect(archive.addr())
+                    .await
+                    .unwrap(),
+            );
+            let mut greeting = String::new();
+            observer.read_line(&mut greeting).await.unwrap();
+            assert!(greeting.starts_with("200"));
+            let start = trace.0.len();
+            assert_eq!(
+                archive
+                    .reconstruct(&c, &mut cache, Fault::Timeout, &mut trace)
+                    .await
+                    .unwrap_err(),
+                Failure::Timeout
+            );
+            assert!(trace.0[start..].contains(&Event::Article(0)));
+            assert_eq!(cache.delivery(c.key()), None);
+            assert_eq!(cache.staged_len(c.key()), 0);
+            assert!(!trace
+                .0
+                .iter()
+                .any(|event| matches!(event, Event::Verified(..) | Event::Published(_))));
+            greeting.clear();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), observer.read_line(&mut greeting))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                archive
+                    .reconstruct(&c, &mut cache, Fault::Timeout, &mut trace)
+                    .await
+                    .unwrap_err(),
+                Failure::Unavailable
+            );
+            cache.restart(c.key(), &mut trace);
+            archive.reset(Fault::Timeout).await;
+        }
+        archive.reset(Fault::Healthy).await;
+        archive
+            .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
+            .await
+            .unwrap();
+        assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
+        archive.shutdown();
+        cache.cleanup(c.key(), &mut trace);
+        cache.assert_empty(&mut trace);
+    })
+    .await
+    .expect("timeout/reset/teardown must be bounded, not wait for the 60 s article delay");
 }
 
 #[test]
@@ -162,10 +254,10 @@ fn cold_precondition_refuses_retained_safety() {
 async fn mock_full_reconstructions_require_distinct_provenance_and_generation() {
     let c = fixture(7);
     let next = fixture(8);
-    let a = Archive::spawn(&c, identity("reseller-a", "spool-a"), Fault::Healthy).await;
-    let b = Archive::spawn(&c, identity("reseller-b", "spool-b"), Fault::Healthy).await;
-    let alias = Archive::spawn(&c, identity("other-label", "spool-a"), Fault::Healthy).await;
-    let other = Archive::spawn(&next, identity("reseller-b", "spool-b"), Fault::Healthy).await;
+    let mut a = Archive::spawn(&c, identity("reseller-a", "spool-a"), Fault::Healthy).await;
+    let mut b = Archive::spawn(&c, identity("reseller-b", "spool-b"), Fault::Healthy).await;
+    let mut alias = Archive::spawn(&c, identity("other-label", "spool-a"), Fault::Healthy).await;
+    let mut other = Archive::spawn(&next, identity("reseller-b", "spool-b"), Fault::Healthy).await;
     let mut trace = Trace::default();
     let mut cache = MemoryCache::default();
     cache.assert_empty(&mut trace);
@@ -173,7 +265,7 @@ async fn mock_full_reconstructions_require_distinct_provenance_and_generation() 
         .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
         .await
         .unwrap();
-    cache.cleanup(c.key, &mut trace);
+    cache.cleanup(c.key(), &mut trace);
     cache.assert_empty(&mut trace);
     let proof_b = b
         .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
@@ -197,7 +289,7 @@ async fn mock_full_reconstructions_require_distinct_provenance_and_generation() 
 async fn explicit_repost_repairs_loss_only_with_an_intact_retained_source() {
     let c = fixture(7);
     for fault in [Fault::Lost(1), Fault::Missing(1)] {
-        let archive = Archive::spawn(&c, identity("label-a", "spool-a"), fault).await;
+        let mut archive = Archive::spawn(&c, identity("label-a", "spool-a"), fault).await;
         let mut cache = MemoryCache::default();
         let mut trace = Trace::default();
         cache.retain_safety(&c);
@@ -215,15 +307,15 @@ async fn explicit_repost_repairs_loss_only_with_an_intact_retained_source() {
             Err(Failure::Integrity)
         );
         archive
-            .repost_from_retained(1, cache.safety(c.key).unwrap(), &mut trace)
+            .repost_from_retained(1, cache.safety(c.key()).unwrap(), &mut trace)
             .await
             .unwrap();
-        cache.restart(c.key, &mut trace);
+        cache.restart(c.key(), &mut trace);
         archive
             .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
             .await
             .unwrap();
-        assert_eq!(cache.delivery(c.key), Some(c.bytes()));
+        assert_eq!(cache.delivery(c.key()), Some(c.bytes()));
         assert!(trace.0.contains(&Event::RepairPosted(1)));
         assert!(
             matches!(archive.repair_without_retained_source(), Err(Failure::NotQualified(owner)) if owner.contains("velmora"))
@@ -240,9 +332,9 @@ async fn teardown_only_removes_owned_allocations_and_archive() {
     let mut trace = Trace::default();
     cache.retain_safety(&c);
     cache.retain_safety(&unrelated);
-    cache.cleanup(c.key, &mut trace);
-    assert_eq!(cache.safety(c.key), None);
-    assert_eq!(cache.safety(unrelated.key), Some(unrelated.bytes()));
+    cache.cleanup(c.key(), &mut trace);
+    assert_eq!(cache.safety(c.key()), None);
+    assert_eq!(cache.safety(unrelated.key()), Some(unrelated.bytes()));
     use tokio::io::{AsyncBufReadExt, BufReader};
     let socket = tokio::net::TcpStream::connect(archive.addr())
         .await
@@ -276,6 +368,6 @@ async fn teardown_only_removes_owned_allocations_and_archive() {
             .unwrap_err(),
         Failure::Unavailable
     );
-    cache.cleanup(unrelated.key, &mut trace);
+    cache.cleanup(unrelated.key(), &mut trace);
     cache.assert_empty(&mut trace);
 }
