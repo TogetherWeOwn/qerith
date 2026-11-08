@@ -149,6 +149,10 @@ struct Io {
     after_io: Option<IoHook>,
     cancel_at_complete: Option<Rc<Cell<bool>>>,
     expire_at_cleanup: Option<Rc<Time>>,
+    #[cfg(feature = "archive-provider")]
+    provider_record: Option<velmora::archive::v1::ObjectRecord>,
+    #[cfg(feature = "archive-provider")]
+    provider_keys: BTreeMap<RecoveryInventory, [u8; 32]>,
 }
 impl Io {
     async fn new(generation: u64) -> Self {
@@ -193,6 +197,10 @@ impl Io {
             after_io: None,
             cancel_at_complete: None,
             expire_at_cleanup: None,
+            #[cfg(feature = "archive-provider")]
+            provider_record: None,
+            #[cfg(feature = "archive-provider")]
+            provider_keys: BTreeMap::new(),
         }
     }
     fn identity(&self) -> CiphertextIdentity {

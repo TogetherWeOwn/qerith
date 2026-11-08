@@ -4,10 +4,10 @@
 //! `rev` in this crate's `Cargo.toml`. No engine code is copied here.
 //!
 //! Only the non-crypto engine surface is re-exported: the NNTP client and
-//! its transports, yEnc and the NZB parser. `velmora::decrypt`
-//! (rclone-crypt) is deliberately not part of this crate's surface; its
-//! replacement STREAM format lands in velmora first and Qerith moves to
-//! that pin once it merges.
+//! its transports, yEnc and the NZB parser. Media decryption is deliberately
+//! not re-exported. The default-off archive-provider consumer bridge uses an
+//! experimental immutable engine checkpoint; it grants neither provider
+//! activation nor cryptographic or durability qualification.
 
 pub mod catalogue;
 pub mod composition;

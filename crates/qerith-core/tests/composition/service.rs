@@ -5,6 +5,9 @@ use qerith_core::{native as n, operations as o, service as s};
 mod delivery;
 #[path = "service_obligations.rs"]
 mod obligations;
+#[cfg(feature = "archive-provider")]
+#[path = "provider_bridge.rs"]
+mod provider_bridge;
 #[path = "service_qa.rs"]
 mod qa;
 #[path = "service_repairs.rs"]

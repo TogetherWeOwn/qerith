@@ -54,6 +54,8 @@ jobs:
       # Includes the pinned-engine smoke test (NZB parse, NNTP fetch against
       # velmora-test-nntp, yEnc round trip).
       - run: cargo test --locked --workspace
+      - run: cargo clippy --locked -p qerith-core --features archive-provider --all-targets -- -D warnings
+      - run: cargo test --locked -p qerith-core --features archive-provider
       - name: Require positive and negative service evidence
         run: |
           test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-positive.json"
@@ -89,6 +91,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Scalar core (no transport features) and the Workers transport build.
       - run: cargo check --locked -p qerith-core --target wasm32-unknown-unknown --no-default-features
+      - run: cargo check --locked -p qerith-core --target wasm32-unknown-unknown --no-default-features --features archive-provider
       - run: cargo check --locked -p qerith-core --target wasm32-unknown-unknown --no-default-features --features worker-transport
       - run: cargo clippy --locked -p qerith-core --target wasm32-unknown-unknown --no-default-features --features worker-transport -- -D warnings
       # The engine's simd128 yEnc fast path must keep compiling through this
@@ -116,6 +119,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo check --locked -p qerith-core
       - run: cargo check --locked -p qerith-core --no-default-features
+      - run: cargo check --locked -p qerith-core --no-default-features --features archive-provider
 
   # Dependency/security gate: the reviewed deny.toml policy must pass for
   # the committed lockfile. Findings are fixed by updating the dependency,

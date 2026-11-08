@@ -5,6 +5,9 @@
 
 use crate::catalogue::*;
 
+#[cfg(feature = "archive-provider")]
+pub mod provider;
+
 /// Future authorized-window envelope; this schema grants no probe permission.
 pub const EVIDENCE_SCHEMA: &str = include_str!("evidence.schema.json");
 
