@@ -872,7 +872,8 @@ fn bucket_read_revocation_is_rechecked_independently_of_reference_authority() {
     error(&f.call("GET", "/bucket/key", &[], b"", 8), "AccessDenied");
     assert_eq!(f.cache.calls, 1);
     assert!(f.access.current.get());
-    assert!(f.access.permits(
+    assert!(qerith_core::catalogue::Authority::permits(
+        &f.access,
         &Reference {
             tenant: TENANT,
             name: "bucket/key".into()
