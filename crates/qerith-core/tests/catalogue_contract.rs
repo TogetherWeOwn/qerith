@@ -382,6 +382,7 @@ fn coalesced_subscribers_cancel_individually_and_are_reauthorized() {
         Mutation::CancelSubscription {
             name: "first".into(),
             job: first,
+            subscription: OperationId(4),
         },
         6,
     );
@@ -1131,6 +1132,20 @@ fn relinked_subscriber_replaces_stale_revision_but_not_current_subscription() {
         ),
         Err(Error::Conflict)
     );
+    assert_eq!(
+        c.transact(
+            A,
+            OperationId(7),
+            Mutation::CancelSubscription {
+                name: "object".into(),
+                job,
+                subscription: OperationId(3),
+            },
+            7,
+            &policy()
+        ),
+        Err(Error::Conflict)
+    );
     publish(&mut c, job, G, 7).unwrap();
     assert_eq!(
         c.lookup(A, "object", 7, &policy())
@@ -1138,6 +1153,193 @@ fn relinked_subscriber_replaces_stale_revision_but_not_current_subscription() {
             .availability_until,
         Some(37)
     );
+}
+
+#[test]
+fn cancellation_identity_survives_same_revision_resubscription_and_replay() {
+    let mut c = MemoryCatalogue::default();
+    let archive = upload(&mut c, "object", 0, G, 1);
+    qualify(&mut c, G, archive);
+    let job = restore(&mut c, "object", 1, 3);
+    let old_cancel = Mutation::CancelSubscription {
+        name: "object".into(),
+        job,
+        subscription: OperationId(3),
+    };
+    tx(&mut c, 4, old_cancel.clone(), 6);
+    assert_eq!(
+        tx(
+            &mut c,
+            5,
+            Mutation::RequestRestore {
+                name: "object".into(),
+                expected_revision: 1,
+                profile: "whole-generation-standard".into(),
+                deadline: 100,
+                availability_for: 30,
+            },
+            7,
+        ),
+        Outcome::Restore(job)
+    );
+    assert_eq!(tx(&mut c, 4, old_cancel.clone(), 7), Outcome::Applied);
+    assert_eq!(
+        c.transact(A, OperationId(6), old_cancel, 7, &policy()),
+        Err(Error::Conflict)
+    );
+    let current_cancel = Mutation::CancelSubscription {
+        name: "object".into(),
+        job,
+        subscription: OperationId(5),
+    };
+    assert_eq!(
+        c.transact(B, OperationId(7), current_cancel.clone(), 7, &policy()),
+        Err(Error::Unavailable)
+    );
+    tx(&mut c, 7, current_cancel, 7);
+    let fence = c.claim(A, job, 8, 90).unwrap();
+    c.transition(A, fence, Transition::CancelIfUnneeded, 8, &policy())
+        .unwrap();
+    assert_eq!(c.job(A, job).unwrap().state, JobState::Cancelled);
+    assert!(c.outbox(A).is_empty());
+}
+
+#[test]
+fn stale_epoch_queued_and_expired_claim_restores_can_retire_without_publication() {
+    for expired_claim in [false, true] {
+        let mut c = MemoryCatalogue::default();
+        let archive = upload(&mut c, "object", 0, G, 1);
+        assert_eq!(
+            c.cancel_unneeded_restore(A, archive, 2, &policy()),
+            Err(Error::Unsafe)
+        );
+        assert_eq!(c.job(A, archive).unwrap().state, JobState::Queued);
+        qualify(&mut c, G, archive);
+        let obsolete = restore(&mut c, "object", 1, 3);
+        let old_fence = expired_claim.then(|| c.claim(A, obsolete, 6, 10).unwrap());
+        c.set_moderation(A, G, 2, true).unwrap();
+        c.set_moderation(A, G, 3, false).unwrap();
+        if let Some(fence) = &old_fence {
+            assert_eq!(
+                c.cancel_unneeded_restore(A, obsolete, 9, &policy()),
+                Err(Error::Fenced)
+            );
+            assert_eq!(
+                c.transition(
+                    A,
+                    fence.clone(),
+                    Transition::PublishRestore {
+                        copy: copy(G, "copy/10")
+                    },
+                    9,
+                    &policy()
+                ),
+                Err(Error::Unavailable)
+            );
+        }
+        assert_eq!(
+            c.cancel_unneeded_restore(A, obsolete, 11, &policy()),
+            Err(Error::Unsafe)
+        );
+        tx(
+            &mut c,
+            4,
+            Mutation::CancelSubscription {
+                name: "object".into(),
+                job: obsolete,
+                subscription: OperationId(3),
+            },
+            11,
+        );
+        assert_eq!(c.claim(A, obsolete, 11, 90), Err(Error::Unavailable));
+        let current = match tx(
+            &mut c,
+            5,
+            Mutation::RequestRestore {
+                name: "object".into(),
+                expected_revision: 1,
+                profile: "whole-generation-standard".into(),
+                deadline: 100,
+                availability_for: 30,
+            },
+            11,
+        ) {
+            Outcome::Restore(job) => job,
+            _ => panic!("expected restore"),
+        };
+        assert_ne!(current, obsolete);
+        let current_view = c.job(A, current).unwrap();
+        let events = c.outbox(A);
+        assert_eq!(
+            c.cancel_unneeded_restore(A, current, 11, &policy()),
+            Err(Error::Unsafe)
+        );
+        assert_eq!(c.job(A, current).unwrap(), current_view);
+        assert_eq!(c.outbox(A), events);
+        let mut queued_cleanup = c.clone();
+        queued_cleanup
+            .cancel_unneeded_restore(A, obsolete, 11, &policy())
+            .unwrap();
+        assert_eq!(queued_cleanup.job(A, current).unwrap(), current_view);
+        assert_eq!(
+            queued_cleanup.outbox(A),
+            events
+                .into_iter()
+                .filter(|e| matches!(&e.effect, Effect::RunJob(j) if j.id == current))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            queued_cleanup.cancel_unneeded_restore(A, obsolete, 11, &policy()),
+            Err(Error::Fenced)
+        );
+        publish(&mut c, current, G, 12).unwrap();
+        assert_eq!(
+            c.candidate(A, G, DeletionKind::DeliveryCache, 43, 44, &policy()),
+            Err(Error::Unsafe)
+        );
+        assert_eq!(c.expire_job(A, obsolete, 43), Err(Error::Conflict));
+        let unknown = Policy {
+            current: false,
+            denied: vec![],
+        };
+        assert_eq!(
+            c.cancel_unneeded_restore(A, obsolete, 43, &unknown),
+            Err(Error::Unsafe)
+        );
+        assert_eq!(
+            c.cancel_unneeded_restore(B, obsolete, 43, &policy()),
+            Err(Error::Unavailable)
+        );
+        c.cancel_unneeded_restore(A, obsolete, 43, &policy())
+            .unwrap();
+        assert_eq!(c.job(A, obsolete).unwrap().state, JobState::Cancelled);
+        assert_eq!(c.job(A, current).unwrap().state, JobState::Complete);
+        assert_eq!(
+            c.lookup(A, "object", 43, &policy())
+                .unwrap()
+                .availability_until,
+            Some(42)
+        );
+        assert!(c.outbox(A).is_empty());
+        assert!(c
+            .candidate(A, G, DeletionKind::DeliveryCache, 43, 44, &policy())
+            .is_ok());
+        assert_eq!(c.claim(A, obsolete, 43, 90), Err(Error::Unavailable));
+        if let Some(fence) = old_fence {
+            assert_eq!(
+                c.transition(
+                    A,
+                    fence,
+                    Transition::PublishRestore {
+                        copy: copy(G, "copy/10")
+                    },
+                    43,
+                    &policy()
+                ),
+                Err(Error::Fenced)
+            );
+        }
+    }
 }
 
 #[test]

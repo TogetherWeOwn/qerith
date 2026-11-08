@@ -148,6 +148,8 @@ pub enum Mutation {
     CancelSubscription {
         name: String,
         job: JobId,
+        /// Operation identity of the accepted RequestRestore, not this cancellation.
+        subscription: OperationId,
     },
     AcquireServingPin {
         name: String,
@@ -350,6 +352,16 @@ pub trait JobPort {
     ) -> Result<()>;
     fn claim(&mut self, tenant: TenantId, job: JobId, now: u64, until: u64) -> Result<Fence>;
     fn expire_job(&mut self, tenant: TenantId, job: JobId, now: u64) -> Result<()>;
+    /// Atomically cancel an unneeded restore without acquiring publication rights.
+    /// Reject a live claim or any currently authorized, matching subscriber;
+    /// advance its fence and remove its notification, without adopting a new epoch.
+    fn cancel_unneeded_restore(
+        &mut self,
+        tenant: TenantId,
+        job: JobId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<()>;
     fn transition(
         &mut self,
         tenant: TenantId,

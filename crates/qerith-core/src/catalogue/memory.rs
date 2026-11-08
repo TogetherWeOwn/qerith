@@ -52,6 +52,7 @@ struct Intent {
 
 #[derive(Clone)]
 struct Subscriber {
+    operation: OperationId,
     revision: u64,
     availability_for: u64,
 }
@@ -427,6 +428,7 @@ impl Tenant {
                 j.subscribers.insert(
                     name,
                     Subscriber {
+                        operation,
                         revision: expected_revision,
                         availability_for,
                     },
@@ -434,14 +436,20 @@ impl Tenant {
                 self.touch(generation)?;
                 Ok(Outcome::Restore(id))
             }
-            Mutation::CancelSubscription { name, job } => {
+            Mutation::CancelSubscription {
+                name,
+                job,
+                subscription,
+            } => {
                 let j = self.jobs.get_mut(&job).ok_or(Error::Unavailable)?;
                 if j.view.kind != JobKind::Restore || terminal(&j.view.state) {
                     return Err(Error::Conflict);
                 }
-                if j.subscribers.remove(&name).is_none() {
-                    return Err(Error::Unavailable);
+                let subscriber = j.subscribers.get(&name).ok_or(Error::Unavailable)?;
+                if subscriber.operation != subscription {
+                    return Err(Error::Conflict);
                 }
+                j.subscribers.remove(&name);
                 let generation = j.view.generation;
                 self.touch(generation)?;
                 Ok(Outcome::Applied)
@@ -478,6 +486,19 @@ impl Tenant {
                 Ok(Outcome::Applied)
             }
         }
+    }
+
+    fn has_current_subscriber(
+        &self,
+        tenant: TenantId,
+        job: &Job,
+        authority: &dyn Authority,
+    ) -> bool {
+        job.subscribers.iter().any(|(name, s)| {
+            self.references.get(name).is_some_and(|r| {
+                r.revision == s.revision && r.generation == Some(job.view.generation)
+            }) && permit(authority, tenant, name, Action::Restore).is_ok()
+        })
     }
 
     fn verified(&self, generation: GenerationId, now: u64) -> bool {
@@ -791,6 +812,37 @@ impl JobPort for MemoryCatalogue {
         })
     }
 
+    fn cancel_unneeded_restore(
+        &mut self,
+        tenant: TenantId,
+        job: JobId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let j = t.jobs.get(&job).ok_or(Error::Unavailable)?;
+            if terminal(&j.view.state) || j.claimed_until > now {
+                return Err(Error::Fenced);
+            }
+            if now >= j.view.deadline {
+                return Err(Error::Expired);
+            }
+            if !authority.is_current()
+                || j.view.kind != JobKind::Restore
+                || t.has_current_subscriber(tenant, j, authority)
+            {
+                return Err(Error::Unsafe);
+            }
+            let j = t.jobs.get_mut(&job).ok_or(Error::Unavailable)?;
+            // Conditional terminalization grants no worker/publication authority.
+            j.fence = next(j.fence)?;
+            j.view.state = JobState::Cancelled;
+            let generation = j.view.generation;
+            t.events.remove(&j.event);
+            t.touch(generation)
+        })
+    }
+
     fn transition(
         &mut self,
         tenant: TenantId,
@@ -908,11 +960,7 @@ impl JobPort for MemoryCatalogue {
                 Transition::FailUnrecoverable => j.view.state = JobState::FailedUnrecoverable,
                 Transition::CancelIfUnneeded => {
                     if j.view.kind == JobKind::Archive
-                        || j.subscribers.iter().any(|(name, s)| {
-                            t.references.get(name).is_some_and(|r| {
-                                r.revision == s.revision && r.generation == Some(generation)
-                            }) && permit(authority, tenant, name, Action::Restore).is_ok()
-                        })
+                        || t.has_current_subscriber(tenant, &j, authority)
                     {
                         return Err(Error::Unsafe);
                     }

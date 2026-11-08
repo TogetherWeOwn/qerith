@@ -36,14 +36,24 @@ engine dependency and immutable pin are unchanged.
   A new archive claim can adopt the current permitted moderation epoch while
   advancing its fence; old workers remain rejected. Restore subscriptions never
   adopt a newer epoch implicitly: a new authorized request is required.
+  `cancel_unneeded_restore` provides atomic conditional cleanup for queued or
+  expired-claim restores, even with an obsolete/prohibited policy epoch. It
+  rejects live claims and currently authorized matching subscribers, requires
+  current authority, advances the fence and removes only that job's notification.
+  It never adopts a newer epoch or grants execution/publication rights. Terminal
+  jobs reject cleanup; at the absolute deadline use `expire_job` instead.
   `retire_upload_intent` explicitly retires expired/superseded positive intents;
   it neither deletes staged bytes nor relaxes the veto on an unresolved intent.
 - Restore coalescing requires the same tenant, generation, profile and fixed
   deadline. Each logical reference retains its revision, subscription and
   availability duration. A relinked reference can replace its stale-revision
   subscriber; duplicate current-revision subscriptions still conflict.
-  Cancellation removes only that subscription, not an
-  archive obligation or another subscriber. Publication rechecks each subscriber
+  Cancellation carries the operation ID of its accepted `RequestRestore` as the
+  subscription identity. It removes only that exact subscription, not a relinked
+  replacement, a same-revision re-subscription, an archive obligation or another
+  subscriber. The request's operation ID is already known to the caller and can
+  be reconciled through the existing operation ledger; it is not an authority
+  credential. Publication rechecks each subscriber
   against **current** authority and reference identity, then atomically publishes
   the complete verified copy and only eligible logical availability leases.
 - `tests/catalogue_contract.rs` exercises the ports with deterministic synthetic
