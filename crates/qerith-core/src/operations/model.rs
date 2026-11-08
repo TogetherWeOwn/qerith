@@ -102,7 +102,8 @@ impl Failure {
         }
     }
     pub fn retryable(self) -> bool {
-        matches!(self.code, ErrorCode::Unavailable | ErrorCode::QuotaExceeded)
+        self.effects == Effects::None
+            && matches!(self.code, ErrorCode::Unavailable | ErrorCode::QuotaExceeded)
     }
     pub fn reconciliation_required(self) -> bool {
         self.effects != Effects::None

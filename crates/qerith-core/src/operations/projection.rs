@@ -28,6 +28,7 @@ pub struct McpTool {
 pub fn mcp_tools() -> Vec<McpTool> {
     REGISTRY
         .iter()
+        .filter(|definition| definition.implemented)
         .map(|definition| McpTool {
             name: definition.name,
             definition,

@@ -65,11 +65,14 @@ fn registry_drives_both_projections_and_capabilities() {
     let routes = rest_routes();
     let tools = mcp_tools();
     assert_eq!(routes.len(), REGISTRY.len());
-    assert_eq!(tools.len(), REGISTRY.len());
+    let implemented: Vec<_> = REGISTRY.iter().filter(|d| d.implemented).collect();
+    assert_eq!(tools.len(), implemented.len());
+    for (tool, definition) in tools.iter().zip(&implemented) {
+        assert_eq!(tool.definition, *definition);
+        assert_eq!(tool.name, definition.name);
+    }
     for (i, definition) in REGISTRY.iter().enumerate() {
         assert_eq!(routes[i].definition, definition);
-        assert_eq!(tools[i].definition, definition);
-        assert_eq!(tools[i].name, definition.name);
         assert_eq!(
             routes[i].path,
             format!("/v1/operations/{}", definition.name)
@@ -98,7 +101,13 @@ fn registry_drives_both_projections_and_capabilities() {
     assert_eq!(version, VERSION);
     assert!(!experimental_tasks);
     assert!(!operations.contains(&Operation::Versions));
-    assert_eq!(operations.len(), REGISTRY.len() - 1);
+    assert_eq!(
+        operations,
+        tools
+            .iter()
+            .map(|tool| tool.definition.operation)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -307,7 +316,7 @@ fn errors_are_sanitized_and_preserve_uncertain_effects() {
         assert_eq!(error, failure);
         assert!(error.reconciliation_required());
         assert!(!error.message().contains("object"));
-        assert_eq!(error.retryable(), code == ErrorCode::Unavailable);
+        assert!(!error.retryable());
     }
     assert_eq!(
         format!("{:?}", id("sensitive_locator")),
@@ -339,6 +348,94 @@ fn errors_are_sanitized_and_preserve_uncertain_effects() {
         )
         .is_error
     );
+}
+
+#[test]
+fn retry_classification_requires_no_effects_across_transports() {
+    for code in [
+        ErrorCode::Unauthenticated,
+        ErrorCode::Denied,
+        ErrorCode::InvalidInput,
+        ErrorCode::Unsupported,
+        ErrorCode::PreconditionFailed,
+        ErrorCode::Conflict,
+        ErrorCode::QuotaExceeded,
+        ErrorCode::InvalidCursor,
+        ErrorCode::NotAvailable,
+        ErrorCode::NotReady,
+        ErrorCode::Cancelled,
+        ErrorCode::IntegrityFailed,
+        ErrorCode::Unavailable,
+        ErrorCode::Internal,
+    ] {
+        for effects in [
+            Effects::None,
+            Effects::Accepted,
+            Effects::Committed,
+            Effects::Unknown,
+        ] {
+            let failure = Failure { code, effects };
+            let fixture = Fixture {
+                injected: Some(failure),
+                ..Fixture::default()
+            };
+            let error = parity(
+                &fixture,
+                Some(&scope("a")),
+                Operation::Restore,
+                args(Operation::Restore),
+            )
+            .unwrap_err();
+            assert_eq!(error, failure);
+            assert_eq!(error.reconciliation_required(), effects != Effects::None);
+            assert_eq!(
+                error.retryable(),
+                effects == Effects::None
+                    && matches!(code, ErrorCode::Unavailable | ErrorCode::QuotaExceeded),
+                "{code:?}/{effects:?}"
+            );
+            assert!(!(error.retryable() && error.reconciliation_required()));
+        }
+    }
+}
+
+#[test]
+fn upload_commit_obeys_job_transition_policy() {
+    assert!(!JobState::Queued.permits(JobState::Succeeded));
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let Output::Upload { job, .. } = call(
+            transport,
+            &mut fixture,
+            Some(&scope("a")),
+            Operation::InitiateUpload,
+            args(Operation::InitiateUpload),
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(job.state, JobState::Queued);
+        let Output::Job(committed) = call(
+            transport,
+            &mut fixture,
+            Some(&scope("a")),
+            Operation::CommitUpload,
+            args(Operation::CommitUpload),
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(committed.handle, job.handle);
+        assert_eq!(committed.state, JobState::Succeeded);
+        assert_eq!(committed.effects, Effects::Committed);
+        assert_eq!(
+            fixture.transitions,
+            [
+                (JobState::Queued, JobState::Running),
+                (JobState::Running, JobState::Succeeded),
+            ]
+        );
+    }
 }
 
 #[test]

@@ -62,6 +62,12 @@ pub fn args(operation: Operation) -> Fields {
     }
 }
 
+fn transition(job: &mut Job, next: JobState, transitions: &mut Vec<(JobState, JobState)>) {
+    assert!(job.state.permits(next));
+    transitions.push((job.state, next));
+    job.state = next;
+}
+
 #[derive(Clone)]
 pub struct UploadRecord {
     transfer: Transfer,
@@ -82,6 +88,7 @@ pub struct Fixture {
     pub quota: bool,
     pub injected: Option<Failure>,
     pub trace: Vec<&'static str>,
+    pub transitions: Vec<(JobState, JobState)>,
     pub effects: usize,
     pub sequence: u64,
 }
@@ -99,6 +106,7 @@ impl Default for Fixture {
             quota: false,
             injected: None,
             trace: vec![],
+            transitions: vec![],
             effects: 0,
             sequence: 0,
         };
@@ -249,8 +257,7 @@ impl Fixture {
     /// Explicit authority completion, not a scheduler or a poll-driven side effect.
     pub fn complete(&mut self, scope: &Scope, handle: &str) {
         let job = self.jobs.get_mut(&(scope.clone(), id(handle))).unwrap();
-        assert!(job.state.permits(JobState::Succeeded));
-        job.state = JobState::Succeeded;
+        transition(job, JobState::Succeeded, &mut self.transitions);
         job.effects = Effects::Committed;
     }
 }
@@ -358,8 +365,11 @@ impl OperationPort for Fixture {
                     .get_mut(&(scope.clone(), upload.job.clone()))
                     .unwrap();
                 if operation == Operation::CommitUpload {
+                    if job.state == JobState::Queued {
+                        transition(job, JobState::Running, &mut self.transitions);
+                    }
+                    transition(job, JobState::Succeeded, &mut self.transitions);
                     upload.committed = true;
-                    job.state = JobState::Succeeded;
                     job.effects = Effects::Committed;
                     self.objects.insert(
                         (scope.tenant.clone(), job.target.reference.clone()),
@@ -378,7 +388,7 @@ impl OperationPort for Fixture {
                     let outcome = if upload.committed {
                         CancelOutcome::AlreadyCommitted
                     } else {
-                        job.state = JobState::Cancelled;
+                        transition(job, JobState::Cancelled, &mut self.transitions);
                         job.effects = Effects::None;
                         CancelOutcome::StoppedBeforeCommit
                     };
@@ -466,7 +476,7 @@ impl OperationPort for Fixture {
                 } else if job.state.terminal() {
                     CancelOutcome::AlreadyTerminal
                 } else {
-                    job.state = JobState::CancelRequested;
+                    transition(&mut job, JobState::CancelRequested, &mut self.transitions);
                     CancelOutcome::Requested
                 };
                 self.jobs

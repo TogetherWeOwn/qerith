@@ -20,9 +20,12 @@ preconditions, effect class and implementation status. `rest_routes()` and
 7. Execute through the **one integration port**, then validate the output shape.
 
 All REST descriptors currently use `POST /v1/operations/<name>` (including reads);
-MCP descriptors use the same names. These are internal projection contracts, not
-an assertion of S3/HTTP caching or MCP wire conformance. The future wire adapter
-must reject duplicate JSON keys and bound raw request bytes, nesting, field names
+MCP descriptors use the same names but include only implemented operations, matching
+capabilities. REST retains recognized unimplemented routes for explicit Unsupported
+responses; direct calls to an unimplemented MCP name also return Unsupported.
+These are internal projection contracts, not an assertion of S3/HTTP caching or MCP
+wire conformance. The future wire adapter must reject duplicate JSON keys and bound
+raw request bytes, nesting, field names
 and aggregate parsing work **before** allocation into `Fields`. Unknown fields
 are never discarded. Serializers must preserve unsigned integers exactly (no
 JavaScript floating-point rounding), absent totals as null/absence, and the
@@ -86,9 +89,10 @@ Current authorization still applies to replay. Persist the accepted response and
 job/outbox identity in the same commit; return that acceptance on a lost-response
 retry, then use explicit status for current progress. Retention, expiry,
 crash-recovery and retry limits belong to the authority's policy, not to a new
-map in this module. An unknown-effect failure requires explicit reconciliation,
-not a blind retry. Non-retryable integrity, predicate and permission failures
-must not become an endless retry loop.
+map in this module. `retryable()` is true only for Unavailable/QuotaExceeded with
+None effects. Accepted, Committed and Unknown effects require explicit
+reconciliation, not a blind retry, regardless of error code. Non-retryable integrity,
+predicate and permission failures must not become an endless retry loop.
 
 Cursor verification uses an authority lookup or a separately reviewed
 authenticated encoding, **not** unsigned serialized offsets or a crypto invented
