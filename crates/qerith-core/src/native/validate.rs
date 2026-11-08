@@ -302,14 +302,6 @@ pub fn validate_request(
     if request.version != VERSION {
         return Err(ErrorCode::UnsupportedVersion);
     }
-    if let Action::Capabilities(offer) = &request.action {
-        if request.session.is_some() {
-            return Err(ErrorCode::InvalidState);
-        }
-        negotiate(offer, policy, request.request_id.clone())?;
-        return Ok(Admission::New);
-    }
-    let selected = session(request, owner, policy, authority, now)?;
     let replay = if let Some(prior) = authority.replay(owner, &request.request_id) {
         let prior = prior.for_owner(owner)?;
         if prior.action != request.action {
@@ -319,6 +311,18 @@ pub fn validate_request(
     } else {
         false
     };
+    if let Action::Capabilities(offer) = &request.action {
+        if request.session.is_some() {
+            return Err(ErrorCode::InvalidState);
+        }
+        negotiate(offer, policy, request.request_id.clone())?;
+        return Ok(if replay {
+            Admission::Replay
+        } else {
+            Admission::New
+        });
+    }
+    let selected = session(request, owner, policy, authority, now)?;
     match &request.action {
         Action::Capabilities(_) => unreachable!(),
         Action::InitiateUpload(value) => {
@@ -503,6 +507,22 @@ pub fn validate_transfer(
     Ok(())
 }
 
+struct MessageBudget(usize);
+
+impl std::io::Write for MessageBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("message limit exceeded"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Checks outbound consistency before serialization. Issued handles/jobs must be
 /// durably bound by the adapter BEFORE publication; this function cannot do so.
 pub fn validate_response(
@@ -513,6 +533,8 @@ pub fn validate_response(
     authority: &impl Authority,
     now: u64,
 ) -> Check {
+    serde_json::to_writer(MessageBudget(MAX_MESSAGE_BYTES), response)
+        .map_err(|_| ErrorCode::LimitExceeded)?;
     let admission = validate_request(request, owner, policy, authority, now);
     if response.version != VERSION
         || response.scope != request.scope
@@ -576,17 +598,23 @@ pub fn validate_response(
         }
         (Action::Cancel { job }, ResponseBody::Cancel(outcome)) => {
             let status = owned(authority.job(job), owner)?;
-            if matches!(outcome, CancelOutcome::CancelledBeforeCommit)
-                && !matches!(status.state, JobState::Cancelled)
-                || matches!(outcome, CancelOutcome::AlreadyCommitted)
-                    && !matches!(
-                        status.outcome,
-                        Some(Outcome::Committed | Outcome::AlreadyCommitted)
-                    )
-            {
-                return Err(ErrorCode::InvalidState);
+            let valid = match outcome {
+                CancelOutcome::Requested => {
+                    matches!(status.state, JobState::Queued | JobState::Running)
+                }
+                CancelOutcome::CancelledBeforeCommit => {
+                    status.outcome == Some(Outcome::CancelledBeforeCommit)
+                }
+                CancelOutcome::AlreadyCommitted => {
+                    matches!(status.outcome, Some(Outcome::Committed | Outcome::Restored))
+                }
+                CancelOutcome::CleanupRequired => status.outcome == Some(Outcome::CleanupRequired),
+            };
+            if valid {
+                Ok(())
+            } else {
+                Err(ErrorCode::InvalidState)
             }
-            Ok(())
         }
         (Action::Browse(value), ResponseBody::Browse { entries, cursor }) => {
             if entries.len() > usize::from(value.page_entries) {
@@ -632,6 +660,11 @@ pub fn validate_response(
             validate_status(status)?;
             if status.target != value.target || status.kind != JobKind::Restore {
                 return Err(ErrorCode::GenerationMismatch);
+            }
+            let expected = resolved_object(&value.target, owner, &selected, policy, authority)?;
+            let length = expected.ciphertext.length;
+            if status.completed_bytes > length || status.total_bytes.is_some_and(|n| n != length) {
+                return Err(ErrorCode::InvalidState);
             }
             Ok(())
         }

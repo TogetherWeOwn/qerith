@@ -24,7 +24,12 @@ unknown enum variants, duplicate struct fields, duplicate metadata keys and
 malformed IDs. Adapters must enforce the same byte bound **before buffering**,
 limit concurrency and time, and use these decoders rather than unbounded generic
 JSON deserialization. Public Rust structs can be constructed directly; those
-callers still invoke validators and must bound their own allocations.
+callers still invoke validators and must bound their own allocations. Outbound
+validation measures compact JSON through a bounded counting writer and rejects
+responses above the same message ceiling without allocating the encoded body.
+Browse adapters must shorten a page and retain its continuation cursor to fit;
+the negotiated entry count is a ceiling, not a guaranteed page size. Transports
+must use compact encoding or separately enforce the bound on their actual bytes.
 
 Capability negotiation is v1 only. Clients offer an ordered list of profiles and
 positive limits. Every profile requirement must be supported; unsupported entries
@@ -130,7 +135,9 @@ The wire has queued/running/succeeded/failed/cancelled, exact target G, declared
 ciphertext-byte unit, optional total, completed bytes and a closed outcome.
 Unknown totals stay null. Totals cannot change once known; progress cannot go
 backwards or exceed known totals; terminal snapshots are immutable. Success
-requires a known complete total and operation-compatible outcome. Irrecoverable
+requires a known complete total and operation-compatible outcome. Restore response
+progress cannot exceed the resolved target's ciphertext length, and any declared
+total must equal that length within the request's byte budget. Irrecoverable
 key loss is an explicit terminal failure, not automatic recovery, server
 plaintext decryption or a reason to weaken integrity. It can be reported from
 independently authenticated lifecycle/client evidence; this module does not
@@ -142,7 +149,10 @@ works across transport/process reconnects. The test `MemoryAuthority` demonstrat
 portable resolution semantics only and **does not claim persistence or durability**.
 Cancellation is an explicit request, with outcomes requested, cancelled before
 commit, already committed, or cleanup required. Acknowledging a request is not
-proof that all side effects stopped. Adapters reconcile actual terminal effects;
+proof that all side effects stopped. Cancel responses reconcile the authoritative
+outcome: cleanup cannot be reported as clean cancellation, and successful upload
+or restore publication is reported as already committed. `requested` applies only
+to queued/running work. Adapters reconcile actual terminal effects;
 one waiter's cancellation must not erase another waiter's demand. Nothing can
 recall already propagated Usenet articles or promise remote byte erasure.
 

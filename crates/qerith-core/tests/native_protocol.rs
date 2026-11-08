@@ -509,6 +509,168 @@ fn durable_status_reconnect_cancel_and_irrecoverable_key_are_explicit() {
     assert_eq!(validate_status(&wrong_kind), Err(ErrorCode::InvalidState));
 }
 
+fn response(request: &Request, body: ResponseBody) -> Response {
+    Response {
+        version: VERSION,
+        scope: request.scope.clone(),
+        request_id: request.request_id.clone(),
+        body,
+    }
+}
+
+#[test]
+fn capabilities_share_the_cross_operation_replay_namespace() {
+    let mut memory = MemoryAuthority::new();
+    let req = request("capabilities");
+    memory.replay = Some((req.request_id.clone(), request("restore").action));
+    assert_eq!(check(&req, &memory), Err(ErrorCode::ReplayConflict));
+    memory.replay = Some((req.request_id.clone(), req.action.clone()));
+    assert_eq!(check(&req, &memory), Ok(Admission::Replay));
+}
+
+#[test]
+fn cancellation_preserves_cleanup_and_publication_outcomes() {
+    let mut memory = MemoryAuthority::new();
+    let mut req = request("status");
+    req.action = Action::Cancel { job: id("job-1") };
+    memory.job.state = JobState::Cancelled;
+    memory.job.outcome = Some(Outcome::CleanupRequired);
+    for (outcome, expected) in [
+        (
+            CancelOutcome::CancelledBeforeCommit,
+            Err(ErrorCode::InvalidState),
+        ),
+        (CancelOutcome::Requested, Err(ErrorCode::InvalidState)),
+        (
+            CancelOutcome::AlreadyCommitted,
+            Err(ErrorCode::InvalidState),
+        ),
+        (CancelOutcome::CleanupRequired, Ok(())),
+    ] {
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Cancel(outcome)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            expected
+        );
+    }
+    memory.job.state = JobState::Succeeded;
+    memory.job.outcome = Some(Outcome::Restored);
+    memory.job.completed_bytes = 10;
+    memory.job.total_bytes = Some(10);
+    let committed = response(&req, ResponseBody::Cancel(CancelOutcome::AlreadyCommitted));
+    assert_eq!(
+        validate_response(&req, &committed, &memory.owner, &policy(), &memory, NOW),
+        Ok(())
+    );
+    memory.job.state = JobState::Queued;
+    memory.job.outcome = None;
+    assert_eq!(
+        validate_response(&req, &committed, &memory.owner, &policy(), &memory, NOW),
+        Err(ErrorCode::InvalidState)
+    );
+}
+
+#[test]
+fn restore_progress_is_bound_to_ciphertext_length_and_budget() {
+    let memory = MemoryAuthority::new();
+    let mut req = request("restore");
+    let Action::Restore(value) = &mut req.action else {
+        panic!()
+    };
+    value.max_bytes = 10;
+    for bytes in [0, 10, 11] {
+        let mut status = memory.job.clone();
+        status.state = JobState::Succeeded;
+        status.outcome = Some(Outcome::Restored);
+        status.completed_bytes = bytes;
+        status.total_bytes = Some(bytes);
+        assert_eq!(
+            validate_response(
+                &req,
+                &response(&req, ResponseBody::Restore(status)),
+                &memory.owner,
+                &policy(),
+                &memory,
+                NOW
+            ),
+            if bytes == 10 {
+                Ok(())
+            } else {
+                Err(ErrorCode::InvalidState)
+            }
+        );
+    }
+    let mut status = memory.job.clone();
+    status.state = JobState::Running;
+    status.completed_bytes = 4;
+    assert_eq!(
+        validate_response(
+            &req,
+            &response(&req, ResponseBody::Restore(status)),
+            &memory.owner,
+            &policy(),
+            &memory,
+            NOW
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn browse_responses_fit_the_decoder_byte_budget() {
+    let mut memory = MemoryAuthority::new();
+    memory.selection.limits.page_entries = 10;
+    memory.cursor.page_entries = 10;
+    memory.object.metadata.user.clear();
+    for n in 0..7 {
+        memory
+            .object
+            .metadata
+            .user
+            .insert(format!("field-{n}"), "x".repeat(1024));
+    }
+    let mut req = request("browse");
+    let Action::Browse(value) = &mut req.action else {
+        panic!()
+    };
+    value.page_entries = 10;
+    let oversized = response(
+        &req,
+        ResponseBody::Browse {
+            entries: vec![memory.object.clone(); 10],
+            cursor: Some(id("cursor-1")),
+        },
+    );
+    assert!(serde_json::to_vec(&oversized).unwrap().len() > MAX_MESSAGE_BYTES);
+    let mut limits = policy();
+    limits.limits.page_entries = 10;
+    assert_eq!(
+        validate_response(&req, &oversized, &memory.owner, &limits, &memory, NOW),
+        Err(ErrorCode::LimitExceeded)
+    );
+    let bounded = response(
+        &req,
+        ResponseBody::Browse {
+            entries: vec![memory.object.clone(); 2],
+            cursor: Some(id("cursor-1")),
+        },
+    );
+    assert_eq!(
+        validate_response(&req, &bounded, &memory.owner, &limits, &memory, NOW),
+        Ok(())
+    );
+    assert_eq!(
+        decode_response(&serde_json::to_vec(&bounded).unwrap()),
+        Ok(bounded)
+    );
+}
+
 #[test]
 fn metadata_is_exact_and_debug_and_errors_are_redacted() {
     let req = request("initiate_upload");
@@ -529,7 +691,10 @@ fn metadata_is_exact_and_debug_and_errors_are_redacted() {
         "雪.bin",
         "application/octet-stream",
     ] {
-        assert!(!debug.contains(secret), "leaked {secret}");
+        assert!(
+            !debug.contains(secret),
+            "Debug must redact sensitive fields"
+        );
     }
     let bytes = serde_json::to_vec(&req).unwrap();
     let text = String::from_utf8(bytes).unwrap();
