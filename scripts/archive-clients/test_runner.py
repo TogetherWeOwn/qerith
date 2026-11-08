@@ -18,7 +18,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from contract import PROFILES, ROWS, missing_result, passed
 from relay import Relay, loopback_upstream
 from runner import artifact_hashes, finalize_manifest, profile_environment, run_bounded
-from worker import Matrix, control
+from worker import Client, Matrix, control
+
+
+class CliArgumentTests(unittest.TestCase):
+    def test_streaming_get_supplies_required_bucket_and_key_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client.__new__(Client)
+            client.args = SimpleNamespace(endpoint="https://127.0.0.1:443")
+            client.evidence, client.sequence, client.restrictive = Path(directory), 1, True
+
+            def invoke(command, **kwargs):
+                self.assertEqual(command[command.index("--bucket") + 1], "archive")
+                self.assertEqual(command[command.index("--key") + 1], "opaque/%2F +/café/../key")
+                self.assertEqual(json.loads(command[command.index("--cli-input-json") + 1]),
+                                 {"ChecksumMode": "ENABLED"})
+                Path(command[-1]).write_bytes(b"verified octets")
+                return subprocess.CompletedProcess(command, 0, b"{}", b'"GET / HTTP/1.1" 200 ')
+
+            with mock.patch.dict(os.environ, {"QERITH_AWS_CLI": "/synthetic/aws"}), \
+                    mock.patch("worker.subprocess.run", side_effect=invoke):
+                result = client.cli(
+                    "get_object", {"Bucket": "archive", "Key": "opaque/%2F +/café/../key",
+                                   "ChecksumMode": "ENABLED"})
+            self.assertEqual(result["Body"], b"verified octets")
+            self.assertEqual(result["ResponseMetadata"]["HTTPStatusCode"], 200)
 
 
 class FixtureControlTests(unittest.TestCase):

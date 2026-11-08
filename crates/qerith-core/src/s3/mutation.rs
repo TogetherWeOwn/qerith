@@ -1151,6 +1151,25 @@ pub struct CopySource {
 }
 
 impl CopySource {
+    /// SDKs send bucket/key with or without one leading slash. Preserve the
+    /// signed header and decode its path exactly once; never accept a remote URL.
+    pub fn target(headers: &Headers, policy: &Policy) -> Result<super::Target> {
+        headers.validate_features()?;
+        let value = headers
+            .get("x-amz-copy-source")
+            .ok_or(ErrorCode::InvalidRequest)?;
+        let path = if value.starts_with('/') {
+            value.to_owned()
+        } else {
+            format!("/{value}")
+        };
+        let target = super::Target::parse(&path, policy)?;
+        if !target.query().is_empty() || target.key.as_ref().is_none_or(|key| key.is_empty()) {
+            return Err(ErrorCode::InvalidRequest);
+        }
+        Ok(target)
+    }
+
     /// Uses the same once-only path decoder as signed requests. This profile has
     /// no public versioning: any query/version selector fails before effects.
     pub fn from_headers(
@@ -1159,14 +1178,7 @@ impl CopySource {
         headers: &Headers,
         policy: &Policy,
     ) -> Result<Self> {
-        headers.validate_features()?;
-        let value = headers
-            .get("x-amz-copy-source")
-            .ok_or(ErrorCode::InvalidRequest)?;
-        let target = super::Target::parse(value, policy)?;
-        if !target.query().is_empty() {
-            return Err(ErrorCode::InvalidRequest);
-        }
+        let target = Self::target(headers, policy)?;
         let key = target
             .key
             .filter(|key| !key.is_empty())

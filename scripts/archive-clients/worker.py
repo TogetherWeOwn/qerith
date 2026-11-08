@@ -129,8 +129,12 @@ class Client:
             body = self.evidence / f"body-{self.sequence}.bin"
             body.write_bytes(parameters.pop("Body"))
             command += ["--body", str(body)]
-        command += ["--cli-input-json", json.dumps(parameters)]
         output = self.evidence / f"get-{self.sequence}.bin"
+        if operation == "get_object":
+            # CLI v2's streaming-output customization requires these flags even
+            # when the service parameters are otherwise supplied as JSON.
+            command += ["--bucket", parameters.pop("Bucket"), "--key", parameters.pop("Key")]
+        command += ["--cli-input-json", json.dumps(parameters)]
         if operation == "get_object":
             command.append(str(output))
         completed = subprocess.run(command, capture_output=True, timeout=20, check=False)

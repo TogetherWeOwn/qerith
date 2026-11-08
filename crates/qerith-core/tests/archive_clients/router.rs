@@ -457,8 +457,7 @@ impl State {
                 self.admit_commit()?;
                 let prepared = self.prepare(&reference, &headers)?;
                 let result = if headers.get("x-amz-copy-source").is_some() {
-                    let source_target =
-                        s3::Target::parse(headers.get("x-amz-copy-source").unwrap(), &p)?;
+                    let source_target = CopySource::target(&headers, &p)?;
                     let name = format!(
                         "{}/{}",
                         source_target.bucket,
