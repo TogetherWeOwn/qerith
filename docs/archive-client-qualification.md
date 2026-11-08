@@ -173,6 +173,12 @@ CLI GET supplies explicit options and a positional output path: this pinned
 streaming command rejects `--cli-input-json`. CLI automatic pagination is disabled
 so the application, not a hidden CLI iterator, exercises each bounded wire page.
 These invocation choices do not change checksum/signing/retry/transport defaults.
+The CLI receives an unescaped `bucket/key` CopySource string; the pinned vendor
+Botocore `handle_copy_source_param` / `_quote_source_header` handler encodes it.
+Pre-escaping at the wrapper double-encodes literal percent signs, spaces and
+Unicode, pointing at a different key. Boto3 instead receives its structured
+Bucket/Key dictionary. The server still decodes the signed wire header only once;
+no relay rewrite or server-side double decoding compensates for wrapper mistakes.
 Upload inventory scans at most the fixture's 64 session slots and explicitly
 rejects unimplemented delimiter/encoding variants. Completion replay models an
 identical request after a lost response; it is not actual crash durability or a

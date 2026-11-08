@@ -125,7 +125,9 @@ class Client:
         command += ["--debug", "s3api", operation.replace("_", "-")]
         if isinstance(parameters.get("CopySource"), dict):
             source = parameters["CopySource"]
-            parameters["CopySource"] = quote(source["Bucket"] + "/" + source["Key"], safe="/")
+            # The pinned CLI's Botocore handler encodes string CopySource itself.
+            # Pre-escaping here double-encodes literal %, spaces and Unicode.
+            parameters["CopySource"] = source["Bucket"] + "/" + source["Key"]
         if "Body" in parameters:
             body = self.evidence / f"body-{self.sequence}.bin"
             body.write_bytes(parameters.pop("Body"))

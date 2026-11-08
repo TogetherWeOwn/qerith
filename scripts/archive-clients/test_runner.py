@@ -22,6 +22,27 @@ from worker import Client, Matrix, control
 
 
 class CliArgumentTests(unittest.TestCase):
+    def test_copy_source_is_left_unescaped_for_vendor_encoding(self):
+        for operation in ("copy_object", "upload_part_copy"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as directory:
+                client = Client.__new__(Client)
+                client.args = SimpleNamespace(endpoint="https://127.0.0.1:443")
+                client.evidence, client.sequence, client.restrictive = Path(directory), 1, True
+                client.identity = "fixture"
+                source = {"Bucket": "archive", "Key": "opaque/%2F +/café/../key"}
+
+                def invoke(command, **kwargs):
+                    params = json.loads(command[command.index("--cli-input-json") + 1])
+                    self.assertEqual(params["CopySource"], "archive/opaque/%2F +/café/../key")
+                    self.assertIn("--no-paginate", command)
+                    return subprocess.CompletedProcess(command, 0, b"{}", b'"PUT / HTTP/1.1" 200 ')
+
+                with mock.patch.dict(os.environ, {"QERITH_AWS_CLI": "/synthetic/aws"}), \
+                        mock.patch("worker.subprocess.run", side_effect=invoke):
+                    client.cli(operation, {"Bucket": "archive", "Key": "destination",
+                                           "CopySource": source})
+                self.assertEqual(source["Key"], "opaque/%2F +/café/../key")
+
     def test_streaming_get_uses_only_explicit_options_and_positional_outfile(self):
         with tempfile.TemporaryDirectory() as directory:
             client = Client.__new__(Client)
