@@ -192,6 +192,82 @@ fn query<'a>(target: &'a s3::Target, name: &str) -> Option<&'a str> {
         .find(|(k, _)| k == name.as_bytes())
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
+fn validate_route(method: &str, target: &s3::Target) -> s3::Result<()> {
+    let selectors = [
+        "uploads",
+        "uploadId",
+        "delete",
+        "restore",
+        "location",
+        "list-type",
+    ];
+    let selected: Vec<_> = selectors
+        .into_iter()
+        .filter(|name| query(target, name).is_some())
+        .collect();
+    if selected.len() > 1 {
+        return Err(s3::ErrorCode::InvalidRequest);
+    }
+    let object = target.key.is_some();
+    let selector = selected.first().copied();
+    let valid = match selector {
+        Some("uploads") => (method == "POST" && object) || (method == "GET" && !object),
+        Some("uploadId") => object && matches!(method, "GET" | "PUT" | "POST" | "DELETE"),
+        Some("delete") => method == "POST" && !object,
+        Some("restore") => method == "POST" && object,
+        Some("location" | "list-type") => method == "GET" && !object,
+        None => true,
+        _ => false,
+    };
+    if !valid {
+        return Err(s3::ErrorCode::InvalidRequest);
+    }
+    for (name, value) in target.query() {
+        let name = std::str::from_utf8(name).map_err(|_| s3::ErrorCode::InvalidRequest)?;
+        if name.starts_with("X-Amz-") {
+            continue;
+        }
+        let allowed = match selector {
+            Some("uploads") if method == "GET" => matches!(
+                name,
+                "uploads"
+                    | "prefix"
+                    | "key-marker"
+                    | "upload-id-marker"
+                    | "max-uploads"
+                    | "delimiter"
+                    | "encoding-type"
+            ),
+            Some("uploadId") => {
+                name == "uploadId"
+                    || (method == "PUT" && name == "partNumber")
+                    || (method == "GET" && matches!(name, "part-number-marker" | "max-parts"))
+            }
+            Some("list-type") => matches!(
+                name,
+                "list-type"
+                    | "prefix"
+                    | "delimiter"
+                    | "continuation-token"
+                    | "start-after"
+                    | "max-keys"
+                    | "encoding-type"
+            ),
+            Some(selector) => name == selector,
+            None => false,
+        };
+        if !allowed
+            || (matches!(name, "uploads" | "delete" | "restore" | "location") && !value.is_empty())
+        {
+            return Err(s3::ErrorCode::InvalidRequest);
+        }
+    }
+    if selector == Some("uploadId") && method == "PUT" && query(target, "partNumber").is_none() {
+        return Err(s3::ErrorCode::InvalidRequest);
+    }
+    Ok(())
+}
+
 fn number(target: &s3::Target, name: &str, default: u64) -> s3::Result<u64> {
     query(target, name).map_or(Ok(default), |s| {
         if s.is_empty() || !s.bytes().all(|c| c.is_ascii_digit()) {
@@ -319,15 +395,7 @@ impl State {
         };
         let tenant = access.tenant;
         let method = request.method.as_str();
-        let selectors = ["uploads", "uploadId", "delete", "restore"];
-        if selectors
-            .iter()
-            .filter(|name| query(&target, name).is_some())
-            .count()
-            > 1
-        {
-            return Err(s3::ErrorCode::InvalidRequest);
-        }
+        validate_route(method, &target)?;
         let multipart = query(&target, "uploads").is_some() || query(&target, "uploadId").is_some();
         let mutation = (target.key.is_some() && matches!(method, "PUT" | "DELETE"))
             || multipart
@@ -453,9 +521,13 @@ impl State {
                 let part = u16::try_from(number(&target, "partNumber", 0)?)
                     .map_err(|_| s3::ErrorCode::InvalidArgument)?;
                 if headers.get("x-amz-copy-source").is_some() {
-                    if !request.body.is_empty() {
+                    if !request.body.is_empty()
+                        || headers.get("x-amz-checksum-algorithm").is_some()
+                        || headers.get("x-amz-sdk-checksum-algorithm").is_some()
+                    {
                         return Err(s3::ErrorCode::InvalidRequest);
                     }
+                    let _ = ValidatedBody::new(request.body.clone(), &headers, &verified, &p)?;
                     let source = self.copy_source(tenant, &headers, &p, &access)?;
                     let range = headers
                         .get("x-amz-copy-source-range")

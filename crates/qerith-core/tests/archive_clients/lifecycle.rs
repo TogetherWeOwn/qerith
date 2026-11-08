@@ -70,7 +70,13 @@ impl Fixture {
         let date = chrono::DateTime::from_timestamp(now as i64, 0).unwrap();
         let timestamp = date.format("%Y%m%dT%H%M%SZ").to_string();
         let day = date.format("%Y%m%d").to_string();
-        let payload = hex(&Sha256::digest(body));
+        let payload = extra
+            .iter()
+            .find(|(name, _)| *name == "x-amz-content-sha256")
+            .map_or_else(
+                || hex(&Sha256::digest(body)),
+                |(_, value)| value.to_string(),
+            );
         // Deliberately independent signer construction for this simple target.
         // The broader escaped-path/raw-signature corpus remains a separate test.
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -237,6 +243,216 @@ async fn delete_objects_validates_selected_sha256_before_mutation() {
         200
     );
     assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 404);
+}
+
+#[tokio::test]
+async fn part_copy_validates_body_receipts_before_changing_inventory() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    assert_eq!(
+        f.call("PUT", "/archive/source", b"source", &[])
+            .await
+            .status,
+        200
+    );
+    f.control("post", b"").await;
+    assert_eq!(
+        f.call(
+            "POST",
+            "/archive/source?restore",
+            b"<RestoreRequest><Days>1</Days></RestoreRequest>",
+            &[]
+        )
+        .await
+        .status,
+        202
+    );
+    f.control("restore", b"").await;
+    let init = f
+        .call("POST", "/archive/destination?uploads", b"", &[])
+        .await;
+    assert_eq!(init.status, 200);
+    let xml = String::from_utf8(init.body).unwrap();
+    let id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap();
+    let target = format!("/archive/destination?partNumber=1&uploadId={id}");
+    assert_eq!(
+        f.call("PUT", &target, b"original part", &[]).await.status,
+        200
+    );
+    let inventory_target = format!("/archive/destination?uploadId={id}");
+    let before = f.call("GET", &inventory_target, b"", &[]).await;
+    assert_eq!(before.status, 200);
+    let wrong_payload = hex(&Sha256::digest(b"not the empty received body"));
+    for (body, extra, code) in [
+        (b"ignored".as_slice(), vec![], "InvalidRequest"),
+        (
+            b"".as_slice(),
+            vec![("x-amz-content-sha256", wrong_payload.as_str())],
+            "BadDigest",
+        ),
+        (
+            b"".as_slice(),
+            vec![(
+                "x-amz-checksum-sha256",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            )],
+            "BadDigest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("x-amz-checksum-crc32", "AQIDBA==")],
+            "BadDigest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("content-md5", "AAAAAAAAAAAAAAAAAAAAAA==")],
+            "BadDigest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("x-amz-checksum-algorithm", "SHA256")],
+            "InvalidRequest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("x-amz-sdk-checksum-algorithm", "CRC32")],
+            "InvalidRequest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("x-amz-checksum-algorithm", "CRC64NVME")],
+            "InvalidRequest",
+        ),
+        (
+            b"".as_slice(),
+            vec![("x-amz-checksum-type", "COMPOSITE")],
+            "InvalidRequest",
+        ),
+    ] {
+        let mut fields = vec![("x-amz-copy-source", "archive/source")];
+        fields.extend(extra);
+        error(&f.call("PUT", &target, body, &fields).await, 400, code);
+        let after = f.call("GET", &inventory_target, b"", &[]).await;
+        assert_eq!(after.status, 200);
+        assert_eq!(after.body, before.body);
+        assert_eq!(
+            f.call("HEAD", "/archive/destination", b"", &[])
+                .await
+                .status,
+            404
+        );
+    }
+    let empty_checksum = STANDARD.encode(Sha256::digest(b""));
+    assert_eq!(
+        f.call(
+            "PUT",
+            &target,
+            b"",
+            &[
+                ("x-amz-copy-source", "archive/source"),
+                ("x-amz-checksum-sha256", &empty_checksum),
+            ]
+        )
+        .await
+        .status,
+        200
+    );
+    let after = f.call("GET", &inventory_target, b"", &[]).await;
+    assert_eq!(after.status, 200);
+    assert_ne!(after.body, before.body);
+    assert!(String::from_utf8_lossy(&after.body).contains("<Size>6</Size>"));
+}
+
+#[tokio::test]
+async fn incompatible_selectors_never_publish_or_change_upload_inventory() {
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    let init = f.call("POST", "/archive/key?uploads", b"", &[]).await;
+    assert_eq!(init.status, 200);
+    let xml = String::from_utf8(init.body).unwrap();
+    let id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split('<')
+        .next()
+        .unwrap();
+    assert_eq!(
+        f.call(
+            "PUT",
+            &format!("/archive/key?partNumber=1&uploadId={id}"),
+            b"original",
+            &[]
+        )
+        .await
+        .status,
+        200
+    );
+    let parts_target = format!("/archive/key?uploadId={id}");
+    let uploads = f.call("GET", "/archive?uploads", b"", &[]).await;
+    let parts = f.call("GET", &parts_target, b"", &[]).await;
+    assert_eq!(uploads.status, 200);
+    assert_eq!(parts.status, 200);
+    for (method, suffix) in [
+        ("PUT", "/key?restore"),
+        ("DELETE", "/key?restore"),
+        ("PUT", "/key?partNumber=1"),
+        ("PUT", "/key?uploads"),
+        ("GET", "/key?uploads"),
+        ("POST", "?uploads"),
+        ("POST", "/key?delete"),
+        ("POST", "?restore"),
+        ("PUT", "/key?location"),
+        ("PUT", "/key?max-parts=1"),
+        ("PUT", "/key?list-type=2"),
+        ("DELETE", "?uploads"),
+    ] {
+        error(
+            &f.call(method, &format!("/archive{suffix}"), b"", &[]).await,
+            400,
+            "InvalidRequest",
+        );
+        assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 404);
+        assert_eq!(
+            f.call("GET", "/archive?uploads", b"", &[]).await.body,
+            uploads.body
+        );
+        assert_eq!(
+            f.call("GET", &parts_target, b"", &[]).await.body,
+            parts.body
+        );
+    }
+    for (method, target) in [
+        ("POST", format!("/archive/key?partNumber=1&uploadId={id}")),
+        ("DELETE", format!("/archive/key?partNumber=1&uploadId={id}")),
+        ("GET", format!("/archive?uploadId={id}")),
+        ("PUT", format!("/archive/key?uploadId={id}")),
+        ("DELETE", format!("/archive/key?max-parts=1&uploadId={id}")),
+    ] {
+        error(
+            &f.call(method, &target, b"", &[]).await,
+            400,
+            "InvalidRequest",
+        );
+        assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 404);
+        assert_eq!(
+            f.call("GET", "/archive?uploads", b"", &[]).await.body,
+            uploads.body
+        );
+        assert_eq!(
+            f.call("GET", &parts_target, b"", &[]).await.body,
+            parts.body
+        );
+    }
 }
 
 #[tokio::test]

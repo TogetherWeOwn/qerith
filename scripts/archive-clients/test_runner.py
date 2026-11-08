@@ -18,7 +18,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from contract import PROFILES, ROWS, missing_result, passed
 from relay import Relay, loopback_upstream
 from runner import artifact_hashes, finalize_manifest, profile_environment, run_bounded
-from worker import Client, Matrix, control
+from worker import Client, Matrix, OPAQUE, control, digest
+
+
+class GetStatusTests(unittest.TestCase):
+    def test_get_rows_require_matching_http_status_before_qualification(self):
+        for ranged, expected in ((False, 200), (True, 206)):
+            for status in (None, 200, 206, 500):
+                with self.subTest(ranged=ranged, status=status), \
+                        tempfile.TemporaryDirectory() as directory, \
+                        mock.patch("worker.Client") as factory:
+                    client = factory.return_value
+                    client.sequence, client.settings, client.restrictive = 0, {}, True
+                    response = {"Body": OPAQUE[1:32] if ranged else OPAQUE,
+                                "ETag": '"baseline"', "ChecksumSHA256": digest(OPAQUE),
+                                "ContentRange": f"bytes 1-31/{len(OPAQUE)}"}
+                    if status is not None:
+                        response["ResponseMetadata"] = {"HTTPStatusCode": status}
+                    client.call.return_value = response
+                    matrix = Matrix(SimpleNamespace(profile="cli-restrictive"), Path(directory))
+                    matrix.baseline = {"ETag": '"baseline"'}
+                    action = lambda: matrix.get(ranged=ranged)
+                    if status == expected:
+                        matrix.row(ROWS[0], action)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            matrix.row(ROWS[0], action)
+                    saved = json.loads((Path(directory) / "result.json").read_text())
+                    self.assertEqual(saved["rows"][0]["outcome"],
+                                     "pass" if status == expected else "fail")
+                    self.assertFalse(saved["qualified"])
+                    self.assertTrue(all(row["outcome"] == "unqualified"
+                                        for row in saved["rows"][1:]))
 
 
 class CliArgumentTests(unittest.TestCase):

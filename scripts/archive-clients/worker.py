@@ -378,6 +378,8 @@ class Matrix:
     def get(self, ranged=False):
         params = {"Range": "bytes=1-31"} if ranged else {"ChecksumMode": "ENABLED"}
         result = self.client.call("get_object", **self.object, **params)
+        status = result.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        assert status == (206 if ranged else 200), f"unexpected GET status: {status}"
         assert result["Body"] == (OPAQUE[1:32] if ranged else OPAQUE)
         if ranged:
             assert result["ContentRange"] == f"bytes 1-31/{len(OPAQUE)}"
