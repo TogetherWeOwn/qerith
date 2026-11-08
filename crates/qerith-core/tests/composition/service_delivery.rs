@@ -135,6 +135,32 @@ async fn native_rest_mcp_handles_deliver_exact_generated_ciphertext_after_reconn
         10,
     )
     .unwrap();
+    let mut mcp_service = s::Service::reconnect(
+        service.checkpoint(),
+        Access(auth.clone()),
+        limits(),
+        profile(),
+        10,
+    )
+    .unwrap();
+    let arguments = serde_json::to_vec(&serde_json::json!({
+        "reference": upload.target.reference.as_str(),
+        "generation": upload.target.generation.as_str(),
+        "identity": "delivery_mcp",
+    }))
+    .unwrap();
+    let o::Output::Download(mcp_transfer) = o::mcp_request(
+        &mut mcp_service,
+        Some(&scope()),
+        o::McpSession::default(),
+        o::TaskMode::Baseline,
+        o::Operation::AuthorizeDownload.definition().name,
+        &arguments,
+    )
+    .outcome
+    .unwrap() else {
+        panic!("mcp download");
+    };
     let time = Time(Cell::new(11));
     let mut cache = Cache {
         io: &io,
@@ -153,7 +179,13 @@ async fn native_rest_mcp_handles_deliver_exact_generated_ciphertext_after_reconn
         // Cache delivery neither consumes nor extends the original transfer pin.
         assert!(reconnected.redeem(&scope(), &handle).is_ok());
     }
-    assert_eq!(cache.reads, 2);
+    assert_eq!(
+        mcp_service
+            .read_download(&scope(), &mcp_transfer.handle, &mut cache, &time)
+            .unwrap(),
+        io.fixture.bytes()
+    );
+    assert_eq!(cache.reads, 3);
     assert_eq!(time.0.get(), 11);
     evidence(
         "service-delivery.json",
