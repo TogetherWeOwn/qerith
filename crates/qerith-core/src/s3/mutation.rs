@@ -22,7 +22,7 @@ use super::{
 use crate::catalogue::{
     self as cat, Action, Authority, Checksum, ChecksumType, CiphertextIdentity, CiphertextMetadata,
     CompleteCopy, GenerationId, JobPort, MemoryCatalogue, MetadataOutbox, Mutation,
-    MutationTargets, OperationId, Outcome, Reference, ReferenceView, TenantId,
+    MutationTargets, OperationId, Outcome, Reference, ReferenceView, TenantId, WriteTarget,
 };
 
 /// Deliberately no Default. Numbers are explicit synthetic fixture inputs, not
@@ -167,13 +167,13 @@ impl DestinationConditions {
         })
     }
 
-    fn evaluate(&self, view: Option<&ReferenceView>) -> Result<()> {
+    fn evaluate(&self, view: Option<&WriteTarget>) -> Result<()> {
         if self.if_none_match && self.if_match.is_some() {
             return Err(ErrorCode::InvalidRequest);
         }
         if let Some(tag) = &self.if_match {
             ObjectMetadata::new("predicate".into(), 0, tag.clone(), 0, vec![], None)?;
-            if view.is_none_or(|v| v.metadata.validator != *tag) {
+            if view.is_none_or(|v| v.validator != *tag) {
                 return Err(ErrorCode::PreconditionFailed);
             }
         }
@@ -704,7 +704,10 @@ impl MemoryMutations {
         bucket.validate_features()?;
         if bucket.key.is_some()
             || request.keys.is_empty()
-            || request.keys.iter().any(String::is_empty)
+            || request
+                .keys
+                .iter()
+                .any(|key| key.is_empty() || !key.chars().all(control::xml_char))
             || request.keys.len() > self.policy.batch_keys
         {
             return Err(ErrorCode::InvalidRequest);

@@ -781,9 +781,9 @@ impl MutationTargets for MemoryCatalogue {
         &self,
         tenant: TenantId,
         name: &str,
-        now: u64,
+        _now: u64,
         authority: &dyn Authority,
-    ) -> Result<(u64, Option<ReferenceView>)> {
+    ) -> Result<(u64, Option<WriteTarget>)> {
         permit(authority, tenant, name, Action::Write)?;
         let Some(t) = self.tenants.get(&tenant) else {
             return Ok((0, None));
@@ -795,14 +795,11 @@ impl MutationTargets for MemoryCatalogue {
         {
             return Ok((revision, None));
         }
-        let (r, g) = t.visible(name)?;
+        let (_, g) = t.visible(name)?;
         Ok((
             revision,
-            Some(ReferenceView {
-                generation: r.generation.ok_or(Error::Unavailable)?,
-                revision,
-                metadata: g.metadata.clone(),
-                availability_until: r.availability.filter(|until| *until > now),
+            Some(WriteTarget {
+                validator: g.metadata.validator.clone(),
             }),
         ))
     }

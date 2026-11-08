@@ -683,15 +683,48 @@ fn tombstones_preserve_revision_and_write_only_authority() {
         .unwrap();
     m.put(p, body(b"one"), 2, &write_only).unwrap();
     assert!(m.catalogue().lookup(T, "key", 3, &write_only).is_err());
-    assert_eq!(
-        m.delete(
-            &reference("key"),
-            &DestinationConditions::default(),
+    let (revision, target) = m
+        .catalogue()
+        .write_target(T, "key", 3, &write_only)
+        .unwrap();
+    assert_eq!(revision, 1);
+    // Exhaustive destructuring keeps this public write-only projection narrow.
+    let WriteTarget { validator } = target.unwrap();
+    let current = m.catalogue().lookup(T, "key", 3, &auth()).unwrap();
+    assert_eq!(validator, current.metadata.validator);
+    let matched = DestinationConditions {
+        if_match: Some(validator),
+        if_none_match: false,
+    };
+    assert!(m
+        .prepare(
+            reference("key"),
+            metadata(),
+            matched.clone(),
+            None,
             3,
             &write_only
         )
-        .unwrap()
-        .status,
+        .is_ok());
+    assert_eq!(
+        m.prepare(
+            reference("key"),
+            metadata(),
+            DestinationConditions {
+                if_match: Some("\"wrong\"".into()),
+                if_none_match: false,
+            },
+            None,
+            3,
+            &write_only
+        )
+        .err(),
+        Some(s3::ErrorCode::PreconditionFailed)
+    );
+    assert_eq!(
+        m.delete(&reference("key"), &matched, 3, &write_only)
+            .unwrap()
+            .status,
         204
     );
     let (revision, view) = m
@@ -1012,6 +1045,311 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
                 .checksums,
             vec![c.clone()]
         );
+    }
+}
+
+#[test]
+fn typed_delete_rejects_all_invalid_keys_before_any_mutation() {
+    for bad in [
+        "bad\0key",
+        "bad\u{1}key",
+        "bad\u{b}key",
+        "bad\u{fffe}key",
+        "bad\u{ffff}key",
+    ] {
+        for quiet in [false, true] {
+            let mut m = model();
+            put(&mut m, "archive/keep", b"keep");
+            let before = m.catalogue().lookup(T, "archive/keep", 4, &auth()).unwrap();
+            let events = m.catalogue().outbox(T);
+            for authority in [
+                auth(),
+                Auth {
+                    denied: Some(format!("archive/{bad}")),
+                    ..auth()
+                },
+            ] {
+                assert_eq!(
+                    m.delete_objects(
+                        T,
+                        &bucket(),
+                        DeleteRequest {
+                            keys: vec!["keep".into(), bad.into()],
+                            quiet,
+                        },
+                        4,
+                        &authority
+                    )
+                    .err(),
+                    Some(s3::ErrorCode::InvalidRequest)
+                );
+                assert_eq!(
+                    m.catalogue().lookup(T, "archive/keep", 4, &auth()).unwrap(),
+                    before
+                );
+                assert_eq!(m.catalogue().outbox(T), events);
+            }
+        }
+    }
+    for key in ["雪�😀", "tab\tkey", "line\nkey", "carriage\rkey"] {
+        let mut m = model();
+        put(&mut m, &format!("archive/{key}"), b"keep");
+        let response = m
+            .delete_objects(
+                T,
+                &bucket(),
+                DeleteRequest {
+                    keys: vec![key.into()],
+                    quiet: false,
+                },
+                4,
+                &auth(),
+            )
+            .unwrap();
+        assert_eq!(response.status, 200);
+        let xml = String::from_utf8(response.body).unwrap();
+        let delete = xml
+            .replace("DeleteResult", "Delete")
+            .replace("Deleted", "Object");
+        assert_eq!(
+            parse_delete(delete.as_bytes(), &policy()).unwrap().keys,
+            vec![key]
+        );
+        assert!(m
+            .catalogue()
+            .lookup(T, &format!("archive/{key}"), 4, &auth())
+            .is_err());
+    }
+}
+
+impl s3::archive::Session for Auth {
+    fn tenant(&self) -> TenantId {
+        T
+    }
+    fn principal(&self) -> &str {
+        "fixture"
+    }
+    fn allows(&self, _: s3::archive::Operation, _: &str) -> bool {
+        self.active
+    }
+}
+struct ReadClock;
+impl s3::archive::Clock for ReadClock {
+    fn now(&self) -> u64 {
+        8
+    }
+}
+struct NoCapacity;
+impl s3::archive::CapacityPort for NoCapacity {
+    fn reserve(
+        &mut self,
+        _: TenantId,
+        _: &str,
+        _: OperationId,
+        _: GenerationId,
+        _: u64,
+    ) -> s3::Result<CapacityReservation> {
+        panic!("read must not reserve restore capacity")
+    }
+}
+struct ReadCache {
+    generation: GenerationId,
+    calls: usize,
+}
+impl s3::archive::QualifiedCache for ReadCache {
+    fn read(
+        &mut self,
+        tenant: TenantId,
+        generation: GenerationId,
+        identity: &CiphertextIdentity,
+        location: &str,
+        _: PinId,
+        range: Option<s3::ByteRange>,
+    ) -> s3::Result<Vec<u8>> {
+        self.calls += 1;
+        assert_eq!(tenant, T);
+        assert_eq!(generation, self.generation);
+        assert_eq!(identity.sha256, <[u8; 32]>::from(Sha256::digest(b"abcd")));
+        assert_eq!(
+            location,
+            format!("fixture/{}/{}/retained", T.0, generation.0)
+        );
+        let range = range.unwrap();
+        Ok(b"abcd"[range.start as usize..=range.end as usize].to_vec())
+    }
+}
+
+#[test]
+fn full_checksum_projection_preserves_and_validates_part_evidence() {
+    for algorithm in [s3::ChecksumAlgorithm::Sha256, s3::ChecksumAlgorithm::Crc32] {
+        let size = if algorithm == s3::ChecksumAlgorithm::Sha256 {
+            32
+        } else {
+            4
+        };
+        let full = STANDARD.encode(vec![0; size]);
+        let parts = vec![
+            STANDARD.encode(vec![1; size]),
+            STANDARD.encode(vec![2; size]),
+        ];
+        let stored =
+            s3::StoredChecksum::full_with_parts(algorithm, full.clone(), parts.clone()).unwrap();
+        assert_eq!(stored.parts(), parts);
+        assert_eq!(stored.value(), full);
+        assert_eq!(stored.checksum_type(), "FULL_OBJECT");
+        assert!(s3::StoredChecksum::full_with_parts(
+            algorithm,
+            full.clone(),
+            vec![STANDARD.encode(vec![0; size - 1])]
+        )
+        .is_err());
+        assert!(s3::StoredChecksum::full_with_parts(
+            algorithm,
+            full.clone(),
+            vec!["not base64".into()]
+        )
+        .is_err());
+        assert!(s3::StoredChecksum::full_with_parts(
+            algorithm,
+            full.clone(),
+            vec![parts[0].clone(); 10_001]
+        )
+        .is_err());
+        assert!(s3::StoredChecksum::full_with_parts(
+            algorithm,
+            STANDARD.encode(vec![0; size - 1]),
+            parts
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn full_multipart_completion_round_trips_through_archive_reads() {
+    for algorithm in [s3::ChecksumAlgorithm::Sha256, s3::ChecksumAlgorithm::Crc32] {
+        let mut m = model();
+        m.catalogue_worker()
+            .create_bucket(T, "archive", "fixture", 1)
+            .unwrap();
+        let id = initiate(&mut m, "archive/key", MultipartChecksum::Full(algorithm));
+        let mut parts = Vec::new();
+        for (number, bytes) in [(1, b"ab"), (2, b"cd")] {
+            parts.push(
+                m.upload_part(
+                    &reference("archive/key"),
+                    id,
+                    number,
+                    body_with(bytes, Some(algorithm), &[]).unwrap(),
+                    3,
+                    &auth(),
+                )
+                .unwrap(),
+            );
+        }
+        let full = match algorithm {
+            s3::ChecksumAlgorithm::Sha256 => Sha256::digest(b"abcd").to_vec(),
+            s3::ChecksumAlgorithm::Crc32 => crc32fast::hash(b"abcd").to_be_bytes().to_vec(),
+        };
+        let result = m
+            .complete(
+                &reference("archive/key"),
+                id,
+                parts,
+                Some(full.clone()),
+                4,
+                &auth(),
+            )
+            .unwrap();
+        let evidence = result.checksum.unwrap();
+        assert_eq!(evidence.parts.len(), 2);
+        for restored in [false, true] {
+            if restored {
+                restore(&mut m, "archive/key");
+            }
+            let mut reader = s3::archive::Adapter::new(
+                m.catalogue().clone(),
+                s3::archive::MemoryTokens::new(8, 30).unwrap(),
+                policy(),
+                s3::archive::AdapterLimits {
+                    read_bytes: 32,
+                    serving_seconds: 10,
+                    restore_job_seconds: 100,
+                    scan_batch: 10,
+                    scan_entries: 10,
+                },
+            )
+            .unwrap();
+            let mut cache = ReadCache {
+                generation: result.generation,
+                calls: 0,
+            };
+            for enabled in [false, true] {
+                let fields = if enabled {
+                    vec![("x-amz-checksum-mode", "ENABLED")]
+                } else {
+                    vec![]
+                };
+                let headers = s3::Headers::new(&fields, &policy()).unwrap();
+                for method in ["HEAD", "GET"] {
+                    let response = reader.handle(
+                        method,
+                        &s3::Target::parse("/archive/key", &policy()).unwrap(),
+                        &headers,
+                        b"",
+                        &auth(),
+                        OperationId(20_000 + u64::from(enabled)),
+                        &ReadClock,
+                        "fixture-read",
+                        &mut cache,
+                        &mut NoCapacity,
+                    );
+                    let expected = if method == "GET" && !restored {
+                        403
+                    } else {
+                        200
+                    };
+                    assert_eq!(
+                        response.status, expected,
+                        "{algorithm:?} {method} restored={restored} checksum={enabled}"
+                    );
+                    if expected == 200 {
+                        let header = |name| {
+                            response
+                                .headers
+                                .iter()
+                                .find(|(k, _)| k == name)
+                                .map(|(_, v)| v.as_str())
+                        };
+                        assert_eq!(header("etag"), Some(result.etag.as_str()));
+                        assert_eq!(
+                            header(algorithm.header()),
+                            enabled.then(|| STANDARD.encode(&full)).as_deref()
+                        );
+                        assert_eq!(
+                            header("x-amz-checksum-type"),
+                            enabled.then_some("FULL_OBJECT")
+                        );
+                        if method == "GET" {
+                            assert_eq!(response.body, b"abcd");
+                        }
+                    } else {
+                        assert!(String::from_utf8(response.body)
+                            .unwrap()
+                            .contains("InvalidObjectState"));
+                    }
+                }
+            }
+            assert_eq!(cache.calls, if restored { 2 } else { 0 });
+            assert_eq!(
+                reader
+                    .catalogue
+                    .lookup(T, "archive/key", 8, &auth())
+                    .unwrap()
+                    .metadata
+                    .checksums,
+                vec![evidence.clone()]
+            );
+        }
     }
 }
 

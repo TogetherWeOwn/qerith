@@ -13,7 +13,10 @@ metadata, restore availability, archival jobs and the outbox. The mutation model
 owns immutable retained byte fixtures and multipart session/part/result evidence.
 It never uses `Mutation::Link` as a copy shortcut. The only new catalogue port is
 `MutationTargets::write_target`: write-authorized inspection of the current
-revision, including a deleted key. It does not grant read/list access. Prohibited
+revision, including a deleted key, and an optional `WriteTarget` containing only
+an existing object's validator for conditional writes. It never returns content
+headers, identity, checksums, recovery references, generation or restore lease.
+It does not grant read/list access. Prohibited
 or deleting generations return errors, not an invented absent key.
 
 Fixture operation/generation identities are allocated by the shared catalogue
@@ -81,6 +84,10 @@ Supported typed integrity modes:
 - No negotiated checksum: length and service SHA256 still verify complete C.
 - SHA256 or CRC32 `FULL_OBJECT`: validate each part, require the exact full-C
   checksum at completion, preserve full algorithm/type/value **and part evidence**.
+  The shared read projection validates digest sizes and retains ordered evidence
+  without reclassifying a full checksum as composite. HEAD works before restore;
+  GET still requires restored availability. Checksum-mode returns the full value
+  with `FULL_OBJECT`, never a composite part-count suffix.
 - SHA256 `COMPOSITE`: use the shared `StoredChecksum` digest-of-binary-part-digests
   construction; persist the part evidence and render the part-count suffix. This
   is not SHA256(C). CRC32 composite and unknown algorithms are not admitted.
@@ -128,7 +135,10 @@ participate in a successful atomic completion.
 `delete` is an authorized logical tombstone and returns 204, including an absent
 key. `delete_objects` takes the shared parsed bucket target separately from
 bucket-relative XML keys, qualifies catalogue references, and echoes only the
-original keys. It returns per-key results, suppressing successful keys in quiet
+original keys. The entire typed batch is checked for empty/XML-forbidden keys
+before the first tombstone, including quiet requests and denied keys; rejection
+leaves all references unchanged. Valid Unicode and tab/LF/CR keep their identity.
+It returns per-key results, suppressing successful keys in quiet
 mode while retaining errors. It never deletes shared byte versions. The shared
 catalogue deletion worker and its serving pins, reference counts and integrity
 proofs remain the sole physical-cleanup authority; there is no Usenet erasure
