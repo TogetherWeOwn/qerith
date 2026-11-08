@@ -68,6 +68,7 @@ struct Upload {
     intent: c::OperationId,
     commit: c::OperationId,
     expected_revision: u64,
+    created_at: u64,
     received: u64,
     verified: bool,
     abort: Option<n::CancelOutcome>,
@@ -87,6 +88,7 @@ struct Job {
     value: o::Job,
     deadline: u64,
     restore: Option<(c::JobId, c::OperationId)>,
+    requires_live_target: bool,
 }
 #[derive(Clone)]
 struct Cursor {
@@ -293,6 +295,11 @@ impl<A: Access> Service<A> {
             .cloned()
             .ok_or_else(denied)?;
         self.permit(scope, &job.value.target.reference, c::Action::Read)?;
+        if job.restore.is_some()
+            || job.requires_live_target && job.value.effects == o::Effects::Committed
+        {
+            self.exact(scope, &job.value.target)?;
+        }
         if let Some((id, _)) = job
             .restore
             .filter(|_| job.value.state != o::JobState::Cancelled)
@@ -487,10 +494,14 @@ impl<A: Access> Service<A> {
         if job.value.state == o::JobState::Succeeded {
             return Ok(job.value);
         }
-        if !upload.submitted || job.value.state.terminal() {
+        if !upload.submitted
+            || job.value.state.terminal()
+            || job.value.state == o::JobState::CancelRequested
+        {
             return Err(fail(o::ErrorCode::Conflict));
         }
-        let metadata = metadata(&upload.descriptor.intent, self.now)?;
+        self.set_now(clock.now().map_err(map)?)?;
+        let metadata = metadata(&upload.descriptor.intent, upload.created_at)?;
         let tenant = self.tenant(scope)?;
         let work = flow::Upload {
             tenant,
@@ -523,7 +534,7 @@ impl<A: Access> Service<A> {
         )
         .await
         {
-            let failure = match error {
+            let mut failure = match error {
                 flow::Failure::Catalogue(error) => map(error),
                 flow::Failure::Io(flow::IoError::Integrity) => fail(o::ErrorCode::IntegrityFailed),
                 flow::Failure::Io(flow::IoError::Uncertain) => o::Failure {
@@ -533,6 +544,7 @@ impl<A: Access> Service<A> {
                 _ => fail(o::ErrorCode::Unavailable),
             };
             self.model.jobs.get_mut(&upload.job).unwrap().value.effects = o::Effects::Unknown;
+            failure.effects = o::Effects::Unknown;
             return Err(failure);
         }
         self.model.uploads.get_mut(handle).unwrap().cleanup = false;
@@ -609,6 +621,7 @@ impl<A: Access> Service<A> {
             scope: scope.clone(),
             deadline: self.expiry(self.limits.job_seconds)?,
             restore: None,
+            requires_live_target: true,
             value: o::Job {
                 handle: token("job", id),
                 target,
@@ -627,7 +640,7 @@ fn metadata(intent: &n::UploadIntent, now: u64) -> Result<c::CiphertextMetadata,
         return Err(fail(o::ErrorCode::Unsupported));
     }
     let mut sha256 = [0; 32];
-    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair).map_err(|_| fail(o::ErrorCode::InvalidInput))?;
         sha256[i] = u8::from_str_radix(pair, 16).map_err(|_| fail(o::ErrorCode::InvalidInput))?;
     }
@@ -696,18 +709,28 @@ impl<A: Access> o::OperationPort for Service<A> {
         Ok(())
     }
     fn preconditions(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
-        let replay = self.replay(scope, request)?.is_some();
-        if replay
-            && matches!(
+        if let Some(output) = self.replay(scope, request)? {
+            match output {
+                o::Output::Job(job)
+                | o::Output::Upload { job, .. }
+                | o::Output::Cancel { job, .. } => {
+                    self.job(scope, &job.handle)?;
+                }
+                o::Output::Download(transfer) => {
+                    self.redeem(scope, &transfer.handle)?;
+                }
+                _ => {}
+            }
+            if matches!(
                 request.operation(),
                 o::Operation::InitiateUpload
                     | o::Operation::CommitUpload
                     | o::Operation::AbortUpload
                     | o::Operation::Copy
                     | o::Operation::Delete
-            )
-        {
-            return Ok(());
+            ) {
+                return Ok(());
+            }
         }
         match request.operation() {
             o::Operation::InitiateUpload | o::Operation::Copy => {
@@ -864,6 +887,7 @@ impl<A: Access> Service<A> {
                     intent: c::OperationId(self.next()?),
                     commit: c::OperationId(self.next()?),
                     expected_revision,
+                    created_at: self.now,
                     received: 0,
                     verified: false,
                     abort: None,
@@ -1146,6 +1170,7 @@ impl<A: Access> Service<A> {
                 )?;
                 job.value.state = o::JobState::Succeeded;
                 job.value.effects = o::Effects::Committed;
+                job.requires_live_target = request.operation() != Op::Delete;
                 self.model
                     .jobs
                     .insert(job.value.handle.clone(), job.clone());

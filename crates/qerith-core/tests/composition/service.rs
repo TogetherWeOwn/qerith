@@ -579,6 +579,338 @@ async fn native_rest_mcp_golden_reconnect_and_cold_restore() {
     assert!(service.redeem(&scope(), &transfer.handle).is_err());
 }
 
+async fn pending_upload() -> (s::Service<Access>, Io, o::Transfer, o::Job, Rc<Auth>) {
+    let auth = Rc::new(Auth::default());
+    let mut service = s::Service::new(Access(auth.clone()), limits(), profile(), 10).unwrap();
+    let io = Io::new(1).await;
+    let intent = n::UploadIntent {
+        object: nid("object"),
+        precondition: n::Precondition::Absent,
+        ciphertext: n::Ciphertext {
+            c: nid("opaque_C"),
+            length: io.identity().length,
+            checksum_hex: nid(&io
+                .identity()
+                .sha256
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()),
+            profile: profile().profiles[0].profile.clone(),
+            key_ref: nid("key_ref"),
+            envelope_ref: nid("envelope_ref"),
+        },
+        metadata: n::Metadata {
+            content_type: "application/octet-stream".into(),
+            content_encoding: None,
+            user: BTreeMap::new(),
+        },
+    };
+    service
+        .bind_upload(&scope(), id("init"), id("root"), intent)
+        .unwrap();
+    let o::Output::Upload { transfer, job } = parity(
+        &mut service,
+        &scope(),
+        o::Operation::InitiateUpload,
+        vec![
+            text("reference", "object"),
+            text("identity", "init"),
+            ("max_bytes".into(), o::Value::Number(io.identity().length)),
+            ("if_absent".into(), o::Value::Flag(true)),
+        ],
+    )
+    .unwrap() else {
+        panic!("upload");
+    };
+    (service, io, transfer, job, auth)
+}
+fn commit_fields(transfer: &o::Transfer) -> o::Fields {
+    vec![
+        text("reference", transfer.target.reference.as_str()),
+        text("generation", transfer.target.generation.as_str()),
+        text("transfer", transfer.handle.as_str()),
+        text("identity", "commit"),
+    ]
+}
+fn fully_stage(service: &mut s::Service<Access>, io: &Io, transfer: &o::Transfer) {
+    service
+        .staged(&scope(), &transfer.handle, 0, io.identity().length)
+        .unwrap();
+    service
+        .verify_staged(
+            &scope(),
+            &transfer.handle,
+            &CompleteCopy {
+                identity: io.identity(),
+                checksums: vec![],
+                location: "trusted-full-stage".into(),
+                receipt: "full C verified".into(),
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn retry_reconnect_preserves_intent_and_uncertain_cancel_never_rolls_back() {
+    let (mut service, mut io, transfer, job, auth) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    io.inject = Injection::PartialUpload;
+    let failed = service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failed.effects, o::Effects::Unknown);
+    assert!(!failed.retryable());
+    let mut service =
+        s::Service::reconnect(service.checkpoint(), Access(auth), limits(), profile(), 12).unwrap();
+    time.0.set(12);
+    io.inject = Injection::None;
+    // Stable initiation metadata must not change with retry/reconnect time.
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &time,
+                &rules
+            )
+            .await
+            .unwrap()
+            .state,
+        o::JobState::Succeeded
+    );
+    assert!(matches!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Cancel,
+            vec![
+                text("job", job.handle.as_str()),
+                text("identity", "after_commit")
+            ]
+        )
+        .unwrap(),
+        o::Output::Cancel {
+            outcome: o::CancelOutcome::AlreadyCommitted,
+            ..
+        }
+    ));
+
+    let (mut service, mut io, transfer, job, _) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    io.inject = Injection::PartialUpload;
+    for _ in 0..limits().attempts {
+        assert!(service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &time,
+                &rules
+            )
+            .await
+            .is_err());
+    }
+    let calls = io.order.len();
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &time,
+                &rules
+            )
+            .await
+            .unwrap_err()
+            .code,
+        o::ErrorCode::QuotaExceeded
+    );
+    assert_eq!(io.order.len(), calls, "attempt cap must precede I/O");
+    let o::Output::Cancel { job, outcome } = parity(
+        &mut service,
+        &scope(),
+        o::Operation::Cancel,
+        vec![
+            text("job", job.handle.as_str()),
+            text("identity", "uncertain_cancel"),
+        ],
+    )
+    .unwrap() else {
+        panic!("cancel");
+    };
+    assert_eq!(outcome, o::CancelOutcome::Requested);
+    assert_eq!(job.effects, o::Effects::Unknown);
+    assert_eq!(job.state, o::JobState::CancelRequested);
+    assert!(service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules
+        )
+        .await
+        .is_err());
+    assert_eq!(io.order.len(), calls);
+}
+
+#[tokio::test]
+async fn staged_handles_expiry_stale_generation_and_delete_have_shared_gates() {
+    let (mut service, mut io, transfer, job, auth) = pending_upload().await;
+    let principal = o::Scope {
+        principal: id("other_principal"),
+        ..scope()
+    };
+    assert!(service.resume(&principal, &transfer.handle).is_err());
+    assert!(service.staged(&principal, &transfer.handle, 0, 1).is_err());
+    assert!(parity(
+        &mut service,
+        &principal,
+        o::Operation::CommitUpload,
+        commit_fields(&transfer)
+    )
+    .is_err());
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer)
+    )
+    .is_err());
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules,
+        )
+        .await
+        .unwrap();
+    let stale = n::Target {
+        object: nid("object"),
+        g: nid("g_999"),
+    };
+    let before = service.allocations();
+    for operation in [
+        o::Operation::Stat,
+        o::Operation::Restore,
+        o::Operation::AuthorizeDownload,
+        o::Operation::Delete,
+    ] {
+        let mut fields = target_fields(&stale);
+        if operation != o::Operation::Stat {
+            fields.push(text("identity", "stale"));
+        }
+        if operation == o::Operation::Restore {
+            fields.push(("availability_seconds".into(), o::Value::Number(50)));
+        }
+        assert_eq!(
+            parity(&mut service, &scope(), operation, fields)
+                .unwrap_err()
+                .code,
+            o::ErrorCode::PreconditionFailed
+        );
+        assert_eq!(service.allocations(), before);
+    }
+    let mut fields = commit_fields(&transfer);
+    fields.retain(|(name, _)| name != "transfer");
+    let deleted = parity(&mut service, &scope(), o::Operation::Delete, fields).unwrap();
+    let o::Output::Job(deleted) = deleted else {
+        panic!("deleted");
+    };
+    assert_eq!(deleted.effects, o::Effects::Committed);
+    assert_eq!(
+        deleted.progress.total(),
+        None,
+        "unknown does not mean zero or 100 percent"
+    );
+    assert!(service
+        .catalogue()
+        .lookup(TENANT, "object", 10, auth.as_ref())
+        .is_err());
+    assert!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Status,
+            vec![text("job", job.handle.as_str())]
+        )
+        .is_err(),
+        "deleted upload target cannot disclose stale job metadata"
+    );
+    assert!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Status,
+            vec![text("job", deleted.handle.as_str())]
+        )
+        .is_ok(),
+        "delete result is retained independently of the tombstoned target"
+    );
+
+    let (mut service, _, transfer, job, _) = pending_upload().await;
+    service.set_now(transfer.expires_at).unwrap();
+    assert!(service.resume(&scope(), &transfer.handle).is_err());
+    assert!(service.staged(&scope(), &transfer.handle, 0, 1).is_err());
+    service.set_now(1010).unwrap();
+    assert!(matches!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Status,
+            vec![text("job", job.handle.as_str())]
+        )
+        .unwrap(),
+        o::Output::Job(o::Job {
+            state: o::JobState::Failed,
+            ..
+        })
+    ));
+}
+
 #[tokio::test]
 async fn negative_authority_profile_and_lifetime_controls_allocate_nothing() {
     let auth = Rc::new(Auth::default());
