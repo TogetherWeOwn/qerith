@@ -144,6 +144,11 @@ pub trait Storage {
         &mut self,
         work: &Work,
     ) -> std::result::Result<[Reconstruction; 2], IoError>;
+    /// Reconcile this scoped inventory's exact completed copy (or the catalogue's
+    /// retained version) before fetching again. Verify it without replacement;
+    /// corrupt/missing recorded completions fail closed, never fall back to a
+    /// silently healed copy. Only proven absence of a completion permits fetch.
+    /// `complete_restore` must return a verified receipt for the same version.
     async fn retrieve(&mut self, work: &Work) -> std::result::Result<(), IoError>;
     async fn complete_restore(&mut self, work: &Work)
         -> std::result::Result<CompleteCopy, IoError>;
@@ -295,13 +300,14 @@ pub async fn run_once<C: JobPort, S: Storage>(
     {
         return Err(Failure::Admission);
     }
-    if policy.cancelled(&work) {
-        if work.job.kind == JobKind::Restore {
-            match catalogue.cancel_unneeded_restore(tenant, work.job.id, now, authority) {
-                Ok(()) | Err(Error::Unsafe) => {}
-                Err(error) => return Err(error.into()),
-            }
+    if work.job.kind == JobKind::Restore {
+        match catalogue.cancel_unneeded_restore(tenant, work.job.id, now, authority) {
+            Ok(()) => return Err(Failure::Io(IoError::Cancelled)),
+            Err(Error::Unsafe) => {} // A current subscriber still needs this job.
+            Err(error) => return Err(error.into()),
         }
+    }
+    if policy.cancelled(&work) {
         // Invocation interruption is not cancellation of a logical obligation.
         // A needed restore or archive stays queued without consuming an attempt.
         return Err(Failure::Io(IoError::Cancelled));
@@ -324,20 +330,30 @@ pub async fn run_once<C: JobPort, S: Storage>(
         catalogue, storage, &work, &fence, clock, policy, qualifier, authority,
     )
     .await;
+    // Expiry is a catalogue obligation, even if I/O or a guard failed. Never
+    // begin cleanup outside the invocation, or let cleanup failure delay expiry.
+    let now = clock.now()?;
+    if result.is_err() && now >= work.job.deadline {
+        catalogue.expire_job(tenant, work.job.id, now)?;
+        return result;
+    }
+    if now >= work.claim_until {
+        return result;
+    }
     if let Err(Failure::Io(error)) = &result {
-        let now = clock.now()?;
         // Uncertain effects retain their inventory and bytes; the next bounded
         // attempt must reconcile, not mistake a timeout for absence.
-        if !matches!(error, IoError::Uncertain)
+        let cleanup_failed = !matches!(error, IoError::Uncertain)
             && policy.cleanup_incomplete(&work, error)
-            && storage.cleanup_incomplete(&work).await.is_err()
-        {
-            return Err(Failure::Cleanup);
-        }
+            && storage.cleanup_incomplete(&work).await.is_err();
         let now = clock.now()?.max(now);
         if now >= work.job.deadline {
             catalogue.expire_job(tenant, work.job.id, now)?;
-        } else if now < work.claim_until {
+        }
+        if cleanup_failed {
+            return Err(Failure::Cleanup);
+        }
+        if now < work.job.deadline && now < work.claim_until {
             if matches!(error, IoError::Cancelled) && work.job.kind == JobKind::Restore {
                 match catalogue.transition(
                     tenant,
@@ -367,7 +383,14 @@ pub async fn run_once<C: JobPort, S: Storage>(
     result
 }
 
-fn guard(work: &Work, clock: &impl Clock, policy: &impl Policy) -> RunResult<u64> {
+fn guard(
+    catalogue: &mut impl JobPort,
+    work: &Work,
+    fence: &Fence,
+    clock: &impl Clock,
+    policy: &impl Policy,
+    authority: &dyn Authority,
+) -> RunResult<u64> {
     let now = clock.now()?;
     if now >= work.claim_until || now >= work.job.deadline {
         return Err(Error::Expired.into());
@@ -378,6 +401,13 @@ fn guard(work: &Work, clock: &impl Clock, policy: &impl Policy) -> RunResult<u64
     if policy.cancelled(work) {
         return Err(Failure::Io(IoError::Cancelled));
     }
+    catalogue.transition(
+        work.tenant,
+        fence.clone(),
+        Transition::Revalidate,
+        now,
+        authority,
+    )?;
     Ok(now)
 }
 
@@ -392,13 +422,13 @@ async fn execute<C: JobPort, S: Storage>(
     qualifier: &impl Qualifier,
     authority: &dyn Authority,
 ) -> RunResult<()> {
-    guard(work, clock, policy)?;
+    guard(catalogue, work, fence, clock, policy, authority)?;
     match work.job.kind {
         JobKind::Archive => {
             storage.post(work).await.map_err(Failure::Io)?;
-            guard(work, clock, policy)?;
+            guard(catalogue, work, fence, clock, policy, authority)?;
             let retrieved = storage.verify_archive(work).await.map_err(Failure::Io)?;
-            let now = guard(work, clock, policy)?;
+            let now = guard(catalogue, work, fence, clock, policy, authority)?;
             if retrieved[0].backbone == retrieved[1].backbone
                 || retrieved
                     .iter()
@@ -442,24 +472,26 @@ async fn execute<C: JobPort, S: Storage>(
                     now,
                 )?;
             }
+            let now = guard(catalogue, work, fence, clock, policy, authority)?;
             catalogue.transition(
                 work.tenant,
                 fence.clone(),
                 Transition::CompleteArchive,
-                guard(work, clock, policy)?,
+                now,
                 authority,
             )?;
         }
         JobKind::Restore => {
             storage.retrieve(work).await.map_err(Failure::Io)?;
-            guard(work, clock, policy)?;
+            guard(catalogue, work, fence, clock, policy, authority)?;
             let copy = storage.complete_restore(work).await.map_err(Failure::Io)?;
             complete(&work.metadata, &copy)?;
+            let now = guard(catalogue, work, fence, clock, policy, authority)?;
             let result = catalogue.transition(
                 work.tenant,
                 fence.clone(),
                 Transition::PublishRestore { copy: copy.clone() },
-                guard(work, clock, policy)?,
+                now,
                 authority,
             );
             if result == Err(Error::Conflict) {
@@ -472,7 +504,7 @@ async fn execute<C: JobPort, S: Storage>(
                 if winner == copy.location {
                     return Err(Error::Conflict.into());
                 }
-                guard(work, clock, policy)?;
+                guard(catalogue, work, fence, clock, policy, authority)?;
                 let receipt = storage
                     .verify_completed(work, &winner)
                     .await
@@ -481,11 +513,12 @@ async fn execute<C: JobPort, S: Storage>(
                 if receipt.location != winner {
                     return Err(Error::IncompleteCopy.into());
                 }
+                let now = guard(catalogue, work, fence, clock, policy, authority)?;
                 catalogue.transition(
                     work.tenant,
                     fence.clone(),
                     Transition::PublishRestore { copy: receipt },
-                    guard(work, clock, policy)?,
+                    now,
                     authority,
                 )?;
             } else {

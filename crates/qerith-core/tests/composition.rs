@@ -104,15 +104,32 @@ enum Injection {
     Interrupted,
 }
 
+type RecoveryInventory = (u64, u64, u64, String);
+type AttemptAllocation = (RecoveryInventory, u64);
+type IoHook = Box<dyn FnMut(&Work)>;
+
+fn inventory(work: &Work) -> RecoveryInventory {
+    (
+        work.tenant.0,
+        work.job.generation.0,
+        work.job.id.0,
+        work.inventory_ref.clone(),
+    )
+}
+fn allocation(work: &Work) -> AttemptAllocation {
+    (inventory(work), work.attempt)
+}
+
 /// The only byte source for a cold attempt is the producer's native engine
 /// ARTICLE adapter. The FixtureC value is an immutable assertion oracle, not a
 /// warm read path. Completed copies are private until a catalogue serving pin.
 struct Io {
     fixture: FixtureC,
     archives: [Archive; 2],
-    scratch: MemoryCache,
+    scratch: BTreeMap<AttemptAllocation, MemoryCache>,
     copies: BTreeMap<String, Vec<u8>>,
-    pending: Option<Vec<u8>>,
+    pending: BTreeMap<AttemptAllocation, Vec<u8>>,
+    completed: BTreeMap<RecoveryInventory, String>,
     trace: Trace,
     order: Vec<&'static str>,
     inject: Injection,
@@ -121,7 +138,7 @@ struct Io {
     expire_at_complete: Option<Rc<Time>>,
     expire_at_upload: Option<Rc<Time>>,
     attempts: Vec<(String, u64)>,
-    after_io: Option<Box<dyn FnMut(&Work)>>,
+    after_io: Option<IoHook>,
     cancel_at_complete: Option<Rc<Cell<bool>>>,
     expire_at_cleanup: Option<Rc<Time>>,
 }
@@ -152,9 +169,10 @@ impl Io {
         Self {
             fixture,
             archives: [a, b],
-            scratch: MemoryCache::default(),
+            scratch: BTreeMap::new(),
             copies: BTreeMap::new(),
-            pending: None,
+            pending: BTreeMap::new(),
+            completed: BTreeMap::new(),
             trace: Trace::default(),
             order: Vec::new(),
             inject: Injection::None,
@@ -224,21 +242,19 @@ impl Io {
     async fn cold_fetch(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         self.check(work)?;
         self.order.push("engine-retrieve");
+        let key = allocation(work);
+        let scratch = self.scratch.entry(key.clone()).or_default();
         let result = self.archives[0]
-            .reconstruct(
-                &self.fixture,
-                &mut self.scratch,
-                self.fault,
-                &mut self.trace,
-            )
+            .reconstruct(&self.fixture, scratch, self.fault, &mut self.trace)
             .await;
         if result.is_err() {
             assert!(self.archives[0].repair_without_retained_source().is_err());
             return Err(IoError::RepairUnavailable);
         }
-        let bytes = self.scratch.delivery(self.fixture.key()).unwrap().to_vec();
-        self.scratch.cleanup(self.fixture.key(), &mut self.trace);
-        self.pending = Some(bytes);
+        let bytes = scratch.delivery(self.fixture.key()).unwrap().to_vec();
+        scratch.cleanup(self.fixture.key(), &mut self.trace);
+        self.scratch.remove(&key);
+        self.pending.insert(key, bytes);
         Ok(())
     }
     fn deliver(
@@ -263,8 +279,9 @@ impl Io {
     }
     fn assert_cold(&self) {
         assert!(self.copies.is_empty());
-        assert!(self.pending.is_none());
-        self.scratch.assert_empty(&mut Trace::default());
+        assert!(self.pending.is_empty());
+        assert!(self.scratch.is_empty());
+        assert!(self.completed.is_empty());
     }
 }
 impl Storage for Io {
@@ -380,10 +397,22 @@ impl Storage for Io {
         if self.inject == Injection::Interrupted {
             return Err(IoError::Cancelled);
         }
-        if self.inject == Injection::RepairFailure {
-            return Err(IoError::RepairUnavailable);
+        self.check(work)?;
+        // Only the exact scoped inventory or catalogue location is eligible;
+        // arbitrary physical presence is never a recovery/authorization signal.
+        if let Some(location) = self
+            .completed
+            .get(&inventory(work))
+            .cloned()
+            .or_else(|| work.retained_location.clone())
+        {
+            self.verify_completed(work, &location).await?;
+        } else {
+            if self.inject == Injection::RepairFailure {
+                return Err(IoError::RepairUnavailable);
+            }
+            self.cold_fetch(work).await?;
         }
-        self.cold_fetch(work).await?;
         if let Some(hook) = &mut self.after_io {
             hook(work);
         }
@@ -394,39 +423,54 @@ impl Storage for Io {
         work: &Work,
     ) -> std::result::Result<CompleteCopy, IoError> {
         self.order.push("whole-generation-check");
-        let mut bytes = self.pending.take().ok_or(IoError::Integrity)?;
-        if self.inject == Injection::PartialRestore {
-            bytes.pop();
-        }
-        if self.inject == Injection::BadDigest {
-            bytes[2000] ^= 1;
-        }
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if bytes.len() as u64 != work.metadata.identity.length
-            || digest != work.metadata.identity.sha256
-            || work.metadata.checksums.iter().any(|c| {
-                c.algorithm != "SHA256"
-                    || c.kind != ChecksumType::FullObject
-                    || c.value != digest
-                    || !c.parts.is_empty()
-            })
-        {
-            return Err(IoError::Integrity);
-        }
-        let location = work.retained_location.clone().unwrap_or_else(|| {
-            format!(
+        let retained = self
+            .completed
+            .get(&inventory(work))
+            .cloned()
+            .or_else(|| work.retained_location.clone());
+        let location = if let Some(location) = retained {
+            self.verify_completed(work, &location).await?;
+            location
+        } else {
+            let mut bytes = self
+                .pending
+                .remove(&allocation(work))
+                .ok_or(IoError::Integrity)?;
+            if self.inject == Injection::PartialRestore {
+                bytes.pop();
+            }
+            if self.inject == Injection::BadDigest {
+                bytes[2000] ^= 1;
+            }
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            if bytes.len() as u64 != work.metadata.identity.length
+                || digest != work.metadata.identity.sha256
+                || work.metadata.checksums.iter().any(|c| {
+                    c.algorithm != "SHA256"
+                        || c.kind != ChecksumType::FullObject
+                        || c.value != digest
+                        || !c.parts.is_empty()
+                })
+            {
+                return Err(IoError::Integrity);
+            }
+            let location = format!(
                 "mock/{}/{}/job-{}-frozen",
                 work.tenant.0, work.job.generation.0, work.job.id.0
-            )
-        });
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.copies.entry(location.clone())
-        {
-            entry.insert(bytes);
-            self.order.push("cache-install");
-        } else {
-            self.verify_completed(work, &location).await?;
-        }
+            );
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.copies.entry(location.clone())
+            {
+                entry.insert(bytes);
+                self.order.push("cache-install");
+            } else {
+                self.verify_completed(work, &location).await?;
+            }
+            location
+        };
+        // Persist completion before acknowledging it; attempt cleanup never
+        // removes this stable entry or its immutable bytes.
+        self.completed.insert(inventory(work), location.clone());
         self.order.push("cache-complete");
         if let Some(cancelled) = &self.cancel_at_complete {
             cancelled.set(true);
@@ -469,8 +513,11 @@ impl Storage for Io {
             return Err(IoError::Retryable);
         }
         self.order.push("cleanup-incomplete");
-        self.pending = None;
-        self.scratch.restart(self.fixture.key(), &mut self.trace);
+        let key = allocation(work);
+        self.pending.remove(&key);
+        if let Some(mut scratch) = self.scratch.remove(&key) {
+            scratch.restart(self.fixture.key(), &mut self.trace);
+        }
         Ok(())
     }
 }
@@ -908,9 +955,17 @@ async fn old_cleanup_cannot_erase_new_attempt_staging() {
     new.claim_until = 40;
     c.claim(TENANT, job, 21, 40).unwrap();
     io.retrieve(&new).await.unwrap();
+    for work in [&old, &new] {
+        let scratch = io.scratch.entry(allocation(work)).or_default();
+        scratch.begin(io.fixture.key(), &mut io.trace);
+        scratch.append(io.fixture.key(), b"attempt-local partial", &mut io.trace);
+    }
     // Even a malformed caller snapshot must not affect the allocation key.
     old.job.checkpoint = 2;
     io.cleanup_incomplete(&old).await.unwrap();
+    assert!(!io.scratch.contains_key(&allocation(&old)));
+    assert!(io.scratch.contains_key(&allocation(&new)));
+    assert!(io.pending.contains_key(&allocation(&new)));
     let copy = io.complete_restore(&new).await.unwrap();
     assert_eq!(io.copies[&copy.location], io.fixture.bytes());
     assert_eq!(
@@ -1171,6 +1226,48 @@ async fn completed_restore_survives_lost_publication_without_replacement() {
             assert_eq!(io.copies.len(), 1);
         }
     }
+}
+
+#[tokio::test]
+async fn missing_recorded_completion_is_not_silently_refetched() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    io.expire_at_complete = Some(time.clone());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Catalogue(Error::Expired))
+    );
+    let completed = io.completed.values().next().unwrap().clone();
+    io.copies.remove(&completed).unwrap();
+    io.expire_at_complete = None;
+    let retrievals = io.order.iter().filter(|e| **e == "engine-retrieve").count();
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::Integrity))
+    );
+    assert_eq!(
+        io.order.iter().filter(|e| **e == "engine-retrieve").count(),
+        retrievals
+    );
+    assert!(io.copies.is_empty());
+    assert!(pin(&mut c, "object", 1001, time.0.get(), auth.as_ref()).is_err());
+}
+
+#[tokio::test]
+async fn unrecorded_physical_presence_cannot_authorize_recovery() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    io.copies
+        .insert("unrecorded-orphan".into(), io.fixture.bytes().to_vec());
+    io.inject = Injection::RepairFailure;
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    assert_eq!(
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await,
+        Err(Failure::Io(IoError::RepairUnavailable))
+    );
+    assert!(!io.order.contains(&"verify-winning-cache"));
+    assert!(pin(&mut c, "object", 1001, 11, auth.as_ref()).is_err());
 }
 
 #[tokio::test]
@@ -2204,10 +2301,20 @@ async fn lost_worker_restart_uses_checkpoint_and_fences_stale_publication() {
     .unwrap();
     // Lose only the worker's incomplete allocation. Do not clone/reimport the
     // authoritative catalogue or describe this as durable database recovery.
-    io.scratch.begin(io.fixture.key(), &mut io.trace);
-    io.scratch
-        .append(io.fixture.key(), b"stale partial", &mut io.trace);
-    io.scratch.restart(io.fixture.key(), &mut io.trace);
+    let key = (
+        (
+            TENANT.0,
+            GENERATION.0,
+            job.0,
+            "retained-inventory-before-worker-loss".into(),
+        ),
+        1,
+    );
+    let scratch = io.scratch.entry(key.clone()).or_default();
+    scratch.begin(io.fixture.key(), &mut io.trace);
+    scratch.append(io.fixture.key(), b"stale partial", &mut io.trace);
+    scratch.restart(io.fixture.key(), &mut io.trace);
+    io.scratch.remove(&key);
     time.0.set(21);
     run_once(
         &mut c,

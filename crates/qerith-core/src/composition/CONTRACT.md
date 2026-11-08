@@ -29,7 +29,13 @@ service, deployment or launch is supplied.
    Exact, still-valid evidence and independence replay is an atomic no-op in the
    catalogue, permitting restart after either proof write without refreshing its
    expiry. Changed same-time content/attribution still conflicts.
-4. Restore: engine retrieval to invisible staged cache -> whole-generation digest,
+4. Restore first reconciles the exact completed version recorded in the scoped
+   immutable inventory or retained catalogue location. The trusted `retrieve` port
+   verifies this version before considering another ARTICLE fetch, so loss of
+   publication can recover even when the archive is unavailable. A missing/corrupt
+   recorded completion fails closed without replacement or fallback healing;
+   arbitrary physical presence is neither inventory nor authority. With no recorded
+   completion: engine retrieval to invisible staged cache -> whole-generation digest,
    length and supported-checksum verification -> cache object completion -> trusted
    complete-copy receipt -> fenced `PublishRestore`. The existing catalogue checks
    archival qualification, live moderation epoch, current per-reference authority,
@@ -62,7 +68,15 @@ these ports are not cryptographic capabilities or proof-carrying data types.
 limits. Zero-length objects remain possible within a positive allocation budget.
 The composition checks committed N before allocation, policy admission before
 claims and every I/O boundary, checked time arithmetic, an absolute job deadline,
-and claim expiry before publication. Upload staging receives an explicit absolute
+and claim expiry before publication. At physical I/O boundaries the worker uses
+`Transition::Revalidate` through the same catalogue transition guards as final
+publication: live fence/claim, current authority snapshot, moderation/deletion and
+at least one authorized matching restore subscriber. This read-only transition
+neither advances the checkpoint nor touches generation revisions. Archive jobs do
+not require subscribers and cannot adopt a changed moderation epoch mid-claim.
+These checks stop the next port call after observed drift; they cannot interrupt
+an already-issued effect. Storage still owns in-call cancellation/timeout checks,
+and final publication remains authoritative. Upload staging receives an explicit absolute
 invocation deadline `min(now + claim_for, archive_deadline)` in the same trusted
 clock epoch. Storage must enforce that deadline and its cancellation signal inside
 staging; a late successful receipt still cannot commit or authorize cleanup.
@@ -93,7 +107,9 @@ Cancellation never cancels an archive obligation or another authorized subscribe
 Pre-claim invocation interruption leaves needed jobs queued without consuming an
 attempt. An interrupted claimed archive, or restore with a current subscriber,
 uses the explicit retry policy and attempt cap, not a restore-only cancellation
-transition. Only catalogue-confirmed unneeded restores become Cancelled.
+transition. Only catalogue-confirmed unneeded restores become Cancelled. This
+conditional cancellation is attempted independently of invocation interruption,
+before claiming or consuming a bounded attempt.
 The producer coalesces same-tenant/generation/profile/**fixed-deadline** requests;
 each reference has its own scope, subscription operation ID and availability
 period. A differing deadline is a separate physical job, not silently widened or
@@ -105,7 +121,12 @@ The Storage adapter must fence cleanup by its own immutable attempt allocation,
 not remove another claim's data. Completed copies, retained safety bytes and
 uncertain effects survive errors, including failed publication. `Uncertain`
 skips cleanup and requires stable-inventory reconciliation on the next bounded
-attempt. A cleanup failure is explicit; no retry is disguised as success. Ordinary
+attempt. Cleanup never starts after claim/deadline expiry. Deadline terminalization
+and outbox removal occur before cleanup or even after cleanup fails across the
+deadline; `Failure::Cleanup` remains explicit. The synthetic fixture keys scratch
+and pending bytes by tenant/generation/job/inventory/immutable attempt, not a
+mutable checkpoint snapshot; old cleanup cannot erase new staging or completion.
+No retry is disguised as success. Ordinary
 catalogue/admission failures leave the claim to expire and preserve bytes. An
 uncertain metadata commit must be reconciled with the original operation IDs;
 transport timeout never proves absence. Do not use automatic abort/deletion to
@@ -165,7 +186,12 @@ access-bearing recovery material. Live evidence additionally needs separately
 authorized windows, authenticated independence/readability artifacts and their
 validity; a synthetic record never upgrades to live qualification by relabeling.
 Consumers must parse `valid_until` and compare it with the window and decision
-time; passing the schema is never qualification or authorization.
+time; passing the schema is never qualification or authorization. Failed/incomplete
+records may contain an empty or ordered observed publication prefix, never reordered
+steps. Successful conclusions still require the exact full five-step sequence;
+authorization and qualification fields are mandatory for every conclusion. The
+schema regression pins these keywords and exercises prefix vectors, not a general
+JSON Schema implementation.
 
 Full suites, wasm/MSRV/clippy and ci-ok run only in GitHub Actions. No dependency
 or workflow changes are needed for the new integration test. The exact-head PR

@@ -67,7 +67,7 @@
         {"const": "engine_retrieval"}, {"const": "whole_generation_verified"},
         {"const": "cache_complete"}, {"const": "conditional_catalogue_publication"},
         {"const": "scoped_serving_pin"}
-      ], "minItems": 5, "maxItems": 5
+      ], "minItems": 0, "maxItems": 5
     },
     "qualification_refs": {
       "type": "object", "additionalProperties": false,
@@ -84,6 +84,7 @@
     "conclusion": {"enum": ["software_invariants_only", "window_pass_not_launch", "failed", "incomplete"]}
   },
   "allOf": [
+    {"if": {"properties": {"conclusion": {"enum": ["software_invariants_only", "window_pass_not_launch"]}}}, "then": {"properties": {"publication_order": {"minItems": 5}}}},
     {"if": {"properties": {"kind": {"const": "synthetic"}}}, "then": {"properties": {"qualification_refs": {"properties": {"synthetic_only": {"const": true}}}, "conclusion": {"enum": ["software_invariants_only", "failed", "incomplete"]}}}},
     {"if": {"properties": {"kind": {"const": "authorized_live_window"}}}, "then": {"properties": {"qualification_refs": {"properties": {"synthetic_only": {"const": false}}}, "conclusion": {"enum": ["window_pass_not_launch", "failed", "incomplete"]}}}}
   ],
