@@ -1,0 +1,27 @@
+{
+  "aws_cli": {
+    "version": "2.31.23",
+    "platform": "linux-x86_64",
+    "url": "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.31.23.zip",
+    "sha256": "eca61882437a815d7a7df9e70982a71cdaef0c4061cf4fb63a07726bd6dfee08",
+    "source_commit": "15a987e6645caa5e10a83504fd98c3eba9ff8dbc",
+    "bundled_sdk": "awscli.botocore 2.0.0dev155 (vendored at source_commit, not standalone botocore)",
+    "bundled_s3transfer": "0.5.1 (vendored at source_commit)",
+    "bundled_crt": "0.27.6",
+    "inventory_note": "Entire vendor distribution, including private SDK/CRT and bundled Python, is pinned by archive digest. Runtime aws --version, binary hashes and vendor dist-info inventory are also saved; no independent SDK wheel is substituted."
+  },
+  "python": {
+    "version": "3.12.8",
+    "boto3": "1.40.61",
+    "botocore": "1.40.61",
+    "crt": "not installed; boto3[crt] is not selected",
+    "lock": "requirements.lock",
+    "bootstrap_pip": "26.1"
+  },
+  "reviewed_at": "2026-11-08",
+  "sources": [
+    "https://pypi.org/pypi/<package>/<version>/json (wheel digests and upload timestamps)",
+    "https://github.com/aws/aws-cli/tree/15a987e6645caa5e10a83504fd98c3eba9ff8dbc",
+    "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.31.23.zip (HTTPS vendor artifact, SHA256 recorded before execution)"
+  ]
+}
