@@ -547,7 +547,17 @@ impl<A: Access> Service<A> {
                 else {
                     return Err(n::ErrorCode::Unavailable);
                 };
-                n::ResponseBody::Cancel(cancel_outcome(outcome))
+                let record = View {
+                    service: self,
+                    scope,
+                }
+                .job(job)
+                .ok_or(n::ErrorCode::NotAuthorized)?;
+                n::ResponseBody::Cancel(if record.value.cleanup_required {
+                    n::CancelOutcome::CleanupRequired
+                } else {
+                    cancel_outcome(outcome)
+                })
             }
         };
         let initiated_upload = match &body {
@@ -568,7 +578,15 @@ impl<A: Access> Service<A> {
                 body.clone(),
             ),
         );
-        self.check_response(scope, request, body.clone())?;
+        // Response validation needs the tentative issuance record to recognize
+        // post-effect reconciliation. Never retain a rejected response for replay.
+        if let Err(error) = self.check_response(scope, request, body.clone()) {
+            self.model
+                .native
+                .replay
+                .remove(&(scope.clone(), request.request_id.clone()));
+            return Err(error);
+        }
         Ok(body)
     }
     fn check_response(

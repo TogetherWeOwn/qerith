@@ -82,10 +82,10 @@ async fn native(
     rules: &Rules,
 ) -> n::ResponseBody {
     service
-        .native_call(
+        .native_bytes(
             &scope(),
             &id("root"),
-            request,
+            &serde_json::to_vec(request).unwrap(),
             s::UploadWorker {
                 storage: io,
                 budget: &budget(),
@@ -94,6 +94,7 @@ async fn native(
             },
         )
         .await
+        .unwrap()
         .body
 }
 fn text(name: &str, value: &str) -> (String, o::Value) {
@@ -115,25 +116,37 @@ fn parity(
     let mut other = s::Service::reconnect(
         service.checkpoint(),
         service.access().clone(),
-        limits(),
+        service.limits().clone(),
         profile(),
         service.now(),
     )
     .unwrap();
-    let rest = o::rest_call(
+    let arguments = fields
+        .into_iter()
+        .map(|(name, value)| {
+            let value = match value {
+                o::Value::Text(value) => serde_json::json!(value),
+                o::Value::Number(value) => serde_json::json!(value),
+                o::Value::Flag(value) => serde_json::json!(value),
+            };
+            (name, value)
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let bytes = serde_json::to_vec(&arguments).unwrap();
+    let rest = o::rest_request(
         service,
         Some(scope),
         "POST",
         &format!("/v1/operations/{}", op.definition().name),
-        fields.clone(),
+        &bytes,
     );
-    let mcp = o::mcp_call(
+    let mcp = o::mcp_request(
         &mut other,
         Some(scope),
         o::McpSession::default(),
         o::TaskMode::Baseline,
         op.definition().name,
-        fields,
+        &bytes,
     );
     assert_eq!(rest.outcome, mcp.outcome);
     assert_eq!(rest.outcome.is_err(), mcp.is_error);
@@ -909,6 +922,256 @@ async fn staged_handles_expiry_stale_generation_and_delete_have_shared_gates() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn committed_upload_and_copy_results_replays_obey_current_moderation() {
+    let (mut service, mut io, transfer, job, _) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules,
+        )
+        .await
+        .unwrap();
+    let fields = vec![
+        text("source", "object"),
+        text("source_generation", transfer.target.generation.as_str()),
+        text("reference", "copy"),
+        ("if_absent".into(), o::Value::Flag(true)),
+        text("identity", "copy_once"),
+    ];
+    let copied = parity(&mut service, &scope(), o::Operation::Copy, fields.clone()).unwrap();
+    let o::Output::Job(copy_job) = &copied else {
+        panic!("copy");
+    };
+    assert_eq!(
+        parity(&mut service, &scope(), o::Operation::Copy, fields.clone()).unwrap(),
+        copied
+    );
+    let generation = GenerationId(
+        transfer
+            .target
+            .generation
+            .as_str()
+            .strip_prefix("g_")
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    service
+        .catalogue_mut()
+        .set_moderation(TENANT, generation, 1, true)
+        .unwrap();
+    let before = service.allocations();
+    for handle in [&job.handle, &copy_job.handle] {
+        for operation in [o::Operation::Status, o::Operation::Result] {
+            assert!(parity(
+                &mut service,
+                &scope(),
+                operation,
+                vec![text("job", handle.as_str())]
+            )
+            .is_err());
+        }
+    }
+    assert!(parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer)
+    )
+    .is_err());
+    assert!(parity(&mut service, &scope(), o::Operation::Copy, fields).is_err());
+    assert_eq!(service.allocations(), before);
+}
+
+#[tokio::test]
+async fn bounded_admission_allows_exact_replay_and_reserves_actual_record_delta() {
+    let (service, io, transfer, job, auth) = pending_upload().await;
+    let mut bounded = limits();
+    bounded.records = 4;
+    let mut service = s::Service::reconnect(
+        service.checkpoint(),
+        Access(auth.clone()),
+        bounded,
+        profile(),
+        10,
+    )
+    .unwrap();
+    let initiation = vec![
+        text("reference", "object"),
+        text("identity", "init"),
+        ("max_bytes".into(), o::Value::Number(io.identity().length)),
+        ("if_absent".into(), o::Value::Flag(true)),
+    ];
+    let replay = parity(
+        &mut service,
+        &scope(),
+        o::Operation::InitiateUpload,
+        initiation.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        replay,
+        o::Output::Upload {
+            transfer: transfer.clone(),
+            job: job.clone()
+        }
+    );
+    fully_stage(&mut service, &io, &transfer);
+    // Three existing records leave room for exactly one commit replay record.
+    let committed = parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    assert_eq!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::CommitUpload,
+            commit_fields(&transfer)
+        )
+        .unwrap(),
+        committed
+    );
+    assert_eq!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::InitiateUpload,
+            initiation.clone()
+        )
+        .unwrap(),
+        replay
+    );
+    let mut changed = commit_fields(&transfer);
+    changed.push(("unexpected".into(), o::Value::Flag(true)));
+    assert!(parity(&mut service, &scope(), o::Operation::CommitUpload, changed).is_err());
+    assert_eq!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::Cancel,
+            vec![
+                text("job", job.handle.as_str()),
+                text("identity", "no_capacity")
+            ]
+        )
+        .unwrap_err()
+        .code,
+        o::ErrorCode::QuotaExceeded
+    );
+    auth.denied.borrow_mut().insert("object".into());
+    assert_eq!(
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::InitiateUpload,
+            initiation
+        )
+        .unwrap_err()
+        .code,
+        o::ErrorCode::Denied,
+        "capacity-free replay must still recheck authority"
+    );
+}
+
+#[tokio::test]
+async fn native_uncertain_cancel_returns_cleanup_required_and_replays() {
+    let (mut service, mut io, transfer, job, _) = pending_upload().await;
+    fully_stage(&mut service, &io, &transfer);
+    parity(
+        &mut service,
+        &scope(),
+        o::Operation::CommitUpload,
+        commit_fields(&transfer),
+    )
+    .unwrap();
+    let time = Time(Cell::new(10));
+    let rules = Rules::default();
+    io.inject = Injection::PartialUpload;
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &time,
+                &rules
+            )
+            .await
+            .unwrap_err()
+            .effects,
+        o::Effects::Unknown
+    );
+    let calls = io.order.len();
+    let policy = profile();
+    let negotiate = request(
+        "cancel_session",
+        None,
+        n::Action::Capabilities(n::Offer {
+            versions: vec![1],
+            profiles: vec![policy.profiles[0].profile.clone()],
+            limits: policy.limits,
+        }),
+    );
+    let n::ResponseBody::Capabilities(selection) =
+        native(&mut service, &negotiate, &mut io, &time, &rules).await
+    else {
+        panic!("session");
+    };
+    let cancel = request(
+        "native_cleanup_cancel",
+        Some(&selection.session),
+        n::Action::Cancel {
+            job: nid(job.handle.as_str()),
+        },
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            native(&mut service, &cancel, &mut io, &time, &rules).await,
+            n::ResponseBody::Cancel(n::CancelOutcome::CleanupRequired)
+        );
+    }
+    assert!(service
+        .finish_upload(
+            &scope(),
+            &transfer.handle,
+            &mut io,
+            &budget(),
+            &time,
+            &rules
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        io.order.len(),
+        calls,
+        "cancel and replay never restart storage"
+    );
+    assert!(service
+        .catalogue()
+        .lookup(TENANT, "object", 10, service.access().0.as_ref())
+        .is_err());
 }
 
 #[tokio::test]

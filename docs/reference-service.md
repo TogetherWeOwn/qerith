@@ -86,7 +86,19 @@ pinned velmora synthetic NNTP ARTICLE/yEnc path; no engine implementation or
 second cold-store simulator is copied into the service. The golden path covers
 native negotiation/initiate/interrupted resume/commit, metadata, REST/MCP
 browse/stat/copy/cancel/status/result and explicit cold restore before a pinned
-download. Negative cases record matching errors and allocation counts.
+download. Requests pass through the bounded native JSON decoder and the merged
+REST/MCP argument decoders, not just the typed projections. Negative cases record
+matching errors and upload/job/transfer allocation counts (not a complete inventory
+of auxiliary reference-model or catalogue rows). Regression coverage includes
+clock-advanced retry, retained uncertain effects, cancellation without new I/O,
+moderated upload/copy results and replays, allocation-free reconciliation at the
+record limit, and native cleanup-aware cancellation with same-ID replay.
+
+Admission reserves the actual delta for the combined upload/job/download/cursor/
+operation-replay record pool. Existing exact-request replays consume no capacity,
+but still pass current authority, precondition and resource-policy checks.
+Descriptor bindings and native sessions/replay each retain their own bounded pools;
+these reference limits are not a production memory-budget qualification.
 
 Actions uploads `service-positive.json`, `service-negative.json` and the exact PR
 head SHA in `product-service-<head>` artifacts. The normal native, wasm, MSRV,

@@ -200,8 +200,22 @@ impl<A: Access> Service<A> {
     pub fn access(&self) -> &A {
         &self.access
     }
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
     pub fn now(&self) -> u64 {
         self.now
+    }
+    fn reserve(&self, additional: usize) -> Result<(), o::Failure> {
+        let count = self.model.uploads.len()
+            + self.model.jobs.len()
+            + self.model.transfers.len()
+            + self.model.cursors.len()
+            + self.model.replay.len();
+        if count.saturating_add(additional) > self.limits.records {
+            return Err(fail(o::ErrorCode::QuotaExceeded));
+        }
+        Ok(())
     }
     pub fn set_now(&mut self, now: u64) -> Result<(), o::Failure> {
         if now < self.now {
@@ -755,7 +769,7 @@ impl<A: Access> o::OperationPort for Service<A> {
         }
         Ok(())
     }
-    fn admit(&mut self, _: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+    fn admit(&mut self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
         if request
             .number("max_bytes")
             .is_some_and(|b| b > self.limits.bytes)
@@ -765,17 +779,21 @@ impl<A: Access> o::OperationPort for Service<A> {
         {
             return Err(fail(o::ErrorCode::QuotaExceeded));
         }
-        let count = self.model.uploads.len()
-            + self.model.jobs.len()
-            + self.model.transfers.len()
-            + self.model.cursors.len()
-            + self.model.replay.len();
-        if request.operation().definition().effects != o::EffectClass::ReadOnly
-            && count + 4 > self.limits.records
-        {
-            return Err(fail(o::ErrorCode::QuotaExceeded));
+        if self.replay(scope, request)?.is_some() {
+            return Ok(());
         }
-        Ok(())
+        // Reserve only the actual new rows, including the reconciliation row.
+        // Read-only browse reserves a cursor at the insertion point instead.
+        let additional = match request.operation() {
+            o::Operation::InitiateUpload => 3,
+            o::Operation::Copy
+            | o::Operation::Delete
+            | o::Operation::Restore
+            | o::Operation::AuthorizeDownload => 2,
+            o::Operation::CommitUpload | o::Operation::AbortUpload | o::Operation::Cancel => 1,
+            _ => 0,
+        };
+        self.reserve(additional)
     }
     fn resolve_cursor(
         &mut self,
@@ -984,9 +1002,7 @@ impl<A: Access> Service<A> {
                     .filter(|e| self.exact(scope, &e.target).is_ok())
                     .collect::<Vec<_>>();
                 let cursor = if entries.len() > limit as usize {
-                    if self.model.cursors.len() >= self.limits.records {
-                        return Err(fail(o::ErrorCode::QuotaExceeded));
-                    }
+                    self.reserve(1)?;
                     let id = token("cursor", self.next()?);
                     self.model.cursors.insert(
                         id.clone(),
