@@ -748,6 +748,147 @@ fn restore_xml_rejects_unknown_fields_and_unqualified_days_tiers() {
 }
 
 #[test]
+fn repeated_and_quoted_metadata_have_one_authenticated_semantics() {
+    let h = Headers::new(
+        &[
+            ("host", "s3.us-east-1.amazonaws.com"),
+            ("cache-control", "public"),
+            ("Cache-Control", "no-store"),
+            ("content-disposition", "attachment; filename=\"a  b.txt\""),
+        ],
+        &policy(),
+    )
+    .unwrap();
+    assert_eq!(h.get("cache-control"), Some("public,no-store"));
+    assert_eq!(
+        h.get("content-disposition"),
+        Some("attachment; filename=\"a  b.txt\"")
+    );
+    let t = Target::parse("/bucket/key", &policy()).unwrap();
+    let canonical = canonical_request(
+        "PUT",
+        &t,
+        &h,
+        "cache-control;content-disposition;host",
+        EMPTY_SHA,
+        false,
+    )
+    .unwrap();
+    assert!(canonical.contains("cache-control:public,no-store\n"));
+    assert!(canonical.contains("content-disposition:attachment; filename=\"a b.txt\"\n"));
+    for name in ["content-type", "content-disposition", "expires"] {
+        assert!(Headers::new(&[(name, "a"), (name, "b")], &policy()).is_err());
+    }
+}
+
+#[test]
+fn persistent_metadata_cannot_be_added_to_an_existing_presign() {
+    let v = fixture("presign-put");
+    let t = Target::parse(v["target"].as_str().unwrap(), &policy()).unwrap();
+    for (name, value) in [
+        ("content-disposition", "attachment"),
+        ("content-language", "en"),
+        ("cache-control", "public"),
+        ("expires", "Sat, 25 May 2013 00:00:00 GMT"),
+    ] {
+        let mut f = fields(&v);
+        set(&mut f, name, value);
+        assert_eq!(
+            verify("PUT", &t, &headers(&f), true, NOW, &policy(), &authority()).unwrap_err(),
+            ErrorCode::AccessDenied
+        );
+    }
+}
+
+#[test]
+fn all_http_date_forms_enforce_conditions_before_cold_state() {
+    let m = metadata(None);
+    for value in [
+        "Fri, 24 May 2013 00:00:00 GMT",
+        "Friday, 24-May-13 00:00:00 GMT",
+        "Fri May 24 00:00:00 2013",
+    ] {
+        let c = Conditions {
+            if_modified_since: Some(value.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan_read(&m, false, &c, None, false, false).unwrap().status,
+            304,
+            "{value}"
+        );
+    }
+    for value in [
+        "Thu, 23 May 2013 00:00:00 GMT",
+        "Thursday, 23-May-13 00:00:00 GMT",
+        "Thu May 23 00:00:00 2013",
+    ] {
+        let c = Conditions {
+            if_unmodified_since: Some(value.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            plan_read(&m, false, &c, None, false, false).unwrap_err(),
+            ErrorCode::PreconditionFailed,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn not_modified_retains_corresponding_cache_policy() {
+    let m = ObjectMetadata::new(
+        "g".into(),
+        10,
+        "\"opaque\"".into(),
+        NOW,
+        vec![
+            ("cache-control".into(), "private, no-store".into()),
+            ("expires".into(), "Sat, 25 May 2013 00:00:00 GMT".into()),
+        ],
+        None,
+    )
+    .unwrap();
+    let c = Conditions {
+        if_none_match: Some("\"opaque\"".into()),
+        ..Default::default()
+    };
+    let p = plan_read(&m, false, &c, None, false, false).unwrap();
+    assert_eq!(p.status, 304);
+    assert!(p.body.is_none());
+    assert_eq!(header(&p, "cache-control"), Some("private, no-store"));
+    assert_eq!(header(&p, "expires"), Some("Sat, 25 May 2013 00:00:00 GMT"));
+}
+
+#[test]
+fn restore_declaration_is_unique_validated_and_before_the_root() {
+    let root = "<RestoreRequest><Days>1</Days></RestoreRequest>";
+    assert_eq!(
+        parse_restore(
+            format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{root}").as_bytes(),
+            &policy()
+        ),
+        Ok(1)
+    );
+    for prefix in [
+        "<?xml version=\"1.0\"?><?xml version=\"1.0\"?>",
+        "<?xml version=\"2.0\"?>",
+        "<?xml encoding=\"UTF-8\"?>",
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>",
+    ] {
+        assert!(
+            parse_restore(format!("{prefix}{root}").as_bytes(), &policy()).is_err(),
+            "{prefix}"
+        );
+    }
+    assert!(parse_restore(
+        format!("{root}<?xml version=\"1.0\"?>").as_bytes(),
+        &policy()
+    )
+    .is_err());
+}
+
+#[test]
 fn explicit_policy_is_required_and_errors_are_s3_xml_except_head() {
     let mut l = limits();
     l.max_restore_days = 0;

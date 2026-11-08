@@ -162,6 +162,7 @@ pub fn verify(
         // The content SHA is itself canonical request input. All other semantic
         // fields must be signed; transport/client headers may remain unsigned.
         if (key.starts_with("x-amz-") && key != "x-amz-content-sha256"
+            || super::wire::persistent_metadata(key)
             || matches!(
                 key,
                 "content-md5"

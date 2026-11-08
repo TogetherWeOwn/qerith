@@ -80,16 +80,7 @@ impl ObjectMetadata {
             || !valid_tag(&etag)
             || DateTime::from_timestamp(modified, 0).is_none()
             || content_headers.iter().any(|(k, v)| {
-                !(k.starts_with("x-amz-meta-") && k.len() > 11
-                    || matches!(
-                        k.as_str(),
-                        "content-type"
-                            | "content-encoding"
-                            | "content-language"
-                            | "content-disposition"
-                            | "cache-control"
-                            | "expires"
-                    ))
+                !super::wire::persistent_metadata(k)
                     || !k
                         .bytes()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
@@ -208,9 +199,9 @@ fn matches_tag(list: &str, etag: &str, weak: bool) -> Result<bool> {
 }
 
 fn http_date(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc2822(value)
-        .ok()
-        .map(|v| v.timestamp())
+    let parsed = httpdate::parse_http_date(value).ok()?;
+    let seconds = parsed.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    i64::try_from(seconds).ok()
 }
 
 fn format_date(value: i64) -> String {
@@ -289,12 +280,19 @@ pub fn plan_read(
     checksum_mode: bool,
 ) -> Result<ReadPlan> {
     if !conditions.evaluate(metadata)? {
+        let mut headers: Vec<_> = metadata
+            .content_headers
+            .iter()
+            .filter(|(k, _)| matches!(k.as_str(), "cache-control" | "expires"))
+            .cloned()
+            .collect();
+        headers.extend([
+            ("etag".into(), metadata.etag.clone()),
+            ("last-modified".into(), format_date(metadata.modified)),
+        ]);
         return Ok(ReadPlan {
             status: 304,
-            headers: vec![
-                ("etag".into(), metadata.etag.clone()),
-                ("last-modified".into(), format_date(metadata.modified)),
-            ],
+            headers,
             body: None,
         });
     }

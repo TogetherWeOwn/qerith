@@ -190,7 +190,9 @@ pub(crate) fn unhex(value: &str) -> Result<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let a = (pair[0] as char)
                 .to_digit(16)

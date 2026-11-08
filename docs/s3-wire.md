@@ -11,7 +11,12 @@ here. No live providers, credentials, customer data or deployment are involved.
 1. Enforce ingress HTTP framing and trusted HTTPS. Pass the **raw, unnormalized
    origin-form request target** and original ordered header values into `Target`
    and `Headers`. Never use form decoding (`+` is not a space), URL path cleanup,
-   slash merging, dot resolution or Unicode normalization. HTTP/2 adapters map
+   slash merging, dot resolution or Unicode normalization. `Headers` preserves
+   interior value whitespace (including quoted metadata) for semantic access,
+   combines repeated list values in order, and rejects singleton duplicates.
+   SigV4 whitespace folding occurs only in canonical signing input. All retained
+   content/cache metadata fields must be signed, with a shared field classifier.
+   HTTP/2 adapters map
    the trusted `:authority` to one Host field and reject conflicting authority.
 2. `verify` validates local SigV4 header/presign authentication against an explicit
    endpoint/region and caller clock. `Authority` resolves only local permanent
@@ -40,8 +45,9 @@ here. No live providers, credentials, customer data or deployment are involved.
    Abandoned/failed staging must be discarded. Recheck authority before commit.
 6. For authorized GET/HEAD, resolve G and validate input, then `plan_read` evaluates
    conditions, range and only then cold state. A matching ETag suppresses
-   If-Unmodified-Since; If-None-Match suppresses If-Modified-Since. Invalid dates
-   are ignored. Applicable 304/412/416 precede cold 403. Multiple ranges are 400.
+   If-Unmodified-Since; If-None-Match suppresses If-Modified-Since. HTTP-date
+   parsing supports IMF-fixdate, RFC 850 and asctime; invalid dates are ignored.
+   Bodyless 304 retains the corresponding Cache-Control and Expires metadata. Applicable 304/412/416 precede cold 403. Multiple ranges are 400.
    HEAD is always bodyless; satisfiable HEAD Range changes Content-Length but
    keeps status 200. GET range is inclusive, clamped, 206 and exact slice of C.
 7. Recheck current authority at queue/publication/serving admission, including
@@ -154,6 +160,7 @@ than three days):
 | hmac | 0.13.0 | 2026-03-29T23:19:21Z | build=false; RustCrypto HMAC over existing sha2 0.11.1 |
 | ctutils | 0.4.8 | 2026-11-02T20:07:29Z | build=false; digest's maintained constant-time verification |
 | cmov | 0.5.4 | 2026-05-28T19:07:33Z | build=false; ctutils portable/architecture primitive dependency |
+| httpdate | 1.0.3 | 2023-08-13T10:55:54Z | No build.rs/proc macros or runtime dependencies; all three HTTP-date formats |
 
 Exact SHA256 integrity is in Cargo.lock. Existing chrono 0.4.45 (std only, no
 clock/timezone runtime), crc32fast 1.5.3, md5 0.8.1, quick-xml 0.42.0, sha2 0.11.1,

@@ -13,6 +13,7 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
     reader.config_mut().trim_text(true);
     let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut root_seen = false;
+    let mut declaration_seen = false;
     let mut parameters_seen = false;
     let mut days = None;
     let mut tier = None;
@@ -64,7 +65,34 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
                     _ => {}
                 }
             }
-            Event::Decl(_) if !root_seen => {}
+            Event::Decl(e) => {
+                if root_seen
+                    || declaration_seen
+                    || e.version().map_err(|_| ErrorCode::MalformedXML)? != "1.0"
+                {
+                    return Err(ErrorCode::MalformedXML);
+                }
+                declaration_seen = true;
+                let attributes = quick_xml::events::BytesStart::from_content(e.as_ref(), 3);
+                let mut position = 0;
+                for attr in attributes.attributes() {
+                    let attr = attr.map_err(|_| ErrorCode::MalformedXML)?;
+                    let next = match attr.key.as_ref() {
+                        "version" if position == 0 && attr.value == "1.0" => 1,
+                        "encoding" if position == 1 && attr.value.eq_ignore_ascii_case("UTF-8") => {
+                            2
+                        }
+                        "standalone"
+                            if (1..=2).contains(&position)
+                                && matches!(attr.value.as_ref(), "yes" | "no") =>
+                        {
+                            3
+                        }
+                        _ => return Err(ErrorCode::MalformedXML),
+                    };
+                    position = next;
+                }
+            }
             Event::Eof => break,
             _ => return Err(ErrorCode::InvalidRequest),
         }

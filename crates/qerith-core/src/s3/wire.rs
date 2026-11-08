@@ -162,7 +162,23 @@ fn decode(value: &str) -> Result<Vec<u8>> {
 /// Header names are case insensitive; repeated ordinary fields retain value
 /// order. Ambiguous singleton fields are rejected before signing or framing.
 #[derive(Clone, Debug)]
-pub struct Headers(Vec<(String, String)>);
+pub struct Headers {
+    fields: Vec<(String, String)>,
+    combined: Vec<(String, String)>,
+}
+
+pub(crate) fn persistent_metadata(name: &str) -> bool {
+    name.starts_with("x-amz-meta-") && name.len() > 11
+        || matches!(
+            name,
+            "content-type"
+                | "content-encoding"
+                | "content-language"
+                | "content-disposition"
+                | "cache-control"
+                | "expires"
+        )
+}
 
 impl Headers {
     pub fn new(fields: &[(&str, &str)], policy: &Policy) -> Result<Self> {
@@ -195,6 +211,9 @@ impl Headers {
                         | "transfer-encoding"
                         | "content-md5"
                         | "content-encoding"
+                        | "content-type"
+                        | "content-disposition"
+                        | "expires"
                         | "range"
                         | "if-match"
                         | "if-none-match"
@@ -205,23 +224,32 @@ impl Headers {
             {
                 return Err(ErrorCode::InvalidRequest);
             }
-            out.push((
-                name,
-                value.split_ascii_whitespace().collect::<Vec<_>>().join(" "),
-            ));
+            out.push((name, value.trim_matches([' ', '\t']).to_owned()));
         }
-        Ok(Self(out))
+        let mut combined: Vec<(String, String)> = Vec::new();
+        for (name, value) in &out {
+            if let Some((_, existing)) = combined.iter_mut().find(|(n, _)| n == name) {
+                existing.push(',');
+                existing.push_str(value);
+            } else {
+                combined.push((name.clone(), value.clone()));
+            }
+        }
+        Ok(Self {
+            fields: out,
+            combined,
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0
+        self.combined
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        self.combined.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     pub(crate) fn validate_features(&self) -> Result<()> {
@@ -284,9 +312,10 @@ pub fn canonical_request(
     let mut canonical = String::new();
     for name in names {
         let values: Vec<_> = headers
+            .fields
             .iter()
-            .filter(|(k, _)| *k == name)
-            .map(|(_, v)| v)
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
             .collect();
         if values.is_empty() {
             return Err(ErrorCode::InvalidRequest);

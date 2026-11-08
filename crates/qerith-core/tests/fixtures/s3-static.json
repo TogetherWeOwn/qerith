@@ -208,6 +208,54 @@
     "canonical_only": false
   },
   {
+    "name": "signed-metadata",
+    "method": "PUT",
+    "target": "/bucket/key",
+    "headers": [
+      [
+        "Content-Length",
+        "3"
+      ],
+      [
+        "Content-Disposition",
+        "attachment; filename=\"a  b.txt\""
+      ],
+      [
+        "Cache-Control",
+        "private, no-store"
+      ],
+      [
+        "Expires",
+        "Sat, 25 May 2013 00:00:00 GMT"
+      ],
+      [
+        "Content-Language",
+        "en"
+      ],
+      [
+        "X-Amz-Date",
+        "20130524T000000Z"
+      ],
+      [
+        "X-Amz-Content-SHA256",
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      ],
+      [
+        "Host",
+        "s3.us-east-1.amazonaws.com"
+      ],
+      [
+        "Authorization",
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=cache-control;content-disposition;content-language;content-length;expires;host;x-amz-content-sha256;x-amz-date, Signature=446dcd39be2d05cffe4f97a03427c4b7d675015daa4d89f9975ed613a4ecfbb2"
+      ]
+    ],
+    "signed_headers": "cache-control;content-disposition;content-language;content-length;expires;host;x-amz-content-sha256;x-amz-date",
+    "canonical": "PUT\n/bucket/key\n\ncache-control:private, no-store\ncontent-disposition:attachment; filename=\"a b.txt\"\ncontent-language:en\ncontent-length:3\nexpires:Sat, 25 May 2013 00:00:00 GMT\nhost:s3.us-east-1.amazonaws.com\nx-amz-content-sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\nx-amz-date:20130524T000000Z\n\ncache-control;content-disposition;content-language;content-length;expires;host;x-amz-content-sha256;x-amz-date\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "body": "abc",
+    "presigned": false,
+    "canonical_only": false
+  },
+  {
     "name": "presign-get",
     "method": "GET",
     "target": "/bucket/key?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIDEXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=4e92e518768b38697e05b1ba05c38ab19c4fdfb43194d4c95c879c958bfa807c",
