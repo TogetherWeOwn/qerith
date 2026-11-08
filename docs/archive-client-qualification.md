@@ -129,10 +129,15 @@ old client security support or of other builds/platforms.
 | `boto3-default` | Empty Botocore `Config()`, explicit synthetic endpoint/region/credentials/CA only. Default checksum/framing/signing/retry/transport settings are recorded from runtime config. Outer 100 s process bound; no default setting silently replaced. Diagnostic rows. |
 | `cli-restrictive` / `boto3-restrictive` | Path addressing, SigV4 payload signing, optional checksum calculation/validation `when_required`, standard retry mode with total attempts 1, connect 2 s/read 3 s. PUT and multipart parts explicitly provide SHA256 integrity; multipart negotiates SHA256 COMPOSITE. Bytes have known fixed lengths. All declared rows must pass. |
 
-Required checksum/signature validation is never disabled. Optional unsupported
-CRC64NVME/aws-chunked/trailers stay red/unqualified rather than being translated
-by the relay or silently accepted. `when_required` is **not** a global integrity
-bypass: explicit SHA256 request checksums and server-side body validation remain.
+Required checksum/signature validation is never disabled. Restrictive profiles
+also select `ChecksumAlgorithm=SHA256` for DeleteObjects: integrity is required
+for that operation even under `when_required`, and the pinned CLI otherwise
+selects unsupported CRC64NVME. The SDK computes SHA256 over its serialized XML;
+the server validates that checksum before any logical deletion. Defaults receive
+no algorithm override. Unsupported CRC64NVME/aws-chunked/trailers stay red/unqualified
+rather than being translated by the relay or silently accepted. `when_required`
+is **not** a global integrity bypass: explicit SHA256 request checksums and
+server-side body validation remain.
 The runner never edits the independent `scripts/s3-static-vectors.py` vectors;
 the parent's raw SigV4 assertions remain independent of client normalization.
 

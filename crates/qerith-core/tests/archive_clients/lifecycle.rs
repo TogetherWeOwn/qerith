@@ -193,6 +193,53 @@ async fn retained_restore_reuses_version_then_both_cache_kinds_can_be_evicted() 
 }
 
 #[tokio::test]
+async fn delete_objects_validates_selected_sha256_before_mutation() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut f = Fixture::new();
+    f.control("configure", br#"{"host":"localhost:443"}"#).await;
+    assert_eq!(f.call("PUT", "/archive", b"", &[]).await.status, 200);
+    assert_eq!(
+        f.call("PUT", "/archive/key", b"retained", &[]).await.status,
+        200
+    );
+    let body = b"<Delete><Object><Key>key</Key></Object></Delete>";
+    error(
+        &f.call(
+            "POST",
+            "/archive?delete",
+            body,
+            &[
+                ("x-amz-sdk-checksum-algorithm", "SHA256"),
+                (
+                    "x-amz-checksum-sha256",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                ),
+            ],
+        )
+        .await,
+        400,
+        "BadDigest",
+    );
+    assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 200);
+    let checksum = STANDARD.encode(Sha256::digest(body));
+    assert_eq!(
+        f.call(
+            "POST",
+            "/archive?delete",
+            body,
+            &[
+                ("x-amz-sdk-checksum-algorithm", "SHA256"),
+                ("x-amz-checksum-sha256", &checksum),
+            ],
+        )
+        .await
+        .status,
+        200
+    );
+    assert_eq!(f.call("HEAD", "/archive/key", b"", &[]).await.status, 404);
+}
+
+#[tokio::test]
 async fn completion_sha256_header_is_rejected_not_ignored() {
     let mut f = Fixture::new();
     f.control("configure", br#"{"host":"localhost:443"}"#).await;

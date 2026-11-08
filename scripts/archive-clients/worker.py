@@ -494,8 +494,11 @@ class Matrix:
     def delete(self):
         keys = [KEY, "multipart.bin", "copy.bin", "copy-replace.bin", "part-copy.bin",
                 "list-a.bin", "list-b.bin", "absent.bin"]
+        # DeleteObjects requires integrity even with when_required. The vendor CLI
+        # otherwise chooses unsupported CRC64NVME; select SHA256, never omit it.
+        options = {"ChecksumAlgorithm": "SHA256"} if self.client.restrictive else {}
         result = self.client.call("delete_objects", Bucket=self.bucket,
-                                  Delete={"Objects": [{"Key": key} for key in keys]})
+                                  Delete={"Objects": [{"Key": key} for key in keys]}, **options)
         assert not result.get("Errors"), result
         assert sorted(item["Key"] for item in result["Deleted"]) == sorted(keys)
         self.client.call("delete_object", **self.object)

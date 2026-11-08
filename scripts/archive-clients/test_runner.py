@@ -70,6 +70,30 @@ class CliArgumentTests(unittest.TestCase):
             self.assertEqual(result["ResponseMetadata"]["HTTPStatusCode"], 200)
 
 
+class DeleteChecksumTests(unittest.TestCase):
+    def test_restrictive_delete_selects_sha256_without_changing_defaults(self):
+        for profile in PROFILES:
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch("worker.Client") as factory:
+                client = factory.return_value
+                client.restrictive = profile.endswith("restrictive")
+
+                def invoke(operation, **parameters):
+                    if operation == "delete_objects":
+                        if client.restrictive:
+                            self.assertEqual(parameters["ChecksumAlgorithm"], "SHA256")
+                        else:
+                            self.assertNotIn("ChecksumAlgorithm", parameters)
+                        return {"Deleted": parameters["Delete"]["Objects"]}
+                    return {}
+
+                client.call.side_effect = invoke
+                matrix = Matrix(SimpleNamespace(profile=profile), Path(directory))
+                matrix.delete()
+                client.expect_error.assert_called_once_with(
+                    "get_object", ["NoSuchKey"], 404, **matrix.object)
+
+
 class FixtureControlTests(unittest.TestCase):
     def test_every_profile_resets_before_its_first_s3_request(self):
         for profile in PROFILES:
