@@ -20,9 +20,10 @@ use super::{
     ObjectMetadata, Policy, Response, Result, StoredChecksum, UploadValidator, VerifiedRequest,
 };
 use crate::catalogue::{
-    self as cat, Action, Authority, Checksum, ChecksumType, CiphertextIdentity, CiphertextMetadata,
-    CompleteCopy, GenerationId, JobPort, MemoryCatalogue, MetadataOutbox, Mutation,
-    MutationTargets, OperationId, Outcome, Reference, ReferenceView, TenantId, WriteTarget,
+    self as cat, Action, ArchiveReadPort, Authority, Checksum, ChecksumType, CiphertextIdentity,
+    CiphertextMetadata, CompleteCopy, GenerationId, JobPort, MemoryCatalogue, MetadataOutbox,
+    Mutation, MutationTargets, OperationId, Outcome, Reference, ReferenceView, TenantId,
+    WriteTarget,
 };
 
 /// Deliberately no Default. Numbers are explicit synthetic fixture inputs, not
