@@ -9,6 +9,7 @@
 //! replacement STREAM format lands in velmora first and Qerith moves to
 //! that pin once it merges.
 
+pub mod catalogue;
 pub mod native;
 pub mod operations;
 
