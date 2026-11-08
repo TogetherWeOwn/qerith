@@ -30,8 +30,8 @@ catalogue's authoritative types when composing product tests.
    are chosen at `spawn`; `PartialStagedWrite` and `CancelAfter` operate at the
    staged-write boundary during `reconstruct`. Use the same fault at both calls
    for the standard scenarios. The timeout case has 60 s server latency and a
-   50 ms attempt deadline; normal attempts have a 10 s outer bound and 2 s per
-   transport operation. A delayed archive is explicitly **one-shot**: completing
+   50 ms ARTICLE deadline, starting after connection/authentication; every attempt
+   retains a 10 s outer bound and 2 s per transport operation. A delayed archive is explicitly **one-shot**: completing
    `reconstruct` shuts down that server and its delayed sessions. Another call
    returns `Unavailable` until `archive.reset(fault).await` creates a fresh server.
    This avoids accumulating authenticated slots: the pinned server's ARTICLE

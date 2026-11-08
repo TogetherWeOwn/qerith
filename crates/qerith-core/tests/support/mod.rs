@@ -309,14 +309,12 @@ impl Archive {
         fault: Fault,
         trace: &mut Trace,
     ) -> Result<Reconstruction, Failure> {
-        let deadline = if fault == Fault::Timeout {
-            Duration::from_millis(50)
-        } else {
-            Duration::from_secs(10)
-        };
-        let result = tokio::time::timeout(deadline, self.fetch(expected, cache, fault, trace))
-            .await
-            .unwrap_or(Err(Failure::Timeout));
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.fetch(expected, cache, fault, trace),
+        )
+        .await
+        .unwrap_or(Err(Failure::Timeout));
         // The pinned server's ARTICLE delay ignores client disconnect. End the
         // entire delayed server after one attempt, releasing its auth slots via
         // upstream shutdown rather than accumulating sleeping sessions on retry.
@@ -344,16 +342,23 @@ impl Archive {
         for (n, article) in self.articles.iter().enumerate() {
             trace.0.push(Event::Article(n));
             let mut raw = Vec::new();
-            client
-                .article_to(engine_id(article), &mut raw)
-                .await
-                .map_err(|err| {
-                    if matches!(err, qerith_core::Error::ArticleNotFound(_)) {
-                        Failure::Missing
-                    } else {
-                        Failure::Transport
-                    }
-                })?;
+            let retrieval = client.article_to(engine_id(article), &mut raw);
+            // Start the injected deadline only after connection/authentication
+            // and the ARTICLE boundary, not during unrelated session setup.
+            let result = if fault == Fault::Timeout {
+                tokio::time::timeout(Duration::from_millis(50), retrieval)
+                    .await
+                    .map_err(|_| Failure::Timeout)?
+            } else {
+                retrieval.await
+            };
+            result.map_err(|err| {
+                if matches!(err, qerith_core::Error::ArticleNotFound(_)) {
+                    Failure::Missing
+                } else {
+                    Failure::Transport
+                }
+            })?;
             let mut part = vec![0; PART_SIZE];
             let decoded = yenc::decode_part_to(&article.message_id, &raw, &mut part)
                 .map_err(|_| Failure::Integrity)?;
