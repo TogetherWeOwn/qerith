@@ -10,6 +10,7 @@
 //! that pin once it merges.
 
 pub mod catalogue;
+pub mod native;
 pub mod operations;
 pub mod s3;
 
