@@ -32,6 +32,9 @@ jobs:
     name: rust test (native)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      QERITH_SERVICE_EVIDENCE_DIR: ${{ runner.temp }}/product-service
+      QERITH_EVIDENCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +53,18 @@ jobs:
       # Includes the pinned-engine smoke test (NZB parse, NNTP fetch against
       # velmora-test-nntp, yEnc round trip).
       - run: cargo test --locked --workspace
+      - name: Require positive and negative service evidence
+        run: |
+          test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-positive.json"
+          test -s "$QERITH_SERVICE_EVIDENCE_DIR/service-negative.json"
+          printf '%s\n' "$QERITH_EVIDENCE_HEAD" > "$QERITH_SERVICE_EVIDENCE_DIR/head-sha.txt"
+      - name: Upload reference-service invariant evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: product-service-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/product-service/
+          if-no-files-found: error
+          retention-days: 7
 
   rust-wasm:
     name: rust check (wasm32)

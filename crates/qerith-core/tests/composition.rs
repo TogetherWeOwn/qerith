@@ -1,6 +1,8 @@
 #![cfg(feature = "native-tls")]
 #![allow(dead_code)]
 
+#[path = "composition/service.rs"]
+mod product_service;
 mod support;
 
 use std::cell::{Cell, RefCell};

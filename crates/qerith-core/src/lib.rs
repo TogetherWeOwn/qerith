@@ -14,6 +14,7 @@ pub mod composition;
 pub mod native;
 pub mod operations;
 pub mod s3;
+pub mod service;
 
 pub use velmora::{nntp, nzb, segment_identity, transport, transports, yenc};
 pub use velmora::{Error, Result};
