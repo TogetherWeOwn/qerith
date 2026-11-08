@@ -1199,6 +1199,207 @@ fn seeded_and_reserved_generations_do_not_collide_and_reconcile() {
 }
 
 #[test]
+fn preseeded_job_handles_survive_acceptance_status_and_replay() {
+    for transport in TRANSPORTS {
+        for operation in [
+            Operation::Copy,
+            Operation::InitiateUpload,
+            Operation::Restore,
+            Operation::Delete,
+        ] {
+            let mut fixture = Fixture::default();
+            let a = scope("a");
+            fixture.objects.insert(
+                (id("a"), id("seed")),
+                Entry {
+                    target: target("seed", "g2"),
+                    bytes: 16,
+                    available: true,
+                },
+            );
+            let prefix = if operation == Operation::InitiateUpload {
+                "uploadjob"
+            } else {
+                "mutationjob"
+            };
+            for sequence in 1..=3 {
+                let mut job = fixture.jobs[&(a.clone(), id("restorejob"))].clone();
+                job.handle = id(&format!("{prefix}{sequence}"));
+                fixture.jobs.insert((a.clone(), job.handle.clone()), job);
+            }
+            let previous = fixture.jobs.clone();
+            let fields = args(operation);
+            let accepted =
+                call(transport, &mut fixture, Some(&a), operation, fields.clone()).unwrap();
+            let job = match &accepted {
+                Output::Upload { transfer, job } => {
+                    assert_eq!(transfer.target, job.target);
+                    job
+                }
+                Output::Job(job) => job,
+                _ => panic!(),
+            };
+            assert_eq!(job.handle, id(&format!("{prefix}4")));
+            if matches!(operation, Operation::Copy | Operation::InitiateUpload) {
+                assert_eq!(job.target.generation, id("g3"));
+            }
+            assert_eq!(fixture.jobs.len(), previous.len() + 1);
+            let jobs = fixture.jobs.clone();
+            let uploads = fixture.uploads.clone();
+            let sequence = fixture.sequence;
+            for replay_transport in TRANSPORTS {
+                for ((owner, handle), previous_job) in &previous {
+                    assert_eq!(
+                        call(
+                            replay_transport,
+                            &mut fixture,
+                            Some(owner),
+                            Operation::Status,
+                            vec![text("job", handle.as_str())]
+                        ),
+                        Ok(Output::Job(previous_job.clone()))
+                    );
+                }
+                assert_eq!(
+                    call(
+                        replay_transport,
+                        &mut fixture,
+                        Some(&a),
+                        operation,
+                        fields.clone()
+                    ),
+                    Ok(accepted.clone())
+                );
+                assert_eq!(fixture.jobs, jobs);
+                assert_eq!(fixture.uploads, uploads);
+                assert_eq!(fixture.sequence, sequence);
+                assert_eq!(fixture.effects, 1);
+                assert_eq!(fixture.replay.len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn preseeded_upload_handles_preserve_transfer_identity_and_replay() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        fixture.objects.insert(
+            (id("a"), id("seed")),
+            Entry {
+                target: target("seed", "g2"),
+                bytes: 16,
+                available: true,
+            },
+        );
+        for sequence in 2..=3 {
+            let reference = format!("seed{sequence}");
+            let mut job = fixture.jobs[&(a.clone(), id("restorejob"))].clone();
+            job.handle = id(&format!("seedjob{sequence}"));
+            job.target = target(&reference, "g1");
+            let mut fields = args(Operation::InitiateUpload);
+            fields.retain(|(name, _)| name != "reference");
+            fields.push(text("reference", &reference));
+            let record = UploadRecord {
+                transfer: Transfer {
+                    handle: id(&format!("upload{sequence}")),
+                    target: job.target.clone(),
+                    direction: TransferDirection::Upload,
+                    expires_at: 1000,
+                    max_bytes: 64,
+                },
+                job: job.handle.clone(),
+                initiation: Operation::InitiateUpload
+                    .definition()
+                    .validate(fields)
+                    .unwrap(),
+                committed: false,
+            };
+            fixture.jobs.insert((a.clone(), job.handle.clone()), job);
+            fixture
+                .uploads
+                .insert((a.clone(), record.transfer.handle.clone()), record);
+        }
+        let previous = fixture.uploads.clone();
+        let previous_jobs = fixture.jobs.clone();
+        let fields = args(Operation::InitiateUpload);
+        let accepted = call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::InitiateUpload,
+            fields.clone(),
+        )
+        .unwrap();
+        let Output::Upload { transfer, job } = &accepted else {
+            panic!()
+        };
+        assert_eq!(transfer.handle, id("upload4"));
+        assert_eq!(job.handle, id("uploadjob2"));
+        assert_eq!(transfer.target, job.target);
+        assert_eq!(job.target.generation, id("g3"));
+        assert_eq!(fixture.uploads.len(), previous.len() + 1);
+        for (key, record) in &previous {
+            assert_eq!(&fixture.uploads[key], record);
+        }
+        for (key, job) in &previous_jobs {
+            assert_eq!(&fixture.jobs[key], job);
+        }
+        let jobs = fixture.jobs.clone();
+        let uploads = fixture.uploads.clone();
+        let sequence = fixture.sequence;
+        for replay_transport in TRANSPORTS {
+            assert_eq!(
+                call(
+                    replay_transport,
+                    &mut fixture,
+                    Some(&a),
+                    Operation::InitiateUpload,
+                    fields.clone()
+                ),
+                Ok(accepted.clone())
+            );
+            assert_eq!(fixture.jobs, jobs);
+            assert_eq!(fixture.uploads, uploads);
+            assert_eq!(fixture.sequence, sequence);
+            assert_eq!(fixture.effects, 1);
+        }
+        for ((owner, _), record) in &previous {
+            let previous_job = &previous_jobs[&(owner.clone(), record.job.clone())];
+            assert_eq!(
+                call(
+                    transport,
+                    &mut fixture,
+                    Some(owner),
+                    Operation::Status,
+                    vec![text("job", record.job.as_str())]
+                ),
+                Ok(Output::Job(previous_job.clone()))
+            );
+            let Output::Cancel {
+                job: stopped,
+                outcome,
+            } = call(
+                transport,
+                &mut fixture,
+                Some(owner),
+                Operation::AbortUpload,
+                finish_upload(&record.transfer, record.transfer.handle.as_str()),
+            )
+            .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(stopped.handle, record.job);
+            assert_eq!(stopped.target, record.transfer.target);
+            assert_eq!(outcome, CancelOutcome::StoppedBeforeCommit);
+        }
+        assert_eq!(fixture.jobs[&(a, job.handle.clone())], *job);
+    }
+}
+
+#[test]
 fn competing_uploads_recheck_destination_fences_and_cannot_republish() {
     for transport in TRANSPORTS {
         let mut fixture = Fixture::default();
