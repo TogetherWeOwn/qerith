@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from contract import PROFILES, UNQUALIFIED, missing_result, passed
 from relay import Relay, loopback_upstream
+import supervisor
 
 PROFILE_SECONDS = 100
 RUNNER_SECONDS = 440
@@ -48,21 +49,26 @@ def finalize_manifest(evidence, head):
 
 def run_bounded(command, env, output, seconds):
     with output.open("wb") as log:
+        # The worker leads its own process group inside the runner's session.
+        # A separate session would put the group beyond the out-of-session
+        # supervisor's enumeration, so process_group=0 must not become setsid.
         process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+                                   process_group=0)
         try:
             return process.wait(timeout=seconds)
         finally:
             # The worker may have launched a CLI subprocess. Always reap the group,
             # including when the worker exits early, times out or receives SIGTERM.
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            # Reap an already-exited leader first so the group check is accurate.
+            process.poll()
+            supervisor.terminate_group(process.pid, sys.stderr.buffer)
             try:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait(timeout=3)
             # A leader can exit before its descendants. Do not leave that group alive.
             try:
@@ -122,7 +128,19 @@ def execute(args):
     evidence.mkdir(parents=True, exist_ok=True)
     manifest = initial_manifest(evidence)
     started = time.monotonic()
+    # SIGKILL of this runner bypasses every finally below, so teardown of worker
+    # process groups cannot be owned here. The runner leads a dedicated session
+    # (sid == runner pid) and an out-of-session supervisor watches a heartbeat
+    # pipe; on EOF it TERM/KILLs every group in the session and verifies.
+    session_id = supervisor.ensure_session()
+    watchdog = None
+    heartbeat = None
     try:
+        # Keep `heartbeat` bound until return: the write fd is what EOFs on
+        # runner death, so it must survive every intermediate scope.
+        watchdog, heartbeat = supervisor.spawn_supervisor(
+            session_id, evidence / "supervisor.log")
+        manifest["supervisor"] = {"pid": watchdog.pid, "session": session_id}
         loopback_upstream(args.upstream)
         assert os.environ.get("GITHUB_ACTIONS") == "true", "runtime is Actions-only"
         pins = manifest["pins"]
@@ -195,6 +213,12 @@ def execute(args):
         manifest["overall"] = "fail"
         raise
     finally:
+        # The heartbeat must stay open for the runner's entire lifetime: closing
+        # it inside finally would report EOF while this group is still alive and
+        # the supervisor would TERM the runner mid-manifest. Process exit closes
+        # the fd, so teardown order is manifest first, containment reap second.
+        # The watchdog is never awaited here either; waiting on a child that
+        # exits only after this process dies would deadlock or self-TERM.
         manifest["elapsed_seconds"] = round(time.monotonic() - started, 3)
         manifest["artifacts"] = artifact_hashes(evidence)
         write_json(evidence / "manifest.json", manifest)
@@ -211,6 +235,20 @@ def main():
         raise KeyboardInterrupt("runner cancelled")
 
     signal.signal(signal.SIGTERM, terminate)
+
+    # Once setsid runs, signals aimed at the outer cargo/timeout group cannot
+    # reach this runner. An orphaned runner must still unwind promptly instead
+    # of holding worker groups for the full bounded lifetime.
+    import threading
+    parent_pid = os.getppid()
+
+    def watch_parent():
+        while parent_pid != 1 and os.getppid() != 1:
+            time.sleep(1)
+        if parent_pid != 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=watch_parent, daemon=True).start()
     try:
         return execute(args)
     except BaseException as error:
