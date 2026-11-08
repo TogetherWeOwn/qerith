@@ -66,27 +66,33 @@ follow redirects or decode chunked uploads. `Expect: 100-continue` works through
 bidirectional forwarding. Synthetic relay tests compare exact request/response
 bytes, including encoded targets and unsupported chunk/trailer framing.
 
-Authenticated controls return HTTP 200 with a JSON object; failed control
-assertions fail qualification. Controls apply fixture-wide to eligible objects:
+Authenticated controls return HTTP 200 with a JSON object containing `ok: true`;
+missing/false acknowledgements and failed control assertions fail qualification.
+Controls apply fixture-wide to eligible objects:
 
 | Control | Required Rust-owned assertion/effect |
 | --- | --- |
-| `archive` | Compose archive posting, simulated exact-G verification, lawful retained eviction, and empty delivery cache; no hot-byte substitute |
+| `reset` | Tear down all model/spool state before each profile's first S3 request; preserve configured TLS host, request budget and sanitized event history |
+| `archive` | Compose archive posting from empty NNTP spools, real engine POST, simulated exact-G ARTICLE verification, lawful retained eviction, and empty delivery/pending/completion caches; no hot-byte substitute |
 | `restore` | Process pending whole-generation reconstruction/verification/publication, or record injected failure without a lease |
 | `expire` | Advance trusted domain clock beyond leases; keep request-signing skew independent |
 | `restart` | Clone/reconnect in-memory model while preserving pending job/state; not actual crash durability |
 | `fail` | Next whole-generation restore I/O fails |
 
 Control responses are saved as row observations; the parent fixture must assert
-its own exact-G/eviction/capacity invariants, not merely return counters.
+its own exact-G/eviction/capacity invariants, not merely return counters. The parent
+also offers `revoke`/`allow` and a `foreign` synthetic tenant identity; this slice
+does not claim their broader tenant/revocation qualification.
 
 Fixture sizes are deliberately small: the main object is 272 arbitrary bytes,
 two multipart parts are 256 bytes each (the fixture minimum nonfinal part must
 be at most 256), and listing uses three keys with a one-key page. Main key is
 `opaque/%2F +/café/../payload.bin`: once-only decoding must not change identity.
 Content type, cache control, user metadata, ETag, LastModified, length and selected
-checksums remain stable across restore states. Each profile uses its own bucket;
-failed profiles may leave objects for process teardown, never a live service.
+checksums remain stable across restore states. Each profile uses its own bucket
+and resets the fixture first, so a failed earlier profile cannot contaminate the
+next profile's cold archive preconditions. A failed reset prevents all S3 calls
+in that profile; later profiles still attempt their own reset.
 
 Copy-after-restore is a must-pass row after true retained eviction. The runner
 never reuploads/warm-substitutes the source to make copy succeed. A failed copy
@@ -133,7 +139,8 @@ the parent's raw SigV4 assertions remain independent of client normalization.
 The canonical ordered matrix is `scripts/archive-clients/contract.py::ROWS`.
 Both restrictive profiles declare every row must-pass:
 
-1. Bucket creation, ListBuckets/HeadBucket/location.
+1. Authenticated fixture reset with explicit success acknowledgement, before any
+   S3 request; then bucket creation, ListBuckets/HeadBucket/location.
 2. PUT, retained metadata/checksum HEAD, no immediate GET lease, cold copy denial.
 3. Conditional 304 before restore and bounded encoded-key listing pagination.
 4. Multipart initiation, two uploads, ListParts, completion, no immediate GET;
@@ -162,7 +169,9 @@ but does not falsely convert the restrictive target into default support.
 ## Bounds, evidence and supply-chain controls
 
 - Job 30 min; setup 300 s; Rust build 900 s; fixture execution 600 s with TERM and
-  10 s KILL fallback. Rust separately owns request/process lifetime caps.
+  10 s KILL fallback. Rust separately caps its fixture at 4,096 requests / 900 s,
+  1 MiB request bodies, 64 commits, 100 multipart parts and 8 MiB staged bytes.
+  These synthetic caps are not qualified production sizes or customer entitlements.
 - Python runner 440 s; each of four profile processes 100 s; CLI calls 20 s;
   direct control calls 5 s. Worker process groups are terminated/reaped in `finally`.
   Fixture restore is one explicit control call, not an unbounded application poll.
@@ -174,8 +183,11 @@ but does not falsely convert the restrictive target into default support.
 - `manifest.json` starts as FAIL before dependency installation, with every row
   unqualified. Thus setup/build/missing-fixture failures still have honest evidence.
   Final manifest includes exact head, pins, actual platform/inventory, settings,
-  bounds, every row and artifact SHA256. The manifest itself is not self-hashed;
-  the Actions artifact/run identifies it. Upload uses `always()`, retention 7 days.
+  bounds, every row and artifact SHA256. An `always()` finalizer refreshes hashes
+  after Rust exits and saves its final `service-trace.json`, even on failure; it
+  never promotes a failed/incomplete run to PASS. The manifest itself is not
+  self-hashed; the Actions artifact/run identifies it. Upload uses `always()`,
+  retention 7 days.
 - No host dependency installations. An ephemeral venv bootstraps exactly hash-pinned
   pip 26.1; the preinstalled pip lacks native age filtering, so this **single pinned
   wheel**, published 2026-04-26, is the documented bootstrap exception. Thereafter

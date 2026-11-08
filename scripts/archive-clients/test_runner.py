@@ -12,11 +12,72 @@ import threading
 import unittest
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from contract import PROFILES, ROWS, missing_result, passed
 from relay import Relay, loopback_upstream
-from runner import artifact_hashes, profile_environment, run_bounded
+from runner import artifact_hashes, finalize_manifest, profile_environment, run_bounded
+from worker import Matrix, control
+
+
+class FixtureControlTests(unittest.TestCase):
+    def test_every_profile_resets_before_its_first_s3_request(self):
+        for profile in PROFILES:
+            events = []
+            with tempfile.TemporaryDirectory() as directory, mock.patch("worker.Client") as factory:
+                client = factory.return_value
+                client.sequence, client.settings = 0, {}
+                client.restrictive = profile.endswith("restrictive")
+
+                def stop_at_first_call(*_args, **_kwargs):
+                    events.append("s3")
+                    raise RuntimeError("stop after first S3 call")
+
+                client.call.side_effect = stop_at_first_call
+                args = SimpleNamespace(profile=profile)
+                matrix = Matrix(args, Path(directory))
+                with mock.patch("worker.control", side_effect=lambda _args, command:
+                                events.append(command) or {"ok": True}) as fixture:
+                    with self.assertRaisesRegex(RuntimeError, "stop after first S3 call"):
+                        matrix.run()
+                self.assertEqual(events, ["reset", "s3"])
+                fixture.assert_called_once_with(args, "reset")
+                self.assertEqual(matrix.rows[0]["id"], "reset-fixture")
+                self.assertEqual(matrix.rows[0]["outcome"], "pass")
+
+    def test_failed_reset_prevents_all_s3_requests(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch("worker.Client") as factory:
+            client = factory.return_value
+            client.sequence, client.settings, client.restrictive = 0, {}, True
+            matrix = Matrix(SimpleNamespace(profile="cli-restrictive"), Path(directory))
+            with mock.patch("worker.control", side_effect=AssertionError("reset failed")):
+                with self.assertRaisesRegex(AssertionError, "reset failed"):
+                    matrix.run()
+            client.call.assert_not_called()
+            result = json.loads((Path(directory) / "result.json").read_text())
+            self.assertEqual(result["rows"][0]["outcome"], "fail")
+            self.assertTrue(all(r["outcome"] == "unqualified" for r in result["rows"][1:]))
+
+    def test_controls_require_bounded_json_success_and_bearer_auth(self):
+        args = SimpleNamespace(upstream="http://127.0.0.1:1234", control_token="synthetic")
+        for body, status in ((b'{"ok":true}', 200), (b'{"ok":false}', 200),
+                             (b'{}', 200), (b'[]', 200), (b'{"ok":true}', 500),
+                             (b' ' * 65537, 200)):
+            with mock.patch("worker.http.client.HTTPConnection") as factory:
+                connection = factory.return_value
+                response = connection.getresponse.return_value
+                response.status, response.read.return_value = status, body
+                if body == b'{"ok":true}' and status == 200:
+                    self.assertEqual(control(args, "reset"), {"ok": True})
+                else:
+                    with self.assertRaises(AssertionError):
+                        control(args, "reset")
+                factory.assert_called_once_with("127.0.0.1", 1234, timeout=5)
+                connection.request.assert_called_once_with("POST", "/__fixture/reset", body=b"",
+                    headers={"Authorization": "Bearer synthetic"})
+                response.read.assert_called_once_with(65537)
+                connection.close.assert_called_once_with()
 
 
 class ManifestTests(unittest.TestCase):
@@ -61,6 +122,29 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(passed(results))
         self.assertFalse(results[0]["qualified"])
         self.assertTrue(all(row["outcome"] == "unqualified" for row in results[0]["rows"]))
+
+    def test_finalization_hashes_fixture_exit_trace_without_promoting_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = root / "service-trace.json"
+            trace.write_text('{"stage":"before runner exit"}')
+            data = {"head": "tested-head", "overall": "fail", "profiles": self.results(),
+                    "artifacts": artifact_hashes(root)}
+            before = data["artifacts"]["service-trace.json"]
+            trace.write_text('{"stage":"after fixture exit"}')
+            (root / "manifest.json").write_text(json.dumps(data))
+            self.assertFalse(finalize_manifest(root, "tested-head"))
+            saved = json.loads((root / "manifest.json").read_text())
+            self.assertEqual(saved["overall"], "fail")
+            self.assertNotEqual(saved["artifacts"]["service-trace.json"], before)
+            self.assertEqual(saved["artifacts"], artifact_hashes(root))
+            saved["overall"] = "pass"
+            (root / "manifest.json").write_text(json.dumps(saved))
+            self.assertFalse(finalize_manifest(root, "different-head"))
+            self.assertTrue(finalize_manifest(root, "tested-head"))
+            saved["profiles"][1]["rows"][0]["outcome"] = "fail"
+            (root / "manifest.json").write_text(json.dumps(saved))
+            self.assertFalse(finalize_manifest(root, "tested-head"))
 
     def test_artifacts_have_content_hashes_not_self_referential_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -175,6 +259,7 @@ class RelayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with Relay(f"http://127.0.0.1:{upstream.getsockname()[1]}", self.cert, self.key, directory) as relay:
                 context = ssl.create_default_context(cafile=self.cert)
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
                 with socket.create_connection(("127.0.0.1", int(relay.endpoint.rsplit(":", 1)[1])), timeout=5) as raw:
                     with context.wrap_socket(raw, server_hostname="localhost") as tls:
                         tls.sendall(request)
@@ -211,6 +296,7 @@ class RelayTests(unittest.TestCase):
                 upstream.settimeout(5)
                 with Relay(f"http://127.0.0.1:{upstream.getsockname()[1]}", self.cert, self.key, directory) as relay:
                     context = ssl.create_default_context(cafile=self.cert)
+                    context.minimum_version = ssl.TLSVersion.TLSv1_2
                     with socket.create_connection(("127.0.0.1", int(relay.endpoint.rsplit(":", 1)[1])), timeout=5) as raw:
                         with context.wrap_socket(raw, server_hostname="localhost") as tls:
                             server, _ = upstream.accept()

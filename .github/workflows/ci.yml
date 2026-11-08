@@ -237,10 +237,15 @@ jobs:
           # group per client/profile. The outer deadline also handles fixture hangs.
           ulimit -f 131072
           timeout --signal=TERM --kill-after=10s 600s cargo test --locked -p qerith-core --test archive_clients -- --ignored --nocapture
+      - name: Finalize trace hashes after fixture exit and validate qualification
+        if: ${{ always() }}
+        run: |
           python3 -I - <<'PY'
-          import json, os, pathlib
-          data = json.loads((pathlib.Path(os.environ['QERITH_CLIENT_EVIDENCE_DIR']) / 'manifest.json').read_text())
-          assert data['head'] == os.environ['QERITH_EVIDENCE_HEAD'] and data['overall'] == 'pass', data
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('scripts/archive-clients').resolve()))
+          import runner
+          assert runner.finalize_manifest(pathlib.Path(os.environ['QERITH_CLIENT_EVIDENCE_DIR']),
+                                          os.environ['QERITH_EVIDENCE_HEAD']), 'qualification incomplete or failed'
           PY
       - name: Upload bounded qualification evidence even on failure
         if: ${{ always() }}
