@@ -90,7 +90,11 @@ Abort before commit prevents publication; after commit it returns 404
 accepted completion request can replay its original result during bounded result
 retention, including after a later overwrite. Changed evidence never replays a
 successful result. This reconciles a lost completion response, not arbitrary
-request idempotency. Success XML is produced only from an accepted commit;
+request idempotency. Success XML is produced only from an accepted commit.
+`copy_response` includes the committed `LastModified`; `complete_response` includes
+`Location`, `Bucket` and decoded `Key`, binding a parsed ingress target back to the
+committed destination and using the trusted policy endpoint (not client Host).
+Accepted results retain their destination and timestamp for identical retries.
 `completion_result` explicitly treats an embedded `<Error>` in HTTP 200 as failure.
 The parsers bound XML and reject unknown fields, DTD/entity expansion, unsupported
 versions and duplicate fields. XML predefined/numeric escapes preserve Unicode
@@ -123,15 +127,26 @@ original keys. It returns per-key results, suppressing successful keys in quiet
 mode while retaining errors. It never deletes shared byte versions. The shared
 catalogue deletion worker and its serving pins, reference counts and integrity
 proofs remain the sole physical-cleanup authority; there is no Usenet erasure
-promise. Aborting multipart never deletes an already committed generation.
+promise. Trusted fixture workers execute a queued event through
+`MemoryMutations::delete_retained`, which obtains a fresh catalogue dispatch,
+checks the exact tenant/generation storage version and verification deadline,
+removes its retained allocation, and publishes catalogue acknowledgement in the
+same exclusive boundary. It rejects stale, wrong-tenant and replayed events.
+Workers must not acknowledge fixture storage deletion directly through
+`catalogue_worker`: that port only updates metadata, not the byte allocation.
+Production storage adapters need durable dispatch/completion reconciliation.
+Aborting multipart never deletes an already committed generation.
 
 ## Explicit synthetic resource/retry policy
 
 `MutationPolicy` has no default. It validates object/part size, minimum nonfinal
 part size, part count (at most 10,000), per-tenant session slots, aggregate staged
-part bytes, batch-delete count (at most 1,000), fixed session lifetime, accepted
-completion result retention and completion attempt ceiling. Zero/contradictory
-limits are rejected. Replacement subtracts the replaced bytes before admission.
+part bytes, batch-delete count (at most 1,000), fixed session lifetime, a separate
+archive work window, accepted completion result retention and completion attempt
+ceiling. Every commit derives the archive deadline as commit time plus
+`archive_window`, so late session completion still grants the entire work window.
+Zero/contradictory limits, overflowing deadlines and unrepresentable XML commit
+timestamps are rejected before publication. Replacement subtracts the replaced bytes before admission.
 Polls and replacements do not extend lifetime. Expired sessions do not gain more
 capacity until the caller explicitly invokes bounded `cleanup(now, limit)`.
 An expiry-ordered index bounds inspection as well as removals, across all

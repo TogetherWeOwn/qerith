@@ -40,12 +40,27 @@ fn auth() -> Auth {
         denied: None,
     }
 }
-struct WireAuth;
+struct WireAuth {
+    secret: [u8; 32],
+}
+impl WireAuth {
+    fn new() -> Self {
+        use std::io::Read;
+        let mut secret = [0; 32];
+        // Linux CI fixture only: fresh OS entropy, no service credential or I/O
+        // beyond the local random device. Never suppress the key-analysis rule.
+        std::fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut secret)
+            .unwrap();
+        Self { secret }
+    }
+}
 impl s3::Authority for WireAuth {
     fn credential(&self, _: &str) -> Option<s3::Credential<'_>> {
         Some(s3::Credential {
             principal: "fixture",
-            secret: b"fixture-secret",
+            secret: &self.secret,
         })
     }
     fn authorize(&self, _: &str, _: &str, _: &s3::Target) -> bool {
@@ -81,6 +96,7 @@ fn mutation_policy() -> MutationPolicy {
         staged_bytes: 64,
         batch_keys: 10,
         lifetime: 100,
+        archive_window: 200,
         result_retention: 30,
         max_attempts: 10,
     }
@@ -161,9 +177,11 @@ fn body_with(
         "UNSIGNED-PAYLOAD",
         false,
     )?;
+    let authority = WireAuth::new();
+    let signing_secret = [b"AWS4".as_slice(), authority.secret.as_slice()].concat();
     let key = hmac(
         &hmac(
-            &hmac(&hmac(b"AWS4fixture-secret", b"20130524"), b"fixture"),
+            &hmac(&hmac(&signing_secret, b"20130524"), b"fixture"),
             b"s3",
         ),
         b"aws4_request",
@@ -175,7 +193,11 @@ fn body_with(
     let authorization = format!("AWS4-HMAC-SHA256 Credential=fixture/20130524/fixture/s3/aws4_request, SignedHeaders={signed}, Signature={}", hex(&hmac(&key, string.as_bytes())));
     fields.push(("authorization", &authorization));
     let headers = s3::Headers::new(&fields, &p)?;
-    let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &WireAuth)?;
+    assert_eq!(
+        s3::verify("PUT", &target, &headers, true, NOW, &p, &WireAuth::new()).err(),
+        Some(s3::ErrorCode::SignatureDoesNotMatch)
+    );
+    let verified = s3::verify("PUT", &target, &headers, true, NOW, &p, &authority)?;
     ValidatedBody::new(bytes.to_vec(), &headers, &verified, &p)
 }
 fn body(bytes: &[u8]) -> ValidatedBody {
@@ -302,6 +324,173 @@ fn put_empty_binary_overwrite_and_atomic_archival_obligation() {
     assert_eq!(b.availability_until, None);
     assert_eq!(b.metadata.headers, metadata().headers);
     assert_eq!(second.put_response().status, 200);
+}
+
+#[test]
+fn late_completion_gets_a_fresh_archive_window_and_invalid_windows_never_publish() {
+    let mut m = model();
+    let id = initiate(&mut m, "archive/key", MultipartChecksum::None);
+    let p = part(&mut m, "archive/key", id, 1, b"late");
+    let result = m
+        .complete(&reference("archive/key"), id, vec![p], None, 100, &auth())
+        .unwrap();
+    let job = m
+        .catalogue()
+        .outbox(T)
+        .into_iter()
+        .find_map(|e| match e.effect {
+            Effect::RunJob(j) if j.generation == result.generation => Some(j),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(job.deadline, 300);
+    m.catalogue_worker().claim(T, job.id, 102, 150).unwrap();
+
+    let mut p = mutation_policy();
+    p.archive_window = 0;
+    assert!(MemoryMutations::new(p).is_err());
+    let mut p = mutation_policy();
+    p.archive_window = u64::MAX;
+    let mut m = MemoryMutations::new(p).unwrap();
+    assert_eq!(
+        m.put(prepare(&m, "key"), body(b"no"), 2, &auth()),
+        Err(s3::ErrorCode::InvalidArgument)
+    );
+    assert!(m.catalogue().outbox(T).is_empty());
+    assert!(m.catalogue().lookup(T, "key", 2, &auth()).is_err());
+}
+
+#[test]
+fn worker_deletion_reclaims_only_dispatched_retained_bytes() {
+    let mut m = model();
+    let first = put(&mut m, "source", b"retained");
+    let other = put(&mut m, "other", b"keep");
+    restore(&mut m, "source");
+    assert_eq!(m.retained_bytes(T), 12);
+    assert_eq!(
+        m.catalogue().candidate(
+            T,
+            first.generation,
+            DeletionKind::UnreferencedGeneration,
+            38,
+            39,
+            &auth()
+        ),
+        Err(Error::Unsafe)
+    );
+    m.delete(
+        &reference("source"),
+        &DestinationConditions::default(),
+        38,
+        &auth(),
+    )
+    .unwrap();
+    let candidate = m
+        .catalogue()
+        .candidate(
+            T,
+            first.generation,
+            DeletionKind::UnreferencedGeneration,
+            38,
+            39,
+            &auth(),
+        )
+        .unwrap();
+    let event = m
+        .catalogue_worker()
+        .finalize_deletion(candidate, 39, &auth())
+        .unwrap();
+    assert!(m.delete_retained(TenantId(2), event, 40, &auth()).is_err());
+    assert!(m.delete_retained(T, event, 90, &auth()).is_err());
+    assert!(m
+        .delete_retained(
+            T,
+            event,
+            40,
+            &Auth {
+                active: false,
+                ..auth()
+            }
+        )
+        .is_err());
+    assert_eq!(m.retained_bytes(T), 12);
+    m.delete_retained(T, event, 40, &auth()).unwrap();
+    assert_eq!(m.retained_bytes(T), 4);
+    assert_eq!(
+        m.catalogue()
+            .generation(T, first.generation)
+            .unwrap()
+            .cache_location,
+        None
+    );
+    assert!(m
+        .catalogue()
+        .generation(T, other.generation)
+        .unwrap()
+        .cache_location
+        .is_some());
+    assert!(m.delete_retained(T, event, 41, &auth()).is_err());
+    assert_eq!(m.retained_bytes(T), 4);
+}
+
+#[test]
+fn operation_specific_xml_round_trips_destination_and_commit_time() {
+    let mut m = model();
+    let first = put(&mut m, "source", b"source");
+    restore(&mut m, "source");
+    let name = "archive/a<&\r/雪";
+    let result = m
+        .copy_object(
+            prepare(&m, name),
+            source(&first, "source"),
+            MetadataDirective::Copy,
+            8,
+            &auth(),
+        )
+        .unwrap();
+    let response = result.copy_response();
+    let text = String::from_utf8(response.body).unwrap();
+    assert!(text.contains("<LastModified>1970-01-01T00:00:08Z</LastModified>"));
+    assert!(!text.contains("<Bucket>"));
+    let target = s3::Target::parse("/archive/a%3C%26%0D/%E9%9B%AA?uploadId=1", &policy()).unwrap();
+    let response = result.complete_response(&target, &policy()).unwrap();
+    let mut reader = quick_xml::Reader::from_reader(response.body.as_slice());
+    let mut fields = BTreeMap::new();
+    let mut tag = String::new();
+    let mut value = String::new();
+    loop {
+        match reader.read_event().unwrap() {
+            quick_xml::events::Event::Start(e) => {
+                tag = e.name().as_ref().to_owned();
+                value.clear();
+            }
+            quick_xml::events::Event::Text(e) => value.push_str(&e.xml10_content()),
+            quick_xml::events::Event::GeneralRef(e) => {
+                let entity = e.as_ref();
+                let decoded = quick_xml::escape::unescape(&format!("&{entity};"))
+                    .unwrap()
+                    .into_owned();
+                value.push_str(&decoded);
+            }
+            quick_xml::events::Event::End(_) => {
+                fields.insert(tag.clone(), value.clone());
+            }
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    assert_eq!(fields["Bucket"], "archive");
+    assert_eq!(fields["Key"], "a<&\r/雪");
+    assert_eq!(
+        fields["Location"],
+        "https://s3.example.invalid/archive/a%3C%26%0D/%E9%9B%AA"
+    );
+    assert_eq!(fields["ETag"], result.etag);
+    let wrong = s3::Target::parse("/archive/wrong", &policy()).unwrap();
+    assert_eq!(
+        result.complete_response(&wrong, &policy()).unwrap_err(),
+        s3::ErrorCode::InvalidArgument
+    );
 }
 
 #[test]
@@ -645,7 +834,7 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
         MultipartChecksum::CompositeSha256,
     ] {
         let mut m = model();
-        let id = initiate(&mut m, "key", mode);
+        let id = initiate(&mut m, "archive/key", mode);
         let algorithm = if mode == MultipartChecksum::Full(s3::ChecksumAlgorithm::Crc32) {
             s3::ChecksumAlgorithm::Crc32
         } else {
@@ -653,7 +842,7 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
         };
         let p1 = m
             .upload_part(
-                &reference("key"),
+                &reference("archive/key"),
                 id,
                 1,
                 body_with(b"ab", Some(algorithm), &[]).unwrap(),
@@ -663,7 +852,7 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
             .unwrap();
         let p2 = m
             .upload_part(
-                &reference("key"),
+                &reference("archive/key"),
                 id,
                 2,
                 body_with(b"cd", Some(algorithm), &[]).unwrap(),
@@ -682,7 +871,7 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
         };
         let result = m
             .complete(
-                &reference("key"),
+                &reference("archive/key"),
                 id,
                 vec![p1.clone(), p2.clone()],
                 full.clone(),
@@ -699,14 +888,19 @@ fn full_and_composite_integrity_preserve_algorithm_and_part_evidence() {
             assert_eq!(c.kind, ChecksumType::FullObject);
             assert_eq!(Some(&c.value), full.as_ref());
         }
-        let response = result.response("CompleteMultipartUploadResult").unwrap();
+        let response = result
+            .complete_response(
+                &s3::Target::parse("/archive/key", &policy()).unwrap(),
+                &policy(),
+            )
+            .unwrap();
         assert_eq!(
             completion_result(response.status, &response.body, &policy()).unwrap(),
             result.etag
         );
         assert_eq!(
             m.catalogue()
-                .lookup(T, "key", 4, &auth())
+                .lookup(T, "archive/key", 4, &auth())
                 .unwrap()
                 .metadata
                 .checksums,

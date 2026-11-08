@@ -38,6 +38,8 @@ pub struct MutationPolicy {
     pub staged_bytes: usize,
     pub batch_keys: usize,
     pub lifetime: u64,
+    /// Archive work gets this full window from successful commit, not preparation.
+    pub archive_window: u64,
     pub result_retention: u64,
     pub max_attempts: u32,
 }
@@ -56,6 +58,7 @@ impl MutationPolicy {
             || self.batch_keys == 0
             || self.batch_keys > 1000
             || self.lifetime == 0
+            || self.archive_window == 0
             || self.result_retention == 0
             || self.max_attempts == 0
         {
@@ -258,14 +261,38 @@ pub struct CommitResult {
     pub generation: GenerationId,
     pub etag: String,
     pub checksum: Option<Checksum>,
+    destination: Reference,
+    modified_at: String,
 }
 
 impl CommitResult {
-    /// Only constructed after catalogue + complete retained bytes + archive job.
-    pub fn response(&self, root: &str) -> Result<Response> {
-        if !matches!(root, "CompleteMultipartUploadResult" | "CopyObjectResult") {
+    /// Render the committed destination, never a caller-selected replacement key.
+    /// The policy host is trusted ingress configuration, not a request Host header.
+    pub fn complete_response(&self, target: &super::Target, policy: &Policy) -> Result<Response> {
+        let key = target.key.as_deref().ok_or(ErrorCode::InvalidArgument)?;
+        if self.destination.name != format!("{}/{key}", target.bucket) {
             return Err(ErrorCode::InvalidArgument);
         }
+        let location = format!("https://{}{}", policy.host, target.canonical_path());
+        Ok(self.result_response(
+            "CompleteMultipartUploadResult",
+            &format!(
+                "<Location>{}</Location><Bucket>{}</Bucket><Key>{}</Key>",
+                xml(&location),
+                xml(&target.bucket),
+                xml(key)
+            ),
+        ))
+    }
+
+    pub fn copy_response(&self) -> Response {
+        self.result_response(
+            "CopyObjectResult",
+            &format!("<LastModified>{}</LastModified>", xml(&self.modified_at)),
+        )
+    }
+
+    fn result_response(&self, root: &str, fields: &str) -> Response {
         let checksum = self.checksum.as_ref().map_or(String::new(), |c| {
             let value = checksum_value(c);
             format!(
@@ -280,10 +307,10 @@ impl CommitResult {
                 }
             )
         });
-        Ok(xml_response(format!(
-            "<{root}><ETag>{}</ETag>{checksum}</{root}>",
+        xml_response(format!(
+            "<{root}>{fields}<ETag>{}</ETag>{checksum}</{root}>",
             xml(&self.etag)
-        )))
+        ))
     }
 
     pub fn put_response(&self) -> Response {
@@ -391,6 +418,54 @@ impl MemoryMutations {
         &mut self.catalogue
     }
 
+    /// Trusted worker-only storage operation. Dispatch is obtained here, not
+    /// accepted from public DeletionDispatch fields. Exclusive access keeps its
+    /// current-authority/proof checks, physical fixture deletion and ack atomic.
+    pub fn delete_retained(
+        &mut self,
+        tenant: TenantId,
+        event: cat::EventId,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> cat::Result<()> {
+        let mut staged = self.catalogue.clone();
+        let dispatch =
+            cat::DeletionPort::dispatch_deletion(&mut staged, tenant, event, now, authority)?;
+        if now >= dispatch.valid_until {
+            return Err(cat::Error::Expired);
+        }
+        match &dispatch.target {
+            cat::DeletionTarget::StorageVersion(location) => {
+                let expected = format!("fixture/{}/{}/retained", tenant.0, dispatch.generation.0);
+                if location != &expected
+                    || !self.retained.contains_key(&(tenant, dispatch.generation))
+                {
+                    return Err(cat::Error::Unsafe);
+                }
+            }
+            cat::DeletionTarget::MetadataOnly => {
+                if self.retained.contains_key(&(tenant, dispatch.generation)) {
+                    return Err(cat::Error::Unsafe);
+                }
+            }
+        }
+        // Validate ack on the unpublished snapshot first; nothing fallible remains
+        // after the in-memory storage operation. Real storage needs reconciliation.
+        cat::DeletionPort::acknowledge_deletion(&mut staged, tenant, event)?;
+        self.retained.remove(&(tenant, dispatch.generation));
+        self.catalogue = staged;
+        Ok(())
+    }
+
+    /// Trusted fixture accounting, not an end-user object-read port.
+    pub fn retained_bytes(&self, tenant: TenantId) -> usize {
+        self.retained
+            .iter()
+            .filter(|((t, _), _)| *t == tenant)
+            .map(|(_, retained)| retained.bytes.len())
+            .sum()
+    }
+
     fn allocate(&mut self) -> Result<u64> {
         self.sequence = self.sequence.checked_add(1).ok_or(ErrorCode::SlowDown)?;
         Ok(self.sequence)
@@ -482,6 +557,15 @@ impl MemoryMutations {
         if body.bytes.len() > self.policy.object_bytes {
             return Err(ErrorCode::EntityTooLarge);
         }
+        let archive_deadline = now
+            .checked_add(self.policy.archive_window)
+            .ok_or(ErrorCode::InvalidArgument)?;
+        let modified_at = i64::try_from(now)
+            .ok()
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+            .filter(|date| date.format("%Y").to_string().len() == 4)
+            .ok_or(ErrorCode::InvalidArgument)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let tenant = prepared.reference.tenant;
         let generation = GenerationId(
             self.catalogue
@@ -532,7 +616,7 @@ impl MemoryMutations {
                     expected_revision: prepared.revision,
                     generation,
                     metadata,
-                    archive_deadline: prepared.expires,
+                    archive_deadline,
                 },
                 now,
                 authority,
@@ -565,6 +649,8 @@ impl MemoryMutations {
             generation,
             etag,
             checksum: checksums.into_iter().next(),
+            destination: prepared.reference.clone(),
+            modified_at,
         })
     }
 
