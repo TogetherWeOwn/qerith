@@ -34,8 +34,8 @@ pub fn args(operation: Operation) -> Fields {
         ],
         Operation::CommitUpload | Operation::AbortUpload => vec![
             text("reference", "new"),
-            text("generation", "g1"),
-            text("transfer", "upload"),
+            text("generation", "g2"),
+            text("transfer", "upload1"),
             text("identity", "finish"),
         ],
         Operation::Browse => vec![text("parent", "root"), num("limit", 1)],
@@ -63,10 +63,19 @@ pub fn args(operation: Operation) -> Fields {
 }
 
 #[derive(Clone)]
+pub struct UploadRecord {
+    transfer: Transfer,
+    job: Opaque,
+    initiation: Request,
+    committed: bool,
+}
+
+#[derive(Clone)]
 pub struct Fixture {
     pub objects: BTreeMap<(Opaque, Opaque), Entry>,
+    pub parents: BTreeMap<(Scope, Opaque), Vec<Opaque>>,
     pub jobs: BTreeMap<(Scope, Opaque), Job>,
-    pub uploads: BTreeMap<(Scope, Opaque), (Transfer, Opaque, bool)>,
+    pub uploads: BTreeMap<(Scope, Opaque), UploadRecord>,
     pub replay: BTreeMap<Reconciliation, (Request, Output)>,
     pub cursors: BTreeMap<Opaque, (Scope, Request, Opaque)>,
     pub denied: bool,
@@ -74,12 +83,14 @@ pub struct Fixture {
     pub injected: Option<Failure>,
     pub trace: Vec<&'static str>,
     pub effects: usize,
+    pub sequence: u64,
 }
 
 impl Default for Fixture {
     fn default() -> Self {
         let mut fixture = Self {
             objects: BTreeMap::new(),
+            parents: BTreeMap::new(),
             jobs: BTreeMap::new(),
             uploads: BTreeMap::new(),
             replay: BTreeMap::new(),
@@ -89,6 +100,7 @@ impl Default for Fixture {
             injected: None,
             trace: vec![],
             effects: 0,
+            sequence: 0,
         };
         fixture.objects.insert(
             (id("a"), id("object")),
@@ -98,6 +110,11 @@ impl Default for Fixture {
                 available: true,
             },
         );
+        fixture
+            .parents
+            .insert((scope("a"), id("root")), vec![id("object")]);
+        fixture.parents.insert((scope("a"), id("another")), vec![]);
+        fixture.parents.insert((scope("b"), id("root")), vec![]);
         fixture.jobs.insert(
             (scope("a"), id("restorejob")),
             Job {
@@ -114,6 +131,13 @@ impl Default for Fixture {
 }
 
 impl Fixture {
+    // Deterministic unique tokens for synthetic data only. Production issuance
+    // must be unpredictable and survive authority restart without identity reuse.
+    fn next(&mut self) -> u64 {
+        self.sequence += 1;
+        self.sequence
+    }
+
     fn replayed(&self, scope: &Scope, request: &Request) -> Result<Option<Output>, Failure> {
         match request
             .reconciliation(scope)
@@ -134,6 +158,11 @@ impl Fixture {
         if self.denied {
             return Err(denied);
         }
+        if let Some(parent) = request.opaque("parent") {
+            if !self.parents.contains_key(&(scope.clone(), parent.clone())) {
+                return Err(denied);
+            }
+        }
         if let Some(job) = request.opaque("job") {
             if !self.jobs.contains_key(&(scope.clone(), job.clone())) {
                 return Err(denied);
@@ -144,7 +173,7 @@ impl Fixture {
                 .uploads
                 .get(&(scope.clone(), transfer.clone()))
                 .ok_or(denied)?;
-            if !request.matches_target(&upload.0.target) {
+            if !request.matches_target(&upload.transfer.target) {
                 return Err(denied);
             }
         }
@@ -169,22 +198,41 @@ impl Fixture {
         Ok(())
     }
 
-    fn check_preconditions(&self, scope: &Scope, request: &Request) -> Result<(), Failure> {
-        if self.replayed(scope, request)?.is_some() {
-            return Ok(());
-        }
+    fn check_destination(&self, scope: &Scope, request: &Request) -> Result<(), Failure> {
         if let Some(reference) = request.opaque("reference") {
             let existing = self.objects.get(&(scope.tenant.clone(), reference.clone()));
             if request.if_absent() && existing.is_some() {
                 return Err(Failure::new(ErrorCode::PreconditionFailed));
             }
-            if request.opaque("transfer").is_none() {
-                if let Some(generation) = request.opaque("generation") {
-                    if existing.map(|e| &e.target.generation) != Some(generation) {
-                        return Err(Failure::new(ErrorCode::PreconditionFailed));
-                    }
+            if let Some(generation) = request.opaque("generation") {
+                if existing.map(|e| &e.target.generation) != Some(generation) {
+                    return Err(Failure::new(ErrorCode::PreconditionFailed));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn check_preconditions(&self, scope: &Scope, request: &Request) -> Result<(), Failure> {
+        if self.replayed(scope, request)?.is_some() {
+            return Ok(());
+        }
+        if let Some(transfer) = request.opaque("transfer") {
+            let upload = &self.uploads[&(scope.clone(), transfer.clone())];
+            if request.operation() == Operation::CommitUpload {
+                if upload.committed {
+                    return Err(Failure {
+                        code: ErrorCode::Conflict,
+                        effects: Effects::Committed,
+                    });
+                }
+                if self.jobs[&(scope.clone(), upload.job.clone())].state == JobState::Cancelled {
+                    return Err(Failure::new(ErrorCode::Conflict));
+                }
+                self.check_destination(scope, &upload.initiation)?;
+            }
+        } else {
+            self.check_destination(scope, request)?;
         }
         if let Some(source) = request.opaque("source") {
             let entry = &self.objects[&(scope.tenant.clone(), source.clone())];
@@ -267,12 +315,13 @@ impl OperationPort for Fixture {
         let operation = request.operation();
         let output = match operation {
             Operation::InitiateUpload => {
+                let sequence = self.next();
                 let target = LogicalReference {
                     reference: request.opaque("reference").unwrap().clone(),
-                    generation: id("g1"),
+                    generation: id(&format!("g{}", sequence + 1)),
                 };
                 let job = Job {
-                    handle: id("uploadjob"),
+                    handle: id(&format!("uploadjob{sequence}")),
                     target: target.clone(),
                     state: JobState::Queued,
                     progress: Progress::new(ProgressUnit::Bytes, None),
@@ -280,7 +329,7 @@ impl OperationPort for Fixture {
                     error: None,
                 };
                 let transfer = Transfer {
-                    handle: id("upload"),
+                    handle: id(&format!("upload{sequence}")),
                     target,
                     direction: TransferDirection::Upload,
                     expires_at: 1000,
@@ -288,7 +337,12 @@ impl OperationPort for Fixture {
                 };
                 self.uploads.insert(
                     (scope.clone(), transfer.handle.clone()),
-                    (transfer.clone(), job.handle.clone(), false),
+                    UploadRecord {
+                        transfer: transfer.clone(),
+                        job: job.handle.clone(),
+                        initiation: request.clone(),
+                        committed: false,
+                    },
                 );
                 self.jobs
                     .insert((scope.clone(), job.handle.clone()), job.clone());
@@ -301,26 +355,27 @@ impl OperationPort for Fixture {
                     .unwrap();
                 let job = self
                     .jobs
-                    .get_mut(&(scope.clone(), upload.1.clone()))
+                    .get_mut(&(scope.clone(), upload.job.clone()))
                     .unwrap();
                 if operation == Operation::CommitUpload {
-                    if job.state == JobState::Cancelled {
-                        return Err(Failure::new(ErrorCode::Conflict));
-                    }
-                    upload.2 = true;
+                    upload.committed = true;
                     job.state = JobState::Succeeded;
                     job.effects = Effects::Committed;
                     self.objects.insert(
                         (scope.tenant.clone(), job.target.reference.clone()),
                         Entry {
                             target: job.target.clone(),
-                            bytes: upload.0.max_bytes,
+                            bytes: upload.transfer.max_bytes,
                             available: false,
                         },
                     );
+                    let members = self.parents.entry((scope.clone(), id("root"))).or_default();
+                    if !members.contains(&job.target.reference) {
+                        members.push(job.target.reference.clone());
+                    }
                     Output::Job(job.clone())
                 } else {
-                    let outcome = if upload.2 {
+                    let outcome = if upload.committed {
                         CancelOutcome::AlreadyCommitted
                     } else {
                         job.state = JobState::Cancelled;
@@ -341,17 +396,21 @@ impl OperationPort for Fixture {
                     .clone(),
             ),
             Operation::Browse => {
+                let members =
+                    &self.parents[&(scope.clone(), request.opaque("parent").unwrap().clone())];
                 let entries: Vec<_> = self
                     .objects
                     .iter()
                     .filter(|((tenant, reference), _)| {
-                        tenant == &scope.tenant && position.is_none_or(|p| reference > p)
+                        tenant == &scope.tenant
+                            && members.contains(reference)
+                            && position.is_none_or(|p| reference > p)
                     })
                     .map(|(_, e)| e.clone())
                     .take(request.number("limit").unwrap() as usize)
                     .collect();
                 let cursor = entries.last().map(|e| {
-                    let cursor = id("pagecursor");
+                    let cursor = id(&format!("pagecursor{}", self.next()));
                     self.cursors.insert(
                         cursor.clone(),
                         (scope.clone(), request.clone(), e.target.reference.clone()),
@@ -361,16 +420,17 @@ impl OperationPort for Fixture {
                 Output::Page { entries, cursor }
             }
             Operation::AuthorizeDownload => {
-                let entry = &self.objects[&(
+                let entry = self.objects[&(
                     scope.tenant.clone(),
                     request.opaque("reference").unwrap().clone(),
-                )];
+                )]
+                    .clone();
                 if !entry.available {
                     return Err(Failure::new(ErrorCode::NotAvailable));
                 }
                 Output::Download(Transfer {
-                    handle: id("download"),
-                    target: entry.target.clone(),
+                    handle: id(&format!("download{}", self.next())),
+                    target: entry.target,
                     direction: TransferDirection::Download,
                     expires_at: 1000,
                     max_bytes: entry.bytes,
@@ -379,12 +439,24 @@ impl OperationPort for Fixture {
             Operation::Status => Output::Job(self.job(scope, request)),
             Operation::Result => {
                 let job = self.job(scope, request);
-                if job.state != JobState::Succeeded {
-                    return Err(Failure::new(ErrorCode::NotReady));
-                }
-                Output::Result {
-                    reference: job.target.clone(),
-                    job,
+                match job.state {
+                    JobState::Succeeded => Output::Result {
+                        reference: job.target.clone(),
+                        job,
+                    },
+                    JobState::Cancelled => {
+                        return Err(Failure {
+                            code: ErrorCode::Cancelled,
+                            effects: job.effects,
+                        })
+                    }
+                    JobState::Failed => {
+                        return Err(job.error.unwrap_or(Failure {
+                            code: ErrorCode::Internal,
+                            effects: job.effects,
+                        }))
+                    }
+                    _ => return Err(Failure::new(ErrorCode::NotReady)),
                 }
             }
             Operation::Cancel => {
@@ -402,14 +474,15 @@ impl OperationPort for Fixture {
                 Output::Cancel { job, outcome }
             }
             Operation::Restore | Operation::Copy | Operation::Delete => {
+                let sequence = self.next();
                 let reference = request.opaque("reference").unwrap().clone();
                 let generation = if operation == Operation::Copy {
-                    id("g2")
+                    id(&format!("g{}", sequence + 1))
                 } else {
                     request.opaque("generation").unwrap().clone()
                 };
                 let job = Job {
-                    handle: id("mutationjob"),
+                    handle: id(&format!("mutationjob{sequence}")),
                     target: LogicalReference {
                         reference,
                         generation,

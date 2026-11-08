@@ -73,6 +73,7 @@ pub enum ErrorCode {
     InvalidCursor,
     NotAvailable,
     NotReady,
+    Cancelled,
     IntegrityFailed,
     Unavailable,
     Internal,
@@ -118,6 +119,7 @@ impl Failure {
             ErrorCode::InvalidCursor => "Invalid or expired cursor",
             ErrorCode::NotAvailable => "Reference not available for download",
             ErrorCode::NotReady => "Result not ready",
+            ErrorCode::Cancelled => "Operation cancelled",
             ErrorCode::IntegrityFailed => "Integrity verification failed",
             ErrorCode::Unavailable => "Service temporarily unavailable",
             ErrorCode::Internal => "Operation failed",
@@ -289,10 +291,13 @@ impl Output {
                 let target_matches = request
                     .opaque("reference")
                     .is_none_or(|id| id == &job.target.reference)
-                    && (creates_generation
-                        || request
-                            .opaque("generation")
-                            .is_none_or(|id| id == &job.target.generation));
+                    && request.opaque("generation").is_none_or(|id| {
+                        if creates_generation {
+                            id != &job.target.generation
+                        } else {
+                            id == &job.target.generation
+                        }
+                    });
                 let error_matches = (job.state == JobState::Failed) == job.error.is_some();
                 let shape_matches = match self {
                     Self::Upload { transfer, .. } => {

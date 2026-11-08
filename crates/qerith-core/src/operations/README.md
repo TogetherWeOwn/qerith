@@ -148,7 +148,10 @@ permission failure, closed/bounded inputs, precondition/quota ordering, sanitize
 unknown-effect errors, upload lost-response reconciliation and abort/commit races,
 status/result/cancel across transports, tenant/principal/reference/transfer/job
 isolation, cursor query/operation/scope binding and invalidation, logical cold
-state, unsupported tasks and monotonic unknown-total progress. Full suites run in
+state, unsupported tasks and monotonic unknown-total progress. Regression cases
+also cover publication-time destination fences, fresh replacement generations,
+unique accepted handles, immutable cursor receipts, authorized parent membership,
+and terminal failed/cancelled results (never a perpetual NotReady). Full suites run in
 GitHub Actions via the existing native, wasm, MSRV and dependency gates.
 
 These are contract tests, not production conformance, cryptographic qualification,

@@ -54,7 +54,7 @@ fn http_error(code: ErrorCode) -> u16 {
         ErrorCode::InvalidInput | ErrorCode::InvalidCursor => 400,
         ErrorCode::Unsupported => 501,
         ErrorCode::PreconditionFailed => 412,
-        ErrorCode::Conflict | ErrorCode::NotReady => 409,
+        ErrorCode::Conflict | ErrorCode::NotReady | ErrorCode::Cancelled => 409,
         ErrorCode::QuotaExceeded => 429,
         ErrorCode::Unavailable => 503,
         ErrorCode::IntegrityFailed | ErrorCode::Internal => 500,

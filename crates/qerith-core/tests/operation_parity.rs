@@ -409,7 +409,7 @@ fn upload_disconnect_reconciliation_commit_abort_and_generation_are_shared() {
             &mut recovered,
             Some(&scope("a")),
             Operation::Stat,
-            vec![text("reference", "new"), text("generation", "g1")],
+            vec![text("reference", "new"), text("generation", "g2")],
         )
         .unwrap() else {
             panic!()
@@ -813,6 +813,388 @@ fn wrong_output_shapes_targets_and_page_bounds_fail_closed() {
             )
             .outcome,
             expected
+        );
+    }
+}
+
+fn initiate_at(
+    transport: Transport,
+    fixture: &mut Fixture,
+    owner: &Scope,
+    reference: &str,
+    identity: &str,
+    generation: Option<&str>,
+) -> (Transfer, Job) {
+    let mut fields = vec![
+        text("reference", reference),
+        text("identity", identity),
+        num("max_bytes", 64),
+    ];
+    fields.push(match generation {
+        Some(generation) => text("generation", generation),
+        None => ("if_absent".into(), Value::Flag(true)),
+    });
+    let Output::Upload { transfer, job } = call(
+        transport,
+        fixture,
+        Some(owner),
+        Operation::InitiateUpload,
+        fields,
+    )
+    .unwrap() else {
+        panic!()
+    };
+    (transfer, job)
+}
+
+fn finish_upload(transfer: &Transfer, identity: &str) -> Fields {
+    vec![
+        text("transfer", transfer.handle.as_str()),
+        text("reference", transfer.target.reference.as_str()),
+        text("generation", transfer.target.generation.as_str()),
+        text("identity", identity),
+    ]
+}
+
+#[test]
+fn competing_uploads_recheck_destination_fences_and_cannot_republish() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        let other = Scope {
+            tenant: id("a"),
+            principal: id("other"),
+        };
+        let (first, _) = initiate_at(transport, &mut fixture, &a, "new", "first", None);
+        let (second, _) = initiate_at(transport, &mut fixture, &other, "new", "second", None);
+        call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::CommitUpload,
+            finish_upload(&first, "commit_first"),
+        )
+        .unwrap();
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&other),
+                Operation::CommitUpload,
+                finish_upload(&second, "commit_second")
+            ),
+            Err(Failure::new(ErrorCode::PreconditionFailed))
+        );
+        let committed = fixture.objects[&(id("a"), id("new"))].clone();
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::CommitUpload,
+                finish_upload(&first, "fresh_identity")
+            ),
+            Err(Failure {
+                code: ErrorCode::Conflict,
+                effects: Effects::Committed
+            })
+        );
+        assert_eq!(fixture.objects[&(id("a"), id("new"))], committed);
+        let (replacement, _) = initiate_at(
+            transport,
+            &mut fixture,
+            &a,
+            "new",
+            "replacement",
+            Some(first.target.generation.as_str()),
+        );
+        fixture
+            .objects
+            .get_mut(&(id("a"), id("new")))
+            .unwrap()
+            .target
+            .generation = id("successor");
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::CommitUpload,
+                finish_upload(&replacement, "stale_replace")
+            ),
+            Err(Failure::new(ErrorCode::PreconditionFailed))
+        );
+    }
+}
+
+#[test]
+fn replacement_allocates_a_fresh_generation_and_validator_rejects_reuse() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        let (transfer, _) =
+            initiate_at(transport, &mut fixture, &a, "object", "replace", Some("g1"));
+        assert_ne!(transfer.target.generation, id("g1"));
+        call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::CommitUpload,
+            finish_upload(&transfer, "commit"),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.objects[&(id("a"), id("object"))].target,
+            transfer.target
+        );
+        let fields = vec![
+            text("reference", "object"),
+            text("generation", "g1"),
+            num("max_bytes", 64),
+            text("identity", "replace"),
+        ];
+        let job = Job {
+            handle: id("badjob"),
+            target: target("object", "g1"),
+            state: JobState::Queued,
+            progress: Progress::new(ProgressUnit::Bytes, None),
+            effects: Effects::Accepted,
+            error: None,
+        };
+        let bad = Output::Upload {
+            transfer: Transfer {
+                handle: id("badtransfer"),
+                target: job.target.clone(),
+                direction: TransferDirection::Upload,
+                expires_at: 1,
+                max_bytes: 64,
+            },
+            job,
+        };
+        assert_eq!(
+            dispatch(
+                &mut InvalidOutput(bad),
+                Some(&a),
+                VERSION,
+                Operation::InitiateUpload,
+                fields
+            ),
+            Err(Failure {
+                code: ErrorCode::Internal,
+                effects: Effects::Unknown
+            })
+        );
+    }
+}
+
+#[test]
+fn independent_acceptances_never_rebind_existing_job_or_transfer_handles() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        let (first, first_job) = initiate_at(transport, &mut fixture, &a, "first", "first", None);
+        let (second, second_job) =
+            initiate_at(transport, &mut fixture, &a, "second", "second", None);
+        assert_ne!(first.handle, second.handle);
+        assert_ne!(first_job.handle, second_job.handle);
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::Status,
+                vec![text("job", first_job.handle.as_str())]
+            )
+            .unwrap(),
+            Output::Job(first_job)
+        );
+        call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::CommitUpload,
+            finish_upload(&first, "commit_first"),
+        )
+        .unwrap();
+        call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::CommitUpload,
+            finish_upload(&second, "commit_second"),
+        )
+        .unwrap();
+        let mut handles = std::collections::BTreeSet::new();
+        for op in [Operation::Restore, Operation::Copy, Operation::Delete] {
+            let Output::Job(job) = call(transport, &mut fixture, Some(&a), op, args(op)).unwrap()
+            else {
+                panic!()
+            };
+            assert!(handles.insert(job.handle));
+        }
+    }
+}
+
+#[test]
+fn issued_cursor_position_survives_continuation_retries_and_other_browsers() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        for reference in ["second", "third"] {
+            fixture.objects.insert(
+                (id("a"), id(reference)),
+                Entry {
+                    target: target(reference, "g1"),
+                    bytes: 1,
+                    available: true,
+                },
+            );
+            fixture
+                .parents
+                .get_mut(&(a.clone(), id("root")))
+                .unwrap()
+                .push(id(reference));
+        }
+        let Output::Page {
+            cursor: Some(first),
+            ..
+        } = call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::Browse,
+            args(Operation::Browse),
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        let fields = vec![
+            text("parent", "root"),
+            num("limit", 1),
+            text("cursor", first.as_str()),
+        ];
+        let Output::Page {
+            entries: expected,
+            cursor: Some(second),
+        } = call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::Browse,
+            fields.clone(),
+        )
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert_ne!(first, second);
+        call(
+            transport,
+            &mut fixture,
+            Some(&scope("b")),
+            Operation::Browse,
+            args(Operation::Browse),
+        )
+        .unwrap();
+        let Output::Page { entries, .. } =
+            parity(&fixture, Some(&a), Operation::Browse, fields).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(entries, expected);
+        assert_eq!(entries[0].target.reference, id("second"));
+    }
+}
+
+#[test]
+fn browse_requires_authorized_parent_and_filters_its_members() {
+    let mut fixture = Fixture::default();
+    let a = scope("a");
+    fixture.parents.insert((a.clone(), id("empty")), vec![]);
+    fixture
+        .parents
+        .insert((a.clone(), id("restricted")), vec![id("object")]);
+    for parent in ["missing", "private"] {
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::Browse,
+                vec![text("parent", parent), num("limit", 1)]
+            ),
+            Err(Failure::new(ErrorCode::Denied))
+        );
+    }
+    let Output::Page { entries, .. } = parity(
+        &fixture,
+        Some(&a),
+        Operation::Browse,
+        vec![text("parent", "empty"), num("limit", 1)],
+    )
+    .unwrap() else {
+        panic!()
+    };
+    assert!(entries.is_empty());
+    assert_eq!(
+        parity(
+            &fixture,
+            Some(&scope("b")),
+            Operation::Browse,
+            vec![text("parent", "restricted"), num("limit", 1)]
+        ),
+        Err(Failure::new(ErrorCode::Denied))
+    );
+    let Output::Page { entries, .. } = parity(
+        &fixture,
+        Some(&a),
+        Operation::Browse,
+        vec![text("parent", "restricted"), num("limit", 1)],
+    )
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn result_preserves_failed_and_cancelled_terminal_outcomes() {
+    for transport in TRANSPORTS {
+        let mut fixture = Fixture::default();
+        let a = scope("a");
+        let (transfer, job) = initiate_at(transport, &mut fixture, &a, "new", "init", None);
+        call(
+            transport,
+            &mut fixture,
+            Some(&a),
+            Operation::AbortUpload,
+            finish_upload(&transfer, "abort"),
+        )
+        .unwrap();
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::Result,
+                vec![text("job", job.handle.as_str())]
+            ),
+            Err(Failure::new(ErrorCode::Cancelled))
+        );
+        let failure = Failure {
+            code: ErrorCode::IntegrityFailed,
+            effects: Effects::Unknown,
+        };
+        let failed = fixture
+            .jobs
+            .get_mut(&(a.clone(), id("restorejob")))
+            .unwrap();
+        failed.state = JobState::Failed;
+        failed.error = Some(failure);
+        failed.effects = failure.effects;
+        assert_eq!(
+            parity(
+                &fixture,
+                Some(&a),
+                Operation::Result,
+                args(Operation::Result)
+            ),
+            Err(failure)
         );
     }
 }
