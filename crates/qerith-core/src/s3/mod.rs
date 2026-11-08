@@ -97,7 +97,8 @@ fn xml(value: &str) -> String {
             '>' => "&gt;".into(),
             '"' => "&quot;".into(),
             '\'' => "&apos;".into(),
-            c if c == '\t' || c == '\n' || c == '\r' || c >= ' ' => c.to_string(),
+            '\r' => "&#13;".into(),
+            c if c == '\t' || c == '\n' || c >= ' ' => c.to_string(),
             _ => "\u{fffd}".into(),
         })
         .collect()

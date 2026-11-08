@@ -899,12 +899,22 @@ impl ArchiveReadPort for MemoryCatalogue {
         &self,
         tenant: TenantId,
         name: &str,
+        action: Action,
         now: u64,
         authority: &dyn Authority,
     ) -> Result<ArchiveView> {
-        let reference = self.lookup(tenant, name, now, authority)?;
+        if !matches!(action, Action::Read | Action::Restore) {
+            return Err(Error::Invalid);
+        }
+        permit(authority, tenant, name, action)?;
         let t = self.tenants.get(&tenant).ok_or(Error::Unavailable)?;
-        let (_, g) = t.visible(name)?;
+        let (r, g) = t.metadata(name)?;
+        let reference = ReferenceView {
+            generation: r.generation.ok_or(Error::Unavailable)?,
+            revision: r.revision,
+            metadata: g.metadata.clone(),
+            availability_until: r.availability.filter(|until| *until > now),
+        };
         let pending = t.jobs.values().any(|j| {
             j.view.generation == reference.generation
                 && j.view.kind == JobKind::Restore

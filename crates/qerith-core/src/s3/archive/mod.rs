@@ -49,6 +49,12 @@ pub trait QualifiedCache {
     ) -> Result<Vec<u8>>;
 }
 
+/// Trusted current epoch seconds, never request data. Must advance across I/O
+/// and not move backwards; ingress and the qualified cache share this time basis.
+pub trait Clock {
+    fn now(&self) -> u64;
+}
+
 pub trait CapacityPort {
     /// Commit capacity before returning. Bind receipt to tenant, reference, G and
     /// operation; reconcile failed/uncertain catalogue outcomes, never free an
@@ -69,6 +75,8 @@ pub struct AdapterLimits {
     pub serving_seconds: u64,
     pub restore_job_seconds: u64,
     pub scan_batch: usize,
+    /// Maximum catalogue entries fetched per request, including discarded groups.
+    pub scan_entries: usize,
 }
 
 pub struct Adapter<C, T> {
@@ -84,6 +92,7 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
             || limits.serving_seconds == 0
             || limits.restore_job_seconds == 0
             || !(1..=1000).contains(&limits.scan_batch)
+            || limits.scan_entries == 0
         {
             return Err(ErrorCode::InvalidArgument);
         }
@@ -121,7 +130,7 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
         body: &[u8],
         session: &impl Session,
         operation_id: cat::OperationId,
-        now: u64,
+        clock: &impl Clock,
         request_id: &str,
         cache: &mut impl QualifiedCache,
         capacity: &mut impl CapacityPort,
@@ -133,7 +142,7 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
             body,
             session,
             operation_id,
-            now,
+            clock,
             cache,
             capacity,
         );
@@ -153,10 +162,11 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
         body: &[u8],
         session: &impl Session,
         operation_id: cat::OperationId,
-        now: u64,
+        clock: &impl Clock,
         cache: &mut impl QualifiedCache,
         capacity: &mut impl CapacityPort,
     ) -> Result<Response> {
+        let now = clock.now();
         let bucket = target.bucket.as_str();
         let operation = if target.key.is_some() {
             match method {
@@ -164,7 +174,10 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                 "POST" => Operation::Restore,
                 _ => return Err(ErrorCode::NotImplemented),
             }
-        } else if bucket.is_empty() && method == "GET" {
+        } else if bucket.is_empty() {
+            if method != "GET" {
+                return Err(ErrorCode::NotImplemented);
+            }
             Operation::ListBuckets
         } else {
             match method {
@@ -235,14 +248,15 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
             Operation::ListObjects => self.list(target, session, &bucket_view, now),
             Operation::Read | Operation::Restore => {
                 let name = format!("{bucket}/{}", target.key.as_deref().ok_or(ErrorCode::InvalidRequest)?);
-                let view = self.catalogue.archive_view(session.tenant(), &name, now, session).map_err(|e| match e {
+                let action = if operation == Operation::Restore { cat::Action::Restore } else { cat::Action::Read };
+                let view = self.catalogue.archive_view(session.tenant(), &name, action, now, session).map_err(|e| match e {
                     cat::Error::Unavailable if session.allows(Operation::ListObjects, bucket) => ErrorCode::NoSuchKey,
                     cat::Error::Unavailable => ErrorCode::AccessDenied,
                     _ => catalogue_error(e),
                 })?;
                 if operation == Operation::Restore {
                     self.restore(&name, view, body, session, operation_id, now, capacity)
-                } else { self.read(method == "HEAD", &name, view, headers, session, operation_id, now, cache) }
+                } else { self.read(method == "HEAD", &name, view, headers, session, operation_id, now, clock, cache) }
             }
             _ => Err(ErrorCode::InvalidRequest),
         }
@@ -258,6 +272,7 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
         session: &impl Session,
         operation: cat::OperationId,
         now: u64,
+        clock: &impl Clock,
         cache: &mut impl QualifiedCache,
     ) -> Result<Response> {
         let metadata = wire_metadata(&view.reference)?;
@@ -345,7 +360,14 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
             if u64::try_from(body.len()).ok() != Some(length) {
                 return Err(ErrorCode::InternalError);
             }
-            if !session.is_current()
+            self.authorize(
+                session,
+                Operation::Read,
+                name.split_once('/').ok_or(ErrorCode::InternalError)?.0,
+            )?;
+            let completed_at = clock.now();
+            if completed_at < now
+                || completed_at >= until
                 || !session.permits(
                     &cat::Reference {
                         tenant: session.tenant(),
@@ -355,7 +377,7 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                 )
                 || self
                     .catalogue
-                    .validate_pin(session.tenant(), pin, now, session)
+                    .validate_pin(session.tenant(), pin, completed_at, session)
                     .is_err()
             {
                 return Err(ErrorCode::AccessDenied);
@@ -586,9 +608,14 @@ fn create_region(body: &[u8], policy: &Policy) -> Result<String> {
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(true);
     let mut stage = 0;
+    let mut declaration_seen = false;
     let mut region = String::new();
     loop {
         match reader.read_event().map_err(|_| ErrorCode::MalformedXML)? {
+            Event::Decl(e) if stage == 0 && !declaration_seen => {
+                super::restore::validate_declaration(&e)?;
+                declaration_seen = true;
+            }
             Event::Start(e) if stage == 0 && e.name().as_ref() == "CreateBucketConfiguration" => {
                 for a in e.attributes() {
                     let a = a.map_err(|_| ErrorCode::MalformedXML)?;

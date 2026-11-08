@@ -66,32 +66,11 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
                 }
             }
             Event::Decl(e) => {
-                if root_seen
-                    || declaration_seen
-                    || e.version().map_err(|_| ErrorCode::MalformedXML)? != "1.0"
-                {
+                if root_seen || declaration_seen {
                     return Err(ErrorCode::MalformedXML);
                 }
+                validate_declaration(&e)?;
                 declaration_seen = true;
-                let attributes = quick_xml::events::BytesStart::from_content(e.as_ref(), 3);
-                let mut position = 0;
-                for attr in attributes.attributes() {
-                    let attr = attr.map_err(|_| ErrorCode::MalformedXML)?;
-                    let next = match attr.key.as_ref() {
-                        "version" if position == 0 && attr.value == "1.0" => 1,
-                        "encoding" if position == 1 && attr.value.eq_ignore_ascii_case("UTF-8") => {
-                            2
-                        }
-                        "standalone"
-                            if (1..=2).contains(&position)
-                                && matches!(attr.value.as_ref(), "yes" | "no") =>
-                        {
-                            3
-                        }
-                        _ => return Err(ErrorCode::MalformedXML),
-                    };
-                    position = next;
-                }
             }
             Event::Eof => break,
             _ => return Err(ErrorCode::InvalidRequest),
@@ -104,6 +83,28 @@ pub fn parse_restore(xml: &[u8], policy: &Policy) -> Result<u32> {
         days.as_deref().ok_or(ErrorCode::InvalidArgument)?,
         tier.as_deref(),
     )
+}
+
+pub(super) fn validate_declaration(e: &quick_xml::events::BytesDecl<'_>) -> Result<()> {
+    if e.version().map_err(|_| ErrorCode::MalformedXML)? != "1.0" {
+        return Err(ErrorCode::MalformedXML);
+    }
+    let attributes = quick_xml::events::BytesStart::from_content(e.as_ref(), 3);
+    let mut position = 0;
+    for attr in attributes.attributes() {
+        let attr = attr.map_err(|_| ErrorCode::MalformedXML)?;
+        position = match attr.key.as_ref() {
+            "version" if position == 0 && attr.value == "1.0" => 1,
+            "encoding" if position == 1 && attr.value.eq_ignore_ascii_case("UTF-8") => 2,
+            "standalone"
+                if (1..=2).contains(&position) && matches!(attr.value.as_ref(), "yes" | "no") =>
+            {
+                3
+            }
+            _ => return Err(ErrorCode::MalformedXML),
+        };
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

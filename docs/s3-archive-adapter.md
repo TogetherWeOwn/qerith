@@ -13,6 +13,9 @@ and map that verified principal to a trusted `Session`. Never deserialize a
 session, tenant, operation ID, capacity receipt or cache receipt from a request.
 `Session` rechecks credentials/current policy; catalogue references are exactly
 `bucket/key`, with no Unicode, dot-segment, slash or percent normalization.
+Ingress supplies a trusted advancing `Clock` (epoch seconds), not a request
+timestamp. Admission and post-I/O pin validation each sample it; backwards time
+fails closed. The qualified cache must use the same time basis during transfers.
 The root target `/` supports ListBuckets; it is not an object/bucket alias.
 
 The read module routes Create/List/Head/DeleteBucket, GetBucketLocation,
@@ -46,13 +49,17 @@ are assertions at a trusted boundary, not cryptographic or physical qualificatio
   are preserved. Unsupported or inconsistent stored checksum evidence fails closed.
 - Preconditions (using the merged precedence rules) and range validation precede
   cold state. HEAD is metadata-only, including ranged HEAD; it never reads cache,
-  pins a transfer, requests capacity or queues work. No lease means GET/range 403
+  pins a transfer, requests capacity or queues work. Metadata and predicates remain
+  visible while delivery-cache deletion is pending or completed. Status lookup
+  checks the requested Read or Restore action without treating either as the other.
+  No lease means GET/range 403
   InvalidObjectState even if retained safety bytes physically exist.
 - GET obtains a catalogue serving pin and compares its generation to the planned
   metadata before cache I/O. `QualifiedCache` is a trusted **whole-generation
   verified immutable cache**; no NNTP fallback or partial reconstruction. The
   adapter bounds buffered read size, validates returned slice length, rechecks
-  current authority and the pin after I/O, and cleans up pins even after revocation.
+  current bucket-operation and reference authority and the pin at fresh time after
+  I/O, and cleans up pins even after revocation or expiry.
   Streaming production adapters must perform equivalent checks during transfer;
   bytes already received cannot be recalled. This reference buffers before success.
 - Regular restore parses the merged strict XML/policy, queues the existing durable
@@ -77,6 +84,15 @@ prefix group, preventing duplicate groups across page boundaries. Calls are curr
 indexed scans, **not a snapshot** across concurrent mutations: newly inserted keys
 behind the cursor need not appear and keys ahead may appear.
 
+`scan_batch` bounds each catalogue call; `scan_entries` bounds total fetched
+entries per request, including skipped delimiter members and StartAfter groups.
+At the request budget, return a truncated page with a cursor after the last scanned
+key, even if KeyCount is zero. Clients must follow the continuation token until
+IsTruncated is false, not stop on an empty page. A page ending exactly at the budget
+may need one final empty page to establish EOF. Lookahead truncation instead
+resumes after the last delivered entry. These bounds do not turn the fixture's
+metadata map or an unauthorized-name filter into a production indexed store.
+
 `TokenPort` binds opaque server-issued handles to tenant, principal, bucket
 incarnation, prefix, delimiter, encoding and StartAfter. Every continued request
 rechecks authorization. Page size may change. Production implementations require
@@ -84,7 +100,10 @@ unguessable bounded-life handles and persistent scope state (or explicit expiry 
 restart). `MemoryTokens` is an explicitly predictable, bounded, expiring fixture;
 it must not become a production credential/token implementation.
 
-XML escapes metacharacters. `encoding-type=url` percent-encodes UTF-8 bytes using
+XML escapes metacharacters and emits carriage returns as numeric references so
+XML 1.0 end-of-line normalization does not change keys. All fallible response fields
+render before a continuation token is allocated; rejected pages consume no token
+capacity. `encoding-type=url` percent-encodes UTF-8 bytes using
 RFC 3986 unreserved characters only, including slash, space, percent and plus.
 Keys not representable in XML 1.0 require URL encoding, never replacement characters
 or silently changed names. Region and unsupported options are validated before

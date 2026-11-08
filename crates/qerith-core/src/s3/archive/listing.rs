@@ -119,20 +119,26 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
             None
         };
         let mut entries: Vec<(String, Option<ReferenceView>, Cursor)> = Vec::new();
+        let mut remaining = self.limits.scan_entries;
+        let mut budget_exhausted = false;
         if max > 0 {
             'scan: loop {
+                let limit = self.limits.scan_batch.min(remaining);
                 let batch = self
                     .catalogue
                     .list_references(
                         session.tenant(),
                         &prefix,
                         after.as_deref(),
-                        self.limits.scan_batch,
+                        limit,
                         now,
                         session,
                     )
                     .map_err(super::catalogue_error)?;
-                let short = batch.len() < self.limits.scan_batch;
+                remaining = remaining
+                    .checked_sub(batch.len())
+                    .ok_or(ErrorCode::InternalError)?;
+                let short = batch.len() < limit;
                 if batch.is_empty() {
                     break;
                 }
@@ -142,6 +148,8 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                         .strip_prefix(&namespace)
                         .ok_or(ErrorCode::InternalError)?
                         .to_owned();
+                    // Even filtered group members advance a budget-limited page.
+                    cursor.after = key.clone();
                     if cursor
                         .skip_prefix
                         .as_ref()
@@ -179,21 +187,19 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                 if short {
                     break;
                 }
+                if remaining == 0 {
+                    budget_exhausted = true;
+                    break;
+                }
             }
         }
-        let truncated = entries.len() > max as usize;
-        if truncated {
+        let overflow = entries.len() > max as usize;
+        let truncated = overflow || budget_exhausted;
+        if overflow {
             entries.pop();
+            // Revisit the lookahead entry: only delivered entries are consumed.
+            cursor = entries.last().ok_or(ErrorCode::InternalError)?.2.clone();
         }
-        let next = if truncated {
-            Some(self.tokens.issue(
-                scope.clone(),
-                entries.last().ok_or(ErrorCode::InternalError)?.2.clone(),
-                now,
-            )?)
-        } else {
-            None
-        };
         // XML 1.0 cannot represent every valid UTF-8 object key. Require URL
         // encoding for those pages; do not replace/control-normalize key bytes.
         let field = |s: &str| -> Result<String> {
@@ -224,12 +230,6 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                 super::super::xml(token)
             ));
         }
-        if let Some(next) = next {
-            xml.push_str(&format!(
-                "<NextContinuationToken>{}</NextContinuationToken>",
-                super::super::xml(&next)
-            ));
-        }
         for (key, view, _) in entries {
             if let Some(view) = view {
                 xml.push_str(&format!("<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>GLACIER</StorageClass></Contents>", field(&key)?, iso_date(view.metadata.modified_at)?, super::super::xml(&view.metadata.validator), view.metadata.identity.length));
@@ -239,6 +239,14 @@ impl<C: ArchiveReadPort, T: TokenPort> Adapter<C, T> {
                     field(&key)?
                 ));
             }
+        }
+        // All fallible fields must render before allocating a deliverable token.
+        if truncated {
+            let next = self.tokens.issue(scope.clone(), cursor, now)?;
+            xml.push_str(&format!(
+                "<NextContinuationToken>{}</NextContinuationToken>",
+                super::super::xml(&next)
+            ));
         }
         xml.push_str("</ListBucketResult>");
         Ok(xml_response(xml))

@@ -17,13 +17,17 @@ struct Access {
     current: Rc<Cell<bool>>,
     list: bool,
     denied: Option<String>,
+    read: bool,
+    bucket_read: Rc<Cell<bool>>,
 }
 impl qerith_core::catalogue::Authority for Access {
     fn is_current(&self) -> bool {
         self.current.get()
     }
-    fn permits(&self, reference: &Reference, _: Action) -> bool {
-        reference.tenant == self.tenant && self.denied.as_deref() != Some(&reference.name)
+    fn permits(&self, reference: &Reference, action: Action) -> bool {
+        reference.tenant == self.tenant
+            && self.denied.as_deref() != Some(&reference.name)
+            && (action != Action::Read || self.read)
     }
 }
 impl Session for Access {
@@ -34,7 +38,8 @@ impl Session for Access {
         &self.principal
     }
     fn allows(&self, op: Operation, _: &str) -> bool {
-        op != Operation::ListObjects || self.list
+        (op != Operation::ListObjects || self.list)
+            && (op != Operation::Read || self.bucket_read.get())
     }
 }
 fn access() -> Access {
@@ -44,6 +49,8 @@ fn access() -> Access {
         current: Rc::new(Cell::new(true)),
         list: true,
         denied: None,
+        read: true,
+        bucket_read: Rc::new(Cell::new(true)),
     }
 }
 fn policy() -> s3::Policy {
@@ -67,6 +74,9 @@ fn policy() -> s3::Policy {
 }
 type TestAdapter = Adapter<MemoryCatalogue, MemoryTokens>;
 fn adapter() -> TestAdapter {
+    adapter_with_scan_budget(2048)
+}
+fn adapter_with_scan_budget(scan_entries: usize) -> TestAdapter {
     Adapter::new(
         MemoryCatalogue::default(),
         MemoryTokens::new(128, 300).unwrap(),
@@ -76,6 +86,7 @@ fn adapter() -> TestAdapter {
             serving_seconds: 10,
             restore_job_seconds: 200000,
             scan_batch: 73,
+            scan_entries,
         },
     )
     .unwrap()
@@ -83,7 +94,14 @@ fn adapter() -> TestAdapter {
 struct Cache {
     calls: usize,
     revoke: Option<Rc<Cell<bool>>>,
+    advance: Option<(Rc<Cell<u64>>, u64)>,
     wrong_length: bool,
+}
+struct TestClock(Rc<Cell<u64>>);
+impl Clock for TestClock {
+    fn now(&self) -> u64 {
+        self.0.get()
+    }
 }
 impl QualifiedCache for Cache {
     fn read(
@@ -102,6 +120,9 @@ impl QualifiedCache for Cache {
         assert_eq!(location, "fixture-copy/10");
         if let Some(current) = &self.revoke {
             current.set(false);
+        }
+        if let Some((clock, until)) = &self.advance {
+            clock.set(*until);
         }
         if self.wrong_length {
             return Ok(vec![]);
@@ -263,6 +284,7 @@ struct Fixture {
     access: Access,
     cache: Cache,
     capacity: Capacity,
+    clock: TestClock,
     op: u64,
 }
 impl Fixture {
@@ -273,9 +295,11 @@ impl Fixture {
             cache: Cache {
                 calls: 0,
                 revoke: None,
+                advance: None,
                 wrong_length: false,
             },
             capacity: Capacity::default(),
+            clock: TestClock(Rc::new(Cell::new(0))),
             op: 100000,
         }
     }
@@ -288,6 +312,7 @@ impl Fixture {
         now: u64,
     ) -> Response {
         self.op += 1;
+        self.clock.0.set(now);
         self.adapter.handle(
             method,
             &Target::parse(target, &policy()).unwrap(),
@@ -295,7 +320,7 @@ impl Fixture {
             body,
             &self.access,
             OperationId(self.op),
-            now,
+            &self.clock,
             "fixture-request<&>",
             &mut self.cache,
             &mut self.capacity,
@@ -782,4 +807,303 @@ fn listing_traverses_over_1000_in_byte_order_and_is_not_snapshot_consistent() {
     assert!(!text(&next).contains("<Key>aaa-new</Key>"));
     assert!(text(&next).contains("<Key>zzz-new</Key>"));
     assert!(text(&next).contains("<IsTruncated>false</IsTruncated>"));
+}
+
+#[test]
+fn service_root_is_only_list_buckets_and_has_no_mutation_alias() {
+    let mut f = Fixture::new();
+    for method in ["PUT", "HEAD", "DELETE", "POST"] {
+        let r = f.call(method, "/", &[], b"", 0);
+        assert_eq!(r.status, 501);
+        if method == "HEAD" {
+            assert!(r.body.is_empty());
+        }
+        assert!(f.adapter.catalogue.buckets(TENANT).is_empty());
+    }
+    assert_eq!(f.call("GET", "/", &[], b"", 0).status, 200);
+}
+
+#[test]
+fn bucket_configuration_accepts_one_valid_leading_xml_declaration() {
+    let mut f = Fixture::new();
+    let config = "<CreateBucketConfiguration><LocationConstraint>fixture-1</LocationConstraint></CreateBucketConfiguration>";
+    for declaration in [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>",
+    ] {
+        assert_eq!(
+            f.call(
+                "PUT",
+                "/bucket",
+                &[],
+                format!("{declaration}{config}").as_bytes(),
+                0
+            )
+            .status,
+            200
+        );
+        assert_eq!(f.call("DELETE", "/bucket", &[], b"", 0).status, 204);
+    }
+    for bad in [
+        format!("<?xml version=\"1.1\"?>{config}"),
+        format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?>{config}"),
+        format!("<?xml version=\"1.0\"?><?xml version=\"1.0\"?>{config}"),
+        config.replace(
+            "<LocationConstraint>",
+            "<?xml version=\"1.0\"?><LocationConstraint>",
+        ),
+        format!("{config}<?xml version=\"1.0\"?>"),
+        format!("<!DOCTYPE CreateBucketConfiguration>{config}"),
+    ] {
+        assert_eq!(f.call("PUT", "/bucket", &[], bad.as_bytes(), 0).status, 400);
+        assert!(f.adapter.catalogue.buckets(TENANT).is_empty());
+    }
+}
+
+#[test]
+fn bucket_read_revocation_is_rechecked_independently_of_reference_authority() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    assert_eq!(f.restore(1, 6).status, 202);
+    let job = restore_job(&f.adapter.catalogue, &f.access);
+    publish(&mut f.adapter.catalogue, &f.access, job, G, 7);
+    f.cache.revoke = Some(f.access.bucket_read.clone());
+    error(&f.call("GET", "/bucket/key", &[], b"", 8), "AccessDenied");
+    assert_eq!(f.cache.calls, 1);
+    assert!(f.access.current.get());
+    assert!(f.access.permits(
+        &Reference {
+            tenant: TENANT,
+            name: "bucket/key".into()
+        },
+        Action::Read
+    ));
+    f.cache.revoke = None;
+    f.access.bucket_read.set(true);
+    assert_eq!(f.call("GET", "/bucket/key", &[], b"", 8).body, C);
+}
+
+#[test]
+fn fresh_clock_fences_buffered_reads_at_pin_and_lease_expiry() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    assert_eq!(f.restore(1, 6).status, 202);
+    let job = restore_job(&f.adapter.catalogue, &f.access);
+    publish(&mut f.adapter.catalogue, &f.access, job, G, 7);
+    // An I/O delay past the 10-second pin must not return buffered bytes.
+    f.cache.advance = Some((f.clock.0.clone(), 18));
+    error(&f.call("GET", "/bucket/key", &[], b"", 8), "AccessDenied");
+    let expiry = archive_expiry(7, 1).unwrap();
+    f.cache.advance = Some((f.clock.0.clone(), expiry));
+    error(
+        &f.call(
+            "GET",
+            "/bucket/key",
+            &[("range", "bytes=1-3")],
+            b"",
+            expiry - 1,
+        ),
+        "AccessDenied",
+    );
+    f.cache.advance = Some((f.clock.0.clone(), 17));
+    assert_eq!(f.call("GET", "/bucket/key", &[], b"", 8).body, C);
+    // A broken infrastructure clock also fails closed rather than extending a pin.
+    f.cache.advance = Some((f.clock.0.clone(), 7));
+    error(&f.call("GET", "/bucket/key", &[], b"", 8), "AccessDenied");
+}
+
+#[test]
+fn metadata_head_and_predicates_survive_delivery_cache_eviction() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    let candidate = f
+        .adapter
+        .catalogue
+        .candidate(TENANT, G, DeletionKind::DeliveryCache, 6, 7, &f.access)
+        .unwrap();
+    let event = f
+        .adapter
+        .catalogue
+        .finalize_deletion(candidate, 7, &f.access)
+        .unwrap();
+    for dispatched in [false, true] {
+        if dispatched {
+            f.adapter
+                .catalogue
+                .dispatch_deletion(TENANT, event, 8, &f.access)
+                .unwrap();
+            f.adapter
+                .catalogue
+                .acknowledge_deletion(TENANT, event)
+                .unwrap();
+        }
+        let head = f.call("HEAD", "/bucket/key", &[], b"", 8);
+        assert_eq!(head.status, 200);
+        assert_eq!(header(&head, "etag"), Some("\"opaque-not-md5-10\""));
+        assert_eq!(
+            f.call("HEAD", "/bucket/key", &[("if-none-match", "*")], b"", 8)
+                .status,
+            304
+        );
+        assert_eq!(
+            f.call("HEAD", "/bucket/key", &[("range", "bytes=999-")], b"", 8)
+                .status,
+            416
+        );
+        error(
+            &f.call("GET", "/bucket/key", &[], b"", 8),
+            "InvalidObjectState",
+        );
+    }
+    assert_eq!(f.cache.calls, 0);
+}
+
+#[test]
+fn restore_authority_does_not_imply_or_require_read_authority() {
+    let mut f = Fixture::new();
+    let archive = f.seed();
+    qualify(&mut f.adapter.catalogue, &f.access, archive, G);
+    f.access.read = false;
+    f.access.bucket_read.set(false);
+    assert_eq!(f.restore(1, 6).status, 202);
+    assert_eq!(f.restore(1, 7).status, 409);
+    let job = restore_job(&f.adapter.catalogue, &f.access);
+    publish(&mut f.adapter.catalogue, &f.access, job, G, 8);
+    assert_eq!(f.restore(2, 9).status, 200);
+    assert_eq!(f.capacity.reservations.len(), 1);
+    assert_eq!(f.call("GET", "/bucket/key", &[], b"", 9).status, 403);
+    let head = f.call("HEAD", "/bucket/key", &[], b"", 9);
+    assert_eq!(head.status, 403);
+    assert!(head.body.is_empty());
+}
+
+fn parsed_keys(xml: &[u8]) -> Vec<String> {
+    use quick_xml::{events::Event, Reader};
+    let mut reader = Reader::from_reader(xml);
+    let mut keys = Vec::new();
+    let mut key = None::<String>;
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(e) if e.name().as_ref() == "Key" => key = Some(String::new()),
+            Event::End(e) if e.name().as_ref() == "Key" => keys.push(key.take().unwrap()),
+            Event::Text(e) => {
+                if let Some(key) = &mut key {
+                    key.push_str(&e.xml10_content());
+                }
+            }
+            Event::GeneralRef(e) => {
+                if let Some(key) = &mut key {
+                    key.push(e.resolve_char_ref().unwrap().unwrap());
+                }
+            }
+            Event::Eof => return keys,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn listing_carriage_returns_round_trip_through_xml_parser() {
+    let mut f = Fixture::new();
+    f.seed();
+    let key = "line\r\nnext\rtab\tend";
+    upload(
+        &mut f.adapter.catalogue,
+        &f.access,
+        key,
+        GenerationId(20),
+        0,
+        20,
+    );
+    let r = f.call("GET", "/bucket?list-type=2&prefix=line", &[], b"", 6);
+    assert_eq!(r.status, 200);
+    assert_eq!(parsed_keys(&r.body), vec![key]);
+    let r = f.call(
+        "GET",
+        "/bucket?list-type=2&prefix=line&encoding-type=url",
+        &[],
+        b"",
+        6,
+    );
+    assert_eq!(parsed_keys(&r.body), vec!["line%0D%0Anext%0Dtab%09end"]);
+}
+
+#[test]
+fn failed_listing_does_not_consume_undelivered_token_capacity() {
+    let mut f = Fixture::new();
+    f.adapter.tokens = MemoryTokens::new(1, 300).unwrap();
+    f.seed();
+    upload(
+        &mut f.adapter.catalogue,
+        &f.access,
+        "\u{1}",
+        GenerationId(20),
+        0,
+        20,
+    );
+    for _ in 0..3 {
+        error(
+            &f.call("GET", "/bucket?list-type=2&max-keys=1", &[], b"", 6),
+            "InvalidArgument",
+        );
+    }
+    let valid = f.call(
+        "GET",
+        "/bucket?list-type=2&max-keys=1&encoding-type=url",
+        &[],
+        b"",
+        6,
+    );
+    assert_eq!(valid.status, 200);
+    assert!(element(&text(&valid), "NextContinuationToken").is_some());
+}
+
+#[test]
+fn delimiter_scan_budget_advances_even_on_empty_truncated_pages() {
+    let mut f = Fixture::new();
+    f.adapter = adapter_with_scan_budget(3);
+    f.seed();
+    for i in 0..10 {
+        upload(
+            &mut f.adapter.catalogue,
+            &f.access,
+            &format!("directory/{i:02}"),
+            GenerationId(20 + i),
+            0,
+            20 + 2 * i,
+        );
+    }
+    let base = "/bucket?list-type=2&delimiter=%2F&max-keys=1";
+    let first = f.call("GET", base, &[], b"", 6);
+    assert!(text(&first).contains("<CommonPrefixes><Prefix>directory/</Prefix>"));
+    let mut token = element(&text(&first), "NextContinuationToken").unwrap();
+    let mut empty_pages = 0;
+    let mut keys = Vec::new();
+    for _ in 0..10 {
+        let r = f.call(
+            "GET",
+            &format!("{base}&continuation-token={token}"),
+            &[],
+            b"",
+            6,
+        );
+        assert_eq!(r.status, 200);
+        assert!(!text(&r).contains("<CommonPrefixes>"));
+        if text(&r).contains("<KeyCount>0</KeyCount>") {
+            empty_pages += 1;
+        }
+        keys.extend(parsed_keys(&r.body));
+        match element(&text(&r), "NextContinuationToken") {
+            Some(next) => token = next,
+            None => {
+                assert_eq!(keys, vec!["key"]);
+                assert_eq!(empty_pages, 2);
+                return;
+            }
+        }
+    }
+    panic!("scan cursor did not make progress");
 }

@@ -77,10 +77,14 @@ pub trait ArchiveReadPort: MetadataOutbox {
         now: u64,
         authority: &dyn Authority,
     ) -> Result<Vec<(String, ReferenceView)>>;
+    /// Metadata/status remains visible during cache deletion. Authorize before
+    /// lookup using exactly Read or Restore; Restore does not imply Read. Serving
+    /// and restore mutations retain their own deletion/admission fences.
     fn archive_view(
         &self,
         tenant: TenantId,
         name: &str,
+        action: Action,
         now: u64,
         authority: &dyn Authority,
     ) -> Result<ArchiveView>;
