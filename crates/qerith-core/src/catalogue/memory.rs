@@ -55,6 +55,7 @@ struct Subscriber {
     operation: OperationId,
     revision: u64,
     availability_for: u64,
+    archive_days: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -81,6 +82,8 @@ struct Pin {
 #[derive(Clone, Default)]
 pub struct MemoryCatalogue {
     tenants: BTreeMap<TenantId, Tenant>,
+    buckets: BTreeMap<String, (TenantId, BucketView)>,
+    bucket_sequence: u64,
 }
 
 fn permit(authority: &dyn Authority, tenant: TenantId, name: &str, action: Action) -> Result<()> {
@@ -173,7 +176,10 @@ impl Tenant {
                 (source.clone(), Action::Read),
                 (destination.clone(), Action::Write),
             ],
-            Mutation::RequestRestore { name, .. } | Mutation::CancelSubscription { name, .. } => {
+            Mutation::RequestRestore { name, .. }
+            | Mutation::RequestArchiveRestore { name, .. }
+            | Mutation::RenewArchiveAvailability { name, .. }
+            | Mutation::CancelSubscription { name, .. } => {
                 vec![(name.clone(), Action::Restore)]
             }
             Mutation::AcquireServingPin { name, .. } => vec![(name.clone(), Action::Read)],
@@ -431,10 +437,82 @@ impl Tenant {
                         operation,
                         revision: expected_revision,
                         availability_for,
+                        archive_days: None,
                     },
                 );
                 self.touch(generation)?;
                 Ok(Outcome::Restore(id))
+            }
+            Mutation::RequestArchiveRestore {
+                name,
+                expected_revision,
+                deadline,
+                days,
+            } => {
+                archive_expiry(deadline, days)?;
+                let (reference, generation_view) = self.visible(&name)?;
+                let generation = reference.generation.ok_or(Error::Unavailable)?;
+                let moderation_epoch = generation_view.moderation_epoch;
+                // A duplicate on the same logical revision remains pending even
+                // when a retry proposes a different deadline or Days value.
+                if self.jobs.values().any(|j| {
+                    j.view.generation == generation
+                        && j.moderation_epoch == moderation_epoch
+                        && j.view.kind == JobKind::Restore
+                        && !terminal(&j.view.state)
+                        && j.view.deadline > now
+                        && j.subscribers
+                            .get(&name)
+                            .is_some_and(|s| s.revision == expected_revision)
+                }) {
+                    return Err(Error::Conflict);
+                }
+                let outcome = self.mutate(
+                    operation,
+                    Mutation::RequestRestore {
+                        name: name.clone(),
+                        expected_revision,
+                        profile: "s3-standard-calendar".into(),
+                        deadline,
+                        availability_for: u64::from(days) * 86400,
+                    },
+                    now,
+                )?;
+                let Outcome::Restore(id) = outcome else {
+                    return Err(Error::Invalid);
+                };
+                self.jobs
+                    .get_mut(&id)
+                    .ok_or(Error::Unavailable)?
+                    .subscribers
+                    .get_mut(&name)
+                    .ok_or(Error::Unavailable)?
+                    .archive_days = Some(days);
+                Ok(outcome)
+            }
+            Mutation::RenewArchiveAvailability {
+                name,
+                expected_revision,
+                days,
+                reservation,
+            } => {
+                let (r, g) = self.visible(&name)?;
+                let old = r.availability.filter(|t| *t > now).ok_or(Error::Expired)?;
+                let until = archive_expiry(now, days)?.max(old);
+                let generation = r.generation.ok_or(Error::Unavailable)?;
+                if r.revision != expected_revision || reservation.generation != generation {
+                    return Err(Error::Conflict);
+                }
+                if g.cache.is_none() || reservation.until < until || reservation.receipt.is_empty()
+                {
+                    return Err(Error::Unsafe);
+                }
+                self.references
+                    .get_mut(&name)
+                    .ok_or(Error::Unavailable)?
+                    .availability = Some(until);
+                self.touch(generation)?;
+                Ok(Outcome::Applied)
             }
             Mutation::CancelSubscription {
                 name,
@@ -617,6 +695,17 @@ impl MetadataOutbox for MemoryCatalogue {
             return Ok(result.clone());
         }
         let names = staged.authorize_mutation(tenant, &mutation, authority)?;
+        if let Mutation::RenewArchiveAvailability {
+            name, reservation, ..
+        } = &mutation
+        {
+            if reservation.tenant != tenant
+                || reservation.name != *name
+                || reservation.operation != operation
+            {
+                return Err(Error::Unsafe);
+            }
+        }
         let result = staged.mutate(operation, mutation.clone(), now)?;
         staged
             .operations
@@ -701,6 +790,146 @@ impl MemoryCatalogue {
         let result = apply(&mut staged)?;
         self.tenants.insert(tenant, staged);
         Ok(result)
+    }
+}
+
+impl ArchiveReadPort for MemoryCatalogue {
+    fn release_serving_pin(&mut self, tenant: TenantId, pin: PinId) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let p = t.pins.remove(&pin).ok_or(Error::Unavailable)?;
+            t.touch(p.generation)
+        })
+    }
+
+    fn create_bucket(
+        &mut self,
+        tenant: TenantId,
+        name: &str,
+        region: &str,
+        now: u64,
+    ) -> std::result::Result<BucketView, BucketError> {
+        if let Some((owner, _)) = self.buckets.get(name) {
+            return Err(if *owner == tenant {
+                BucketError::AlreadyOwned
+            } else {
+                BucketError::Unavailable
+            });
+        }
+        self.bucket_sequence = self
+            .bucket_sequence
+            .checked_add(1)
+            .ok_or(BucketError::Invalid)?;
+        let view = BucketView {
+            name: name.into(),
+            region: region.into(),
+            created_at: now,
+            incarnation: self.bucket_sequence,
+        };
+        self.buckets.insert(name.into(), (tenant, view.clone()));
+        Ok(view)
+    }
+
+    fn bucket(&self, tenant: TenantId, name: &str) -> std::result::Result<BucketView, BucketError> {
+        self.buckets
+            .get(name)
+            .filter(|(owner, _)| *owner == tenant)
+            .map(|(_, view)| view.clone())
+            .ok_or(BucketError::Unavailable)
+    }
+
+    fn buckets(&self, tenant: TenantId) -> Vec<BucketView> {
+        self.buckets
+            .values()
+            .filter(|(owner, _)| *owner == tenant)
+            .map(|(_, view)| view.clone())
+            .collect()
+    }
+
+    fn delete_bucket(
+        &mut self,
+        tenant: TenantId,
+        name: &str,
+    ) -> std::result::Result<(), BucketError> {
+        self.bucket(tenant, name)?;
+        let prefix = format!("{name}/");
+        if self.tenants.get(&tenant).is_some_and(|t| {
+            t.references
+                .iter()
+                .any(|(n, r)| n.starts_with(&prefix) && r.generation.is_some())
+                || t.intents
+                    .values()
+                    .any(|i| i.pending && i.name.starts_with(&prefix))
+        }) {
+            return Err(BucketError::NotEmpty);
+        }
+        self.buckets.remove(name);
+        Ok(())
+    }
+
+    fn list_references(
+        &self,
+        tenant: TenantId,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<Vec<(String, ReferenceView)>> {
+        if !authority.is_current() {
+            return Err(Error::Unavailable);
+        }
+        let Some(t) = self.tenants.get(&tenant) else {
+            return Ok(Vec::new());
+        };
+        let start = after.unwrap_or(prefix).max(prefix).to_owned();
+        Ok(t.references
+            .range(start..)
+            .take_while(|(n, _)| n.starts_with(prefix))
+            .filter(|(n, _)| after.is_none_or(|a| n.as_str() > a))
+            .filter_map(|(n, _)| {
+                self.lookup(tenant, n, now, authority)
+                    .ok()
+                    .map(|v| (n.clone(), v))
+            })
+            .take(limit)
+            .collect())
+    }
+
+    fn archive_view(
+        &self,
+        tenant: TenantId,
+        name: &str,
+        action: Action,
+        now: u64,
+        authority: &dyn Authority,
+    ) -> Result<ArchiveView> {
+        if !matches!(action, Action::Read | Action::Restore) {
+            return Err(Error::Invalid);
+        }
+        permit(authority, tenant, name, action)?;
+        let t = self.tenants.get(&tenant).ok_or(Error::Unavailable)?;
+        let (r, g) = t.metadata(name)?;
+        let reference = ReferenceView {
+            generation: r.generation.ok_or(Error::Unavailable)?,
+            revision: r.revision,
+            metadata: g.metadata.clone(),
+            availability_until: r.availability.filter(|until| *until > now),
+        };
+        let pending = t.jobs.values().any(|j| {
+            j.view.generation == reference.generation
+                && j.view.kind == JobKind::Restore
+                && !terminal(&j.view.state)
+                && j.view.deadline > now
+                && j.moderation_epoch == g.moderation_epoch
+                && j.subscribers
+                    .get(name)
+                    .is_some_and(|s| s.revision == reference.revision)
+        });
+        Ok(ArchiveView {
+            reference,
+            pending,
+            cache_location: g.cache.clone(),
+        })
     }
 }
 
@@ -940,8 +1169,12 @@ impl JobPort for MemoryCatalogue {
                         }
                         eligible.push((
                             name.clone(),
-                            now.checked_add(subscriber.availability_for)
-                                .ok_or(Error::Invalid)?,
+                            match subscriber.archive_days {
+                                Some(days) => archive_expiry(now, days)?,
+                                None => now
+                                    .checked_add(subscriber.availability_for)
+                                    .ok_or(Error::Invalid)?,
+                            },
                         ));
                     }
                     if eligible.is_empty() {

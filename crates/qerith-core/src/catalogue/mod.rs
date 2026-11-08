@@ -4,7 +4,11 @@
 //! scheduler, cryptographic verifier or authorization service. See `CONTRACT.md`
 //! for the durable adapter's atomicity, recovery and trust requirements.
 
+mod archive;
 mod memory;
+pub use archive::{
+    archive_expiry, ArchiveReadPort, ArchiveView, BucketError, BucketView, CapacityReservation,
+};
 pub use memory::MemoryCatalogue;
 
 use std::collections::BTreeMap;
@@ -144,6 +148,20 @@ pub enum Mutation {
         profile: String,
         deadline: u64,
         availability_for: u64,
+    },
+    /// Same durable job path, with a persisted calendar period starting only at
+    /// verified publication. Does not change generic RequestRestore semantics.
+    RequestArchiveRestore {
+        name: String,
+        expected_revision: u64,
+        deadline: u64,
+        days: u32,
+    },
+    RenewArchiveAvailability {
+        name: String,
+        expected_revision: u64,
+        days: u32,
+        reservation: CapacityReservation,
     },
     CancelSubscription {
         name: String,
