@@ -114,7 +114,10 @@ impl UploadValidator {
                 checksum = Some((algorithm, digest_value(value, algorithm.size())?));
             }
         }
-        if let Some(requested) = headers.get("x-amz-sdk-checksum-algorithm") {
+        if let Some(requested) = headers
+            .get("x-amz-checksum-algorithm")
+            .or_else(|| headers.get("x-amz-sdk-checksum-algorithm"))
+        {
             let expected = match requested {
                 "SHA256" => ChecksumAlgorithm::Sha256,
                 "CRC32" => ChecksumAlgorithm::Crc32,
