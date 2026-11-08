@@ -276,7 +276,15 @@ impl Storage for Io {
         if self.inject == Injection::PartialUpload {
             return Err(IoError::Retryable);
         }
-        let bytes = self.fixture.bytes();
+        let location = format!(
+            "mock/{}/{}/intent-{}",
+            upload.tenant.0, upload.generation.0, upload.intent.0
+        );
+        let bytes = self
+            .copies
+            .get(&location)
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| self.fixture.bytes());
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         if bytes.len() as u64 != upload.metadata.identity.length
             || digest != upload.metadata.identity.sha256
@@ -289,12 +297,11 @@ impl Storage for Io {
         {
             return Err(IoError::Integrity);
         }
-        let location = format!(
-            "mock/{}/{}/intent-{}",
-            upload.tenant.0, upload.generation.0, upload.intent.0
-        );
-        self.copies
-            .insert(location.clone(), self.fixture.bytes().to_vec());
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.copies.entry(location.clone())
+        {
+            entry.insert(self.fixture.bytes().to_vec());
+        }
         self.order.push("upload-complete");
         let mut copy = self.copy(&upload.metadata, location);
         if self.inject == Injection::BadReceipt {
@@ -915,6 +922,103 @@ async fn upload_invocation_expiry_prevents_commit_but_retains_completed_bytes() 
         c.reconcile(TENANT, upload.commit, &auth).unwrap(),
         Reconciliation::Absent
     );
+}
+
+#[tokio::test]
+async fn completed_upload_survives_lost_commit_without_replacement() {
+    for empty_checksums in [false, true] {
+        for corrupt in [false, true] {
+            let mut c = MemoryCatalogue::default();
+            let mut io = Io::new(1).await;
+            let mut upload = io.upload();
+            if empty_checksums {
+                upload.metadata.checksums.clear();
+            }
+            let time = Rc::new(Time(Cell::new(10)));
+            let auth = Auth::default();
+            let rules = Rules::default();
+            io.expire_at_upload = Some(time.clone());
+            assert_eq!(
+                ingest(
+                    &mut c,
+                    &mut io,
+                    &upload,
+                    &budget(),
+                    time.as_ref(),
+                    &rules,
+                    &auth,
+                )
+                .await,
+                Err(Failure::Admission)
+            );
+            assert_eq!(time.0.get(), 110);
+            assert_eq!(io.copies.len(), 1);
+            let location = io.copies.keys().next().unwrap().clone();
+            if corrupt {
+                io.copies.get_mut(&location).unwrap()[0] ^= 1;
+            }
+            let original = io.copies[&location].clone();
+            let allocation = io.copies[&location].as_ptr();
+            io.expire_at_upload = None;
+            let result = ingest(
+                &mut c,
+                &mut io,
+                &upload,
+                &budget(),
+                time.as_ref(),
+                &rules,
+                &auth,
+            )
+            .await;
+            if corrupt {
+                assert_eq!(result, Err(Failure::Io(IoError::Integrity)));
+                assert_eq!(
+                    c.reconcile(TENANT, upload.intent, &auth).unwrap(),
+                    Reconciliation::Applied(Outcome::UploadIntent(upload.intent))
+                );
+                assert_eq!(
+                    c.reconcile(TENANT, upload.commit, &auth).unwrap(),
+                    Reconciliation::Absent
+                );
+                assert!(c.lookup(TENANT, "object", 110, &auth).is_err());
+                assert!(c.generation(TENANT, GENERATION).is_err());
+                assert!(c.outbox(TENANT).is_empty());
+                assert_eq!(
+                    io.order.iter().filter(|e| **e == "upload-complete").count(),
+                    1
+                );
+            } else {
+                let committed = result.unwrap();
+                let archive = commit_job(committed.clone());
+                assert_eq!(c.job(TENANT, archive).unwrap().checkpoint, 0);
+                assert_eq!(c.outbox(TENANT).len(), 1);
+                assert_eq!(
+                    ingest(
+                        &mut c,
+                        &mut io,
+                        &upload,
+                        &budget(),
+                        time.as_ref(),
+                        &rules,
+                        &auth,
+                    )
+                    .await
+                    .unwrap(),
+                    committed
+                );
+                assert_eq!(c.outbox(TENANT).len(), 1);
+                assert_eq!(
+                    c.generation(TENANT, GENERATION).unwrap().cache_location,
+                    Some(location.clone())
+                );
+            }
+            assert_eq!(io.copies[&location], original);
+            assert_eq!(io.copies[&location].as_ptr(), allocation);
+            assert_eq!(io.copies.len(), 1);
+            assert!(!io.order.contains(&"cleanup-incomplete"));
+            assert!(pin(&mut c, "object", 1000, 110, &auth).is_err());
+        }
+    }
 }
 
 #[tokio::test]
