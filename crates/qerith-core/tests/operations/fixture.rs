@@ -68,12 +68,12 @@ fn transition(job: &mut Job, next: JobState, transitions: &mut Vec<(JobState, Jo
     job.state = next;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadRecord {
-    transfer: Transfer,
-    job: Opaque,
-    initiation: Request,
-    committed: bool,
+    pub transfer: Transfer,
+    pub job: Opaque,
+    pub initiation: Request,
+    pub committed: bool,
 }
 
 #[derive(Clone)]
@@ -164,6 +164,17 @@ impl Fixture {
                     .any(|u| u.transfer.target.generation == generation)
             {
                 return generation;
+            }
+            self.next();
+        }
+    }
+
+    fn fresh_handle(&mut self, scope: &Scope, prefix: &str) -> Opaque {
+        loop {
+            let handle = id(&format!("{prefix}{}", self.sequence));
+            let key = (scope.clone(), handle.clone());
+            if !self.jobs.contains_key(&key) && !self.uploads.contains_key(&key) {
+                return handle;
             }
             self.next();
         }
@@ -350,13 +361,14 @@ impl OperationPort for Fixture {
         let output = match operation {
             Operation::InitiateUpload => {
                 let generation = self.fresh_generation();
-                let sequence = self.sequence;
+                let job_handle = self.fresh_handle(scope, "uploadjob");
+                let transfer_handle = self.fresh_handle(scope, "upload");
                 let target = LogicalReference {
                     reference: request.opaque("reference").unwrap().clone(),
                     generation,
                 };
                 let job = Job {
-                    handle: id(&format!("uploadjob{sequence}")),
+                    handle: job_handle,
                     target: target.clone(),
                     state: JobState::Queued,
                     progress: Progress::new(ProgressUnit::Bytes, None),
@@ -364,7 +376,7 @@ impl OperationPort for Fixture {
                     error: None,
                 };
                 let transfer = Transfer {
-                    handle: id(&format!("upload{sequence}")),
+                    handle: transfer_handle,
                     target,
                     direction: TransferDirection::Upload,
                     expires_at: 1000,
@@ -524,9 +536,9 @@ impl OperationPort for Fixture {
                     self.next();
                     request.opaque("generation").unwrap().clone()
                 };
-                let sequence = self.sequence;
+                let handle = self.fresh_handle(scope, "mutationjob");
                 let job = Job {
-                    handle: id(&format!("mutationjob{sequence}")),
+                    handle,
                     target: LogicalReference {
                         reference,
                         generation,
