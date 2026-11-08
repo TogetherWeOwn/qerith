@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use qerith_core::catalogue::*;
-use qerith_core::composition::{self as flow, *};
+use qerith_core::composition::*;
 use sha2::{Digest, Sha256};
 use support::{Archive, Event, Fault, FixtureC, Key, MemoryCache, MockBackbone, Trace};
 
