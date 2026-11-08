@@ -20,6 +20,43 @@ fn identity(label: &'static str, provenance: &'static str) -> MockBackbone {
 }
 
 #[tokio::test]
+async fn empty_spool_requires_post_for_actual_committed_lengths() {
+    for length in [0, 1, 1024, 2057] {
+        let c = FixtureC::committed(
+            Key {
+                object: 7,
+                generation: 9,
+            },
+            vec![0x5a; length],
+        );
+        let mut archive = Archive::unposted(&c, identity("simulated", "unposted-spool")).await;
+        let mut trace = Trace::default();
+        let mut cache = MemoryCache::default();
+        if length != 0 {
+            assert!(archive
+                .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
+                .await
+                .is_err());
+            assert!(cache.delivery(c.key()).is_none());
+            cache.cleanup(c.key(), &mut trace);
+        }
+        for n in 0..c.parts() {
+            archive
+                .repost_from_retained(n, c.bytes(), &mut trace)
+                .await
+                .unwrap();
+        }
+        archive
+            .reconstruct(&c, &mut cache, Fault::Healthy, &mut trace)
+            .await
+            .unwrap();
+        assert_eq!(cache.delivery(c.key()).unwrap(), c.bytes());
+        cache.cleanup(c.key(), &mut trace);
+        cache.assert_empty(&mut trace);
+    }
+}
+
+#[tokio::test]
 async fn empty_cache_reconstruction_preserves_c_and_replays() {
     let c = fixture(7);
     let expected = vec![

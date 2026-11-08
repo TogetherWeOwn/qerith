@@ -37,8 +37,17 @@ impl FixtureC {
         // a stale prefix relabelled as a new generation cannot pass verification.
         bytes[..8].copy_from_slice(&key.object.to_le_bytes());
         bytes[8..16].copy_from_slice(&key.generation.to_le_bytes());
+        Self::committed(key, bytes)
+    }
+
+    /// Bind actual S3-committed fixture octets, not a separately generated oracle.
+    pub fn committed(key: Key, bytes: Vec<u8>) -> Self {
         let digest = Sha256::digest(&bytes).into();
         Self { key, bytes, digest }
+    }
+
+    pub fn parts(&self) -> usize {
+        self.bytes.len().div_ceil(PART_SIZE)
     }
 
     /// Returns a copy; changing it cannot relabel the committed bytes/digest.
@@ -274,6 +283,21 @@ impl Archive {
         }
     }
 
+    /// Empty remote spool: no ARTICLE exists until the engine really POSTs it.
+    pub async fn unposted(fixture: &FixtureC, identity: MockBackbone) -> Self {
+        let mut config = ServerConfig::for_test();
+        config.group = GROUP.into();
+        config.articles.clear();
+        config.missing_ids.clear();
+        Self {
+            fixture: fixture.clone(),
+            identity,
+            articles: articles(fixture),
+            server: Some(TestNntpServer::spawn(config).await),
+            delayed: false,
+        }
+    }
+
     /// Discard owned sessions/spool and create a fresh server for another attempt.
     /// Reset is explicit: retained-source POST state is not carried forward.
     pub async fn reset(&mut self, fault: Fault) {
@@ -362,7 +386,7 @@ impl Archive {
             let mut part = vec![0; PART_SIZE];
             let decoded = yenc::decode_part_to(&article.message_id, &raw, &mut part)
                 .map_err(|_| Failure::Integrity)?;
-            if !decoded.multipart
+            if decoded.multipart != (expected.parts() > 1)
                 || decoded.file_size != expected.bytes.len() as u64
                 || decoded.offset != cache.staged_len(expected.key) as u64
             {
@@ -441,7 +465,7 @@ fn articles(fixture: &FixtureC) -> Vec<Article> {
         yenc::encode_segment(&mut raw, &yenc::SegmentParams {
             name: "opaque-C.bin".into(),
             part: n as u32 + 1,
-            total: 3,
+            total: fixture.parts() as u32,
             begin: (n * PART_SIZE + 1) as u64,
             end: (n * PART_SIZE + bytes.len()) as u64,
             file_size: fixture.bytes.len() as u64,

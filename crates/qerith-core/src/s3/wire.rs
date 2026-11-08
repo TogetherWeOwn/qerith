@@ -261,7 +261,22 @@ impl Headers {
     }
 
     pub(crate) fn validate_features(&self) -> Result<()> {
+        if let (Some(wire), Some(sdk)) = (
+            self.get("x-amz-checksum-algorithm"),
+            self.get("x-amz-sdk-checksum-algorithm"),
+        ) {
+            if wire != sdk {
+                return Err(ErrorCode::InvalidRequest);
+            }
+        }
         for (k, v) in self.iter() {
+            if matches!(
+                k,
+                "x-amz-checksum-algorithm" | "x-amz-sdk-checksum-algorithm"
+            ) && !matches!(v, "SHA256" | "CRC32")
+            {
+                return Err(ErrorCode::InvalidRequest);
+            }
             if k.starts_with("x-amz-")
                 && !k.starts_with("x-amz-meta-")
                 && !matches!(
@@ -273,6 +288,7 @@ impl Headers {
                         | "x-amz-checksum-crc32"
                         | "x-amz-checksum-type"
                         | "x-amz-sdk-checksum-algorithm"
+                        | "x-amz-checksum-algorithm"
                         | "x-amz-checksum-mode"
                         | "x-amz-copy-source"
                         | "x-amz-copy-source-range"

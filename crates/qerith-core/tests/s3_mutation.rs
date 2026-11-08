@@ -206,6 +206,72 @@ fn body_with(
 fn body(bytes: &[u8]) -> ValidatedBody {
     body_with(bytes, None, &[]).unwrap()
 }
+#[test]
+fn checksum_algorithm_wire_header_requires_matching_integrity_evidence() {
+    let bytes = b"checksum header semantics";
+    let sha = STANDARD.encode(Sha256::digest(bytes));
+    assert!(body_with(bytes, None, &[("x-amz-checksum-algorithm", "SHA256")]).is_err());
+    assert!(body_with(
+        bytes,
+        None,
+        &[
+            ("x-amz-checksum-algorithm", "SHA256"),
+            ("x-amz-checksum-sha256", &sha),
+        ]
+    )
+    .is_ok());
+    assert!(body_with(
+        bytes,
+        None,
+        &[
+            ("x-amz-checksum-algorithm", "SHA256"),
+            ("x-amz-sdk-checksum-algorithm", "CRC32"),
+            ("x-amz-checksum-sha256", &sha),
+        ]
+    )
+    .is_err());
+}
+
+#[test]
+fn sdk_copy_source_accepts_optional_leading_slash_and_decodes_once() {
+    let p = policy();
+    for value in ["archive/a%252Fb", "/archive/a%252Fb"] {
+        let headers = s3::Headers::new(&[("x-amz-copy-source", value)], &p).unwrap();
+        let source = CopySource::from_headers(T, GenerationId(1), &headers, &p).unwrap();
+        assert_eq!(source.reference, reference("archive/a%2Fb"));
+    }
+    for value in [
+        "archive/a?versionId=1",
+        "https://other.invalid/archive/a",
+        "//archive/a",
+    ] {
+        let headers = s3::Headers::new(&[("x-amz-copy-source", value)], &p).unwrap();
+        assert!(CopySource::from_headers(T, GenerationId(1), &headers, &p).is_err());
+    }
+}
+
+#[test]
+fn trusted_archive_worker_reads_exact_committed_bytes_without_a_delivery_lease() {
+    let mut model = model();
+    let result = put(&mut model, "archive/worker", b"committed opaque C");
+    assert_eq!(
+        model.retained_for_archive(T, result.generation).unwrap(),
+        b"committed opaque C"
+    );
+    assert!(model
+        .retained_for_archive(TenantId(2), result.generation)
+        .is_err());
+    assert!(model.retained_for_archive(T, GenerationId(999)).is_err());
+    assert_eq!(
+        model
+            .catalogue()
+            .lookup(T, "archive/worker", 2, &auth())
+            .unwrap()
+            .availability_until,
+        None
+    );
+}
+
 fn put(m: &mut MemoryMutations, name: &str, bytes: &[u8]) -> CommitResult {
     m.put(prepare(m, name), body(bytes), 2, &auth()).unwrap()
 }
