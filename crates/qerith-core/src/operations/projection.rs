@@ -80,6 +80,10 @@ pub fn rest_call(
     } else {
         Err(Failure::new(ErrorCode::Unsupported))
     };
+    rest_response(outcome)
+}
+
+pub(super) fn rest_response(outcome: Result<Output, Failure>) -> RestResponse {
     let status = match &outcome {
         Err(error) => http_error(error.code),
         Ok(Output::Job(job)) if !job.state.terminal() => 202,
@@ -121,6 +125,10 @@ pub fn mcp_call(
     } else {
         Err(Failure::new(ErrorCode::Unsupported))
     };
+    mcp_response(outcome)
+}
+
+pub(super) fn mcp_response(outcome: Result<Output, Failure>) -> McpResponse {
     McpResponse {
         is_error: outcome.is_err(),
         outcome,

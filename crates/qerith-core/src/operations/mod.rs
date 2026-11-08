@@ -7,10 +7,12 @@
 mod model;
 mod projection;
 mod registry;
+mod wire;
 
 pub use model::*;
 pub use projection::*;
 pub use registry::*;
+pub use wire::{mcp_request, rest_request, MAX_MESSAGE_BYTES};
 
 /// The single integration seam. All methods fail closed; there are no permissive defaults.
 ///
