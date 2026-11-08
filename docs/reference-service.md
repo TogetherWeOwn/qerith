@@ -30,8 +30,12 @@ not a public unvalidated wire endpoint. A REST/MCP integration must resolve that
 same descriptor before initiating. It cannot invent metadata or infer it from an
 object hash. Native initiation performs this binding itself. Copy and delete are
 registry operations; the current native wire enum has no invented copy/delete or
-result variant. Native status exposes the same job; REST/MCP result exposes its
-committed logical target. Native ciphertext ranges are explicitly unsupported by
+result variant. Native status/cancel support upload and restore jobs only; copy/delete
+job handles explicitly return `UnsupportedProfile` rather than masquerading as uploads.
+REST/MCP status/cancel/result support copy/delete and expose their committed logical
+targets. Native and operation opaque identities share the same bounded 128-byte
+alphanumeric/`_-.:` alphabet, preserving punctuation without lossy casts or aliases.
+Native ciphertext ranges are explicitly unsupported by
 this adapter, rather than silently expanded to whole-object downloads.
 
 Upload descriptor ingress uses the native stored-ciphertext and metadata validator,
@@ -59,7 +63,12 @@ inherit source availability. The destination requires its own explicit restore.
 Re-copying the same physical ciphertext still changes logical G and reference
 revision, fencing old jobs and pins. Bindings survive checkpoint/reconnect and are
 bounded with the other service records. Model-transaction rollback includes Link,
-binding, job, identity allocation, membership and accepted-response replay.
+binding, job, identity allocation, membership and accepted-response replay. Copy's
+key, parent and context grants are checked again by its effect-time catalogue
+authority. Reconciliation rechecks those retained grants and the live destination
+binding/moderation, not the old source's execution-only availability lease or
+continued existence. Repeated uploads of the same C use a distinct stable
+per-upload storage-generation validator; repeatable C is never used as unique G.
 
 ## Transfer and jobs
 
@@ -91,7 +100,15 @@ Cancellation is non-rollback: a committed job reports already committed; an
 unstarted upload can stop before commit; restore cancellation removes only its
 own accepted subscription. An interrupted/uncertain storage attempt retains a
 cleanup/reconciliation obligation instead of claiming no effects. Polling does
-not extend deadlines. A new commit identity cannot clear cleanup-aware cancellation
+not extend deadlines. Unknown effects remain unknown through fresh commit identities,
+worker early exits and deadline Result failures. Uncommitted upload job access uses
+Write, not an ungranted Read of a not-yet-published object. Restore admission/replay
+and subscription cancellation require Restore; cancellation does not require Write.
+Physical restore completion is projected as success only for the exact subscription
+recorded at publication, never for an excluded logical reference. Native restore
+`max_seconds` also bounds the worker deadline (the operation registry exposes the
+same optional field independently of `availability_seconds`).
+A new commit identity cannot clear cleanup-aware cancellation
 or restart storage. Native resume/restore/status replays retain their original,
 already-validated progress/status while still checking current request authority;
 they do not falsely validate historical progress against the latest state.
@@ -110,7 +127,9 @@ not qualified production bearer tokens or claims of unguessability.
 
 Browse cursors retain bounded immutable model snapshots, scoped to principal,
 container, query limit and expiry. Each continued entry is rechecked against
-current authority and generation. Cursor retries do not mutate their position.
+current authority and generation, including direct `execute` calls. Cursor retries
+do not mutate their position and reuse an equivalent unexpired successor rather
+than allocating repeated continuation rows.
 No global content identity, provider location, or key material appears in public
 operation errors.
 
@@ -130,13 +149,17 @@ moderated upload/copy results and replays, allocation-free reconciliation at the
 record limit, and native cleanup-aware cancellation with same-ID replay.
 
 Admission reserves the actual delta for the combined upload/job/download/cursor/
-operation-replay record pool. Existing exact-request replays consume no capacity,
+operation-replay record pool, including a held completion-binding slot for each
+accepted upload. Native capability negotiation reserves both session and replay
+rows. Existing exact-request replays consume no capacity,
 but still pass current authority, precondition and resource-policy checks.
 Descriptor bindings and native sessions/replay each retain their own bounded pools;
 these reference limits are not a production memory-budget qualification.
 
 Actions uploads `service-positive.json`, `service-negative.json` and the exact PR
-head SHA in `product-service-<head>` artifacts. The normal native, wasm, MSRV,
+head SHA in `product-service-<head>` artifacts. PR jobs explicitly check out that
+head, and evidence asserts `git rev-parse HEAD` matches it and records the tested
+SHA separately. Merge-group jobs still test their queue SHA. The normal native, wasm, MSRV,
 cargo-deny and aggregate checks remain required. No local full suite is used.
 The artifact uploader is pinned to the verified v4.6.2 SHA, reads only the named
 synthetic evidence directory, excludes hidden files by default and expires after

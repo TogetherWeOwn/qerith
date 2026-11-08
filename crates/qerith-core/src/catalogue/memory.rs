@@ -62,6 +62,7 @@ struct Subscriber {
 struct Job {
     view: JobView,
     subscribers: BTreeMap<String, Subscriber>,
+    published: BTreeSet<(String, OperationId)>,
     fence: u64,
     claimed_until: u64,
     moderation_epoch: u64,
@@ -230,6 +231,7 @@ impl Tenant {
             Job {
                 view,
                 subscribers: BTreeMap::new(),
+                published: BTreeSet::new(),
                 fence: 0,
                 claimed_until: 0,
                 moderation_epoch,
@@ -777,6 +779,23 @@ impl MetadataOutbox for MemoryCatalogue {
 }
 
 impl MemoryCatalogue {
+    /// Trusted reference-model projection of this exact subscription's publication.
+    /// Shared physical completion alone says nothing about an excluded subscriber.
+    pub fn restore_published(
+        &self,
+        tenant: TenantId,
+        job: JobId,
+        name: &str,
+        subscription: OperationId,
+    ) -> Result<bool> {
+        let job = self
+            .tenants
+            .get(&tenant)
+            .and_then(|tenant| tenant.jobs.get(&job))
+            .ok_or(Error::Unavailable)?;
+        Ok(job.published.contains(&(name.into(), subscription)))
+    }
+
     fn atomic<T>(
         &mut self,
         tenant: TenantId,
@@ -1191,6 +1210,8 @@ impl JobPort for MemoryCatalogue {
                     for (name, until) in eligible {
                         let r = t.references.get_mut(&name).ok_or(Error::Unavailable)?;
                         r.availability = Some(r.availability.map_or(until, |old| old.max(until)));
+                        j.published
+                            .insert((name.clone(), j.subscribers[&name].operation));
                     }
                     t.generations
                         .get_mut(&generation)

@@ -17,7 +17,7 @@ impl Opaque {
             || value.len() > MAX_TOKEN_BYTES
             || !value
                 .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+                .all(|c| c.is_ascii_alphanumeric() || b"_-.:".contains(&c))
         {
             return Err(Failure::new(ErrorCode::InvalidInput));
         }

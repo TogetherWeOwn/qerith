@@ -68,6 +68,41 @@ impl<A: Access> c::Authority for UploadAuthority<'_, A> {
     }
 }
 
+#[derive(Clone)]
+struct CopyDescriptor {
+    source: n::Object,
+    destination: o::Opaque,
+    parents: Vec<o::Opaque>,
+}
+impl CopyDescriptor {
+    fn permitted(&self, access: &impl Access, scope: &o::Scope) -> bool {
+        access.key_envelope(
+            scope,
+            &self.source.ciphertext.key_ref,
+            &self.source.ciphertext.envelope_ref,
+        ) && access.copy_compatible(scope, &self.source, &self.destination)
+            && self
+                .parents
+                .iter()
+                .all(|parent| access.container(scope, parent.as_str()))
+    }
+}
+struct CopyAuthority<'a, A> {
+    authority: Authority<'a, A>,
+    descriptor: &'a CopyDescriptor,
+}
+impl<A: Access> c::Authority for CopyAuthority<'_, A> {
+    fn is_current(&self) -> bool {
+        self.authority.is_current()
+            && self
+                .descriptor
+                .permitted(self.authority.access, self.authority.scope)
+    }
+    fn permits(&self, reference: &c::Reference, action: c::Action) -> bool {
+        self.authority.permits(reference, action) && self.is_current()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Limits {
     pub bytes: u64,
@@ -120,6 +155,8 @@ struct Job {
     value: o::Job,
     deadline: u64,
     restore: Option<(c::JobId, c::OperationId)>,
+    copy: Option<CopyDescriptor>,
+    native_upload: bool,
     requires_live_target: bool,
 }
 #[derive(Clone)]
@@ -251,7 +288,18 @@ impl<A: Access> Service<A> {
             + self.model.transfers.len()
             + self.model.cursors.len()
             + self.model.replay.len()
-            + self.model.objects.len();
+            + self.model.objects.len()
+            + self
+                .model
+                .uploads
+                .values()
+                .filter(|upload| {
+                    self.model
+                        .jobs
+                        .get(&upload.job)
+                        .is_some_and(|job| job.value.effects != o::Effects::Committed)
+                })
+                .count();
         if count.saturating_add(additional) > self.limits.records {
             return Err(fail(o::ErrorCode::QuotaExceeded));
         }
@@ -351,7 +399,11 @@ impl<A: Access> Service<A> {
             })
             .ok_or_else(denied)
     }
-    fn permit_copy(&self, scope: &o::Scope, request: &o::Request) -> Result<(), o::Failure> {
+    fn permit_copy(
+        &self,
+        scope: &o::Scope,
+        request: &o::Request,
+    ) -> Result<CopyDescriptor, o::Failure> {
         let source = request.opaque("source").unwrap();
         let view = self.exact(
             scope,
@@ -391,7 +443,17 @@ impl<A: Access> Service<A> {
         {
             return Err(fail(o::ErrorCode::NotAvailable));
         }
-        Ok(())
+        Ok(CopyDescriptor {
+            source: object.clone(),
+            destination: request.opaque("reference").unwrap().clone(),
+            parents: self
+                .model
+                .members
+                .iter()
+                .filter(|(t, _, name)| *t == tenant && name == source)
+                .map(|(_, parent, _)| parent.clone())
+                .collect(),
+        })
     }
     fn target(request: &o::Request) -> o::LogicalReference {
         o::LogicalReference {
@@ -407,13 +469,21 @@ impl<A: Access> Service<A> {
             .filter(|j| j.scope == *scope)
             .cloned()
             .ok_or_else(denied)?;
-        self.permit(scope, &job.value.target.reference, c::Action::Read)?;
+        self.permit(
+            scope,
+            &job.value.target.reference,
+            if job.native_upload && job.value.effects != o::Effects::Committed {
+                c::Action::Write
+            } else {
+                c::Action::Read
+            },
+        )?;
         if job.restore.is_some()
             || job.requires_live_target && job.value.effects == o::Effects::Committed
         {
             self.exact(scope, &job.value.target)?;
         }
-        if let Some((id, _)) = job
+        if let Some((id, subscription)) = job
             .restore
             .filter(|_| job.value.state != o::JobState::Cancelled)
         {
@@ -426,7 +496,23 @@ impl<A: Access> Service<A> {
             job.value.state = match stored.state {
                 c::JobState::Queued | c::JobState::RetryWait { .. } => o::JobState::Queued,
                 c::JobState::Running => o::JobState::Running,
-                c::JobState::Complete => o::JobState::Succeeded,
+                c::JobState::Complete => {
+                    if self
+                        .model
+                        .catalogue
+                        .restore_published(
+                            self.tenant(scope)?,
+                            id,
+                            job.value.target.reference.as_str(),
+                            subscription,
+                        )
+                        .map_err(map)?
+                    {
+                        o::JobState::Succeeded
+                    } else {
+                        o::JobState::Failed
+                    }
+                }
                 c::JobState::Cancelled => o::JobState::Cancelled,
                 c::JobState::FailedUnrecoverable | c::JobState::Expired => o::JobState::Failed,
             };
@@ -437,12 +523,18 @@ impl<A: Access> Service<A> {
                 job.value.effects = o::Effects::Committed;
             }
             if job.value.state == o::JobState::Failed {
-                job.value.error = Some(fail(o::ErrorCode::Unavailable));
+                job.value.error = Some(o::Failure {
+                    code: o::ErrorCode::Unavailable,
+                    effects: job.value.effects,
+                });
             }
         }
         if self.now >= job.deadline && !job.value.state.terminal() {
             job.value.state = o::JobState::Failed;
-            job.value.error = Some(fail(o::ErrorCode::Unavailable));
+            job.value.error = Some(o::Failure {
+                code: o::ErrorCode::Unavailable,
+                effects: job.value.effects,
+            });
         }
         Ok(job)
     }
@@ -631,6 +723,7 @@ impl<A: Access> Service<A> {
             .cloned()
             .ok_or_else(denied)?;
         self.permit_descriptor(scope, &upload.descriptor)?;
+        self.set_now(clock.now().map_err(map)?)?;
         let job = self.job(scope, &upload.job)?;
         if job.value.state == o::JobState::Succeeded {
             return Ok(job.value);
@@ -639,11 +732,13 @@ impl<A: Access> Service<A> {
             || job.value.state.terminal()
             || job.value.state == o::JobState::CancelRequested
         {
-            return Err(fail(o::ErrorCode::Conflict));
+            return Err(o::Failure {
+                code: o::ErrorCode::Conflict,
+                effects: job.value.effects,
+            });
         }
-        self.reserve(1)?;
-        self.set_now(clock.now().map_err(map)?)?;
-        let metadata = metadata(&upload.descriptor.intent, upload.created_at)?;
+        let mut metadata = metadata(&upload.descriptor.intent, upload.created_at)?;
+        metadata.validator = format!("upload_{}", upload.intent.0);
         let tenant = self.tenant(scope)?;
         let work = flow::Upload {
             tenant,
@@ -664,7 +759,10 @@ impl<A: Access> Service<A> {
             descriptor: &upload.descriptor,
         };
         if upload.attempts >= self.limits.attempts {
-            return Err(fail(o::ErrorCode::QuotaExceeded));
+            return Err(o::Failure {
+                code: o::ErrorCode::QuotaExceeded,
+                effects: job.value.effects,
+            });
         }
         self.model.uploads.get_mut(handle).unwrap().attempts += 1;
         self.model.uploads.get_mut(handle).unwrap().cleanup = true;
@@ -771,6 +869,8 @@ impl<A: Access> Service<A> {
             scope: scope.clone(),
             deadline: self.expiry(self.limits.job_seconds)?,
             restore: None,
+            copy: None,
+            native_upload: false,
             requires_live_target: true,
             value: o::Job {
                 handle: token("job", id),
@@ -857,8 +957,31 @@ impl<A: Access> o::OperationPort for Service<A> {
             }
             self.permit_descriptor(scope, &upload.descriptor)?;
         }
+        if request.operation() == o::Operation::Restore {
+            self.permit(
+                scope,
+                request.opaque("reference").unwrap(),
+                c::Action::Restore,
+            )?;
+        }
         if request.operation() == o::Operation::Copy {
-            self.permit_copy(scope, request)?;
+            if let Some(o::Output::Job(job)) = self.replay(scope, request)? {
+                let stored = self
+                    .model
+                    .jobs
+                    .get(&job.handle)
+                    .filter(|job| job.scope == *scope)
+                    .ok_or_else(denied)?;
+                if !stored
+                    .copy
+                    .as_ref()
+                    .is_some_and(|copy| copy.permitted(&self.access, scope))
+                {
+                    return Err(denied());
+                }
+            } else {
+                self.permit_copy(scope, request)?;
+            }
         }
         if request.operation() == o::Operation::InitiateUpload {
             let descriptor = self
@@ -924,6 +1047,9 @@ impl<A: Access> o::OperationPort for Service<A> {
             || request
                 .number("availability_seconds")
                 .is_some_and(|s| s > self.limits.job_seconds)
+            || request
+                .number("max_seconds")
+                .is_some_and(|s| s > self.limits.job_seconds)
         {
             return Err(fail(o::ErrorCode::QuotaExceeded));
         }
@@ -933,7 +1059,8 @@ impl<A: Access> o::OperationPort for Service<A> {
         // Reserve only the actual new rows, including the reconciliation row.
         // Read-only browse reserves a cursor at the insertion point instead.
         let additional = match request.operation() {
-            o::Operation::InitiateUpload => 3,
+            // Includes the eventual immutable object binding, held until completion.
+            o::Operation::InitiateUpload => 4,
             o::Operation::Copy => 3,
             o::Operation::Delete | o::Operation::Restore | o::Operation::AuthorizeDownload => 2,
             o::Operation::CommitUpload | o::Operation::AbortUpload | o::Operation::Cancel => 1,
@@ -970,6 +1097,16 @@ impl<A: Access> o::OperationPort for Service<A> {
         self.authorize(scope, request)?;
         self.preconditions(scope, request)?;
         self.admit(scope, request)?;
+        if let Some(cursor) = position {
+            if request.operation() != o::Operation::Browse
+                || request.opaque("cursor") != Some(cursor)
+            {
+                return Err(fail(o::ErrorCode::InvalidCursor));
+            }
+            self.resolve_cursor(scope, request, cursor)?;
+        } else if request.opaque("cursor").is_some() {
+            return Err(fail(o::ErrorCode::InvalidCursor));
+        }
         if let Some(output) = self.replay(scope, request)? {
             return Ok(output);
         }
@@ -1034,7 +1171,9 @@ impl<A: Access> Service<A> {
                     reference: request.opaque("reference").unwrap().clone(),
                     generation: token("g", id),
                 };
-                let job = self.new_job(scope, target.clone(), id, request.number("max_bytes"))?;
+                let mut job =
+                    self.new_job(scope, target.clone(), id, request.number("max_bytes"))?;
+                job.native_upload = true;
                 let transfer = o::Transfer {
                     handle: token("up", id),
                     target,
@@ -1105,7 +1244,9 @@ impl<A: Access> Service<A> {
                 }
                 self.model.uploads.get_mut(handle).unwrap().submitted = true;
                 job.value.state = o::JobState::Running;
-                job.value.effects = o::Effects::Accepted;
+                if job.value.effects != o::Effects::Unknown {
+                    job.value.effects = o::Effects::Accepted;
+                }
                 self.model
                     .jobs
                     .insert(job.value.handle.clone(), job.clone());
@@ -1162,7 +1303,22 @@ impl<A: Access> Service<A> {
                     .into_iter()
                     .filter(|e| self.exact(scope, &e.target).is_ok())
                     .collect::<Vec<_>>();
-                let cursor = if entries.len() > limit as usize {
+                let existing = self
+                    .model
+                    .cursors
+                    .iter()
+                    .find(|(_, cursor)| {
+                        cursor.scope == *scope
+                            && cursor.parent == *parent
+                            && cursor.limit == limit
+                            && cursor.expires > self.now
+                            && entries.len() > limit as usize
+                            && cursor.entries == entries[limit as usize..]
+                    })
+                    .map(|(id, _)| id.clone());
+                let cursor = if existing.is_some() {
+                    existing
+                } else if entries.len() > limit as usize {
                     self.reserve(1)?;
                     let id = token("cursor", self.next()?);
                     self.model.cursors.insert(
@@ -1245,6 +1401,9 @@ impl<A: Access> Service<A> {
                     id,
                     Some(view.metadata.identity.length),
                 )?;
+                if let Some(seconds) = request.number("max_seconds") {
+                    job.deadline = self.expiry(seconds)?.min(job.deadline);
+                }
                 let auth = Authority {
                     access: &self.access,
                     scope,
@@ -1301,15 +1460,12 @@ impl<A: Access> Service<A> {
                 let id = self.next()?;
                 let name = request.opaque("reference").unwrap();
                 let revision = self.fence(scope, request)?;
-                let source_object = if request.operation() == Op::Copy {
-                    self.permit_copy(scope, request)?;
-                    let source = request.opaque("source").unwrap();
-                    let view = self.lookup(scope, source)?;
-                    Some(self.bound_object(scope, source, &view)?.object.clone())
+                let copy = if request.operation() == Op::Copy {
+                    Some(self.permit_copy(scope, request)?)
                 } else {
                     None
                 };
-                let logical_generation = if source_object.is_some() {
+                let logical_generation = if copy.is_some() {
                     token("g", id)
                 } else {
                     request.opaque("generation").unwrap().clone()
@@ -1331,12 +1487,23 @@ impl<A: Access> Service<A> {
                         expected_revision: revision,
                     }
                 };
+                let copy_authority;
+                let authority: &dyn c::Authority = if let Some(descriptor) = &copy {
+                    copy_authority = CopyAuthority {
+                        authority: auth,
+                        descriptor,
+                    };
+                    &copy_authority
+                } else {
+                    &auth
+                };
                 let result = self
                     .model
                     .catalogue
-                    .transact(tenant, c::OperationId(id), mutation, self.now, &auth)
+                    .transact(tenant, c::OperationId(id), mutation, self.now, authority)
                     .map_err(map)?;
-                if let Some(mut object) = source_object {
+                if let Some(descriptor) = &copy {
+                    let mut object = descriptor.source.clone();
                     let c::Outcome::Reference {
                         generation: storage_generation,
                         revision,
@@ -1356,15 +1523,7 @@ impl<A: Access> Service<A> {
                             revision,
                         },
                     );
-                    let source = request.opaque("source").unwrap();
-                    let parents = self
-                        .model
-                        .members
-                        .iter()
-                        .filter(|(t, _, n)| *t == tenant && n == source)
-                        .map(|(_, parent, _)| parent.clone())
-                        .collect::<Vec<_>>();
-                    for parent in parents {
+                    for parent in descriptor.parents.iter().cloned() {
                         self.model.members.insert((tenant, parent, name.clone()));
                     }
                 }
@@ -1379,6 +1538,7 @@ impl<A: Access> Service<A> {
                 )?;
                 job.value.state = o::JobState::Succeeded;
                 job.value.effects = o::Effects::Committed;
+                job.copy = copy;
                 job.requires_live_target = request.operation() != Op::Delete;
                 self.model
                     .jobs
@@ -1394,7 +1554,15 @@ impl<A: Access> Service<A> {
         } else if job.value.state.terminal() {
             o::CancelOutcome::AlreadyTerminal
         } else {
-            self.permit(scope, &job.value.target.reference, c::Action::Write)?;
+            self.permit(
+                scope,
+                &job.value.target.reference,
+                if job.restore.is_some() {
+                    c::Action::Restore
+                } else {
+                    c::Action::Write
+                },
+            )?;
             if self
                 .model
                 .uploads

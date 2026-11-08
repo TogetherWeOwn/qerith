@@ -1,6 +1,9 @@
 use super::*;
 use qerith_core::{native as n, operations as o, service as s};
 
+#[path = "service_repairs.rs"]
+mod repairs;
+
 #[derive(Clone)]
 struct Access(Rc<Auth>);
 impl s::Access for Access {
@@ -11,8 +14,14 @@ impl s::Access for Access {
             TenantId(2)
         })
     }
-    fn permits(&self, scope: &o::Scope, name: &str, _: Action) -> bool {
-        scope.tenant.as_str() == "tenant" && !self.0.denied.borrow().contains(name)
+    fn permits(&self, scope: &o::Scope, name: &str, action: Action) -> bool {
+        scope.tenant.as_str() == "tenant"
+            && !self.0.denied.borrow().contains(name)
+            && !self
+                .0
+                .denied
+                .borrow()
+                .contains(&format!("{name}:{action:?}"))
     }
     fn container(&self, scope: &o::Scope, parent: &str) -> bool {
         scope.tenant.as_str() == "tenant"
@@ -1641,9 +1650,9 @@ async fn committed_upload_and_copy_results_replays_obey_current_moderation() {
 
 #[tokio::test]
 async fn bounded_admission_allows_exact_replay_and_reserves_actual_record_delta() {
-    let (service, io, transfer, job, auth) = pending_upload().await;
+    let (service, mut io, transfer, job, auth) = pending_upload().await;
     let mut bounded = limits();
-    bounded.records = 4;
+    bounded.records = 5;
     let mut service = s::Service::reconnect(
         service.checkpoint(),
         Access(auth.clone()),
@@ -1673,7 +1682,7 @@ async fn bounded_admission_allows_exact_replay_and_reserves_actual_record_delta(
         }
     );
     fully_stage(&mut service, &io, &transfer);
-    // Three existing records leave room for exactly one commit replay record.
+    // Three rows plus the held completion binding leave one commit replay slot.
     let committed = parity(
         &mut service,
         &scope(),
@@ -1717,6 +1726,21 @@ async fn bounded_admission_allows_exact_replay_and_reserves_actual_record_delta(
         .unwrap_err()
         .code,
         o::ErrorCode::QuotaExceeded
+    );
+    assert_eq!(
+        service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut io,
+                &budget(),
+                &Time(Cell::new(10)),
+                &Rules::default()
+            )
+            .await
+            .unwrap()
+            .state,
+        o::JobState::Succeeded
     );
     auth.denied.borrow_mut().insert("object".into());
     assert_eq!(

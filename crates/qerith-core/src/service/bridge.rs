@@ -321,6 +321,24 @@ impl<A: Access> Service<A> {
         if !self.access.admit(scope) {
             return Err(n::ErrorCode::NotAuthorized);
         }
+        match &request.action {
+            n::Action::Restore(value) => self
+                .permit(
+                    scope,
+                    &operation_id(&value.target.object).map_err(error)?,
+                    c::Action::Restore,
+                )
+                .map_err(error)?,
+            n::Action::Status { job } | n::Action::Cancel { job } => {
+                let value = self
+                    .job(scope, &operation_id(job).map_err(error)?)
+                    .map_err(error)?;
+                if !value.native_upload && value.restore.is_none() {
+                    return Err(n::ErrorCode::UnsupportedProfile);
+                }
+            }
+            _ => {}
+        }
         let admission = n::validate_request(
             request,
             &owner(scope),
@@ -332,6 +350,20 @@ impl<A: Access> Service<A> {
             self.now,
         )?;
         if admission == n::Admission::Replay {
+            if matches!(request.action, n::Action::InitiateUpload(_)) {
+                let descriptor = self
+                    .model
+                    .descriptors
+                    .get(&(
+                        scope.clone(),
+                        operation_id(&request.request_id).map_err(error)?,
+                    ))
+                    .ok_or(n::ErrorCode::NotAuthorized)?;
+                self.permit_descriptor(scope, descriptor).map_err(error)?;
+                if descriptor.parent != *parent {
+                    return Err(n::ErrorCode::ReplayConflict);
+                }
+            }
             let body = self
                 .model
                 .native
@@ -351,7 +383,14 @@ impl<A: Access> Service<A> {
             }
             return Ok(body);
         }
-        if self.model.native.replay.len() + self.model.native.sessions.len() >= self.limits.records
+        let additional = if matches!(request.action, n::Action::Capabilities(_)) {
+            2
+        } else {
+            1
+        };
+        if (self.model.native.replay.len() + self.model.native.sessions.len())
+            .saturating_add(additional)
+            > self.limits.records
         {
             return Err(n::ErrorCode::LimitExceeded);
         }
@@ -535,6 +574,10 @@ impl<A: Access> Service<A> {
                     "availability_seconds".into(),
                     o::Value::Number(value.max_seconds.into()),
                 ));
+                fields.push((
+                    "max_seconds".into(),
+                    o::Value::Number(value.max_seconds.into()),
+                ));
                 let o::Output::Job(job) = call(self, o::Operation::Restore, fields)? else {
                     return Err(n::ErrorCode::Unavailable);
                 };
@@ -585,13 +628,16 @@ impl<A: Access> Service<A> {
                 body.clone(),
             ),
         );
-        // Response validation needs the tentative issuance record to recognize
-        // post-effect reconciliation. Never retain a rejected response for replay.
+        // Response validation needs the issuance record for post-effect reconciliation.
+        // Preserve an actual commit even if the session expired at worker entry;
+        // replay still requires a live session and current response authority.
         if let Err(error) = self.check_response(scope, request, body.clone()) {
-            self.model
-                .native
-                .replay
-                .remove(&(scope.clone(), request.request_id.clone()));
+            if !matches!(body, n::ResponseBody::Committed(_)) {
+                self.model
+                    .native
+                    .replay
+                    .remove(&(scope.clone(), request.request_id.clone()));
+            }
             return Err(error);
         }
         Ok(body)

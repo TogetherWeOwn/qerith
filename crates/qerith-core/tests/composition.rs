@@ -27,8 +27,13 @@ impl Authority for Auth {
     fn is_current(&self) -> bool {
         !self.stale.get()
     }
-    fn permits(&self, reference: &Reference, _: Action) -> bool {
-        reference.tenant == TENANT && !self.denied.borrow().contains(&reference.name)
+    fn permits(&self, reference: &Reference, action: Action) -> bool {
+        reference.tenant == TENANT
+            && !self.denied.borrow().contains(&reference.name)
+            && !self
+                .denied
+                .borrow()
+                .contains(&format!("{}:{action:?}", reference.name))
     }
 }
 struct Time(Cell<u64>);
