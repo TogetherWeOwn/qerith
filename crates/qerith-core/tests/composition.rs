@@ -750,6 +750,74 @@ async fn unneeded_restore_cancels_without_invocation_interruption_or_attempt() {
 }
 
 #[tokio::test]
+async fn unneeded_restore_cancellation_does_not_require_resource_admission() {
+    for denied_by in 0..3 {
+        let (mut c, mut io, _, time, auth, rules) = archived().await;
+        let job = request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref());
+        if denied_by == 0 {
+            let fence = c.claim(TENANT, job, 10, 20).unwrap();
+            c.transition(TENANT, fence, Transition::Checkpoint {
+                expected: 0, next: 3, inventory_ref: "lost-final-attempt".into(),
+            }, 10, auth.as_ref()).unwrap();
+            time.0.set(21);
+        }
+        c.transact(TENANT, OperationId(1001), Mutation::CancelSubscription {
+            name: "object".into(), job, subscription: OperationId(1000),
+        }, time.0.get(), auth.as_ref()).unwrap();
+        let limit = if denied_by == 1 { Budget::new(1, 3, 3, 100).unwrap() } else { budget() };
+        if denied_by == 2 { rules.deny.set(true); }
+        let before = io.order.len();
+        let event = job_event(&c, job);
+        assert_eq!(run_once(&mut c, &mut io, TENANT, event, &limit, time.as_ref(), &rules, &MockQualification, auth.as_ref()).await,
+            Err(Failure::Io(IoError::Cancelled)));
+        assert_eq!(io.order.len(), before);
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Cancelled);
+        assert_eq!(c.job(TENANT, job).unwrap().checkpoint, if denied_by == 0 { 3 } else { 0 });
+        assert!(c.outbox(TENANT).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn completed_attempt_adoption_releases_only_its_own_staging() {
+    let (mut c, mut io, _, time, auth, _) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    let job = request(&mut c, "object", 1000, 500, 40, 11, auth.as_ref());
+    let old = Work {
+        tenant: TENANT, event: job_event(&c, job), job: c.job(TENANT, job).unwrap(),
+        metadata: c.generation(TENANT, GENERATION).unwrap().metadata,
+        retained_location: None, inventory_ref: "shared-completed-inventory".into(),
+        attempt: 1, claim_until: 20, budget: budget(),
+    };
+    let mut new = old.clone();
+    new.attempt = 2;
+    io.retrieve(&old).await.unwrap();
+    io.retrieve(&new).await.unwrap();
+    let complete = io.complete_restore(&old).await.unwrap();
+    let mut unrelated = new.clone();
+    unrelated.attempt = 3;
+    io.pending.insert(allocation(&unrelated), b"unrelated staging".to_vec());
+    assert_eq!(io.complete_restore(&new).await.unwrap(), complete);
+    assert!(!io.pending.contains_key(&allocation(&new)));
+    assert_eq!(io.pending[&allocation(&unrelated)], b"unrelated staging");
+    assert_eq!(io.copies.len(), 1);
+}
+
+#[tokio::test]
+async fn settled_deletion_allows_a_second_truly_cold_restore() {
+    let (mut c, mut io, _, time, auth, rules) = archived().await;
+    evict(&mut c, &mut io, &time, auth.as_ref());
+    for (operation, now) in [(1000, 11), (1001, 100)] {
+        time.0.set(now);
+        if operation == 1001 { evict(&mut c, &mut io, &time, auth.as_ref()); }
+        let job = request(&mut c, "object", operation, 500, 40, time.0.get(), auth.as_ref());
+        run(&mut c, &mut io, job, &time, &rules, auth.as_ref()).await.unwrap();
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+        assert_eq!(io.copies.len(), 1);
+    }
+    assert_eq!(io.order.iter().filter(|e| **e == "engine-retrieve").count(), 2);
+}
+
+#[tokio::test]
 async fn deadline_expiry_skips_cleanup_and_survives_cleanup_failure() {
     for expires_during_cleanup in [false, true] {
         let mut c = MemoryCatalogue::default();
@@ -1466,7 +1534,21 @@ enum BoundaryDrift {
     Prohibited,
     Fence,
 }
+struct TerminalClock {
+    committed: Rc<Cell<bool>>,
+    lose_ack: bool,
+    now: u64,
+    deadline: u64,
+}
+impl Clock for TerminalClock {
+    fn now(&self) -> qerith_core::catalogue::Result<u64> {
+        if self.committed.get() {
+            if self.lose_ack { Ok(self.deadline) } else { Err(Error::Uncertain) }
+        } else { Ok(self.now) }
+    }
+}
 struct InterleavedCatalogue {
+    terminal: Option<(Rc<Cell<bool>>, bool)>,
     drift: Option<(Rc<Cell<bool>>, BoundaryDrift)>,
     inner: MemoryCatalogue,
     winner: Option<(Fence, CompleteCopy)>,
@@ -1538,8 +1620,15 @@ impl JobPort for InterleavedCatalogue {
                 )?;
             }
         }
-        self.inner
-            .transition(tenant, fence, transition, now, authority)
+        let terminal = matches!(transition, Transition::PublishRestore { .. } | Transition::CompleteArchive);
+        self.inner.transition(tenant, fence, transition, now, authority)?;
+        if terminal {
+            if let Some((committed, lose_ack)) = self.terminal.take() {
+                committed.set(true);
+                if lose_ack { return Err(Error::Uncertain); }
+            }
+        }
+        Ok(())
     }
     forward_job!(write record_verification(tenant: TenantId, evidence: VerificationEvidence, independence: IndependenceEvidence, now: u64) -> qerith_core::catalogue::Result<()>);
     forward_job!(write set_safety_hold(tenant: TenantId, generation: GenerationId, hold: bool) -> qerith_core::catalogue::Result<()>);
@@ -1550,6 +1639,33 @@ impl JobPort for InterleavedCatalogue {
     forward_job!(write cancel_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
     forward_job!(write reconcile_retained_deletion(tenant: TenantId, event: EventId, retained: CompleteCopy, settlement_ref: String, now: u64) -> qerith_core::catalogue::Result<()>);
     forward_job!(write acknowledge_deletion(tenant: TenantId, event: EventId) -> qerith_core::catalogue::Result<()>);
+}
+
+#[tokio::test]
+async fn terminal_success_and_uncertainty_survive_post_commit_clock_faults() {
+    for archive in [false, true] {
+        for lose_ack in [false, true] {
+            let (mut c, mut io, _, time, auth, rules) = archived().await;
+            let job = if archive {
+                let mut newer = Io::new(2).await;
+                let upload = newer.upload();
+                let job = commit_job(ingest(&mut c, &mut newer, &upload, &budget(), time.as_ref(), &rules, auth.as_ref()).await.unwrap());
+                io = newer;
+                job
+            } else { request(&mut c, "object", 1000, 500, 40, 10, auth.as_ref()) };
+            let event = job_event(&c, job);
+            let committed = Rc::new(Cell::new(false));
+            let clock = TerminalClock { committed: committed.clone(), lose_ack, now: 10, deadline: c.job(TENANT, job).unwrap().deadline };
+            let mut c = InterleavedCatalogue { inner: c, terminal: Some((committed.clone(), lose_ack)), drift: None, winner: None, event_reads: Cell::new(0) };
+            assert_eq!(run_once(&mut c, &mut io, TENANT, event, &budget(), &clock, &rules, &MockQualification, auth.as_ref()).await,
+                if lose_ack { Err(Failure::Catalogue(Error::Uncertain)) } else { Ok(()) });
+            assert!(committed.get());
+            assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+            assert!(c.inner.outbox(TENANT).is_empty());
+            assert!(!io.order.contains(&"cleanup-incomplete"));
+            assert_eq!(io.copies.len(), 1);
+        }
+    }
 }
 
 #[tokio::test]
@@ -1590,6 +1706,7 @@ async fn catalogue_drift_stops_at_next_io_boundary() {
             io.order.clear();
             let mut c = InterleavedCatalogue {
                 drift: Some((signal, drift)),
+                terminal: None,
                 inner: c,
                 winner: None,
                 event_reads: Cell::new(0),
@@ -1675,6 +1792,7 @@ async fn competing_cold_restores_reconcile_verified_winner_with_one_attempt() {
         let event = job_event(&c, second);
         let mut c = InterleavedCatalogue {
             drift: None,
+        terminal: None,
             inner: c,
             winner: Some((fence, winner.clone())),
             event_reads: Cell::new(0),
@@ -1752,6 +1870,7 @@ async fn backlog_lookup_is_event_scoped_even_before_failed_admission() {
     );
     let mut c = InterleavedCatalogue {
         drift: None,
+        terminal: None,
         inner: c,
         winner: None,
         event_reads: Cell::new(0),
