@@ -633,13 +633,21 @@ async fn copied_destination_accepts_same_ciphertext_upload_as_new_storage_genera
             panic!("upload");
         };
         fully_stage(&mut service, &io, &transfer);
-        parity(
-            &mut service,
-            &scope(),
-            o::Operation::CommitUpload,
-            commit_fields(&transfer),
-        )
-        .unwrap();
+        let mut fields = commit_fields(&transfer);
+        assert_eq!(
+            parity(
+                &mut service,
+                &scope(),
+                o::Operation::CommitUpload,
+                fields.clone(),
+            )
+            .unwrap_err()
+            .code,
+            o::ErrorCode::Conflict,
+        );
+        fields.retain(|(name, _)| name != "identity");
+        fields.push(text("identity", "replacement_commit"));
+        parity(&mut service, &scope(), o::Operation::CommitUpload, fields).unwrap();
         service
             .finish_upload(
                 &scope(),
