@@ -41,6 +41,16 @@ impl FixtureC {
         Self { key, bytes, digest }
     }
 
+    /// Bind actual S3-committed fixture octets, not a separately generated oracle.
+    pub fn committed(key: Key, bytes: Vec<u8>) -> Self {
+        let digest = Sha256::digest(&bytes).into();
+        Self { key, bytes, digest }
+    }
+
+    pub fn parts(&self) -> usize {
+        self.bytes.len().div_ceil(PART_SIZE)
+    }
+
     /// Returns a copy; changing it cannot relabel the committed bytes/digest.
     pub fn key(&self) -> Key {
         self.key
@@ -441,7 +451,7 @@ fn articles(fixture: &FixtureC) -> Vec<Article> {
         yenc::encode_segment(&mut raw, &yenc::SegmentParams {
             name: "opaque-C.bin".into(),
             part: n as u32 + 1,
-            total: 3,
+            total: fixture.parts() as u32,
             begin: (n * PART_SIZE + 1) as u64,
             end: (n * PART_SIZE + bytes.len()) as u64,
             file_size: fixture.bytes.len() as u64,

@@ -206,6 +206,28 @@ fn body_with(
 fn body(bytes: &[u8]) -> ValidatedBody {
     body_with(bytes, None, &[]).unwrap()
 }
+#[test]
+fn trusted_archive_worker_reads_exact_committed_bytes_without_a_delivery_lease() {
+    let mut model = model();
+    let result = put(&mut model, "archive/worker", b"committed opaque C");
+    assert_eq!(
+        model.retained_for_archive(T, result.generation).unwrap(),
+        b"committed opaque C"
+    );
+    assert!(model
+        .retained_for_archive(TenantId(2), result.generation)
+        .is_err());
+    assert!(model.retained_for_archive(T, GenerationId(999)).is_err());
+    assert_eq!(
+        model
+            .catalogue()
+            .lookup(T, "archive/worker", 2, &auth())
+            .unwrap()
+            .availability_until,
+        None
+    );
+}
+
 fn put(m: &mut MemoryMutations, name: &str, bytes: &[u8]) -> CommitResult {
     m.put(prepare(m, name), body(bytes), 2, &auth()).unwrap()
 }

@@ -456,6 +456,29 @@ impl MemoryMutations {
         Ok(())
     }
 
+    /// Trusted archive-worker ingress, never a user GET or an availability lease.
+    /// The worker must still obey catalogue claims, budgets and live authority.
+    /// Borrow the exact committed retained version; no substitute byte source.
+    pub fn retained_for_archive(
+        &self,
+        tenant: TenantId,
+        generation: GenerationId,
+    ) -> cat::Result<&[u8]> {
+        let view = cat::JobPort::generation(&self.catalogue, tenant, generation)?;
+        let retained = self
+            .retained
+            .get(&(tenant, generation))
+            .ok_or(cat::Error::Unavailable)?;
+        let expected = format!("fixture/{}/{}/retained", tenant.0, generation.0);
+        if view.cache_location.as_deref() != Some(expected.as_str())
+            || retained.bytes.len() as u64 != view.metadata.identity.length
+            || <[u8; 32]>::from(Sha256::digest(&retained.bytes)) != view.metadata.identity.sha256
+        {
+            return Err(cat::Error::Unsafe);
+        }
+        Ok(&retained.bytes)
+    }
+
     /// Trusted fixture accounting, not an end-user object-read port.
     pub fn retained_bytes(&self, tenant: TenantId) -> usize {
         self.retained
