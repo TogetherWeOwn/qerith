@@ -1062,7 +1062,6 @@ version = "0.1.0"
 source = "git+https://github.com/TogetherWeOwn/velmora?rev=e8fb2adeda386a38d74fc77c7aaa0a05a1b70bf3#e8fb2adeda386a38d74fc77c7aaa0a05a1b70bf3"
 dependencies = [
  "tokio",
- "velmora",
 ]
 
 [[package]]

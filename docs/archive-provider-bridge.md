@@ -94,12 +94,18 @@ also compile the default-off bridge explicitly.
 
 ## Dependency supply-chain record
 
-No local dependency fetch, installation, build or suite ran. The lock graph was
-composed from the prior product lock and the shared immutable source lock and
-manifests without materializing provider/media/NZB fixtures. Actions must validate
-it with the existing `cargo metadata --locked` freshness and immutable-pin gates,
-clean dependency build/tests, cargo-deny and CodeQL; it is not locally resolved
-or verified.
+No local dependency-source fetch, installation, build or suite ran. The first
+composed lock graph failed Actions freshness on head `a0d1ea3` (run
+`42508369021`): it accidentally retained an engine dev-dependency as a normal
+synthetic-server dependency. A subsequent manifest-only Cargo resolution used
+only the three pinned package manifests and empty target placeholders, never
+engine code or provider/media/NZB fixtures. `cargo update --offline --workspace`
+against that projection identified exactly the stale edge, with no package or
+version changes. The fix removes it; the projected files were cleaned up.
+Registry index metadata was accessed, not dependency source artifacts. This is a
+lockfile diagnostic, not a build or CI substitute. Actions must still validate
+the actual git source with the existing `cargo metadata --locked` freshness and
+immutable-pin gates, clean dependency build/tests, cargo-deny and CodeQL.
 
 Cargo 1.99.1 has no supported stable release-age filter or blanket dependency
 build-script/proc-macro refusal. These protections are **not claimed**. Existing
