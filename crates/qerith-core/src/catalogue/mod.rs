@@ -359,6 +359,8 @@ pub trait MetadataOutbox {
 /// is atomic with its emitted outbox records. No external side effect runs here.
 pub trait JobPort {
     fn outbox(&self, tenant: TenantId) -> Vec<OutboxEvent>;
+    /// Read exactly one notification without materializing the tenant backlog.
+    fn outbox_event(&self, tenant: TenantId, event: EventId) -> Result<OutboxEvent>;
     fn job(&self, tenant: TenantId, job: JobId) -> Result<JobView>;
     fn generation(&self, tenant: TenantId, generation: GenerationId) -> Result<GenerationView>;
     /// Retire an expired or superseded intent, without deleting staged bytes.
@@ -388,6 +390,8 @@ pub trait JobPort {
         now: u64,
         authority: &dyn Authority,
     ) -> Result<()>;
+    /// Exact, still-valid evidence + independence replay is a no-op. A replay
+    /// must not extend validity, replace attribution or hide conflicting content.
     fn record_verification(
         &mut self,
         tenant: TenantId,

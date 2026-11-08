@@ -26,6 +26,8 @@ engine dependency and immutable pin are unchanged.
   It supplies scoped outbox and job reads, fenced worker claims, conditional
   checkpoints, bounded retry-wait and terminal transitions, verification input,
   safety/moderation policy updates and deletion candidate/finalization/ack.
+  `outbox_event(tenant, event)` reads one scoped notification without materializing
+  the tenant backlog; `outbox` remains the bulk fixture/inspection API.
   Job/event IDs are tenant-scoped and stable across retries. Claims cannot extend
   the absolute job deadline. Expiration explicitly terminates even an abandoned
   claim; failed or expired archival work does not release the safety copy.
@@ -94,6 +96,10 @@ specific two backbone identities. The trusted worker authenticates and validates
 these artifacts before recording them. Strings, two reseller labels, POST,
 STAT, samples, PAR2 presence and time elapsed establish none of these facts.
 Expired/missing/uncertain evidence fails closed even after archive completion.
+Recording exact still-valid verification and independence evidence again is an
+atomic no-op, including after a worker lost acknowledgement of either proof write.
+This does not refresh timestamps or validity. Changed content or independence at
+the same verification time conflicts; an expired exact replay still fails closed.
 This module does not perform live qualification or manufacture signed receipts.
 
 Deletion is candidate → grace → current-authority and all-obligations recheck →
