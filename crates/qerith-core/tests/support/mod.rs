@@ -386,7 +386,7 @@ impl Archive {
             let mut part = vec![0; PART_SIZE];
             let decoded = yenc::decode_part_to(&article.message_id, &raw, &mut part)
                 .map_err(|_| Failure::Integrity)?;
-            if !decoded.multipart
+            if decoded.multipart != (expected.parts() > 1)
                 || decoded.file_size != expected.bytes.len() as u64
                 || decoded.offset != cache.staged_len(expected.key) as u64
             {
