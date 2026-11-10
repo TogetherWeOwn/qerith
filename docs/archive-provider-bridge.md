@@ -216,7 +216,13 @@ A second case requires native ranges to retain `InvalidRange` without allocation
 foreign-tenant and missing-envelope grants to fail before cache I/O, and key
 revocation during I/O to withhold all bytes and prevent a subsequent cache read.
 Cache delivery has no provider transport available and does not delete bytes on
-revocation. These additions are authored, not yet observed passing.
+revocation. Both additions passed on head
+`a1d8f3ea5ad31fd680b5b2634563d0c9439c6433`, Actions run `42757748906`,
+native job `129635974960`, with all 111 feature-on composition tests passing.
+Default native/Clippy, wasm/MSRV/deny/ci-ok, synthetic clients (job `129635974670`),
+CodeQL run `42757744272` and PR standards run `42757749342` passed. This is
+previous-head synthetic evidence, not acceptance of subsequent changes or
+independent/native review clearance.
 
 This remains synthetic full-ciphertext service/cache qualification. The setup's
 prior eviction still uses the existing synthetic NNTP proof, never an S3 proof;
@@ -224,6 +230,33 @@ no stored fixtures, supplier calls, new profile, decryption, public share servic
 physical settlement or durable database/runtime is introduced. Native byte
 ranges stay unsupported. Backend-specific proof, durable runtime, bounded cache
 lifecycle and complete upload/share/client parity remain unfinished.
+
+## Product invocation interruption checkpoint
+
+The bridge now races every provider read, begin, part, commit and reconcile future
+against trusted `Control::cancelled`. It registers the policy/deadline wake before
+checking current authority and polling provider I/O, and checks authority on every
+subsequent poll. A provider future with no wake source cannot keep the product
+invocation suspended after its control event. This uses the canonical control
+contract, not a new provider protocol, pool or runtime policy source.
+
+Completed acknowledgements still enter the original journal path; subsequent
+effects, validated write proof and restore publication retain their current
+authority fences. An interrupted read cannot publish its incomplete prefix.
+Interrupted write invocations retain `BeginPending` or `EffectPending`; dropping
+a future does not prove rollback, physical socket closure, request settlement or
+permission to release a lease, abort, reallocate or delete safety bytes.
+
+The generated restore wake test now covers both a cooperative provider and one
+that writes an invisible prefix then remains pending forever. It checks actual
+registered-task wakes for policy revocation, cancellation and deadline on both
+backends. A new product ingest/job test stalls each of begin, part, commit and
+reconcile without provider control registration, asserts the product's actual
+cancellation wake, then serializes/reloads the pending journal and requires
+uncertainty-only recovery without fresh allocation, abort or safety-copy cleanup.
+These extensions are authored, not yet observed passing; no pre-fix test execution
+is claimed. Transport-internal control/settlement and durable runtime qualification
+remain mandatory and are not replaced by this invocation-level interruption.
 
 ## Dependency supply-chain record
 

@@ -201,6 +201,106 @@ async fn provider_pending_write_cancel_retains_original_journal_and_safety_copy(
 }
 
 #[tokio::test]
+async fn provider_uncontrolled_write_futures_are_interrupted_without_settling_effects() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake};
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for fault in [
+            WriteFault::StallBegin,
+            WriteFault::StallPart,
+            WriteFault::StallCommit,
+            WriteFault::StallReconcile,
+        ] {
+            let (mut c, mut storage, job, auth, time) = staged(
+                backend,
+                if matches!(fault, WriteFault::StallReconcile) {
+                    WriteFault::Part
+                } else {
+                    fault
+                },
+            )
+            .await;
+            if matches!(fault, WriteFault::StallReconcile) {
+                assert_eq!(
+                    attempt(&mut c, &mut storage, job, &auth, &time).await,
+                    Err(Failure::Io(IoError::Uncertain))
+                );
+                reconnect(&mut storage);
+                writer_mut(&mut storage, backend).fault = fault;
+                time.0.set(13);
+            }
+            let events = storage.control.events.clone();
+            {
+                let run = attempt(&mut c, &mut storage, job, &auth, &time);
+                let mut run = std::pin::pin!(run);
+                let wakes = Arc::new(Wakes::default());
+                let waker = wakes.clone().into();
+                let mut cx = Context::from_waker(&waker);
+                assert!(run.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+                events.send_replace(Some(a::Failure::Cancelled));
+                assert!(wakes.0.load(Ordering::SeqCst) > 0, "missing product wake");
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), run)
+                        .await
+                        .expect("product must interrupt a provider with no wake source"),
+                    Err(Failure::Io(IoError::Uncertain))
+                );
+            }
+            let phase = storage.cache.provider_write.as_ref().unwrap().phase.clone();
+            if matches!(fault, WriteFault::StallBegin) {
+                assert_eq!(phase, WritePhase::BeginPending);
+            } else {
+                assert!(matches!(phase, WritePhase::EffectPending { .. }));
+            }
+            let calls = writer(&storage, backend).calls.clone();
+            assert_eq!(
+                calls.last(),
+                Some(&match fault {
+                    WriteFault::StallBegin => "begin",
+                    WriteFault::StallPart => "part",
+                    WriteFault::StallCommit => "commit",
+                    WriteFault::StallReconcile => "reconcile",
+                    _ => unreachable!(),
+                })
+            );
+            reconnect(&mut storage);
+            events.send_replace(None);
+            writer_mut(&mut storage, backend).fault = WriteFault::None;
+            time.0.set(time.0.get() + 3);
+            assert_eq!(
+                attempt(&mut c, &mut storage, job, &auth, &time).await,
+                Err(Failure::Io(IoError::Uncertain))
+            );
+            assert_eq!(storage.cache.provider_write.as_ref().unwrap().phase, phase);
+            if matches!(fault, WriteFault::StallBegin) {
+                assert_eq!(writer(&storage, backend).calls, calls);
+            } else {
+                let mut expected = calls;
+                expected.push("reconcile");
+                assert_eq!(writer(&storage, backend).calls, expected);
+            }
+            assert!(storage.cache.provider_record.is_none());
+            assert_retained(&c, &storage, job, backend);
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_write_scope_and_saved_session_binding_fail_before_effects() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         for field in 0..5 {
@@ -282,6 +382,10 @@ enum WriteFault {
     SecondPart,
     RevokeAfterPart,
     Receipt,
+    StallBegin,
+    StallPart,
+    StallCommit,
+    StallReconcile,
 }
 struct Writer {
     inner: Provider,
@@ -308,6 +412,9 @@ impl a::ArchiveProvider for Writer {
         control.check(&intent.target, a::Action::Write)?;
         assert_eq!(intent.target.backend, self.inner.backend);
         self.calls.push("begin");
+        if matches!(self.fault, WriteFault::StallBegin) {
+            return std::future::pending().await;
+        }
         if matches!(self.fault, WriteFault::Begin) {
             return Err(a::Failure::Uncertain);
         }
@@ -333,6 +440,9 @@ impl a::ArchiveProvider for Writer {
         assert_eq!(bytes, &self.inner.bytes[start..start + part.bytes as usize]);
         self.calls.push("part");
         self.parts.push(index);
+        if matches!(self.fault, WriteFault::StallPart) {
+            return std::future::pending().await;
+        }
         if matches!(self.fault, WriteFault::Stall) {
             return Err(control
                 .cancelled(&session.intent.target, a::Action::Write)
@@ -375,6 +485,9 @@ impl a::ArchiveProvider for Writer {
             assert_eq!(receipt.acknowledgement, aid(&format!("ack-{index}")));
         }
         self.calls.push("commit");
+        if matches!(self.fault, WriteFault::StallCommit) {
+            return std::future::pending().await;
+        }
         let proof = a::WriteProof {
             record: a::ObjectRecord {
                 identity: a::ObjectIdentity {
@@ -438,6 +551,9 @@ impl a::ArchiveProvider for Writer {
         control.check(&session.intent.target, a::Action::Write)?;
         assert_eq!(self.session.as_ref(), Some(session));
         self.calls.push("reconcile");
+        if matches!(self.fault, WriteFault::StallReconcile) {
+            return std::future::pending().await;
+        }
         if self.settled_absent {
             return Ok(a::Reconciled::Absent);
         }

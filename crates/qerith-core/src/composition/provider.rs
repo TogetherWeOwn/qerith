@@ -103,6 +103,32 @@ pub struct ProviderStorage<L, N, S, C> {
     pub control: C,
 }
 
+async fn invoke<T>(
+    control: &impl Control,
+    target: &a::Target,
+    action: a::Action,
+    operation: impl std::future::Future<Output = a::Result<T>>,
+) -> a::Result<T> {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let mut cancelled = std::pin::pin!(control.cancelled(target, action));
+    let mut operation = std::pin::pin!(operation);
+    poll_fn(|cx| {
+        // Register the event/deadline wake before checking current authority or
+        // polling I/O. Dropping I/O interrupts this invocation, not remote effects;
+        // the caller retains its pending journal and physical lease obligations.
+        if let Poll::Ready(error) = cancelled.as_mut().poll(cx) {
+            return Poll::Ready(Err(error));
+        }
+        if let Err(error) = control.check(target, action) {
+            return Poll::Ready(Err(error));
+        }
+        operation.as_mut().poll(cx)
+    })
+    .await
+}
+
 fn io(error: a::Failure) -> IoError {
     match error {
         a::Failure::Uncertain => IoError::Uncertain,
@@ -198,14 +224,24 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
             let mut stage = self.cache.begin_provider_restore(work, key).await?;
             match record.identity.target.backend {
                 a::Backend::Nntp => {
-                    self.nntp
-                        .read_range(&record, range, &mut stage, &self.control)
-                        .await
+                    invoke(
+                        &self.control,
+                        &record.identity.target,
+                        a::Action::Read,
+                        self.nntp
+                            .read_range(&record, range, &mut stage, &self.control),
+                    )
+                    .await
                 }
                 a::Backend::S3 => {
-                    self.s3
-                        .read_range(&record, range, &mut stage, &self.control)
-                        .await
+                    invoke(
+                        &self.control,
+                        &record.identity.target,
+                        a::Action::Read,
+                        self.s3
+                            .read_range(&record, range, &mut stage, &self.control),
+                    )
+                    .await
                 }
             }
             .map_err(io)?;

@@ -145,10 +145,14 @@ pub(super) async fn post(
         WritePhase::Verified { .. } => return Ok(()),
         WritePhase::Prepared => {
             save(cache, work, &mut journal, WritePhase::BeginPending).await?;
-            let session = provider
-                .begin(&journal.intent, control)
-                .await
-                .map_err(|_| IoError::Uncertain)?;
+            let session = invoke(
+                control,
+                &journal.intent.target,
+                a::Action::Write,
+                provider.begin(&journal.intent, control),
+            )
+            .await
+            .map_err(|_| IoError::Uncertain)?;
             if session.intent != journal.intent {
                 return Err(IoError::Uncertain);
             }
@@ -165,7 +169,14 @@ pub(super) async fn post(
             .map_err(|_| IoError::Uncertain)?;
         }
         WritePhase::EffectPending { session } => {
-            match provider.reconcile(&session, control).await {
+            match invoke(
+                control,
+                &journal.intent.target,
+                a::Action::Write,
+                provider.reconcile(&session, control),
+            )
+            .await
+            {
                 Ok(a::Reconciled::Verified(proof)) => {
                     return verified(cache, control, work, &mut journal, *proof).await;
                 }
@@ -216,10 +227,14 @@ pub(super) async fn post(
             },
         )
         .await?;
-        let receipt = provider
-            .write_part(&session, index, &bytes, control)
-            .await
-            .map_err(|_| IoError::Uncertain)?;
+        let receipt = invoke(
+            control,
+            &journal.intent.target,
+            a::Action::Write,
+            provider.write_part(&session, index, &bytes, control),
+        )
+        .await
+        .map_err(|_| IoError::Uncertain)?;
         if receipt.index != index
             || receipt.intent_binding != journal.intent.binding().map_err(io)?
         {
@@ -250,9 +265,13 @@ pub(super) async fn post(
         },
     )
     .await?;
-    let proof = provider
-        .commit(&session, &receipts, control)
-        .await
-        .map_err(|_| IoError::Uncertain)?;
+    let proof = invoke(
+        control,
+        &journal.intent.target,
+        a::Action::Write,
+        provider.commit(&session, &receipts, control),
+    )
+    .await
+    .map_err(|_| IoError::Uncertain)?;
     verified(cache, control, work, &mut journal, proof).await
 }

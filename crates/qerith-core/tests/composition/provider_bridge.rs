@@ -185,6 +185,7 @@ enum Fault {
     Corrupt,
     Revoke,
     Stall,
+    UncontrolledStall,
 }
 struct Provider {
     backend: a::Backend,
@@ -255,6 +256,10 @@ impl a::ArchiveProvider for Provider {
         let mut bytes = self.bytes.clone();
         if matches!(self.fault, Fault::Corrupt) {
             bytes[0] ^= 1;
+        }
+        if matches!(self.fault, Fault::UncontrolledStall) {
+            sink.write(&bytes[..bytes.len() / 2]).await?;
+            return std::future::pending().await;
         }
         if matches!(self.fault, Fault::Stall) {
             sink.write(&bytes[..bytes.len() / 2]).await?;
@@ -521,11 +526,18 @@ async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_pu
     }
 
     for backend in [a::Backend::Nntp, a::Backend::S3] {
-        for stop in [
-            a::Failure::Denied,
-            a::Failure::Cancelled,
-            a::Failure::Deadline,
-        ] {
+        for (fault, stop) in [Fault::Stall, Fault::UncontrolledStall]
+            .into_iter()
+            .flat_map(|fault| {
+                [
+                    a::Failure::Denied,
+                    a::Failure::Cancelled,
+                    a::Failure::Deadline,
+                ]
+                .into_iter()
+                .map(move |stop| (fault, stop))
+            })
+        {
             let (mut service, mut io, _, _, auth) = hot_upload().await;
             let time = Time(Cell::new(60));
             evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
@@ -533,7 +545,7 @@ async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_pu
             // Setup uses loopback archive I/O with real timeouts. Pause only
             // after it settles, so auto-advance cannot expire setup reads.
             tokio::time::pause();
-            let mut storage = bridge(io, backend, auth.clone(), Fault::Stall);
+            let mut storage = bridge(io, backend, auth.clone(), fault);
             let events = storage.control.events.clone();
             let restore = request_restore(
                 service.catalogue_mut(),
