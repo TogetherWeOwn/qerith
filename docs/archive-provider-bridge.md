@@ -859,8 +859,12 @@ corrupt readback. The remote object already exists, but the product must retain
 EffectPending and safety bytes without installing a record. Invalid readback
 must remain uncertain through original-session reconciliation; exact readback
 then installs the original immutable version without replaying begin, part or
-complete. Neither backend fallback nor abort is permitted. These assertions are
-authored, not yet observed passing.
+complete. Neither backend fallback nor abort is permitted. Both tests passed on
+head `c02aca59afc28cbb2eeb9881f500d4ce1dd56d6b`, Actions run `42832755915`,
+native job `129886833017`, with all 150 feature-on composition cases. Default
+native/Clippy, synthetic clients (`129886833379`), WASM/MSRV/deny/ci-ok,
+CodeQL run `42832742737` and PR standards run `42832755849` passed. These are
+exact-head synthetic receipts, not independent acceptance.
 
 This is executable shared-adapter consumer coverage, not an implementation of a
 safe network transport, signer, durable remote journal, physical settlement,
@@ -868,6 +872,32 @@ authenticated media readability or supplier durability. Default qualification
 still refuses archive completion; all safety bytes remain. It supplies no S3
 cold-miss/eviction, actual NNTP adapter or production-support receipt. No runtime,
 crypto, dependency, workflow or eviction-policy change is included.
+
+## Shared NNTP adapter consumer checkpoint
+
+Two generated tests in `tests/composition/provider_shared_nntp.rs` connect the
+product ingest/outbox worker to the actual pinned
+`velmora::archive::v1::nntp::Provider<Io>`. A two-part immutable manifest and
+posting plan use generated identifiers/headers; the shared adapter performs
+article assembly, yEnc encoding/decoding and ciphertext digest verification.
+The in-memory I/O checks the selected target, exact part bytes and original
+message identifiers, and rejects any repeated POST. No stored payload or NZB
+fixture is read and no network connection is made.
+
+The positive case authors both POSTs and full readback into Verified product
+inventory, then refuses the separate independent-backbone qualification. Three
+fault scenarios author a lost acknowledgement after the final irreversible
+POST, missing BODY and valid yEnc carrying wrong ciphertext. None authorizes
+absence, record installation, fallback or reposting. Invalid readback must
+retain the exact uncertain journal and safety bytes across a serialized
+checkpoint; exact later readback may reconcile the original manifest without
+another POST. The additions are authored, not yet observed passing.
+
+The fake is not `ClientIo`, a socket, durable posting plan, broker/pool lease,
+physical close/settlement or authenticated media/backbone qualification. The
+journal reconnect is not a durable restart. Safety copies remain intact and
+no new-provider cold publication, live support or eviction claim follows.
+Runtime, crypto, dependency graph, workflows and safety policy are unchanged.
 
 ## Dependency supply-chain record
 
