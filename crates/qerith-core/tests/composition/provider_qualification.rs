@@ -190,7 +190,8 @@ async fn s3_qualified_upload_reuses_retained_provider_bound_copy_for_a_new_resto
         serde_json::from_slice(&serde_json::to_vec(&storage.cache.provider_retained).unwrap())
             .unwrap();
     auth.denied.borrow_mut().insert("object:Write".into());
-    let restore = request_restore(&mut c, "object", 100, 50, 20, 10, auth.as_ref());
+    // Upload operations already own 100/101; restore and pin need fresh IDs.
+    let restore = request_restore(&mut c, "object", 1900, 50, 20, 10, auth.as_ref());
     assert_ne!(restore, job);
     qualified_attempt(&mut c, &mut storage, restore, &auth, &time, 0)
         .await
@@ -203,7 +204,7 @@ async fn s3_qualified_upload_reuses_retained_provider_bound_copy_for_a_new_resto
             .as_ref(),
         Some(&location)
     );
-    assert!(super::super::super::pin(&mut c, "object", 101, 10, auth.as_ref()).is_ok());
+    assert!(super::super::super::pin(&mut c, "object", 1901, 10, auth.as_ref()).is_ok());
     assert_eq!(storage.cache.copies.len(), 1);
     assert_eq!(
         storage.cache.copies[&location],
@@ -267,7 +268,7 @@ async fn s3_retained_binding_or_bytes_failure_prevents_qualification_and_warm_re
             }
             let copies = storage.cache.copies.clone();
             let target_job = if completed {
-                request_restore(&mut c, "object", 100, 50, 20, 10, auth.as_ref())
+                request_restore(&mut c, "object", 1900, 50, 20, 10, auth.as_ref())
             } else {
                 job
             };

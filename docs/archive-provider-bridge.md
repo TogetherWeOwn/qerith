@@ -205,7 +205,14 @@ restore job with Write revoked, retaining exactly the same cache copy and no
 provider refetch/allocation; and eight pre-qualification/post-completion failure
 scenarios for absent/wrong bindings and corrupt/missing bytes. The pre-completion
 cases resume after explicitly retryable synthetic assessor unavailability, not
-a terminal job failure. These additions have not yet been observed passing.
+a terminal job failure. On head `f61a765`, Actions run `42784941432`, native job
+`129723704956`, passed 128 composition cases and failed both additions while
+requesting restore: operation ID 100 replayed the original upload intent, yielding
+`Unavailable` with Write revoked or `Conflict` otherwise. The warm test's pin ID
+101 also collided with the upload commit. The repair uses fresh IDs 1900/1901;
+it retains Write revocation, exact-copy reuse, corruption refusal and no-refetch
+assertions. No runtime authority or idempotency semantics change. The repaired
+additions have not yet been observed passing.
 The reference cache's serialized journal/binding is not a durable database or a
 process-restart receipt. Actual S3-backed cold restore from this new completion
 boundary, runtime assessors, durable catalogue, sharing and global cache lifecycle
