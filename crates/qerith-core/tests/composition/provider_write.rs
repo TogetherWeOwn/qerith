@@ -35,11 +35,68 @@ fn writer_mut(storage: &mut WriteStorage, backend: a::Backend) -> &mut Writer {
     }
 }
 
+async fn checkpoint_first_part(
+    c: &mut MemoryCatalogue,
+    storage: &mut WriteStorage,
+    job: JobId,
+    auth: &Auth,
+    time: &Time,
+) {
+    // Stop after the fake CAS stores the first receipt, not before it is issued.
+    storage.cache.provider_cache_stall = Some("journal-part-saved");
+    let events = storage.control.events.clone();
+    let mut future = Box::pin(attempt(c, storage, job, auth, time));
+    assert!(std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(future.as_mut(), cx))
+    })
+    .await
+    .is_pending());
+    events.send_replace(Some(a::Failure::Cancelled));
+    assert_eq!(future.await, Err(Failure::Io(IoError::Uncertain)));
+    events.send_replace(None);
+    storage.cache.provider_cache_stall = None;
+    assert!(matches!(
+        &storage.cache.provider_write.as_ref().unwrap().phase,
+        WritePhase::Ready { receipts, .. } if receipts.len() == 1
+    ));
+}
+
 #[tokio::test]
-async fn provider_multipart_saved_receipt_resumes_without_rebegin_or_replaying_part() {
+async fn provider_revocation_before_receipt_checkpoint_preserves_uncertain_session() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         let (mut c, mut storage, job, auth, time) =
             staged(backend, WriteFault::RevokeAfterPart).await;
+        multipart(&mut storage);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        let pending = storage.cache.provider_write.clone().unwrap();
+        assert!(matches!(pending.phase, WritePhase::EffectPending { .. }));
+        assert_eq!(writer(&storage, backend).calls, ["begin", "part"]);
+        assert!(storage.cache.provider_record.is_none());
+        assert_retained(&c, &storage, job, backend);
+        reconnect(&mut storage);
+        auth.denied.borrow_mut().clear();
+        writer_mut(&mut storage, backend).fault = WriteFault::None;
+        time.0.set(13);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        assert_eq!(storage.cache.provider_write.as_ref(), Some(&pending));
+        assert_eq!(
+            writer(&storage, backend).calls,
+            ["begin", "part", "reconcile"]
+        );
+        assert_retained(&c, &storage, job, backend);
+    }
+}
+
+#[tokio::test]
+async fn provider_multipart_saved_receipt_resumes_without_rebegin_or_replaying_part() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
         multipart(&mut storage);
         let intent = storage
             .cache
@@ -48,10 +105,7 @@ async fn provider_multipart_saved_receipt_resumes_without_rebegin_or_replaying_p
             .unwrap()
             .intent
             .clone();
-        assert_eq!(
-            attempt(&mut c, &mut storage, job, &auth, &time).await,
-            Err(Failure::Io(IoError::Cancelled))
-        );
+        checkpoint_first_part(&mut c, &mut storage, job, &auth, &time).await;
         let WritePhase::Ready { session, receipts } =
             &storage.cache.provider_write.as_ref().unwrap().phase
         else {

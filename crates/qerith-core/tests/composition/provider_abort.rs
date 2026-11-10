@@ -53,13 +53,9 @@ async fn provider_explicit_abort_before_begin_is_terminal_without_provider_effec
 async fn provider_explicit_abort_ready_session_distinguishes_s3_removal_from_nntp_irreversibility()
 {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
-        let (mut c, mut storage, job, auth, time) =
-            staged(backend, WriteFault::RevokeAfterPart).await;
+        let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
         multipart(&mut storage);
-        assert_eq!(
-            attempt(&mut c, &mut storage, job, &auth, &time).await,
-            Err(Failure::Io(IoError::Cancelled))
-        );
+        checkpoint_first_part(&mut c, &mut storage, job, &auth, &time).await;
         auth.denied.borrow_mut().clear();
         let work = work(&c, job);
         let original = storage.cache.provider_write.clone().unwrap();
@@ -178,13 +174,9 @@ async fn provider_lost_revoked_or_interrupted_abort_retains_pending_journal_with
         WriteFault::AbortStall,
     ] {
         let backend = a::Backend::S3;
-        let (mut c, mut storage, job, auth, time) =
-            staged(backend, WriteFault::RevokeAfterPart).await;
+        let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
         multipart(&mut storage);
-        assert_eq!(
-            attempt(&mut c, &mut storage, job, &auth, &time).await,
-            Err(Failure::Io(IoError::Cancelled))
-        );
+        checkpoint_first_part(&mut c, &mut storage, job, &auth, &time).await;
         auth.denied.borrow_mut().clear();
         writer_mut(&mut storage, backend).fault = fault;
         let work = work(&c, job);
@@ -223,12 +215,9 @@ async fn provider_lost_revoked_or_interrupted_abort_retains_pending_journal_with
 #[tokio::test]
 async fn provider_abort_checks_scope_session_and_durable_terminal_acknowledgement() {
     let backend = a::Backend::S3;
-    let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::RevokeAfterPart).await;
+    let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
     multipart(&mut storage);
-    assert_eq!(
-        attempt(&mut c, &mut storage, job, &auth, &time).await,
-        Err(Failure::Io(IoError::Cancelled))
-    );
+    checkpoint_first_part(&mut c, &mut storage, job, &auth, &time).await;
     auth.denied.borrow_mut().clear();
     let work = work(&c, job);
     let original = storage.cache.provider_write.clone().unwrap();

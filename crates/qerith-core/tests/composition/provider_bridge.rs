@@ -53,6 +53,7 @@ impl ArchiveCache for Io {
         let checkpoint = match next.phase {
             WritePhase::BeginPending => "journal-begin",
             WritePhase::Verified { .. } => "journal-verified",
+            WritePhase::Ready { ref receipts, .. } if !receipts.is_empty() => "journal-part",
             _ => "journal-other",
         };
         if self.provider_cache_stall == Some(checkpoint) {
@@ -75,6 +76,7 @@ impl ArchiveCache for Io {
             (checkpoint, self.provider_cache_stall),
             ("journal-begin", Some("journal-begin-saved"))
                 | ("journal-verified", Some("journal-verified-saved"))
+                | ("journal-part", Some("journal-part-saved"))
         ) {
             return std::future::pending().await;
         }

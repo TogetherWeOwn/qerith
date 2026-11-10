@@ -357,6 +357,30 @@ clients (job `129642786246`), CodeQL run `42759866064` and PR standards run
 claimed. Transport-internal control/settlement and durable runtime qualification
 remain mandatory and are not replaced by this invocation-level interruption.
 
+## Receipt-checkpoint cancellation regression
+
+Head `b077461e1978fe14c5d52544c0e5eb66f460346d` failed native Actions run
+`42794404977`, job `129755730937`: 130 composition cases passed and four failed.
+The new journal-stall regression passed. The four older multipart/abort tests
+revoked Write inside the first provider part call, then expected a saved receipt
+and `Cancelled`. With journal invocation control, revocation is detected before
+that receipt CAS is polled: the original `EffectPending` checkpoint remains and
+the correct result is `Uncertain`. No runtime weakening is needed.
+
+The generated fake now also permits a stall after persisting the first receipt.
+The four saved-receipt/ready-abort cases use that boundary, trigger cancellation,
+require `Uncertain`, reload the actual `Ready` checkpoint and retain their
+original no-rebegin/no-part-replay and backend-specific abort assertions. A
+separate generated test keeps the original pre-checkpoint revocation timing and
+requires `EffectPending`, retained safety bytes and original-session uncertain
+reconciliation without further part or commit calls. These repaired/new
+assertions are authored, not yet observed passing. Serialized fake checkpoints
+are not durable CAS settlement or physical provider qualification.
+
+Default native/Clippy, synthetic clients (job `129755731094`), WASM/MSRV/deny,
+CodeQL run `42794395717` and PR standards run `42794405035` passed on `b077461`;
+overall CI failed. That evidence does not establish independent acceptance.
+
 ## Explicit incomplete-write abort checkpoint
 
 `ProviderStorage::abort_write` is an explicit trusted-worker entry point using the
