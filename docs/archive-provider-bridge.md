@@ -1,25 +1,27 @@
 # Experimental archive-provider consumer bridge
 
-This is a default-off **cold restore checkpoint**, not complete multi-backend
-support. Enable `qerith-core/archive-provider` only in synthetic development.
+This is a default-off **cold restore and journaled-write checkpoint**, not
+complete multi-backend support. Enable `qerith-core/archive-provider` only in synthetic development.
 There is no live supplier configuration, signer, provider probe, activation,
 charged fallback, media decryption, durable database or production qualification.
 
 ## Immutable source
 
 Both engine packages are pinned to experimental Velmora source
-`40dba9a8cedb27748fa22e8a1d63cb2132067efd` (PR #19). This is an integration
+`a4c7dfe6fce9920803994911a3679003751b2505` (PR #19). This is an integration
 checkpoint, **not an accepted production pin**. Shared exact-head Actions run
-`42509015484` passed, including the corrected invocation-control source. Shared
-native Crypto/Security/QA acceptance is still a separate gate. The product
-previous-head run `42508625487` passed all three generated restore tests; that
-is not evidence for this new consumer head. Product run `42509624918` failed
-both new control tests during their shared loopback archive setup, before the
-control assertions (`Io(Integrity)` at `hot_upload`). The corrected tests keep
-real time during setup and pause only the stalled-provider phase; their result
-must be established by a new exact-head Actions run. The dependency bump must settle through
-shared review and the product's applicable independent Security/Crypto/QA gates
-before this PR is ready.
+`42511923975` passed all 21 archive-provider tests, including empty-S3 exact-version
+HEAD and completed-reconciliation uncertainty corrections. Shared native
+Crypto/Security/QA acceptance is still a separate gate.
+
+Product head `e313bbf10ce296e511824bcd20e30ad3a8769d88` passed all five generated
+restore/control tests and all 95 feature-on composition tests in Actions run
+`42740944540`, job `129581535509`. It also passed wasm, MSRV and cargo-deny.
+Overall CI **failed**: the inherited pinned-client job could not import its absent
+`runner` module and skipped client execution. That is not product qualification
+or a reason to waive the client gate. The new write tests below are authored,
+not yet observed passing. Both the corrected dependency pin and this consumer
+head need their own exact-head Actions and applicable independent review gates.
 
 The previous pin `c5e79d617896490a47d577a9b062cd0010e0bc8a` predates more than
 this module: the intervening engine changes include the media format and pinned
@@ -79,12 +81,50 @@ never aborts/deletes provider objects, uncertain writes, safety copies or anothe
 attempt's completed version. Existing serving pins and protocol-specific range,
 validator and authorization checks are unchanged.
 
+## Product write-ahead checkpoint
+
+`Storage::post` now consumes a product-owned `WriteJournal` through the shared
+provider's begin/part/commit/reconcile operations. `ingest` still stages the entire
+ciphertext through the existing common cache and commits its original catalogue
+upload/outbox. The trusted adapter selects and persists the exact new-write intent
+independently of old-read routing. Every scope, byte/part budget, saved-session and
+receipt binding is checked before effects. Each part is read from the retained
+immutable staging copy and rehashed before provider I/O; no client profile or
+key binding is converted.
+
+`ArchiveCache::save_archive_write` is a scoped atomic compare-and-swap port:
+intent before begin, pending phase before every remote effect, original session
+before parts, exact receipt before acknowledgement, and validated readback record
+in the same transaction as `Verified`. A runtime must serialize/fence writers and
+settle issued requests before reporting absence; these values are not a database
+or a physical-lease implementation. Failed proof, revocation after an issued
+effect, lost acknowledgement and failed local record commit remain uncertain.
+Restart reconciles only the original session. No automatic abort, deletion,
+reallocation, alternate account or backend fallback is issued.
+
+Lost begin responses lack a remote session, and shared v1 cannot reconcile by
+intent alone. `BeginPending` therefore stays uncertain and needs trusted transport
+settlement/recovery; the bridge never retries begin blindly. Partial writes whose
+original-session reconciliation remains uncertain likewise keep their journal
+and safety bytes. Definite abort/restart settlement and durable runtime adapters
+remain unfinished.
+
+Eight generated write tests in `tests/composition/provider_write.rs` exercise the
+actual product `ingest` and `run_once` paths for both backends: successful remote
+observation without fabricated qualification; lost commit plus serialized journal
+reconnect; lost begin/part; bad proof and failed local commit; early/late Write
+revocation with Read retained; stalled-part cancellation; scope/session/receipt
+binding rejection; and changed retained staging rejection. These are authored
+fake-provider assertions, not observed PASS or durable/process/socket recovery.
+
 ## Explicitly unfinished boundaries
 
-- New provider records deliberately fail closed for `post` and
-  `verify_archive`. Upload still stages through the existing common cache port;
-  shared begin/part/commit/abort/reconcile and durable write journal integration
-  are not yet wired.
+- `verify_archive` deliberately fails closed for every new-provider journal or
+  record, including after successful remote readback. The catalogue job never
+  becomes archive-complete from these observations. Neither cleanup nor a failed
+  qualifier discards the retained staging copy. Backend-specific authenticated
+  qualification and actual durable write-journal/runtime implementations remain
+  unwired.
 - The legacy two-independent-backbone archive qualification/eviction path is
   untouched. No S3 receipt is converted to a pair of NNTP reconstructions. S3
   archival completion/eviction needs its own authenticated durable-write and
@@ -113,7 +153,15 @@ also compile the default-off bridge explicitly.
 
 ## Dependency supply-chain record
 
-The event-control pin change has no engine Cargo manifest changes from the
+The corrective pin delta from `40dba9a8cedb27748fa22e8a1d63cb2132067efd` changes
+only ordinary archive adapter source, generated tests and documentation. Its
+selective source diff was reviewed through the GitHub API. No engine manifest,
+package version, dependency edge, build hook or script exception changes.
+Cargo 1.99.1 still lacks the age/build refusal controls recorded below; no local
+install or dependency-source materialization is performed. Locked clean build,
+tests and deny remain exact-head Actions obligations.
+
+The earlier event-control pin change has no engine Cargo manifest changes from the
 previous pinned checkpoint. Only the three git source coordinates move in the
 lock; no package versions/dependency edges change. The product additionally
 enables Tokio's existing dev-only `test-util` feature for deterministic paused

@@ -6,6 +6,9 @@ use super::*;
 use a::{ArchiveProvider, Control};
 use velmora::archive::v1 as a;
 
+mod write;
+pub use write::{WriteJournal, WritePhase};
+
 /// Trusted product inventory/cache adapter. Resolve `recovery_ref` in the same
 /// tenant/generation scope as the catalogue metadata, not from request fields.
 /// None means an explicitly recognized legacy record; missing/corrupt/unknown
@@ -22,6 +25,33 @@ pub trait ArchiveCache: Storage {
         Self: 'a;
 
     fn archive_record(&self, work: &Work) -> std::result::Result<Option<a::ObjectRecord>, IoError>;
+    /// Stable intent selected independently of old-read routing, durably bound to
+    /// this tenant/generation/recovery inventory before any provider effect. None
+    /// means no new-provider write; unknown or corrupt journals are errors.
+    fn archive_write(&self, _work: &Work) -> std::result::Result<Option<WriteJournal>, IoError> {
+        Ok(None)
+    }
+    /// Atomic compare-and-swap on the exact scoped journal. A Verified update
+    /// installs its entire immutable ObjectRecord in the same transaction. Never
+    /// acknowledge a non-durable update; uncertainty requires original-state
+    /// reconciliation. The journal retains the safety copy, never grants eviction.
+    async fn save_archive_write(
+        &mut self,
+        _work: &Work,
+        _expected: &WriteJournal,
+        _next: &WriteJournal,
+    ) -> std::result::Result<(), IoError> {
+        Err(IoError::RepairUnavailable)
+    }
+    /// Read exactly this part from the retained verified immutable staging copy,
+    /// not client-supplied bytes. Enforce Work's invocation bounds during I/O.
+    async fn archive_write_part(
+        &mut self,
+        _work: &Work,
+        _part: &a::Part,
+    ) -> std::result::Result<Vec<u8>, IoError> {
+        Err(IoError::RepairUnavailable)
+    }
     /// Reconcile the scoped completed inventory or retained catalogue version.
     /// Verify its full bytes/checksums and exact cache key. Only proven absence
     /// returns false; missing/corrupt recorded completions must return an error.
@@ -120,9 +150,24 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     }
 
     async fn post(&mut self, work: &Work) -> std::result::Result<(), IoError> {
+        if let Some(journal) = self.cache.archive_write(work)? {
+            return match journal.intent.target.backend {
+                a::Backend::Nntp => {
+                    write::post(
+                        &mut self.cache,
+                        &mut self.nntp,
+                        &self.control,
+                        work,
+                        journal,
+                    )
+                    .await
+                }
+                a::Backend::S3 => {
+                    write::post(&mut self.cache, &mut self.s3, &self.control, work, journal).await
+                }
+            };
+        }
         if self.record(work)?.is_some() {
-            // Write journal and backend-specific qualification are not yet wired.
-            // Preserve the staged safety copy rather than fabricate NNTP proof.
             return Err(IoError::RepairUnavailable);
         }
         self.cache.post(work).await
@@ -132,7 +177,9 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
         &mut self,
         work: &Work,
     ) -> std::result::Result<[Reconstruction; 2], IoError> {
-        if self.record(work)?.is_some() {
+        if self.cache.archive_write(work)?.is_some() || self.record(work)?.is_some() {
+            // Provider readback is an observation, not authenticated readability
+            // or independent-backbone/S3 durable qualification. Keep safety bytes.
             return Err(IoError::RepairUnavailable);
         }
         self.cache.verify_archive(work).await
@@ -201,6 +248,11 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     async fn cleanup_incomplete(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         // Cleanup authority belongs to the trusted cache, even after read
         // revocation. Do not issue archive abort/delete or fall back on errors.
+        if self.cache.archive_write(work)?.is_some() {
+            // A failed qualifier or interrupted write cannot discard safety bytes
+            // or settle a pending request. Abort needs a separate settled path.
+            return Ok(());
+        }
         match self.cache.archive_record(work)? {
             Some(record) => {
                 self.cache

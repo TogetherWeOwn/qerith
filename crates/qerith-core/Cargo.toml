@@ -31,13 +31,13 @@ subtle = "=2.6.1"
 # Pin policy: an immutable git `rev` only (never a branch or tag); a bump is
 # a reviewed PR that moves this rev, the matching velmora-test-nntp rev below
 # and Cargo.lock together.
-velmora = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "40dba9a8cedb27748fa22e8a1d63cb2132067efd", default-features = false }
+velmora = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "a4c7dfe6fce9920803994911a3679003751b2505", default-features = false }
 
 [dev-dependencies]
 serde_json = "=1.0.154"
 # Same immutable pin as velmora above: the synthetic NNTP server the smoke
 # test fetches from, so no CI run touches real Usenet.
-velmora-test-nntp = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "40dba9a8cedb27748fa22e8a1d63cb2132067efd" }
+velmora-test-nntp = { version = "0.1.0", git = "https://github.com/TogetherWeOwn/velmora", rev = "a4c7dfe6fce9920803994911a3679003751b2505" }
 tokio = { version = "1", features = ["full", "test-util"] }
 sha2 = "=0.11.1"
 

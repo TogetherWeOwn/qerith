@@ -1,7 +1,10 @@
 use super::super::request as request_restore;
 use super::*;
 use a::{Control, Sink};
-use qerith_core::composition::provider::{ArchiveCache, ProviderStorage};
+use qerith_core::composition::provider::{ArchiveCache, ProviderStorage, WriteJournal, WritePhase};
+
+#[path = "provider_write.rs"]
+mod write;
 use velmora::archive::v1 as a;
 
 pub struct Stage<'a> {
@@ -23,6 +26,43 @@ impl ArchiveCache for Io {
     type Stage<'a> = Stage<'a>;
     fn archive_record(&self, _: &Work) -> std::result::Result<Option<a::ObjectRecord>, IoError> {
         Ok(self.provider_record.clone())
+    }
+    fn archive_write(&self, _: &Work) -> std::result::Result<Option<WriteJournal>, IoError> {
+        Ok(self.provider_write.clone())
+    }
+    async fn save_archive_write(
+        &mut self,
+        _: &Work,
+        expected: &WriteJournal,
+        next: &WriteJournal,
+    ) -> std::result::Result<(), IoError> {
+        if self.provider_write.as_ref() != Some(expected) {
+            return Err(IoError::Integrity);
+        }
+        if let WritePhase::Verified { record } = &next.phase {
+            if self.inject == Injection::Uncertain {
+                return Err(IoError::Uncertain);
+            }
+            self.provider_record = Some(record.clone());
+        }
+        // Serialized state is an explicit fake checkpoint, not a durable DB.
+        self.provider_write =
+            Some(serde_json::from_slice(&serde_json::to_vec(next).unwrap()).unwrap());
+        Ok(())
+    }
+    async fn archive_write_part(
+        &mut self,
+        work: &Work,
+        part: &a::Part,
+    ) -> std::result::Result<Vec<u8>, IoError> {
+        self.check(work)?;
+        let location = work.retained_location.as_ref().ok_or(IoError::Integrity)?;
+        let bytes = self.copies.get(location).ok_or(IoError::Integrity)?;
+        let start = usize::try_from(part.offset).map_err(|_| IoError::Integrity)?;
+        bytes
+            .get(start..start + part.bytes as usize)
+            .map(|b| b.to_vec())
+            .ok_or(IoError::Integrity)
     }
     async fn reconcile_provider_restore(
         &mut self,
@@ -90,7 +130,7 @@ struct Current {
     deadline: tokio::time::Instant,
 }
 impl Control for Current {
-    fn check(&self, target: &a::Target, _: a::Action) -> a::Result<()> {
+    fn check(&self, target: &a::Target, action: a::Action) -> a::Result<()> {
         if let Some(error) = *self.events.borrow() {
             return Err(error);
         }
@@ -104,7 +144,11 @@ impl Control for Current {
                     tenant: TENANT,
                     name: "object".into(),
                 },
-                Action::Restore,
+                if matches!(action, a::Action::Write | a::Action::AbortIncomplete) {
+                    Action::Write
+                } else {
+                    Action::Restore
+                },
             )
         {
             return Err(a::Failure::Denied);

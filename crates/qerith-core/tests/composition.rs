@@ -152,6 +152,8 @@ struct Io {
     #[cfg(feature = "archive-provider")]
     provider_record: Option<velmora::archive::v1::ObjectRecord>,
     #[cfg(feature = "archive-provider")]
+    provider_write: Option<qerith_core::composition::provider::WriteJournal>,
+    #[cfg(feature = "archive-provider")]
     provider_keys: BTreeMap<RecoveryInventory, [u8; 32]>,
 }
 impl Io {
@@ -199,6 +201,8 @@ impl Io {
             expire_at_cleanup: None,
             #[cfg(feature = "archive-provider")]
             provider_record: None,
+            #[cfg(feature = "archive-provider")]
+            provider_write: None,
             #[cfg(feature = "archive-provider")]
             provider_keys: BTreeMap::new(),
         }
