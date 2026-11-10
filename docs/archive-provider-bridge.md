@@ -1,9 +1,13 @@
 # Experimental archive-provider consumer bridge
 
-This is a default-off **cold restore and journaled-write checkpoint**, not
+This is a default-off **experimental product-consumer source milestone**, not
 complete multi-backend support. Enable `qerith-core/archive-provider` only in synthetic development.
 There is no live supplier configuration, signer, provider probe, activation,
 charged fallback, media decryption, durable database or production qualification.
+The [finite acceptance matrix](archive-provider-acceptance.md) defines the
+implemented operation paths, exact-head evidence and deferred full-product
+obligations. Historical checkpoints below describe their cited heads, not the
+current acceptance state; the matrix is the consolidated scope/evidence index.
 
 ## Immutable source
 
