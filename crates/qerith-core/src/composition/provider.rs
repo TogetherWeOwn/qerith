@@ -163,6 +163,41 @@ impl<L: ArchiveCache, N, S, C: Control> ProviderStorage<L, N, S, C> {
     }
 }
 
+impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control>
+    ProviderStorage<L, N, S, C>
+{
+    /// Explicit trusted-worker cancellation, never automatic error cleanup. The
+    /// caller owns the scoped Work/claim; the cache CAS serializes this decision
+    /// with concurrent writes. No journal means unavailable, not a legacy abort.
+    /// This does not cancel a catalogue job, erase completed objects or release
+    /// safety bytes/physical leases. Lost abort acknowledgement requires repair;
+    /// object absence alone cannot prove an incomplete multipart was removed.
+    pub async fn abort_write(
+        &mut self,
+        work: &Work,
+    ) -> std::result::Result<a::AbortOutcome, IoError> {
+        let journal = self
+            .cache
+            .archive_write(work)?
+            .ok_or(IoError::RepairUnavailable)?;
+        match journal.intent.target.backend {
+            a::Backend::Nntp => {
+                write::abort(
+                    &mut self.cache,
+                    &mut self.nntp,
+                    &self.control,
+                    work,
+                    journal,
+                )
+                .await
+            }
+            a::Backend::S3 => {
+                write::abort(&mut self.cache, &mut self.s3, &self.control, work, journal).await
+            }
+        }
+    }
+}
+
 impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storage
     for ProviderStorage<L, N, S, C>
 {

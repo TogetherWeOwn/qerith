@@ -25,6 +25,21 @@ pub enum WritePhase {
     EffectPending {
         session: a::WriteSession,
     },
+    /// Stop writes while the original issued request is reconciled. Only settled
+    /// absence permits the incomplete-session abort; a verified object is retained.
+    AbortRequested {
+        session: a::WriteSession,
+    },
+    /// An explicit incomplete-session abort may have taken effect. Never replay
+    /// writes or infer multipart removal from object absence after this point.
+    AbortPending {
+        session: a::WriteSession,
+    },
+    /// No provider allocation was issued, or incomplete removal was acknowledged.
+    /// Terminal for writes, not permission to delete the retained safety copy.
+    Aborted {
+        session: Option<a::WriteSession>,
+    },
     /// Written atomically with the immutable record after validated readback.
     Verified {
         record: a::ObjectRecord,
@@ -57,7 +72,12 @@ fn validate(work: &Work, journal: &WriteJournal) -> std::result::Result<(), IoEr
                 return Err(IoError::Integrity);
             }
         }
-        WritePhase::EffectPending { session } if session.intent != *intent => {
+        WritePhase::EffectPending { session }
+        | WritePhase::AbortRequested { session }
+        | WritePhase::AbortPending { session }
+        | WritePhase::Aborted {
+            session: Some(session),
+        } if session.intent != *intent => {
             return Err(IoError::Integrity);
         }
         WritePhase::Verified { record } => {
@@ -118,6 +138,110 @@ async fn verified(
     .map_err(|_| IoError::Uncertain)
 }
 
+pub(super) async fn abort(
+    cache: &mut impl ArchiveCache,
+    provider: &mut impl ArchiveProvider,
+    control: &impl Control,
+    work: &Work,
+    mut journal: WriteJournal,
+) -> std::result::Result<a::AbortOutcome, IoError> {
+    validate(work, &journal)?;
+    control
+        .check(&journal.intent.target, a::Action::AbortIncomplete)
+        .map_err(io)?;
+    let session = match journal.phase.clone() {
+        WritePhase::Prepared => {
+            save(
+                cache,
+                work,
+                &mut journal,
+                WritePhase::Aborted { session: None },
+            )
+            .await
+            .map_err(|_| IoError::Uncertain)?;
+            return Ok(a::AbortOutcome::IncompleteRemoved);
+        }
+        WritePhase::Aborted { .. } => return Ok(a::AbortOutcome::IncompleteRemoved),
+        WritePhase::Verified { .. } => return Ok(a::AbortOutcome::Irreversible),
+        WritePhase::BeginPending | WritePhase::AbortPending { .. } => {
+            return Err(IoError::Uncertain);
+        }
+        WritePhase::Ready { session, .. } => session,
+        WritePhase::EffectPending { session } | WritePhase::AbortRequested { session } => {
+            if matches!(journal.phase, WritePhase::EffectPending { .. }) {
+                save(
+                    cache,
+                    work,
+                    &mut journal,
+                    WritePhase::AbortRequested {
+                        session: session.clone(),
+                    },
+                )
+                .await
+                .map_err(|_| IoError::Uncertain)?;
+            }
+            // Reconcile the original request before touching its incomplete
+            // session. Object absence after a lost abort cannot prove removal.
+            match invoke(
+                control,
+                &journal.intent.target,
+                a::Action::Write,
+                provider.reconcile(&session, control),
+            )
+            .await
+            {
+                Ok(a::Reconciled::Absent) => session,
+                Ok(a::Reconciled::Verified(proof)) => {
+                    verified(cache, control, work, &mut journal, *proof).await?;
+                    return Ok(a::AbortOutcome::Irreversible);
+                }
+                _ => return Err(IoError::Uncertain),
+            }
+        }
+    };
+    control
+        .check(&journal.intent.target, a::Action::AbortIncomplete)
+        .map_err(io)?;
+    save(
+        cache,
+        work,
+        &mut journal,
+        WritePhase::AbortPending {
+            session: session.clone(),
+        },
+    )
+    .await
+    .map_err(|_| IoError::Uncertain)?;
+    let outcome = invoke(
+        control,
+        &journal.intent.target,
+        a::Action::AbortIncomplete,
+        provider.abort(&session, control),
+    )
+    .await
+    .map_err(|_| IoError::Uncertain)?;
+    control
+        .check(&journal.intent.target, a::Action::AbortIncomplete)
+        .map_err(|_| IoError::Uncertain)?;
+    match outcome {
+        a::AbortOutcome::IncompleteRemoved => {
+            save(
+                cache,
+                work,
+                &mut journal,
+                WritePhase::Aborted {
+                    session: Some(session),
+                },
+            )
+            .await
+            .map_err(|_| IoError::Uncertain)?;
+        }
+        a::AbortOutcome::Irreversible => {}
+        _ => return Err(IoError::Uncertain),
+    }
+    Ok(outcome)
+}
+
 pub(super) async fn post(
     cache: &mut impl ArchiveCache,
     provider: &mut impl ArchiveProvider,
@@ -141,7 +265,10 @@ pub(super) async fn post(
         return Err(IoError::RepairUnavailable);
     }
     match journal.phase.clone() {
-        WritePhase::BeginPending => return Err(IoError::Uncertain),
+        WritePhase::BeginPending
+        | WritePhase::AbortRequested { .. }
+        | WritePhase::AbortPending { .. } => return Err(IoError::Uncertain),
+        WritePhase::Aborted { .. } => return Err(IoError::Cancelled),
         WritePhase::Verified { .. } => return Ok(()),
         WritePhase::Prepared => {
             save(cache, work, &mut journal, WritePhase::BeginPending).await?;

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "provider_abort.rs"]
+mod abort;
+
 fn multipart(storage: &mut WriteStorage) {
     let bytes = storage.cache.fixture.bytes();
     let split = bytes.len() / 2;
@@ -386,6 +389,9 @@ enum WriteFault {
     StallPart,
     StallCommit,
     StallReconcile,
+    AbortLost,
+    AbortRevoke,
+    AbortStall,
 }
 struct Writer {
     inner: Provider,
@@ -524,8 +530,36 @@ impl a::ArchiveProvider for Writer {
         }
         Ok(returned)
     }
-    async fn abort(&mut self, _: &a::WriteSession, _: &impl Control) -> a::Result<a::AbortOutcome> {
-        panic!("uncertain writes must never auto-abort")
+    async fn abort(
+        &mut self,
+        session: &a::WriteSession,
+        control: &impl Control,
+    ) -> a::Result<a::AbortOutcome> {
+        control.check(&session.intent.target, a::Action::AbortIncomplete)?;
+        assert_eq!(self.session.as_ref(), Some(session));
+        assert!(
+            self.proof.is_none(),
+            "committed objects must never be aborted"
+        );
+        self.calls.push("abort");
+        if matches!(self.fault, WriteFault::AbortStall) {
+            return std::future::pending().await;
+        }
+        if self.inner.backend == a::Backend::Nntp {
+            return Ok(a::AbortOutcome::Irreversible);
+        }
+        self.session = None;
+        if matches!(self.fault, WriteFault::AbortLost) {
+            return Err(a::Failure::Uncertain);
+        }
+        if matches!(self.fault, WriteFault::AbortRevoke) {
+            self.inner
+                .auth
+                .denied
+                .borrow_mut()
+                .insert("object:Write".into());
+        }
+        Ok(a::AbortOutcome::IncompleteRemoved)
     }
     async fn stat(
         &mut self,

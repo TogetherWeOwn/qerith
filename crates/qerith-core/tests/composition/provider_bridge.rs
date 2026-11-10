@@ -43,6 +43,9 @@ impl ArchiveCache for Io {
         if self.provider_write.as_ref() != Some(expected) {
             return Err(IoError::Integrity);
         }
+        if matches!(next.phase, WritePhase::Aborted { .. }) && self.inject == Injection::Uncertain {
+            return Err(IoError::Uncertain);
+        }
         if let WritePhase::Verified { record } = &next.phase {
             if self.inject == Injection::Uncertain {
                 return Err(IoError::Uncertain);

@@ -107,8 +107,9 @@ Lost begin responses lack a remote session, and shared v1 cannot reconcile by
 intent alone. `BeginPending` therefore stays uncertain and needs trusted transport
 settlement/recovery; the bridge never retries begin blindly. Partial writes whose
 original-session reconciliation remains uncertain likewise keep their journal
-and safety bytes. Definite abort/restart settlement and durable runtime adapters
-remain unfinished.
+and safety bytes. The explicit incomplete-session abort checkpoint below adds a
+trusted worker entry point, not automatic cleanup or public cancellation wiring.
+Physical abort/restart settlement and durable runtime adapters remain unfinished.
 
 Eleven generated write tests in `tests/composition/provider_write.rs` exercise the
 actual product `ingest` and `run_once` paths for both backends: successful remote
@@ -254,9 +255,46 @@ backends. A new product ingest/job test stalls each of begin, part, commit and
 reconcile without provider control registration, asserts the product's actual
 cancellation wake, then serializes/reloads the pending journal and requires
 uncertainty-only recovery without fresh allocation, abort or safety-copy cleanup.
-These extensions are authored, not yet observed passing; no pre-fix test execution
-is claimed. Transport-internal control/settlement and durable runtime qualification
+These extensions passed on head `03eab66467a183e2508e14d2af2e2bb365051c84`,
+Actions run `42759870946`, native job `129642786087`: all 112 feature-on
+composition tests passed. Default native/Clippy, wasm/MSRV/deny/ci-ok, synthetic
+clients (job `129642786246`), CodeQL run `42759866064` and PR standards run
+`42759870746` passed. No pre-fix test execution or independent acceptance is
+claimed. Transport-internal control/settlement and durable runtime qualification
 remain mandatory and are not replaced by this invocation-level interruption.
+
+## Explicit incomplete-write abort checkpoint
+
+`ProviderStorage::abort_write` is an explicit trusted-worker entry point using the
+existing scoped Work, journal CAS and canonical provider abort outcome. Ordinary
+job failure/cleanup never invokes it. It does not cancel a catalogue job or wire
+public REST/MCP/S3 cancellation to a runtime worker. That integration still needs
+an authority/claim-owning runtime and durable journal; it is not shipped here.
+
+- A prepared intent is atomically marked `Aborted` without allocating remotely.
+- A ready session is checkpointed `AbortPending` before its exact backend/session
+  is passed to `ArchiveProvider::abort`, under current `AbortIncomplete` control.
+- A possibly issued write first persists `AbortRequested`, preventing background
+  write replay while original-session reconciliation runs. Only transport-proven
+  settled absence permits incomplete-session abort. A validated committed proof
+  is saved as `Verified` and reported irreversible, never passed to abort.
+- Only `IncompleteRemoved`, followed by a current-authority check and acknowledged
+  local CAS, becomes terminal `Aborted`. NNTP `Irreversible` is returned honestly
+  while preserving the pending checkpoint; it is not article erasure or rollback.
+- Lost begin, lost/revoked/interrupted abort and failed terminal persistence stay
+  uncertain. A later abort or posting attempt does not replay an abort-pending
+  session, allocate another one or interpret object absence as multipart removal.
+  Trusted physical settlement/recovery remains a separate unimplemented boundary.
+
+Five generated tests in `tests/composition/provider_abort.rs` begin with actual
+product ingest/archive jobs and cover no-effect cancellation, ready-session
+backend outcomes, uncertain-effect settlement versus committed objects, pending
+abort interruption/reconnect/no replay, scope/session refusal and failed terminal
+persistence. The fake invalidates a removed S3 session and rejects abort of a
+committed object. These tests are authored, not yet observed passing. All cases
+retain safety bytes and withhold archive completion. No live provider, durable
+restart, public cancellation, physical settlement, lease-release or safety-copy
+eviction qualification is claimed.
 
 ## Dependency supply-chain record
 
