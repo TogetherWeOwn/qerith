@@ -432,6 +432,80 @@ async fn provider_cache_acknowledgement_rechecks_immutable_record_before_returni
 }
 
 #[tokio::test]
+async fn provider_retained_verified_journal_still_cleans_exact_restore_attempt_allocation() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut service, mut io, _, _, auth) = hot_upload().await;
+        let time = Time(Cell::new(60));
+        evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+        // A retained Verified journal from the original archive write resolves
+        // for this generation's restore work; it must not suppress cleanup of
+        // a distinct restore attempt allocation.
+        let stored = record(&io, backend);
+        io.provider_write = Some(WriteJournal {
+            intent: stored.intent(),
+            phase: WritePhase::Verified {
+                record: stored.clone(),
+            },
+        });
+        let mut storage = bridge(io, backend, auth.clone(), Fault::None);
+        let restore = request_restore(
+            service.catalogue_mut(),
+            "object",
+            913,
+            1000,
+            50,
+            60,
+            auth.as_ref(),
+        );
+        let work = work(&service, restore);
+        storage.retrieve(&work).await.unwrap();
+        let completed = storage.complete_restore(&work).await.unwrap();
+        let saved_completed = storage.cache.completed.clone();
+        let saved_keys = storage.cache.provider_keys.clone();
+        let saved_copies = storage.cache.copies.clone();
+
+        let mut losing = work.clone();
+        losing.attempt = 2;
+        let mut other = work.clone();
+        other.attempt = 3;
+        storage.cache.pending.insert(allocation(&losing), vec![1]);
+        storage.cache.pending.insert(allocation(&other), vec![2]);
+        storage.cleanup_incomplete(&losing).await.unwrap();
+        assert!(!storage.cache.pending.contains_key(&allocation(&losing)));
+        assert_eq!(storage.cache.pending[&allocation(&other)], vec![2]);
+        assert_eq!(storage.cache.completed, saved_completed);
+        assert_eq!(storage.cache.provider_keys, saved_keys);
+        assert_eq!(storage.cache.copies, saved_copies);
+        // Cleanup is cache-local: no remote abort/delete is issued.
+        assert_eq!(
+            storage.nntp.reads + storage.s3.reads,
+            1,
+            "only the restore read reached the provider"
+        );
+        assert_eq!(storage.nntp.stats + storage.s3.stats, 0);
+        storage.cleanup_incomplete(&other).await.unwrap();
+        assert!(storage.cache.pending.is_empty());
+
+        // Write work with the same retained journal still preserves safety
+        // bytes; cleanup never discards an interrupted write's allocation.
+        let mut archive_work = work.clone();
+        archive_work.job.kind = JobKind::Archive;
+        storage
+            .cache
+            .pending
+            .insert(allocation(&archive_work), vec![3]);
+        storage.cleanup_incomplete(&archive_work).await.unwrap();
+        assert_eq!(storage.cache.pending[&allocation(&archive_work)], vec![3]);
+        assert_eq!(storage.cache.completed, saved_completed);
+        assert_eq!(storage.cache.copies, saved_copies);
+        assert_eq!(
+            completed.location,
+            saved_copies.keys().next().unwrap().clone()
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_completed_cache_reconciles_without_refetch_and_cleanup_is_attempt_local() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         let (mut service, mut io, _, _, auth) = hot_upload().await;

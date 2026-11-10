@@ -14,6 +14,20 @@ enum CacheFault {
     Rollback,
 }
 
+/// First sample is live; every later sample observes the transfer as expired.
+/// Deterministically stands in for grant expiry during body verification.
+struct LateClock(Cell<bool>);
+impl Clock for LateClock {
+    fn now(&self) -> qerith_core::catalogue::Result<u64> {
+        if self.0.get() {
+            Ok(60)
+        } else {
+            self.0.set(true);
+            Ok(10)
+        }
+    }
+}
+
 struct Cache<'a> {
     io: &'a Io,
     auth: &'a Auth,
@@ -523,6 +537,61 @@ async fn delivery_rechecks_live_grants_and_advancing_clock_after_cache_io() {
         );
         assert_eq!(cache.reads, 1);
     }
+}
+
+#[tokio::test]
+async fn delivery_post_verification_expiry_denies_regardless_of_body_verification() {
+    // Valid body: expiry observed only at the post-verification gate must
+    // withhold delivery even though the bytes verify.
+    let (mut service, io, upload, _, auth) = hot_upload().await;
+    let transfer = authorize(&mut service, &upload.target);
+    let time = Time(Cell::new(10));
+    let mut cache = Cache {
+        io: &io,
+        auth: &auth,
+        time: &time,
+        fault: CacheFault::None,
+        reads: 0,
+    };
+    assert_eq!(
+        service
+            .read_download(
+                &scope(),
+                &transfer.handle,
+                &mut cache,
+                &LateClock(Cell::new(false))
+            )
+            .unwrap_err()
+            .code,
+        o::ErrorCode::NotAvailable
+    );
+    assert_eq!(cache.reads, 1);
+
+    // Corrupt body: post-verification expiry still takes precedence over the
+    // integrity outcome; neither bytes nor an integrity verdict are disclosed.
+    // Fresh service: reuse would sample a rollback against the advanced clock.
+    let (mut service, io, upload, _, auth) = hot_upload().await;
+    let transfer = authorize(&mut service, &upload.target);
+    let mut cache = Cache {
+        io: &io,
+        auth: &auth,
+        time: &time,
+        fault: CacheFault::Corrupt,
+        reads: 0,
+    };
+    assert_eq!(
+        service
+            .read_download(
+                &scope(),
+                &transfer.handle,
+                &mut cache,
+                &LateClock(Cell::new(false))
+            )
+            .unwrap_err()
+            .code,
+        o::ErrorCode::NotAvailable
+    );
+    assert_eq!(cache.reads, 1);
 }
 
 #[tokio::test]

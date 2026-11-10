@@ -319,14 +319,28 @@ pub(super) async fn post(
         WritePhase::Verified { .. } => return Ok(()),
         WritePhase::Prepared => {
             save(cache, control, work, &mut journal, WritePhase::BeginPending).await?;
-            let session = invoke(
+            let session = match invoke(
                 control,
                 &journal.intent.target,
                 a::Action::Write,
                 provider.begin(&journal.intent, control),
             )
             .await
-            .map_err(|_| IoError::Uncertain)?;
+            {
+                Ok(session) => session,
+                // Transient is the shared contract's definitive no-effect,
+                // bounded-retry result. Restore the original intent to
+                // Prepared under the same durable CAS so a later retry
+                // re-enters begin; every other failure may have allocated
+                // remotely and stays BeginPending/Uncertain.
+                Err(a::Failure::Transient) => {
+                    save(cache, control, work, &mut journal, WritePhase::Prepared)
+                        .await
+                        .map_err(|_| IoError::Uncertain)?;
+                    return Err(IoError::Retryable);
+                }
+                Err(_) => return Err(IoError::Uncertain),
+            };
             if session.intent != journal.intent {
                 return Err(IoError::Uncertain);
             }

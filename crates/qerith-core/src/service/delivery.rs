@@ -67,18 +67,26 @@ impl<A: Access> Service<A> {
             copy.pin,
             None,
         );
+        // Verify the buffered body before the final clock/authority gate so
+        // expiry or a grant change during verification is observed; the
+        // outcome itself is withheld until the gate passes.
+        let verified = match body {
+            Err(_) => Err(fail(o::ErrorCode::Unavailable)),
+            Ok(bytes)
+                if u64::try_from(bytes.len()).ok() != Some(copy.identity.length)
+                    || <[u8; 32]>::from(Sha256::digest(&bytes)) != copy.identity.sha256 =>
+            {
+                Err(fail(o::ErrorCode::IntegrityFailed))
+            }
+            Ok(bytes) => Ok(bytes),
+        };
         self.set_now(clock.now().map_err(|_| fail(o::ErrorCode::Unavailable))?)?;
-        // Even a cache error must not disclose a revoked transfer's state. Check
-        // current key grants, logical binding, immutable version and pin first.
+        // Even a cache or integrity error must not disclose a revoked
+        // transfer's state. Check current key grants, logical binding,
+        // immutable version and pin at the post-verification boundary first.
         if self.download_copy(scope, handle)? != copy {
             return Err(denied());
         }
-        let body = body.map_err(|_| fail(o::ErrorCode::Unavailable))?;
-        if u64::try_from(body.len()).ok() != Some(copy.identity.length)
-            || <[u8; 32]>::from(Sha256::digest(&body)) != copy.identity.sha256
-        {
-            return Err(fail(o::ErrorCode::IntegrityFailed));
-        }
-        Ok(body)
+        verified
     }
 }

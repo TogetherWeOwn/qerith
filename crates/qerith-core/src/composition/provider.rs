@@ -604,9 +604,14 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     async fn cleanup_incomplete(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         // Cleanup authority belongs to the trusted cache, even after read
         // revocation. Do not issue archive abort/delete or fall back on errors.
-        if self.cache.archive_write(work)?.is_some() {
+        if work.job.kind == crate::catalogue::JobKind::Archive
+            && self.cache.archive_write(work)?.is_some()
+        {
             // A failed qualifier or interrupted write cannot discard safety bytes
             // or settle a pending request. Abort needs a separate settled path.
+            // Restore work carries a distinct attempt allocation even when the
+            // retained Verified journal resolves here; it still needs exact
+            // attempt-local cleanup below.
             return Ok(());
         }
         match self.cache.archive_record(work)? {

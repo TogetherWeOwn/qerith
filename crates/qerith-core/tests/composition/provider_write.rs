@@ -656,6 +656,7 @@ enum WriteFault {
     None,
     Qualify,
     Begin,
+    BeginTransient,
     Part,
     Commit,
     Proof,
@@ -704,6 +705,9 @@ impl a::ArchiveProvider for Writer {
         }
         if matches!(self.fault, WriteFault::Begin) {
             return Err(a::Failure::Uncertain);
+        }
+        if matches!(self.fault, WriteFault::BeginTransient) {
+            return Err(a::Failure::Transient);
         }
         let session = a::WriteSession {
             intent: intent.clone(),
@@ -1087,6 +1091,75 @@ async fn provider_lost_begin_or_part_never_reallocates_aborts_or_cleans_safety_b
             assert!(storage.cache.provider_record.is_none());
             assert_retained(&c, &storage, job, backend);
         }
+    }
+}
+
+#[tokio::test]
+async fn provider_transient_begin_restores_prepared_for_bounded_retry_but_uncertain_stays_pending()
+{
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        // Transient is the shared contract's definitive no-effect result: the
+        // original intent returns to Prepared under CAS and a bounded retry
+        // re-enters begin with the same intent.
+        let (mut c, mut storage, job, auth, time) =
+            staged(backend, WriteFault::BeginTransient).await;
+        let intent = storage
+            .cache
+            .provider_write
+            .as_ref()
+            .unwrap()
+            .intent
+            .clone();
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Retryable))
+        );
+        assert_eq!(
+            storage.cache.provider_write.as_ref().unwrap().phase,
+            WritePhase::Prepared
+        );
+        assert_eq!(
+            storage.cache.provider_write.as_ref().unwrap().intent,
+            intent
+        );
+        assert_eq!(writer(&storage, backend).calls, ["begin"]);
+        assert!(storage.cache.provider_record.is_none());
+        assert_retained(&c, &storage, job, backend);
+        reconnect(&mut storage);
+        writer_mut(&mut storage, backend).fault = WriteFault::None;
+        time.0.set(13);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::RepairUnavailable))
+        );
+        assert_eq!(
+            writer(&storage, backend).calls,
+            ["begin", "begin", "part", "commit"]
+        );
+        assert_eq!(
+            storage.cache.provider_record.as_ref().unwrap().intent(),
+            intent
+        );
+        assert_retained(&c, &storage, job, backend);
+
+        // Uncertain may have allocated remotely: it must stay BeginPending and
+        // never re-begin or infer settled absence, even on retry.
+        let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::Begin).await;
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        let pending = storage.cache.provider_write.clone().unwrap();
+        assert_eq!(pending.phase, WritePhase::BeginPending);
+        time.0.set(13);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        assert_eq!(storage.cache.provider_write.as_ref(), Some(&pending));
+        assert_eq!(writer(&storage, backend).calls, ["begin"]);
+        assert!(storage.cache.provider_record.is_none());
+        assert_retained(&c, &storage, job, backend);
     }
 }
 
