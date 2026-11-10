@@ -14,14 +14,15 @@ checkpoint, **not an accepted production pin**. Shared exact-head Actions run
 HEAD and completed-reconciliation uncertainty corrections. Shared native
 Crypto/Security/QA acceptance is still a separate gate.
 
-Product head `e313bbf10ce296e511824bcd20e30ad3a8769d88` passed all five generated
-restore/control tests and all 95 feature-on composition tests in Actions run
-`42740944540`, job `129581535509`. It also passed wasm, MSRV and cargo-deny.
-Overall CI **failed**: the inherited pinned-client job could not import its absent
-`runner` module and skipped client execution. That is not product qualification
-or a reason to waive the client gate. The new write tests below are authored,
-not yet observed passing. Both the corrected dependency pin and this consumer
-head need their own exact-head Actions and applicable independent review gates.
+Product head `eb12fdfea98ffdaaa8113cbfddb2bfe634d325a2` passed all five generated
+restore/control tests, all eight journaled-write tests and all 103 feature-on
+composition tests in Actions run `42746036318`, job `129598240848`. Native default
+tests/Clippy, wasm, MSRV, cargo-deny and ci-ok passed. The pinned synthetic-client
+job `129598240888` also passed after consuming accepted client runner source from
+PR #17; CodeQL run `42746031713` and PR standards run `42746035616` passed.
+These receipts verify that head, not subsequent multipart test additions or
+product/provider durability. Every new consumer head still needs exact-head
+Actions and the applicable independent review gates; the PR remains incomplete.
 
 The previous pin `c5e79d617896490a47d577a9b062cd0010e0bc8a` predates more than
 this module: the intervening engine changes include the media format and pinned
@@ -109,13 +110,23 @@ original-session reconciliation remains uncertain likewise keep their journal
 and safety bytes. Definite abort/restart settlement and durable runtime adapters
 remain unfinished.
 
-Eight generated write tests in `tests/composition/provider_write.rs` exercise the
+Eleven generated write tests in `tests/composition/provider_write.rs` exercise the
 actual product `ingest` and `run_once` paths for both backends: successful remote
 observation without fabricated qualification; lost commit plus serialized journal
 reconnect; lost begin/part; bad proof and failed local commit; early/late Write
 revocation with Read retained; stalled-part cancellation; scope/session/receipt
-binding rejection; and changed retained staging rejection. These are authored
-fake-provider assertions, not observed PASS or durable/process/socket recovery.
+binding rejection; and changed retained staging rejection. The first eight passed
+on the head cited above.
+
+Three new tests add two-part recovery: a saved first receipt resumes without
+reallocating or replaying that part; an uncertain second part cannot progress
+unless the transport explicitly reports settled absence, after which only the
+original session/intent/parts are retried; and an invalid returned receipt cannot
+be checkpointed or reach commit. The fake validates the full original session,
+exact retained part bytes and every commit receipt. The three additions are
+authored, not yet observed passing. Serialized journal reconnection and a fake
+settlement flag are not durable process restart, physical settlement or safe-abort
+qualification. All cases retain safety bytes and withhold archive completion.
 
 ## Explicitly unfinished boundaries
 

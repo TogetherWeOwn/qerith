@@ -1,5 +1,182 @@
 use super::*;
 
+fn multipart(storage: &mut WriteStorage) {
+    let bytes = storage.cache.fixture.bytes();
+    let split = bytes.len() / 2;
+    assert!(split > 0);
+    let journal = storage.cache.provider_write.as_mut().unwrap();
+    assert_eq!(journal.phase, WritePhase::Prepared);
+    journal.intent.parts = [0..split, split..bytes.len()]
+        .into_iter()
+        .enumerate()
+        .map(|(index, range)| a::Part {
+            offset: range.start as u64,
+            bytes: range.len() as u32,
+            sha256: a::digest(&bytes[range]),
+            reference: aid(&format!("immutable-part-{index}")),
+        })
+        .collect();
+    journal.intent.validate().unwrap();
+}
+fn reconnect(storage: &mut WriteStorage) {
+    let saved = serde_json::to_vec(storage.cache.provider_write.as_ref().unwrap()).unwrap();
+    storage.cache.provider_write = Some(serde_json::from_slice(&saved).unwrap());
+}
+fn writer_mut(storage: &mut WriteStorage, backend: a::Backend) -> &mut Writer {
+    if backend == a::Backend::Nntp {
+        &mut storage.nntp
+    } else {
+        &mut storage.s3
+    }
+}
+
+#[tokio::test]
+async fn provider_multipart_saved_receipt_resumes_without_rebegin_or_replaying_part() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut c, mut storage, job, auth, time) =
+            staged(backend, WriteFault::RevokeAfterPart).await;
+        multipart(&mut storage);
+        let intent = storage
+            .cache
+            .provider_write
+            .as_ref()
+            .unwrap()
+            .intent
+            .clone();
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Cancelled))
+        );
+        let WritePhase::Ready { session, receipts } =
+            &storage.cache.provider_write.as_ref().unwrap().phase
+        else {
+            panic!("acknowledged part checkpoint");
+        };
+        assert_eq!(session.intent, intent);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].index, 0);
+        assert_eq!(writer(&storage, backend).parts, [0]);
+        assert_retained(&c, &storage, job, backend);
+        reconnect(&mut storage);
+        auth.denied.borrow_mut().clear();
+        writer_mut(&mut storage, backend).fault = WriteFault::None;
+        time.0.set(13);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::RepairUnavailable))
+        );
+        assert_eq!(writer(&storage, backend).parts, [0, 1]);
+        assert_eq!(
+            writer(&storage, backend).calls,
+            ["begin", "part", "part", "commit"]
+        );
+        assert_eq!(
+            storage.cache.provider_record.as_ref().unwrap().intent(),
+            intent
+        );
+        assert_retained(&c, &storage, job, backend);
+    }
+}
+
+#[tokio::test]
+async fn provider_multipart_uncertainty_requires_settled_absence_before_exact_session_retry() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for settled in [false, true] {
+            let (mut c, mut storage, job, auth, time) =
+                staged(backend, WriteFault::SecondPart).await;
+            multipart(&mut storage);
+            let intent = storage
+                .cache
+                .provider_write
+                .as_ref()
+                .unwrap()
+                .intent
+                .clone();
+            assert_eq!(
+                attempt(&mut c, &mut storage, job, &auth, &time).await,
+                Err(Failure::Io(IoError::Uncertain))
+            );
+            assert!(matches!(
+                storage.cache.provider_write.as_ref().unwrap().phase,
+                WritePhase::EffectPending { .. }
+            ));
+            assert_eq!(writer(&storage, backend).parts, [0, 1]);
+            assert!(storage.cache.provider_record.is_none());
+            assert_retained(&c, &storage, job, backend);
+            reconnect(&mut storage);
+            let provider = writer_mut(&mut storage, backend);
+            provider.fault = WriteFault::None;
+            // Synthetic transport assertion only: no live physical-settlement
+            // or safe-abort proof is obtained by this generated provider.
+            provider.settled_absent = settled;
+            time.0.set(13);
+            let result = attempt(&mut c, &mut storage, job, &auth, &time).await;
+            if settled {
+                assert_eq!(result, Err(Failure::Io(IoError::RepairUnavailable)));
+                assert_eq!(writer(&storage, backend).parts, [0, 1, 0, 1]);
+                assert_eq!(
+                    writer(&storage, backend).calls,
+                    [
+                        "begin",
+                        "part",
+                        "part",
+                        "reconcile",
+                        "part",
+                        "part",
+                        "commit"
+                    ]
+                );
+                assert_eq!(
+                    storage.cache.provider_record.as_ref().unwrap().intent(),
+                    intent
+                );
+            } else {
+                assert_eq!(result, Err(Failure::Io(IoError::Uncertain)));
+                assert_eq!(writer(&storage, backend).parts, [0, 1]);
+                assert_eq!(
+                    writer(&storage, backend).calls,
+                    ["begin", "part", "part", "reconcile"]
+                );
+                assert!(storage.cache.provider_record.is_none());
+                assert!(matches!(
+                    storage.cache.provider_write.as_ref().unwrap().phase,
+                    WritePhase::EffectPending { .. }
+                ));
+            }
+            assert_retained(&c, &storage, job, backend);
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_malformed_part_ack_cannot_be_checkpointed_or_advance_to_commit() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::Receipt).await;
+        multipart(&mut storage);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        assert!(matches!(
+            storage.cache.provider_write.as_ref().unwrap().phase,
+            WritePhase::EffectPending { .. }
+        ));
+        reconnect(&mut storage);
+        time.0.set(13);
+        assert_eq!(
+            attempt(&mut c, &mut storage, job, &auth, &time).await,
+            Err(Failure::Io(IoError::Uncertain))
+        );
+        assert_eq!(writer(&storage, backend).parts, [0]);
+        assert_eq!(
+            writer(&storage, backend).calls,
+            ["begin", "part", "reconcile"]
+        );
+        assert!(storage.cache.provider_record.is_none());
+        assert_retained(&c, &storage, job, backend);
+    }
+}
+
 #[tokio::test]
 async fn provider_pending_write_cancel_retains_original_journal_and_safety_copy() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
@@ -102,11 +279,17 @@ enum WriteFault {
     Proof,
     Revoke,
     Stall,
+    SecondPart,
+    RevokeAfterPart,
+    Receipt,
 }
 struct Writer {
     inner: Provider,
     fault: WriteFault,
     calls: Vec<&'static str>,
+    parts: Vec<usize>,
+    session: Option<a::WriteSession>,
+    settled_absent: bool,
     proof: Option<a::WriteProof>,
 }
 impl a::ArchiveProvider for Writer {
@@ -128,10 +311,12 @@ impl a::ArchiveProvider for Writer {
         if matches!(self.fault, WriteFault::Begin) {
             return Err(a::Failure::Uncertain);
         }
-        Ok(a::WriteSession {
+        let session = a::WriteSession {
             intent: intent.clone(),
             remote: aid("original-session"),
-        })
+        };
+        self.session = Some(session.clone());
+        Ok(session)
     }
     async fn write_part(
         &mut self,
@@ -141,30 +326,54 @@ impl a::ArchiveProvider for Writer {
         control: &impl Control,
     ) -> a::Result<a::PartReceipt> {
         control.check(&session.intent.target, a::Action::Write)?;
+        assert_eq!(self.session.as_ref(), Some(session));
         session.intent.check_part(index, bytes)?;
-        assert_eq!(bytes, self.inner.bytes);
+        let part = &session.intent.parts[index];
+        let start = part.offset as usize;
+        assert_eq!(bytes, &self.inner.bytes[start..start + part.bytes as usize]);
         self.calls.push("part");
+        self.parts.push(index);
         if matches!(self.fault, WriteFault::Stall) {
             return Err(control
                 .cancelled(&session.intent.target, a::Action::Write)
                 .await);
         }
-        if matches!(self.fault, WriteFault::Part) {
+        if matches!(self.fault, WriteFault::Part)
+            || (matches!(self.fault, WriteFault::SecondPart) && index == 1)
+        {
             return Err(a::Failure::Uncertain);
+        }
+        if matches!(self.fault, WriteFault::RevokeAfterPart) {
+            self.inner
+                .auth
+                .denied
+                .borrow_mut()
+                .insert("object:Write".into());
         }
         Ok(a::PartReceipt {
             index,
-            intent_binding: session.intent.binding()?,
-            acknowledgement: aid("ack"),
+            intent_binding: if matches!(self.fault, WriteFault::Receipt) {
+                [0; 32]
+            } else {
+                session.intent.binding()?
+            },
+            acknowledgement: aid(&format!("ack-{index}")),
         })
     }
     async fn commit(
         &mut self,
         session: &a::WriteSession,
-        _: &[a::PartReceipt],
+        receipts: &[a::PartReceipt],
         control: &impl Control,
     ) -> a::Result<a::WriteProof> {
         control.check(&session.intent.target, a::Action::Write)?;
+        assert_eq!(self.session.as_ref(), Some(session));
+        assert_eq!(receipts.len(), session.intent.parts.len());
+        for (index, receipt) in receipts.iter().enumerate() {
+            assert_eq!(receipt.index, index);
+            assert_eq!(receipt.intent_binding, session.intent.binding()?);
+            assert_eq!(receipt.acknowledgement, aid(&format!("ack-{index}")));
+        }
         self.calls.push("commit");
         let proof = a::WriteProof {
             record: a::ObjectRecord {
@@ -227,8 +436,11 @@ impl a::ArchiveProvider for Writer {
         control: &impl Control,
     ) -> a::Result<a::Reconciled> {
         control.check(&session.intent.target, a::Action::Write)?;
-        assert_eq!(session.remote, aid("original-session"));
+        assert_eq!(self.session.as_ref(), Some(session));
         self.calls.push("reconcile");
+        if self.settled_absent {
+            return Ok(a::Reconciled::Absent);
+        }
         Ok(self
             .proof
             .clone()
@@ -271,6 +483,9 @@ async fn staged(
         },
         inner,
         calls: Vec::new(),
+        parts: Vec::new(),
+        session: None,
+        settled_absent: false,
         proof: None,
     };
     let mut storage = ProviderStorage {
