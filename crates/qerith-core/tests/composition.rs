@@ -156,6 +156,8 @@ struct Io {
     #[cfg(feature = "archive-provider")]
     provider_keys: BTreeMap<RecoveryInventory, [u8; 32]>,
     #[cfg(feature = "archive-provider")]
+    provider_retained: BTreeMap<String, [u8; 32]>,
+    #[cfg(feature = "archive-provider")]
     provider_cache_stall: Option<&'static str>,
 }
 impl Io {
@@ -207,6 +209,8 @@ impl Io {
             provider_write: None,
             #[cfg(feature = "archive-provider")]
             provider_keys: BTreeMap::new(),
+            #[cfg(feature = "archive-provider")]
+            provider_retained: BTreeMap::new(),
             #[cfg(feature = "archive-provider")]
             provider_cache_stall: None,
         }

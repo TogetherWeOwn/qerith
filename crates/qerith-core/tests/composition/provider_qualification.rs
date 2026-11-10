@@ -35,6 +35,7 @@ impl Qualifier for S3Qualification {
             11 => proof.durability_ref.clear(),
             12 => proof.provenance_ref.clear(),
             13 => proof.verifier_version.clear(),
+            14 => return Err(IoError::Retryable), // Synthetic assessor temporarily unavailable.
             _ => unreachable!(),
         }
         Ok(proof)
@@ -166,6 +167,139 @@ async fn s3_qualified_product_archive_completes_without_nntp_evidence_or_evictio
         ),
         Err(Error::Unsafe)
     );
+}
+
+#[tokio::test]
+async fn s3_qualified_upload_reuses_retained_provider_bound_copy_for_a_new_restore_job() {
+    let (mut c, mut storage, job, auth, time) = staged(a::Backend::S3, WriteFault::Qualify).await;
+    qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0)
+        .await
+        .unwrap();
+    let record = storage.cache.provider_record.clone().unwrap();
+    let location = c
+        .generation(TENANT, GENERATION)
+        .unwrap()
+        .cache_location
+        .unwrap();
+    assert_eq!(
+        storage.cache.provider_retained.get(&location),
+        Some(&record.identity.cache_key())
+    );
+    reconnect(&mut storage);
+    storage.cache.provider_retained =
+        serde_json::from_slice(&serde_json::to_vec(&storage.cache.provider_retained).unwrap())
+            .unwrap();
+    auth.denied.borrow_mut().insert("object:Write".into());
+    let restore = request_restore(&mut c, "object", 100, 50, 20, 10, auth.as_ref());
+    assert_ne!(restore, job);
+    qualified_attempt(&mut c, &mut storage, restore, &auth, &time, 0)
+        .await
+        .unwrap();
+    assert_eq!(c.job(TENANT, restore).unwrap().state, JobState::Complete);
+    assert_eq!(
+        c.generation(TENANT, GENERATION)
+            .unwrap()
+            .cache_location
+            .as_ref(),
+        Some(&location)
+    );
+    assert!(super::super::super::pin(&mut c, "object", 101, 10, auth.as_ref()).is_ok());
+    assert_eq!(storage.cache.copies.len(), 1);
+    assert_eq!(
+        storage.cache.copies[&location],
+        storage.cache.fixture.bytes()
+    );
+    assert!(storage.cache.pending.is_empty());
+    assert!(
+        storage.cache.provider_keys.is_empty(),
+        "no new restore allocation"
+    );
+    assert_eq!(
+        storage.s3.inner.reads, 1,
+        "qualification only; no restore refetch"
+    );
+    assert_eq!(storage.s3.calls, ["begin", "part", "commit"]);
+    assert!(storage.nntp.calls.is_empty());
+    assert_eq!(storage.nntp.inner.reads, 0);
+    assert!(storage.cache.trace.0.is_empty());
+}
+
+#[tokio::test]
+async fn s3_retained_binding_or_bytes_failure_prevents_qualification_and_warm_restore() {
+    for completed in [false, true] {
+        for fault in 0..4 {
+            let (mut c, mut storage, job, auth, time) =
+                staged(a::Backend::S3, WriteFault::Qualify).await;
+            if completed {
+                qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0)
+                    .await
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    qualified_attempt(&mut c, &mut storage, job, &auth, &time, 14).await,
+                    Err(Failure::Io(IoError::Retryable))
+                );
+                time.0.set(13);
+            }
+            let location = c
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .unwrap();
+            let record = storage.cache.provider_record.clone();
+            match fault {
+                0 => {
+                    storage.cache.provider_retained.remove(&location);
+                }
+                1 => {
+                    storage
+                        .cache
+                        .provider_retained
+                        .insert(location.clone(), [0; 32]);
+                }
+                2 => {
+                    storage.cache.copies.get_mut(&location).unwrap()[0] ^= 1;
+                }
+                3 => {
+                    storage.cache.copies.remove(&location);
+                }
+                _ => unreachable!(),
+            }
+            let copies = storage.cache.copies.clone();
+            let target_job = if completed {
+                request_restore(&mut c, "object", 100, 50, 20, 10, auth.as_ref())
+            } else {
+                job
+            };
+            assert_eq!(
+                qualified_attempt(&mut c, &mut storage, target_job, &auth, &time, 0).await,
+                Err(Failure::Io(IoError::Integrity)),
+                "completed={completed}, fault={fault}"
+            );
+            assert_ne!(c.job(TENANT, target_job).unwrap().state, JobState::Complete);
+            assert_eq!(
+                c.generation(TENANT, GENERATION)
+                    .unwrap()
+                    .cache_location
+                    .as_ref(),
+                Some(&location)
+            );
+            assert_eq!(
+                storage.cache.copies, copies,
+                "never replace or remove retained bytes"
+            );
+            assert_eq!(storage.cache.provider_record, record);
+            assert_eq!(
+                storage.s3.inner.reads, 1,
+                "no refetch to heal a recorded copy"
+            );
+            assert_eq!(storage.s3.calls, ["begin", "part", "commit"]);
+            assert!(storage.nntp.calls.is_empty());
+            assert_eq!(storage.nntp.inner.reads, 0);
+            assert!(storage.cache.pending.is_empty());
+            assert!(storage.cache.trace.0.is_empty());
+        }
+    }
 }
 
 #[tokio::test]

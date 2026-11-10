@@ -35,9 +35,12 @@ pub trait ArchiveCache: Storage {
         Ok(None)
     }
     /// Atomic compare-and-swap on the exact scoped journal. A Verified update
-    /// installs its entire immutable ObjectRecord in the same transaction. Never
-    /// acknowledge a non-durable update; uncertainty requires original-state
-    /// reconciliation. The journal retains the safety copy, never grants eviction.
+    /// installs its entire immutable ObjectRecord in the same transaction and
+    /// binds the verified retained copy's exact location to its provider cache key.
+    /// That binding must resolve for later jobs of this generation, not only the
+    /// archive job's inventory. Never acknowledge a non-durable update;
+    /// uncertainty requires original-state reconciliation. The journal retains
+    /// the safety copy, never grants eviction.
     async fn save_archive_write(
         &mut self,
         _work: &Work,
@@ -365,6 +368,21 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
             return Ok(None);
         }
         let target = &record.identity.target;
+        let location = work
+            .retained_location
+            .as_deref()
+            .ok_or(IoError::Integrity)?;
+        let copy = cache_read(
+            &self.control,
+            target,
+            self.cache
+                .verify_provider_completed(work, record.identity.cache_key(), location),
+            false,
+        )
+        .await?;
+        if copy.location != location || complete(&work.metadata, &copy).is_err() {
+            return Err(IoError::Integrity);
+        }
         // Both rights must remain current even if the provider ignores Control.
         // No cache allocation, publication or second whole-body buffer is needed.
         invoke(&self.control, target, a::Action::Write, async {

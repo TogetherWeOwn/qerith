@@ -185,11 +185,31 @@ its deletion request used `now = not_before = 10`, so candidate validation
 correctly returned `Invalid` before evaluating the expected `Unsafe` predicate.
 The repair retains that invalid-input control, uses future deadline 11 to reach
 the safety refusal for both deletion kinds, and checks that neither refusal
-mutates the generation. Runtime deletion policy is unchanged. The repaired test
-has not yet been observed passing in Actions. Existing NNTP qualification remains
-separately exercised. Actual
-S3-backed warm/cold restore from this new completion boundary, runtime assessors,
-durable catalogue, sharing and global cache lifecycle remain unfinished.
+mutates the generation. Runtime deletion policy is unchanged. The repaired head
+`b766bb99c6796192e4d5251ad0e0beaf1d76375c` passed all 128 feature-on composition
+cases in Actions run `42782384493`, native job `129715274582`. Default native
+and Clippy, WASM/MSRV/deny/ci-ok, synthetic clients (`129715274241`), CodeQL run
+`42782375660` and PR standards run `42782384870` passed. This is synthetic
+exact-head evidence, not independent acceptance or physical qualification.
+
+The write-journal cache contract now requires the Verified transaction to bind
+the retained immutable upload location to the final provider cache key, resolving
+across later jobs of the same generation. Before S3 observation/qualification,
+the bridge checks that bound copy's complete receipt, identity, checksums and
+exact location through the existing control-interruptible cache seam. Neither
+matching ciphertext alone nor an archive-job-local key establishes that binding.
+Missing/corrupt recorded bytes or a wrong binding cannot be healed by refetch.
+
+Two additional generated tests author a qualified S3 upload followed by a new
+restore job with Write revoked, retaining exactly the same cache copy and no
+provider refetch/allocation; and eight pre-qualification/post-completion failure
+scenarios for absent/wrong bindings and corrupt/missing bytes. The pre-completion
+cases resume after explicitly retryable synthetic assessor unavailability, not
+a terminal job failure. These additions have not yet been observed passing.
+The reference cache's serialized journal/binding is not a durable database or a
+process-restart receipt. Actual S3-backed cold restore from this new completion
+boundary, runtime assessors, durable catalogue, sharing and global cache lifecycle
+remain unfinished. S3-qualified copies still cannot be evicted.
 
 ## Explicitly unfinished boundaries
 

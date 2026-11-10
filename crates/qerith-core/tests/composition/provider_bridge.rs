@@ -40,7 +40,7 @@ impl ArchiveCache for Io {
     }
     async fn save_archive_write(
         &mut self,
-        _: &Work,
+        work: &Work,
         expected: &WriteJournal,
         next: &WriteJournal,
     ) -> std::result::Result<(), IoError> {
@@ -54,6 +54,10 @@ impl ArchiveCache for Io {
             if self.inject == Injection::Uncertain {
                 return Err(IoError::Uncertain);
             }
+            let location = work.retained_location.as_ref().ok_or(IoError::Integrity)?;
+            self.verify_completed(work, location).await?;
+            self.provider_retained
+                .insert(location.clone(), record.identity.cache_key());
             self.provider_record = Some(record.clone());
         }
         // Serialized state is an explicit fake checkpoint, not a durable DB.
@@ -120,7 +124,11 @@ impl ArchiveCache for Io {
         key: [u8; 32],
     ) -> std::result::Result<CompleteCopy, IoError> {
         if self.provider_keys.get(&inventory(work)) != Some(&key) {
-            return Err(IoError::Integrity);
+            let location = work
+                .retained_location
+                .as_deref()
+                .ok_or(IoError::Integrity)?;
+            self.verify_provider_completed(work, key, location).await?;
         }
         let copy = self.complete_restore(work).await?;
         if self.provider_cache_stall == Some("complete") {
@@ -134,7 +142,9 @@ impl ArchiveCache for Io {
         key: [u8; 32],
         location: &str,
     ) -> std::result::Result<CompleteCopy, IoError> {
-        if self.provider_keys.get(&inventory(work)) != Some(&key) {
+        if self.provider_keys.get(&inventory(work)) != Some(&key)
+            && self.provider_retained.get(location) != Some(&key)
+        {
             return Err(IoError::Integrity);
         }
         let copy = self.verify_completed(work, location).await?;
