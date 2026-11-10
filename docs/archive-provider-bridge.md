@@ -110,8 +110,10 @@ record. A missing Verified record or conflicting installed object is Integrity,
 not permission to begin, reconcile, abort or acknowledge a terminal state. This
 check does not require Read authority for a Write/Abort invocation. Generated
 regressions author both backend paths across eleven inconsistent states and a
-matching-Verified replay control with Read revoked; Actions execution is pending.
-They do not establish physical settlement or durable inventory repair.
+matching-Verified replay control with Read revoked. Both passed on head
+`fb1385e339dab382f5522245e31276f1ff640f00`, Actions run `42804369214`, native job
+`129789652299`, with all 140 feature-on composition cases. They do not establish
+physical settlement or durable inventory repair.
 
 Lost begin responses lack a remote session, and shared v1 cannot reconcile by
 intent alone. `BeginPending` therefore stays uncertain and needs trusted transport
@@ -700,6 +702,37 @@ S3 archive or eviction evidence. These are scoped compatible-reference operation
 not public sharing, a cross-vault crypto policy, ciphertext conversion, a new
 private/public dedupe scope or physical/durable qualification. Public sharing and
 complete client parity remain unfinished; safety-copy eviction is unchanged.
+
+## Inbound S3 upload-to-provider checkpoint
+
+Two generated tests in `tests/composition/provider_s3_upload.rs` connect the
+existing `s3::mutation::MemoryMutations` PUT and multipart paths to the actual
+provider archive worker. Both consume the same signed-body validator helper as
+the existing S3 mutation tests; it uses fresh fixture-only signing entropy and
+checks rejection with a different signing key. No endpoint or credentials exist.
+PUT negotiates a full SHA-256 checksum; multipart uses its supported no-checksum
+mode. A mismatched multipart part receipt must fail before retained bytes or an
+archive outbox event exist; exact successful completion replay must preserve the
+same generation, validator and outbox.
+
+The test passes the mutation adapter's actual `retained_for_archive` bytes and
+catalogue cache location into the reference `ArchiveCache`, rather than generating
+a second oracle body or staging another upload. The archive outbox then runs
+through `run_once`, journaled begin/part/commit and exact record installation for
+both backends. The original metadata, validator, full ciphertext hash and retained
+safety bytes must remain unchanged. S3 completes only through the explicitly
+synthetic assessor; new-provider NNTP qualification still refuses completion.
+Aborted multipart and Write-revoked PUT must leave no archive outbox or retained
+copy. These assertions are authored, not yet observed passing.
+
+This is a non-durable reference-cache handoff, not an atomic production adapter,
+a server/HTTP receipt, authenticated encryption, public sharing, complete S3
+multipart-checksum parity or eviction qualification. The existing cache verifier
+only accepts SHA-256 full-object evidence without multipart subchecksums; that
+remaining fixture/runtime boundary is not weakened to claim parity. Shared
+provider acceptance, actual assessors, durable inventory/runtime and physical
+settlement remain unshipped. No supplier activation, charged fallback, safety-copy
+eviction or new supported-backend claim follows.
 
 ## Dependency supply-chain record
 

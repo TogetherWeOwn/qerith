@@ -1,6 +1,9 @@
 use super::*;
 use qerith_core::catalogue::S3VerificationEvidence;
 
+#[path = "provider_s3_upload.rs"]
+mod s3_upload;
+
 // These references assert synthetic software qualification only. No media keys,
 // supplier durability or authenticated plaintext are present in this fake.
 struct S3Qualification(u8);
