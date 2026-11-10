@@ -110,8 +110,14 @@ Verified inventories, not the current write policy. Unknown tenant, generation o
 recovery references refuse both read and write without fallback. Missing new-write
 configuration refuses staging rather than using legacy NNTP or permanent cache.
 
-This case is authored, not yet observed passing. The scoped adapter and target
-selection are test-only; serialization is not durable runtime recovery. Neither
+Initial head `40364b8d1a24a588d7c8126ab2c27ed03829fd5e` failed this case in
+Actions run `42826864569`, native job `129866350593` (147 passed, 1 failed):
+the post-worker storage check looked up an outbox event already retired by terminal
+assessor refusal. The test now captures original work before running the jobs and
+asserts both FailedUnrecoverable state and retired notifications, retaining all
+safety-copy and routing assertions. The correction is not yet observed passing.
+The scoped adapter and target selection are test-only; serialization is not durable
+runtime recovery. Neither
 new provider is given an authenticated qualification or eviction receipt: archive
 jobs deliberately remain incomplete at the separate assessor boundary, and both
 safety copies remain intact. Only the already-qualified legacy generation is

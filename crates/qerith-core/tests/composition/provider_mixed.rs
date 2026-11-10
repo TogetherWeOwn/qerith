@@ -293,6 +293,12 @@ async fn mixed_generations_keep_old_reads_and_frozen_write_targets_when_config_i
             .provider_write = Some(serde_json::from_slice(&bytes).unwrap());
     }
     storage.cache.new_write = None;
+    // Terminal assessor refusal retires RunJob notifications. Capture the
+    // original work while those events still exist for later storage checks.
+    let retained_reads = [
+        work(service.catalogue(), nntp_job),
+        work(service.catalogue(), s3_job),
+    ];
     for job in [s3_job, nntp_job] {
         let event = job_event(service.catalogue(), job);
         assert_eq!(
@@ -330,20 +336,24 @@ async fn mixed_generations_keep_old_reads_and_frozen_write_targets_when_config_i
         records[0].identity.cache_key(),
         records[1].identity.cache_key()
     );
-    for job in [nntp_job, s3_job] {
-        let work = work(service.catalogue(), job);
-        storage.retrieve(&work).await.unwrap();
+    for work in &retained_reads {
+        storage.retrieve(work).await.unwrap();
         let location = work.retained_location.as_ref().unwrap();
-        let copy = storage.verify_completed(&work, location).await.unwrap();
+        let copy = storage.verify_completed(work, location).await.unwrap();
         assert_eq!(copy.identity, work.metadata.identity);
         let io = &storage.cache.generations[&work.job.generation.0];
         assert_eq!(io.copies[location], io.fixture.bytes());
         assert!(!io.order.contains(&"engine-post"));
         assert!(!io.order.contains(&"engine-retrieve"));
-        assert_ne!(
-            service.catalogue().job(TENANT, job).unwrap().state,
-            JobState::Complete
+        assert_eq!(
+            service.catalogue().job(TENANT, work.job.id).unwrap().state,
+            JobState::FailedUnrecoverable
         );
+        assert!(service
+            .catalogue()
+            .outbox(TENANT)
+            .iter()
+            .all(|event| event.id != work.event));
     }
     // The legacy cold job still traverses its original engine and publishes via
     // the ordinary catalogue fence, with both new-provider journals present.
@@ -376,7 +386,7 @@ async fn mixed_generations_keep_old_reads_and_frozen_write_targets_when_config_i
         );
     }
     // Unknown tenant/generation/recovery inventory cannot become legacy I/O.
-    let original = work(service.catalogue(), nntp_job);
+    let original = &retained_reads[0];
     for field in ["tenant", "generation", "recovery"] {
         let mut changed = original.clone();
         match field {
