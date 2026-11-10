@@ -162,6 +162,14 @@ async fn cache_read<T>(
     Ok(value)
 }
 
+struct Discard;
+
+impl a::Sink for Discard {
+    async fn write(&mut self, _bytes: &[u8]) -> a::Result<()> {
+        Ok(())
+    }
+}
+
 struct RestoreSink<'a, S, C> {
     inner: S,
     control: &'a C,
@@ -344,6 +352,66 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
             return Err(IoError::RepairUnavailable);
         }
         self.cache.verify_archive(work).await
+    }
+
+    async fn verify_s3_archive(
+        &mut self,
+        work: &Work,
+    ) -> std::result::Result<Option<a::ObjectRecord>, IoError> {
+        let Some(record) = self.record(work)? else {
+            return Ok(None);
+        };
+        if record.identity.target.backend != a::Backend::S3 {
+            return Ok(None);
+        }
+        let target = &record.identity.target;
+        // Both rights must remain current even if the provider ignores Control.
+        // No cache allocation, publication or second whole-body buffer is needed.
+        invoke(&self.control, target, a::Action::Write, async {
+            let observed = invoke(
+                &self.control,
+                target,
+                a::Action::Read,
+                self.s3.stat(&record, &self.control),
+            )
+            .await?;
+            if observed != record.identity {
+                return Err(a::Failure::Integrity);
+            }
+            let mut sink = RestoreSink {
+                inner: Discard,
+                control: &self.control,
+                target,
+                remaining: record.identity.bytes,
+                digest: Sha256::new(),
+                failed: None,
+            };
+            if record.identity.bytes != 0 {
+                invoke(
+                    &self.control,
+                    target,
+                    a::Action::Read,
+                    self.s3.read_range(
+                        &record,
+                        a::Range {
+                            offset: 0,
+                            bytes: record.identity.bytes,
+                        },
+                        &mut sink,
+                        &self.control,
+                    ),
+                )
+                .await?;
+            }
+            sink.finish(record.identity.sha256)?;
+            self.control.check(target, a::Action::Write)
+        })
+        .await
+        .map_err(io)?;
+        if self.record(work)?.as_ref() != Some(&record) {
+            return Err(IoError::Integrity);
+        }
+        Ok(Some(record))
     }
 
     async fn retrieve(&mut self, work: &Work) -> std::result::Result<(), IoError> {

@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "provider_abort.rs"]
 mod abort;
+#[path = "provider_qualification.rs"]
+mod qualification;
 
 fn multipart(storage: &mut WriteStorage) {
     let bytes = storage.cache.fixture.bytes();
@@ -469,6 +471,7 @@ async fn provider_write_rejects_changed_staging_before_part_io() {
 #[derive(Clone, Copy)]
 enum WriteFault {
     None,
+    Qualify,
     Begin,
     Part,
     Commit,
@@ -656,10 +659,15 @@ impl a::ArchiveProvider for Writer {
     }
     async fn stat(
         &mut self,
-        _: &a::ObjectRecord,
-        _: &impl Control,
+        record: &a::ObjectRecord,
+        control: &impl Control,
     ) -> a::Result<a::ObjectIdentity> {
-        Err(a::Failure::Unsupported)
+        if !matches!(self.fault, WriteFault::Qualify) {
+            return Err(a::Failure::Unsupported);
+        }
+        control.check(&record.identity.target, a::Action::Read)?;
+        assert_eq!(self.proof.as_ref().map(|p| &p.record), Some(record));
+        Ok(record.identity.clone())
     }
     async fn read_range(
         &mut self,

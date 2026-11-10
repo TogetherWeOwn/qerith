@@ -106,6 +106,48 @@ pub struct VerificationEvidence {
     pub readability_ref: String,
 }
 
+/// Trusted backend-specific qualification, not an S3 acknowledgement or an ETag.
+/// The worker authenticates these external references; no client can supply them.
+/// This permits archive completion/publication only, never safety-copy eviction.
+#[cfg(feature = "archive-provider")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3VerificationEvidence {
+    pub record: velmora::archive::v1::ObjectRecord,
+    pub recovery_ref: String,
+    pub verified_at: u64,
+    pub valid_until: u64,
+    pub verifier_version: String,
+    pub provenance_ref: String,
+    pub readability_ref: String,
+    pub durability_ref: String,
+}
+
+#[cfg(feature = "archive-provider")]
+impl S3VerificationEvidence {
+    pub(crate) fn valid(
+        &self,
+        tenant: TenantId,
+        generation: GenerationId,
+        metadata: &CiphertextMetadata,
+        now: u64,
+    ) -> bool {
+        let identity = &self.record.identity;
+        self.record.validate().is_ok()
+            && identity.target.backend == velmora::archive::v1::Backend::S3
+            && identity.target.tenant.as_str() == tenant.0.to_string()
+            && identity.target.generation.as_str() == generation.0.to_string()
+            && identity.bytes == metadata.identity.length
+            && identity.sha256 == metadata.identity.sha256
+            && self.recovery_ref == metadata.recovery_ref
+            && self.verified_at <= now
+            && self.valid_until > now
+            && !self.verifier_version.is_empty()
+            && !self.provenance_ref.is_empty()
+            && !self.readability_ref.is_empty()
+            && !self.durability_ref.is_empty()
+    }
+}
+
 /// External qualification, not a deduction from two reseller names or receipts.
 /// Only the trusted worker port accepts it. Fixture values prove no real-world
 /// backbone independence. A durable adapter must authenticate the attribution.
@@ -418,6 +460,18 @@ pub trait JobPort {
         independence: IndependenceEvidence,
         now: u64,
     ) -> Result<()>;
+    /// Exact replay is a no-op; refreshed evidence cannot replace immutable
+    /// routing/version/encryption identity or coexist with NNTP qualification.
+    #[cfg(feature = "archive-provider")]
+    fn record_s3_verification(
+        &mut self,
+        _tenant: TenantId,
+        _generation: GenerationId,
+        _evidence: S3VerificationEvidence,
+        _now: u64,
+    ) -> Result<()> {
+        Err(Error::Unsafe)
+    }
     fn set_safety_hold(
         &mut self,
         tenant: TenantId,

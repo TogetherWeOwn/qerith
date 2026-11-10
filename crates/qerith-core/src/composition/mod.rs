@@ -148,6 +148,16 @@ pub trait Storage {
         &mut self,
         work: &Work,
     ) -> std::result::Result<[Reconstruction; 2], IoError>;
+    /// Backend-specific exact-version full-ciphertext observation. None selects
+    /// the existing NNTP qualification path, not a provider fallback. This alone
+    /// proves neither authenticated readability nor supplier durability.
+    #[cfg(feature = "archive-provider")]
+    async fn verify_s3_archive(
+        &mut self,
+        _work: &Work,
+    ) -> std::result::Result<Option<velmora::archive::v1::ObjectRecord>, IoError> {
+        Ok(None)
+    }
     /// Reconcile this scoped inventory's exact completed copy (or the catalogue's
     /// retained version) before fetching again. Verify it without replacement;
     /// corrupt/missing recorded completions fail closed, never fall back to a
@@ -171,6 +181,18 @@ pub trait Storage {
 /// cannot manufacture independence from the two reconstruction labels. Synthetic
 /// assessors qualify software only, never provider independence or encryption.
 pub trait Qualifier {
+    /// Separate trusted-client authentication and backend durability assessment
+    /// bound to the entire observed record. The default refuses qualification;
+    /// a shared WriteProof, checksum or fake provider is not this assessor.
+    #[cfg(feature = "archive-provider")]
+    fn qualify_s3(
+        &self,
+        _work: &Work,
+        _record: &velmora::archive::v1::ObjectRecord,
+        _now: u64,
+    ) -> std::result::Result<S3VerificationEvidence, IoError> {
+        Err(IoError::RepairUnavailable)
+    }
     fn qualify(
         &self,
         work: &Work,
@@ -438,6 +460,28 @@ async fn execute<C: JobPort, S: Storage>(
         JobKind::Archive => {
             storage.post(work).await.map_err(Failure::Io)?;
             guard(catalogue, work, fence, clock, policy, authority)?;
+            #[cfg(feature = "archive-provider")]
+            if let Some(record) = storage.verify_s3_archive(work).await.map_err(Failure::Io)? {
+                let now = guard(catalogue, work, fence, clock, policy, authority)?;
+                let proof = qualifier
+                    .qualify_s3(work, &record, now)
+                    .map_err(Failure::Io)?;
+                if proof.record != record
+                    || !proof.valid(work.tenant, work.job.generation, &work.metadata, now)
+                {
+                    return Err(Error::Unsafe.into());
+                }
+                catalogue.record_s3_verification(work.tenant, work.job.generation, proof, now)?;
+                let now = guard(catalogue, work, fence, clock, policy, authority)?;
+                catalogue.transition(
+                    work.tenant,
+                    fence.clone(),
+                    Transition::CompleteArchive,
+                    now,
+                    authority,
+                )?;
+                return Ok(());
+            }
             let retrieved = storage.verify_archive(work).await.map_err(Failure::Io)?;
             let now = guard(catalogue, work, fence, clock, policy, authority)?;
             if retrieved[0].backbone == retrieved[1].backbone

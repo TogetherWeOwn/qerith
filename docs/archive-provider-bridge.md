@@ -149,14 +149,49 @@ post-read no-mutation/no-byte-I/O assertions. All 109 feature-on composition
 cases passed on that head. No HTTP/SigV4, live-provider, durable catalogue, S3
 archival completion or eviction qualification is claimed.
 
+## Backend-specific S3 qualification checkpoint
+
+The default-off bridge now distinguishes S3 archive completion from NNTP
+independence and from safety-copy eviction. After journaled posting, the S3
+observation path checks exact-version stat, then streams the entire ciphertext
+through the existing bounded, sticky-error digest sink without allocating a
+second body or a cache version. Empty objects still require exact-version stat.
+Both Read and Write controls remain current during the observation; the original
+immutable journal/record is rechecked afterward.
+
+A separate trusted `Qualifier::qualify_s3` must supply
+`S3VerificationEvidence`, binding that entire backend/account/locator/version/
+encryption record and recovery reference to current provenance, verifier,
+authenticated-readability and backend-durability references. The default returns
+`RepairUnavailable`. This is a trusted worker assertion, not a cryptographic
+capability, provider qualification implementation or user-supplied field. Neither
+`WriteProof` nor ciphertext SHA-256 manufactures the missing assessment.
+
+The catalogue independently validates scope, bytes, references and freshness,
+refuses NNTP/S3 evidence mixing, treats exact current replays as no-ops and allows
+refresh only for the same immutable record. Archive completion and restore
+publication may consume this separate evidence. **Deletion continues to require
+the unchanged NNTP proof and therefore refuses S3-qualified generations.** No
+S3 safety-copy eviction policy is implemented or relaxed.
+
+Three generated tests in `tests/composition/provider_qualification.rs` author the
+actual product ingest/job/completion path, thirteen invalid qualification cases,
+readback-only refusal, five corrupt/unbounded/incomplete-stream cases, retained
+safety bytes, immutable refresh/replay and refusal of NNTP evidence mixing. They
+use explicitly fake readability/durability assertions; no media keys or physical
+supplier evidence exists. These additions are authored, not yet observed passing
+in Actions. Existing NNTP qualification remains separately exercised. Actual
+S3-backed warm/cold restore from this new completion boundary, runtime assessors,
+durable catalogue, sharing and global cache lifecycle remain unfinished.
+
 ## Explicitly unfinished boundaries
 
-- `verify_archive` deliberately fails closed for every new-provider journal or
-  record, including after successful remote readback. The catalogue job never
-  becomes archive-complete from these observations. Neither cleanup nor a failed
-  qualifier discards the retained staging copy. Backend-specific authenticated
-  qualification and actual durable write-journal/runtime implementations remain
-  unwired.
+- The legacy `verify_archive` pair path deliberately fails closed for every
+  new-provider journal or record. The additive S3 qualification checkpoint below
+  can complete a synthetic archive job through a separate trusted assessor; the
+  default assessor still refuses it. Neither readback alone nor a failed assessor
+  discards staging bytes. Real authenticated readability/durability assessment and
+  durable write-journal/runtime implementations remain unwired.
 - The legacy two-independent-backbone archive qualification/eviction path is
   untouched. No S3 receipt is converted to a pair of NNTP reconstructions. S3
   archival completion/eviction needs its own authenticated durable-write and

@@ -38,6 +38,8 @@ struct Generation {
     dispatch_valid_until: u64,
     verification: BTreeMap<BackboneId, VerificationEvidence>,
     independence: Option<IndependenceEvidence>,
+    #[cfg(feature = "archive-provider")]
+    s3_verification: Option<S3VerificationEvidence>,
 }
 
 #[derive(Clone)]
@@ -311,6 +313,8 @@ impl Tenant {
                         dispatch_valid_until: 0,
                         verification: BTreeMap::new(),
                         independence: None,
+                        #[cfg(feature = "archive-provider")]
+                        s3_verification: None,
                     },
                 );
                 self.references.insert(
@@ -579,6 +583,18 @@ impl Tenant {
                 r.revision == s.revision && r.generation == Some(job.view.generation)
             }) && permit(authority, tenant, name, Action::Restore).is_ok()
         })
+    }
+
+    fn archive_verified(&self, tenant: TenantId, generation: GenerationId, now: u64) -> bool {
+        #[cfg(not(feature = "archive-provider"))]
+        let _ = tenant;
+        #[cfg(feature = "archive-provider")]
+        if let Some(g) = self.generations.get(&generation) {
+            if let Some(proof) = &g.s3_verification {
+                return proof.valid(tenant, generation, &g.metadata, now);
+            }
+        }
+        self.verified(generation, now)
     }
 
     fn verified(&self, generation: GenerationId, now: u64) -> bool {
@@ -1205,7 +1221,7 @@ impl JobPort for MemoryCatalogue {
                 Transition::CompleteArchive => {
                     if j.view.kind != JobKind::Archive
                         || g.prohibited
-                        || !t.verified(generation, now)
+                        || !t.archive_verified(tenant, generation, now)
                     {
                         return Err(Error::Unsafe);
                     }
@@ -1219,7 +1235,7 @@ impl JobPort for MemoryCatalogue {
                     if j.view.kind != JobKind::Restore
                         || g.prohibited
                         || !g.archived
-                        || !t.verified(generation, now)
+                        || !t.archive_verified(tenant, generation, now)
                     {
                         return Err(Error::Unsafe);
                     }
@@ -1300,6 +1316,10 @@ impl JobPort for MemoryCatalogue {
                 .generations
                 .get_mut(&evidence.generation)
                 .ok_or(Error::Unavailable)?;
+            #[cfg(feature = "archive-provider")]
+            if g.s3_verification.is_some() {
+                return Err(Error::Unsafe);
+            }
             if g.deletion_dispatched
                 || g.prohibited
                 || evidence.reconstructed != g.metadata.identity
@@ -1331,6 +1351,41 @@ impl JobPort for MemoryCatalogue {
             }
             g.verification.insert(evidence.backbone, evidence);
             g.independence = Some(independence);
+            g.revision = next(g.revision)?;
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "archive-provider")]
+    fn record_s3_verification(
+        &mut self,
+        tenant: TenantId,
+        generation: GenerationId,
+        evidence: S3VerificationEvidence,
+        now: u64,
+    ) -> Result<()> {
+        self.atomic(tenant, |t| {
+            let g = t
+                .generations
+                .get_mut(&generation)
+                .ok_or(Error::Unavailable)?;
+            if g.deleting.is_some()
+                || g.prohibited
+                || !g.verification.is_empty()
+                || g.independence.is_some()
+                || !evidence.valid(tenant, generation, &g.metadata, now)
+            {
+                return Err(Error::Unsafe);
+            }
+            if let Some(old) = &g.s3_verification {
+                if old == &evidence {
+                    return Ok(());
+                }
+                if old.record != evidence.record || old.verified_at >= evidence.verified_at {
+                    return Err(Error::Conflict);
+                }
+            }
+            g.s3_verification = Some(evidence);
             g.revision = next(g.revision)?;
             Ok(())
         })
