@@ -710,22 +710,22 @@ fn writer(storage: &WriteStorage, backend: a::Backend) -> &Writer {
         &storage.s3
     }
 }
-async fn staged(
+fn write_storage(
+    mut io: Io,
     backend: a::Backend,
     fault: WriteFault,
-) -> (MemoryCatalogue, WriteStorage, JobId, Rc<Auth>, Time) {
-    let mut io = Io::new(1).await;
+    auth: Rc<Auth>,
+) -> WriteStorage {
     io.provider_write = Some(WriteJournal {
         intent: record(&io, backend).intent(),
         phase: WritePhase::Prepared,
     });
-    let auth = Rc::new(Auth::default());
     let ProviderStorage {
         cache,
         nntp,
         s3,
         control,
-    } = bridge(io, backend, auth.clone(), Fault::None);
+    } = bridge(io, backend, auth, Fault::None);
     let wrap = |inner: Provider| Writer {
         fault: if inner.backend == backend {
             fault
@@ -739,12 +739,19 @@ async fn staged(
         settled_absent: false,
         proof: None,
     };
-    let mut storage = ProviderStorage {
+    ProviderStorage {
         cache,
         nntp: wrap(nntp),
         s3: wrap(s3),
         control,
-    };
+    }
+}
+async fn staged(
+    backend: a::Backend,
+    fault: WriteFault,
+) -> (MemoryCatalogue, WriteStorage, JobId, Rc<Auth>, Time) {
+    let auth = Rc::new(Auth::default());
+    let mut storage = write_storage(Io::new(1).await, backend, fault, auth.clone());
     let mut c = MemoryCatalogue::default();
     let time = Time(Cell::new(10));
     let upload = storage.cache.upload();

@@ -87,6 +87,217 @@ fn proof(c: &MemoryCatalogue, storage: &WriteStorage, now: u64) -> S3Verificatio
 }
 
 #[tokio::test]
+async fn service_rest_mcp_upload_commit_reaches_selected_provider_and_retained_delivery() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for mcp in [false, true] {
+            let (mut service, io, transfer, _, auth) = pending_upload().await;
+            fully_stage(&mut service, &io, &transfer);
+            let arguments = serde_json::to_vec(&serde_json::json!({
+                "reference": transfer.target.reference.as_str(),
+                "generation": transfer.target.generation.as_str(),
+                "transfer": transfer.handle.as_str(),
+                "identity": "provider_service_commit",
+            }))
+            .unwrap();
+            let outcome = if mcp {
+                let response = o::mcp_request(
+                    &mut service,
+                    Some(&scope()),
+                    o::McpSession::default(),
+                    o::TaskMode::Baseline,
+                    o::Operation::CommitUpload.definition().name,
+                    &arguments,
+                );
+                assert!(!response.is_error);
+                response.outcome
+            } else {
+                o::rest_request(
+                    &mut service,
+                    Some(&scope()),
+                    "POST",
+                    &format!(
+                        "/v1/operations/{}",
+                        o::Operation::CommitUpload.definition().name
+                    ),
+                    &arguments,
+                )
+                .outcome
+            };
+            assert!(matches!(outcome.unwrap(), o::Output::Job(_)));
+            let mut storage = write_storage(io, backend, WriteFault::Qualify, auth.clone());
+            let time = Time(Cell::new(10));
+            let result = service
+                .finish_upload(
+                    &scope(),
+                    &transfer.handle,
+                    &mut storage,
+                    &budget(),
+                    &time,
+                    &Rules::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.state, o::JobState::Succeeded);
+            assert_eq!(result.effects, o::Effects::Committed);
+            assert!(storage.nntp.calls.is_empty());
+            assert!(
+                storage.s3.calls.is_empty(),
+                "commit only stages common cache"
+            );
+            let archive = service
+                .catalogue()
+                .outbox(TENANT)
+                .into_iter()
+                .find_map(|event| match event.effect {
+                    Effect::RunJob(job) if job.kind == JobKind::Archive => Some(job.id),
+                    _ => None,
+                })
+                .unwrap();
+            let result = qualified_attempt(
+                service.catalogue_mut(),
+                &mut storage,
+                archive,
+                &auth,
+                &time,
+                0,
+            )
+            .await;
+            assert_eq!(writer(&storage, backend).calls, ["begin", "part", "commit"]);
+            let record = storage.cache.provider_record.as_ref().unwrap();
+            assert_eq!(record.identity.target.backend, backend);
+            assert_eq!(record.identity.target.encryption.key_epoch, aid("key_ref"));
+            assert_eq!(
+                record.identity.target.encryption.envelope,
+                aid("envelope_ref")
+            );
+            if backend == a::Backend::Nntp {
+                assert_eq!(result, Err(Failure::Io(IoError::RepairUnavailable)));
+                assert_retained(service.catalogue(), &storage, archive, backend);
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(
+                service.catalogue().job(TENANT, archive).unwrap().state,
+                JobState::Complete
+            );
+            let mut service = s::Service::reconnect(
+                service.checkpoint(),
+                Access(auth.clone()),
+                limits(),
+                profile(),
+                10,
+            )
+            .unwrap();
+            auth.denied.borrow_mut().insert("object:Write".into());
+            let mut fields = vec![
+                text("reference", transfer.target.reference.as_str()),
+                text("generation", transfer.target.generation.as_str()),
+                text("identity", "provider_service_restore"),
+                ("availability_seconds".into(), o::Value::Number(50)),
+            ];
+            parity(
+                &mut service,
+                &scope(),
+                o::Operation::Restore,
+                fields.clone(),
+            )
+            .unwrap();
+            let restore = service
+                .catalogue()
+                .outbox(TENANT)
+                .into_iter()
+                .rev()
+                .find_map(|event| match event.effect {
+                    Effect::RunJob(job) if job.kind == JobKind::Restore => Some(job.id),
+                    _ => None,
+                })
+                .unwrap();
+            qualified_attempt(
+                service.catalogue_mut(),
+                &mut storage,
+                restore,
+                &auth,
+                &time,
+                0,
+            )
+            .await
+            .unwrap();
+            fields.pop();
+            fields[2] = text("identity", "provider_service_download");
+            let o::Output::Download(download) = parity(
+                &mut service,
+                &scope(),
+                o::Operation::AuthorizeDownload,
+                fields,
+            )
+            .unwrap() else {
+                panic!("download");
+            };
+            assert_eq!(
+                service
+                    .read_download(
+                        &scope(),
+                        &download.handle,
+                        &mut ReadCache(&storage.cache),
+                        &time,
+                    )
+                    .unwrap(),
+                storage.cache.fixture.bytes()
+            );
+            assert_eq!(
+                storage.s3.inner.reads, 1,
+                "qualification only, no warm refetch"
+            );
+            assert!(storage.nntp.calls.is_empty());
+            assert_eq!(storage.nntp.inner.reads, 0);
+            assert_eq!(storage.cache.copies.len(), 1);
+            assert!(storage.cache.pending.is_empty());
+            assert!(storage.cache.trace.0.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn service_upload_key_revocation_prevents_provider_staging_and_outbox_commit() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut service, io, transfer, _, auth) = pending_upload().await;
+        fully_stage(&mut service, &io, &transfer);
+        parity(
+            &mut service,
+            &scope(),
+            o::Operation::CommitUpload,
+            commit_fields(&transfer),
+        )
+        .unwrap();
+        let mut storage = write_storage(io, backend, WriteFault::Qualify, auth.clone());
+        let journal = storage.cache.provider_write.clone();
+        let allocations = service.allocations();
+        let outbox = service.catalogue().outbox(TENANT);
+        auth.denied.borrow_mut().insert("key_ref".into());
+        let error = service
+            .finish_upload(
+                &scope(),
+                &transfer.handle,
+                &mut storage,
+                &budget(),
+                &Time(Cell::new(10)),
+                &Rules::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, o::ErrorCode::Denied);
+        assert_eq!(service.allocations(), allocations);
+        assert_eq!(service.catalogue().outbox(TENANT), outbox);
+        assert_eq!(storage.cache.provider_write, journal);
+        assert!(storage.cache.provider_record.is_none());
+        assert!(storage.cache.copies.is_empty());
+        assert!(storage.cache.order.is_empty());
+        assert!(storage.nntp.calls.is_empty());
+        assert!(storage.s3.calls.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn s3_qualified_product_archive_completes_without_nntp_evidence_or_eviction() {
     let (mut c, mut storage, job, auth, time) = staged(a::Backend::S3, WriteFault::Qualify).await;
     qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0)

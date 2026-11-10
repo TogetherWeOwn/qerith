@@ -228,8 +228,13 @@ authority revocations during a permanently stalled retained check and asserts
 immediate completion on the policy wake, without a timeout/deadline rescuing it.
 The authored recovery assertions preserve the Verified journal, exact record,
 cache binding and safety bytes, respect the retry deadline and complete without
-repeating begin/part/commit. These new assertions await exact-head Actions; no
-red-before execution or physical settlement claim is made.
+repeating begin/part/commit. These assertions passed on head
+`c3e8934ef6da9f805c5bde0dbc49224e697ff55f`, Actions run `42789351833`, native
+job `129738500171`: all 131 feature-on composition cases passed. Default native
+and Clippy, WASM/MSRV/deny/ci-ok, synthetic clients (`129738500105`), CodeQL run
+`42789344501` and PR standards run `42789352140` passed. This is exact-head
+synthetic evidence, not independent acceptance; no red-before execution or
+physical settlement claim is made.
 
 The reference cache's serialized journal/binding is not a durable database or a
 process-restart receipt. Actual S3-backed cold restore from this new completion
@@ -556,6 +561,30 @@ qualification after remote readback. No physical cache settlement, durable
 restart, global lifecycle or backend-specific durability claim is made. Journal
 persistence itself still needs a bounded durable runtime implementation; this
 read guard is not a transaction-cancellation or CAS-settlement mechanism.
+
+## Service upload-to-provider checkpoint
+
+Two generated tests in `tests/composition/provider_qualification.rs` extend the
+service upload seam, rather than starting with a composition-only upload. REST
+and MCP commit requests execute independently, each followed by the real
+`Service::finish_upload` worker through `ProviderStorage`. Public commit stages
+only the common cache; the committed outbox then drives the selected provider's
+begin/part/commit and immutable journal. The other provider and legacy reader
+remain unused. NNTP still refuses completion without its independent assessment;
+S3 uses the explicitly fake assessor, never NNTP backbone evidence.
+
+For S3, the test authors reference-checkpoint reconnection, Write revocation,
+REST/MCP restore and download authorization, and actual `Service::read_download`
+bytes from the original retained cache copy. No provider refetch, new cache
+allocation or safety-copy eviction is involved. A negative test revokes the bound
+key before the upload worker and requires denial before storage I/O, outbox
+commit or journal mutation for either backend. These additions are authored,
+not yet observed passing. The test helper extraction changes no runtime code.
+
+This is not a native wire-upload, HTTP/SigV4 S3 upload, public-share, physical
+provider, durable process restart or production receipt. It does not implement
+runtime assessors, a durable catalogue/cache, global admission/retention or the
+still-prohibited S3 safety-copy eviction/cold boundary.
 
 ## Dependency supply-chain record
 
