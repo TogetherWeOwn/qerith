@@ -176,6 +176,20 @@ qualification. Tests are authored; only exact-head Actions can establish PASS.
 The native Actions job runs default and feature-on clippy/tests; wasm and MSRV
 also compile the default-off bridge explicitly.
 
+Provider-to-S3 read cases select the S3-compatible ciphertext metadata profile
+before composition ingest, then use the existing synthetic NNTP qualification
+and eviction setup and a separate provider restore inventory. The actual
+`composition::ingest` / archive job / restore job / catalogue publication /
+`s3::archive::Adapter` path is exercised, not the HTTP/SigV4 S3 upload path. No
+profile is converted after commit. Native-service objects carry an unquoted C
+validator and native user metadata that the strict S3 wire profile cannot
+represent. A separate negative case keeps the committed native metadata intact
+and requires GET/HEAD to reject before cache byte I/O rather than synthesize an
+ETag, discard headers or expose native ciphertext under an S3 profile. This is
+fail-closed incompatibility coverage, not cross-profile parity or a supported
+client-visible conversion. Catalogue aliases are not public-share/vault-key
+compatibility receipts.
+
 ## Dependency supply-chain record
 
 The corrective pin delta from `40dba9a8cedb27748fa22e8a1d63cb2132067efd` changes

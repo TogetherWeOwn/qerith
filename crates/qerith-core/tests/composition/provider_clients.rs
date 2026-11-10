@@ -120,14 +120,66 @@ fn call(
     )
 }
 async fn restored(backend: a::Backend) -> (Reader, Io, Session) {
-    let (mut service, mut io, _, _, auth) = hot_upload().await;
+    restored_profile(backend, false).await
+}
+async fn restored_profile(backend: a::Backend, native: bool) -> (Reader, Io, Session) {
+    let (mut catalogue, mut io, auth) = if native {
+        let (mut service, io, _, _, auth) = hot_upload().await;
+        (std::mem::take(service.catalogue_mut()), io, auth)
+    } else {
+        let mut catalogue = MemoryCatalogue::default();
+        let mut io = Io::new(1).await;
+        let auth = Rc::new(Auth::default());
+        let time = Time(Cell::new(10));
+        let mut upload = io.upload();
+        // Choose the S3 byte/metadata profile BEFORE ingest. Never rewrite a
+        // native object's unquoted C validator or arbitrary user metadata.
+        upload.metadata.headers = BTreeMap::from([
+            ("content-type".into(), "application/octet-stream".into()),
+            ("x-amz-meta-label".into(), "synthetic-opaque-C".into()),
+        ]);
+        let archive = commit_job(
+            ingest(
+                &mut catalogue,
+                &mut io,
+                &upload,
+                &budget(),
+                &time,
+                &Rules::default(),
+                auth.as_ref(),
+            )
+            .await
+            .unwrap(),
+        );
+        run(
+            &mut catalogue,
+            &mut io,
+            archive,
+            &time,
+            &Rules::default(),
+            auth.as_ref(),
+        )
+        .await
+        .unwrap();
+        let hot = request_restore(&mut catalogue, "object", 1700, 1000, 50, 10, auth.as_ref());
+        run(
+            &mut catalogue,
+            &mut io,
+            hot,
+            &time,
+            &Rules::default(),
+            auth.as_ref(),
+        )
+        .await
+        .unwrap();
+        (catalogue, io, auth)
+    };
     let time = Time(Cell::new(60));
     // Prior eviction is still the existing synthetic NNTP proof. This separate
     // restore inventory never qualifies S3 archival completion or eviction.
-    evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+    evict(&mut catalogue, &mut io, &time, auth.as_ref());
     io.provider_record = Some(record(&io, backend));
     let mut storage = bridge(io, backend, auth.clone(), Fault::None);
-    let mut catalogue = std::mem::take(service.catalogue_mut());
     catalogue
         .create_bucket(TENANT, "bucket", "generated-1", 60)
         .unwrap();
@@ -283,6 +335,43 @@ async fn provider_restored_cache_serves_s3_full_range_head_and_validator_without
                 "http_or_sigv4_qualification": false,
                 "s3_archive_or_eviction_qualification": false,
             }),
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_restored_native_profile_is_not_silently_rewritten_for_s3_clients() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut reader, io, session) = restored_profile(backend, true).await;
+        let metadata = reader
+            .catalogue
+            .lookup(TENANT, "bucket/object", 60, session.auth.as_ref())
+            .unwrap()
+            .metadata;
+        assert_eq!(metadata.validator, "opaque_C");
+        let mut cache = Cache {
+            io: &io,
+            calls: 0,
+            requests: 0,
+            revoke: None,
+        };
+        for method in ["GET", "HEAD"] {
+            let response = call(&mut reader, &session, &mut cache, method, &[]);
+            assert_eq!(response.status, 500);
+            assert_ne!(response.body, io.fixture.bytes());
+        }
+        assert_eq!(
+            cache.calls, 0,
+            "incompatible metadata fails before byte I/O"
+        );
+        assert_eq!(
+            reader
+                .catalogue
+                .lookup(TENANT, "bucket/object", 60, session.auth.as_ref())
+                .unwrap()
+                .metadata,
+            metadata,
+            "a protocol adapter cannot rewrite committed native identity/metadata"
         );
     }
 }
