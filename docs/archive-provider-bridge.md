@@ -13,7 +13,11 @@ checkpoint, **not an accepted production pin**. Shared exact-head Actions run
 `42509015484` passed, including the corrected invocation-control source. Shared
 native Crypto/Security/QA acceptance is still a separate gate. The product
 previous-head run `42508625487` passed all three generated restore tests; that
-is not evidence for this new consumer head. The dependency bump must settle through
+is not evidence for this new consumer head. Product run `42509624918` failed
+both new control tests during their shared loopback archive setup, before the
+control assertions (`Io(Integrity)` at `hot_upload`). The corrected tests keep
+real time during setup and pause only the stalled-provider phase; their result
+must be established by a new exact-head Actions run. The dependency bump must settle through
 shared review and the product's applicable independent Security/Crypto/QA gates
 before this PR is ready.
 

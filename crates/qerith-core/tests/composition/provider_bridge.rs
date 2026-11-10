@@ -453,7 +453,7 @@ async fn provider_restore_errors_never_publish_or_fall_back() {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_publication() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -482,6 +482,9 @@ async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_pu
             let time = Time(Cell::new(60));
             evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
             io.provider_record = Some(record(&io, backend));
+            // Setup uses loopback archive I/O with real timeouts. Pause only
+            // after it settles, so auto-advance cannot expire setup reads.
+            tokio::time::pause();
             let mut storage = bridge(io, backend, auth.clone(), Fault::Stall);
             let events = storage.control.events.clone();
             let restore = request_restore(
@@ -546,11 +549,12 @@ async fn provider_stalled_restore_wakes_on_policy_cancel_and_deadline_without_pu
                 service.catalogue().job(TENANT, restore).unwrap().state,
                 JobState::Complete
             );
+            tokio::time::resume();
         }
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn provider_control_observes_events_before_wait_registration() {
     let (_, io, _, _, auth) = hot_upload().await;
     let target = record(&io, a::Backend::S3).identity.target;
