@@ -1,5 +1,4 @@
 use super::*;
-use a::ArchiveProvider;
 
 #[tokio::test]
 async fn provider_pending_write_cancel_retains_original_journal_and_safety_copy() {

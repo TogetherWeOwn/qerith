@@ -190,9 +190,93 @@ jobs:
       - name: Audit advisories, bans, licenses, sources
         run: cargo-deny --manifest-path Cargo.toml check
 
+  archive-clients:
+    name: pinned archive clients (synthetic)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      QERITH_EVIDENCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      QERITH_CLIENT_RUNNER: ${{ github.workspace }}/scripts/archive-clients/runner.py
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12.8"
+      - name: Initialize fail-closed evidence for this exact head
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QERITH_EVIDENCE_HEAD"
+          # runner context is unavailable in job-level env; bind these at runtime.
+          export QERITH_CLIENT_EVIDENCE_DIR="$RUNNER_TEMP/archive-client-evidence"
+          export QERITH_CLIENT_PRIVATE_DIR="$RUNNER_TEMP/archive-client-private-$GITHUB_RUN_ID"
+          printf 'QERITH_CLIENT_EVIDENCE_DIR=%s\n' "$QERITH_CLIENT_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          printf 'QERITH_CLIENT_PRIVATE_DIR=%s\n' "$QERITH_CLIENT_PRIVATE_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$QERITH_CLIENT_EVIDENCE_DIR"
+          python3 -I - <<'PY'
+          import pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('scripts/archive-clients').resolve()))
+          import runner
+          runner.initial_manifest(pathlib.Path(__import__('os').environ['QERITH_CLIENT_EVIDENCE_DIR']))
+          PY
+      - name: Install pinned wheel-only clients and throwaway TLS fixture material
+        run: timeout --signal=TERM --kill-after=10s 300s bash scripts/archive-clients/setup-actions.sh
+      - name: Test relay preservation, bounds, cleanup and manifest failure cases
+        run: timeout --signal=TERM --kill-after=10s 90s python3 -I -m unittest discover -s scripts/archive-clients -p 'test_*.py' -v
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the parent-owned archive integration fixture
+        run: timeout --signal=TERM --kill-after=10s 900s cargo test --locked -p qerith-core --test archive_clients --no-run
+      - name: Exercise pinned low-level clients through synthetic cold restore
+        run: |
+          set -euo pipefail
+          # Rust owns its fixture process lifetime; Python owns a bounded process
+          # group per client/profile. The outer deadline also handles fixture hangs.
+          ulimit -f 131072
+          timeout --signal=TERM --kill-after=10s 600s cargo test --locked -p qerith-core --test archive_clients -- --ignored --nocapture
+      - name: Finalize trace hashes after fixture exit and validate qualification
+        if: ${{ always() }}
+        run: |
+          python3 -I - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, str(pathlib.Path('scripts/archive-clients').resolve()))
+          import runner
+          assert runner.finalize_manifest(pathlib.Path(os.environ['QERITH_CLIENT_EVIDENCE_DIR']),
+                                          os.environ['QERITH_EVIDENCE_HEAD']), 'qualification incomplete or failed'
+          PY
+      - name: Upload bounded qualification evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: archive-clients-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ env.QERITH_CLIENT_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove private keys and client installations on success, failure or cancellation
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          case "$QERITH_CLIENT_PRIVATE_DIR" in
+            "$RUNNER_TEMP"/archive-client-private-*)
+              if [ -d "$QERITH_CLIENT_PRIVATE_DIR" ]; then
+                ls -ld -- "$QERITH_CLIENT_PRIVATE_DIR"
+                rm -rf -- "$QERITH_CLIENT_PRIVATE_DIR"
+              fi
+              test ! -e "$QERITH_CLIENT_PRIVATE_DIR"
+              ;;
+            *) exit 1 ;;
+          esac
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
