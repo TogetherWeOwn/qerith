@@ -295,8 +295,15 @@ adapter. Each retains the exact original ciphertext while requiring refusal befo
 restore/provider I/O, no publication, unchanged catalogue qualification and safety
 bytes, and no inventory repair or replacement. Only attempt-local incomplete
 cleanup is allowed. The existing positive warm-restore case still requires exact
-record reuse with Write revoked. New assertions are authored, not yet observed
-passing; no pre-fix execution or independent acceptance is claimed.
+record reuse with Write revoked. Head `daa64cba3423899c2a2594ff2de45dd8354ae757`
+failed this regression before restore assertions: the backend substitution retained
+an S3 version, but shared NNTP records require version equal to generation. Actions
+run `42818066352`, native job `129836157929`, passed 146 composition cases and
+failed this one. The corrected replacement uses the canonical NNTP version so
+record validation succeeds before testing the catalogue fence; failure diagnostics
+now name the scenario. Restore assertions and runtime policy are unchanged.
+Corrected scenarios are authored, not yet observed passing; no pre-fix execution
+or independent acceptance is claimed.
 
 ## Explicitly unfinished boundaries
 

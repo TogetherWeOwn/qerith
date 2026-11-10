@@ -468,7 +468,10 @@ async fn s3_qualified_restore_rejects_rebound_inventory_even_with_matching_ciphe
         let original_bytes = storage.cache.copies.clone();
         let mut changed = qualified.clone();
         match fault {
-            "backend" => changed.identity.target.backend = a::Backend::Nntp,
+            "backend" => {
+                changed.identity.target.backend = a::Backend::Nntp;
+                changed.identity.version = changed.identity.target.generation.clone();
+            }
             "account" => changed.identity.target.account = aid("changed-account"),
             "locator" => changed.identity.target.locator = aid("changed-locator"),
             "version" => changed.identity.version = aid("changed-version"),
@@ -481,7 +484,9 @@ async fn s3_qualified_restore_rejects_rebound_inventory_even_with_matching_ciphe
             "missing-record" | "legacy" | "legacy-adapter" => {}
             _ => unreachable!(),
         }
-        changed.validate().unwrap();
+        changed
+            .validate()
+            .unwrap_or_else(|error| panic!("valid replacement record for {fault}: {error:?}"));
         // Rebind the entire fake inventory consistently. Record/journal/key
         // agreement and identical bytes still do not match catalogue qualification.
         if matches!(fault, "missing-record" | "legacy") {
