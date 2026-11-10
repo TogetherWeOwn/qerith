@@ -291,10 +291,40 @@ product ingest/archive jobs and cover no-effect cancellation, ready-session
 backend outcomes, uncertain-effect settlement versus committed objects, pending
 abort interruption/reconnect/no replay, scope/session refusal and failed terminal
 persistence. The fake invalidates a removed S3 session and rejects abort of a
-committed object. These tests are authored, not yet observed passing. All cases
-retain safety bytes and withhold archive completion. No live provider, durable
+committed object. All five passed on head
+`50eaac61171f390651bce68e0d469d8602bf5a9b`, Actions run `42762184395`,
+native job `129650231005`, along with all 117 feature-on composition cases.
+Default native/Clippy, wasm/MSRV/deny/ci-ok, synthetic clients (job `129650231339`),
+CodeQL run `42762180035` and PR standards run `42762184490` passed. This is
+previous-head synthetic evidence, not acceptance of subsequent changes or
+independent review clearance. All cases retain safety bytes and withhold archive
+completion. No live provider, durable
 restart, public cancellation, physical settlement, lease-release or safety-copy
 eviction qualification is claimed.
+
+## Bounded restore-stream checkpoint
+
+The product wraps invisible provider staging in an attempt-local sink. Before
+forwarding each block, it checks current Read authority, the shared stream-block
+cap and the remaining immutable ciphertext length (already within Work's byte
+budget). It rechecks authority after cache writes, hashes accepted bytes
+incrementally and requires exact length and whole-ciphertext SHA-256 before
+`retrieve` succeeds. The first sink failure is sticky: a provider that ignores a
+rejection cannot recover success by returning Ok or writing a valid body later.
+No second full-body buffer, provider protocol or dependency is added.
+
+The cache must still bound its own allocations and verify negotiated checksums,
+immutable completion and persisted keys before publication. This stream guard
+is not authenticated plaintext readability, global cache admission/retention,
+durable runtime qualification or permission to evict safety bytes.
+
+A generated test inspects invisible staging before completion/cleanup for each
+backend with oversized, overlong, truncated, ignored-error and corrupt streams.
+It requires no excess bytes or completed copy, then attempt-local cleanup and a
+fresh segmented restore through the actual product job/publication path. The
+existing product-job failure test also includes all four new stream faults and
+requires incomplete cleanup without publication/fallback. These additions are
+authored, not yet observed passing; no pre-fix execution is claimed.
 
 ## Dependency supply-chain record
 

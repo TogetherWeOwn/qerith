@@ -4,6 +4,7 @@
 
 use super::*;
 use a::{ArchiveProvider, Control};
+use sha2::{Digest, Sha256};
 use velmora::archive::v1 as a;
 
 mod write;
@@ -127,6 +128,54 @@ async fn invoke<T>(
         operation.as_mut().poll(cx)
     })
     .await
+}
+
+struct RestoreSink<'a, S, C> {
+    inner: S,
+    control: &'a C,
+    target: &'a a::Target,
+    remaining: u64,
+    digest: Sha256,
+    failed: Option<a::Failure>,
+}
+
+impl<S: a::Sink, C: Control> a::Sink for RestoreSink<'_, S, C> {
+    async fn write(&mut self, bytes: &[u8]) -> a::Result<()> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        let result = async {
+            self.control.check(self.target, a::Action::Read)?;
+            if bytes.len() > a::STREAM_BLOCK_BYTES || bytes.len() as u64 > self.remaining {
+                return Err(a::Failure::Limit);
+            }
+            self.inner.write(bytes).await?;
+            self.control.check(self.target, a::Action::Read)
+        }
+        .await;
+        if let Err(error) = result {
+            // A provider must not turn a rejected block into successful completion
+            // by ignoring the sink error and returning Ok from read_range.
+            self.failed = Some(error);
+            return Err(error);
+        }
+        self.remaining -= bytes.len() as u64;
+        self.digest.update(bytes);
+        Ok(())
+    }
+}
+
+impl<S, C: Control> RestoreSink<'_, S, C> {
+    fn finish(self, expected: [u8; 32]) -> a::Result<()> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        self.control.check(self.target, a::Action::Read)?;
+        if self.remaining != 0 || <[u8; 32]>::from(self.digest.finalize()) != expected {
+            return Err(a::Failure::Integrity);
+        }
+        Ok(())
+    }
 }
 
 fn io(error: a::Failure) -> IoError {
@@ -256,7 +305,14 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
                 offset: 0,
                 bytes: record.identity.bytes,
             };
-            let mut stage = self.cache.begin_provider_restore(work, key).await?;
+            let mut stage = RestoreSink {
+                inner: self.cache.begin_provider_restore(work, key).await?,
+                control: &self.control,
+                target: &record.identity.target,
+                remaining: range.bytes,
+                digest: Sha256::new(),
+                failed: None,
+            };
             match record.identity.target.backend {
                 a::Backend::Nntp => {
                     invoke(
@@ -280,6 +336,7 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
                 }
             }
             .map_err(io)?;
+            stage.finish(record.identity.sha256).map_err(io)?;
         }
         if self.record(work)?.as_ref() != Some(&record) {
             return Err(IoError::Integrity);

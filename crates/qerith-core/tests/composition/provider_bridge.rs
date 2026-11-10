@@ -189,6 +189,11 @@ enum Fault {
     Revoke,
     Stall,
     UncontrolledStall,
+    Oversized,
+    Overrun,
+    Short,
+    IgnoreLimit,
+    Split,
 }
 struct Provider {
     backend: a::Backend,
@@ -272,7 +277,28 @@ impl a::ArchiveProvider for Provider {
                 .cancelled(&record.identity.target, a::Action::Read)
                 .await);
         }
-        sink.write(&bytes).await?;
+        if matches!(self.fault, Fault::Oversized | Fault::IgnoreLimit) {
+            let result = sink.write(&vec![0; a::STREAM_BLOCK_BYTES + 1]).await;
+            if matches!(self.fault, Fault::IgnoreLimit) {
+                // Even a subsequent valid body must not erase the first error.
+                let _ = sink.write(&bytes).await;
+                return Ok(());
+            }
+            return result;
+        }
+        if matches!(self.fault, Fault::Short) {
+            return sink.write(&bytes[..bytes.len() / 2]).await;
+        }
+        if matches!(self.fault, Fault::Split) {
+            let split = bytes.len() / 2;
+            sink.write(&bytes[..split]).await?;
+            sink.write(&bytes[split..]).await?;
+        } else {
+            sink.write(&bytes).await?;
+        }
+        if matches!(self.fault, Fault::Overrun) {
+            return sink.write(&[0]).await;
+        }
         if matches!(self.fault, Fault::Revoke) {
             self.auth
                 .denied
@@ -467,7 +493,15 @@ async fn provider_restore_reuses_product_job_publication_and_authorized_delivery
 
 #[tokio::test]
 async fn provider_restore_errors_never_publish_or_fall_back() {
-    for fault in [Fault::Missing, Fault::Corrupt, Fault::Revoke] {
+    for fault in [
+        Fault::Missing,
+        Fault::Corrupt,
+        Fault::Revoke,
+        Fault::Oversized,
+        Fault::Overrun,
+        Fault::Short,
+        Fault::IgnoreLimit,
+    ] {
         let (mut service, mut io, _, _, auth) = hot_upload().await;
         let time = Time(Cell::new(60));
         evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
@@ -506,6 +540,111 @@ async fn provider_restore_errors_never_publish_or_fall_back() {
         assert_eq!(storage.s3.reads, 1);
         assert!(storage.cache.copies.is_empty());
         assert!(storage.cache.pending.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn provider_restore_stream_is_bounded_and_verified_before_cache_completion() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for fault in [
+            Fault::Oversized,
+            Fault::Overrun,
+            Fault::Short,
+            Fault::IgnoreLimit,
+            Fault::Corrupt,
+        ] {
+            let (mut service, mut io, _, _, auth) = hot_upload().await;
+            let time = Time(Cell::new(60));
+            evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+            io.provider_record = Some(record(&io, backend));
+            let mut storage = bridge(io, backend, auth.clone(), fault);
+            let restore = request_restore(
+                service.catalogue_mut(),
+                "object",
+                902,
+                1000,
+                50,
+                60,
+                auth.as_ref(),
+            );
+            let job = service.catalogue().job(TENANT, restore).unwrap();
+            let generation = service
+                .catalogue()
+                .generation(TENANT, job.generation)
+                .unwrap();
+            let work = Work {
+                tenant: TENANT,
+                event: job_event(service.catalogue(), restore),
+                attempt: 1,
+                inventory_ref: format!(
+                    "composition-v1/{}/{}/{}",
+                    TENANT.0, job.generation.0, job.id.0
+                ),
+                job,
+                metadata: generation.metadata,
+                retained_location: generation.cache_location,
+                claim_until: 100,
+                budget: budget(),
+            };
+            // Inspect the invisible allocation before job cleanup. The bridge,
+            // not completion-time validation, must refuse excess cache writes.
+            assert_eq!(storage.retrieve(&work).await, Err(IoError::Integrity));
+            let staged = &storage.cache.pending[&allocation(&work)];
+            if matches!(fault, Fault::Oversized | Fault::IgnoreLimit) {
+                assert!(staged.is_empty());
+            } else {
+                assert!(staged.len() <= work.metadata.identity.length as usize);
+            }
+            assert!(storage.cache.completed.is_empty());
+            assert!(storage.cache.copies.is_empty());
+            assert!(service
+                .catalogue()
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .is_none());
+            storage.cleanup_incomplete(&work).await.unwrap();
+            assert!(storage.cache.pending.is_empty());
+            // Retry the real product job with valid segmented bytes; stream
+            // accounting is attempt-local and cannot poison a fresh restore.
+            if backend == a::Backend::Nntp {
+                storage.nntp.fault = Fault::Split;
+            } else {
+                storage.s3.fault = Fault::Split;
+            }
+            run_once(
+                service.catalogue_mut(),
+                &mut storage,
+                TENANT,
+                work.event,
+                &budget(),
+                &time,
+                &Rules::default(),
+                &MockQualification,
+                auth.as_ref(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                service.catalogue().job(TENANT, restore).unwrap().state,
+                JobState::Complete
+            );
+            let location = service
+                .catalogue()
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .unwrap();
+            assert_eq!(
+                storage.cache.copies[&location],
+                storage.cache.fixture.bytes()
+            );
+            assert_eq!(
+                storage.nntp.reads,
+                2 * usize::from(backend == a::Backend::Nntp)
+            );
+            assert_eq!(storage.s3.reads, 2 * usize::from(backend == a::Backend::S3));
+        }
     }
 }
 
