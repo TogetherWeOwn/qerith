@@ -257,7 +257,14 @@ async fn provider_journal_and_record_must_agree_before_restore_or_legacy_io() {
                 "{backend:?}/{fault}",
             );
             assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
-            assert_eq!(storage.cache.order, order);
+            assert_eq!(storage.nntp.stats + storage.s3.stats, 0);
+            // A failed restore attempt now performs exact-attempt cache-local
+            // cleanup (removing only its own allocation, which is empty here).
+            // This is not retrieval, remote mutation or legacy fallback: the
+            // order proves cleanup-incomplete is the only post-failure step.
+            let mut expected_order = order;
+            expected_order.push("cleanup-incomplete");
+            assert_eq!(storage.cache.order, expected_order);
             assert_eq!(storage.cache.attempts, attempts);
             assert_eq!(storage.cache.copies, copies);
             assert_eq!(storage.cache.provider_write, journal);
@@ -447,6 +454,8 @@ async fn provider_retained_verified_journal_still_cleans_exact_restore_attempt_a
                 record: stored.clone(),
             },
         });
+        io.provider_record = Some(stored);
+
         let mut storage = bridge(io, backend, auth.clone(), Fault::None);
         let restore = request_restore(
             service.catalogue_mut(),

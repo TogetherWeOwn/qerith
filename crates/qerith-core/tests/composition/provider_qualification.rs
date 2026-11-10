@@ -511,9 +511,11 @@ async fn s3_qualified_restore_rejects_rebound_inventory_even_with_matching_ciphe
         let record = storage.cache.provider_record.clone();
         let bindings = storage.cache.provider_retained.clone();
         let mut order = storage.cache.order.clone();
-        if matches!(fault, "legacy" | "legacy-adapter") {
-            order.push("cleanup-incomplete");
-        }
+        // Every failed restore attempt performs exact-attempt cache-local
+        // cleanup, including rebound-inventory cases with a retained Verified
+        // journal. This is not retrieval, remote mutation or legacy fallback;
+        // the s3/nntp calls, reads and copies assertions below prove that.
+        order.push("cleanup-incomplete");
         auth.denied.borrow_mut().insert("object:Write".into());
         let restore = request_restore(&mut c, "object", 1900, 50, 20, 10, auth.as_ref());
         let event = job_event(&c, restore);
