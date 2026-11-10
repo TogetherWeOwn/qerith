@@ -323,3 +323,200 @@ async fn provider_restored_native_cache_rechecks_keys_scope_and_unsupported_rang
         );
     }
 }
+
+#[tokio::test]
+async fn provider_restored_service_copy_preserves_bytes_but_fences_replaced_handles() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for mcp in [false, true] {
+            let (mut service, io, upload, auth, _) = restored(backend).await;
+            let record = io.provider_record.clone().unwrap();
+            let copies = io.copies.clone();
+            let arguments = serde_json::to_vec(&serde_json::json!({
+                "source": upload.target.reference.as_str(),
+                "source_generation": upload.target.generation.as_str(),
+                "reference": "provider_copy",
+                "if_absent": true,
+                "identity": "provider_copy_commit",
+            }))
+            .unwrap();
+            let outcome = if mcp {
+                let response = o::mcp_request(
+                    &mut service,
+                    Some(&scope()),
+                    o::McpSession::default(),
+                    o::TaskMode::Baseline,
+                    o::Operation::Copy.definition().name,
+                    &arguments,
+                );
+                assert!(!response.is_error);
+                response.outcome
+            } else {
+                o::rest_request(
+                    &mut service,
+                    Some(&scope()),
+                    "POST",
+                    &format!("/v1/operations/{}", o::Operation::Copy.definition().name),
+                    &arguments,
+                )
+                .outcome
+            };
+            let o::Output::Job(copy) = outcome.unwrap() else {
+                panic!("copy");
+            };
+            assert_eq!(copy.state, o::JobState::Succeeded);
+            assert_eq!(copy.effects, o::Effects::Committed);
+            assert_ne!(copy.target.generation, upload.target.generation);
+            let mut storage = bridge(io, backend, auth.clone(), Fault::None);
+            let mut service = s::Service::reconnect(
+                service.checkpoint(),
+                Access(auth.clone()),
+                limits(),
+                profile(),
+                60,
+            )
+            .unwrap();
+            parity(
+                &mut service,
+                &scope(),
+                o::Operation::Restore,
+                vec![
+                    text("reference", copy.target.reference.as_str()),
+                    text("generation", copy.target.generation.as_str()),
+                    text("identity", "provider_copy_restore"),
+                    ("availability_seconds".into(), o::Value::Number(50)),
+                ],
+            )
+            .unwrap();
+            let job = service
+                .catalogue()
+                .outbox(TENANT)
+                .into_iter()
+                .rev()
+                .find_map(|event| match event.effect {
+                    Effect::RunJob(job) if job.kind == JobKind::Restore => Some(job.id),
+                    _ => None,
+                })
+                .unwrap();
+            let event = job_event(service.catalogue(), job);
+            let time = Time(Cell::new(60));
+            run_once(
+                service.catalogue_mut(),
+                &mut storage,
+                TENANT,
+                event,
+                &budget(),
+                &time,
+                &Rules::default(),
+                &MockQualification,
+                auth.as_ref(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                service.catalogue().job(TENANT, job).unwrap().state,
+                JobState::Complete
+            );
+            assert_eq!(storage.cache.provider_record.as_ref(), Some(&record));
+            assert_eq!(storage.cache.copies, copies);
+            assert!(storage.cache.pending.is_empty());
+            assert_eq!((storage.nntp.reads, storage.s3.reads), (0, 0));
+            let o::Output::Download(transfer) = parity(
+                &mut service,
+                &scope(),
+                o::Operation::AuthorizeDownload,
+                vec![
+                    text("reference", copy.target.reference.as_str()),
+                    text("generation", copy.target.generation.as_str()),
+                    text("identity", "provider_copy_download"),
+                ],
+            )
+            .unwrap() else {
+                panic!("copy download");
+            };
+            parity(
+                &mut service,
+                &scope(),
+                o::Operation::Delete,
+                vec![
+                    text("reference", upload.target.reference.as_str()),
+                    text("generation", upload.target.generation.as_str()),
+                    text("identity", "provider_copy_source_delete"),
+                ],
+            )
+            .unwrap();
+            auth.denied.borrow_mut().insert("object".into());
+            let mut cache = Cache {
+                io: &storage.cache,
+                auth: &auth,
+                revoke: false,
+                reads: 0,
+            };
+            assert_eq!(
+                service
+                    .read_download(&scope(), &transfer.handle, &mut cache, &time)
+                    .unwrap(),
+                storage.cache.fixture.bytes(),
+            );
+            let mut replacement =
+                copy_fields(&copy.target, "provider_copy", "provider_copy_replace");
+            replacement.retain(|(name, _)| name != "if_absent");
+            replacement.push(text("generation", copy.target.generation.as_str()));
+            parity(&mut service, &scope(), o::Operation::Copy, replacement).unwrap();
+            assert!(service
+                .read_download(&scope(), &transfer.handle, &mut cache, &time)
+                .is_err());
+            assert_eq!(
+                cache.reads, 1,
+                "stale logical generation fails before shared byte I/O"
+            );
+            assert_eq!(storage.cache.copies, copies);
+            assert_eq!(storage.cache.provider_record.as_ref(), Some(&record));
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_restored_service_copy_rechecks_vault_keys_and_scope_before_effects() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut service, io, upload, auth, _) = restored(backend).await;
+        let allocations = service.allocations();
+        let outbox = service.catalogue().outbox(TENANT);
+        let generation = service.catalogue().generation(TENANT, GENERATION).unwrap();
+        let fields = copy_fields(&upload.target, "provider_copy", "provider_copy_denied");
+        for (revoked, code) in [
+            ("object:Read", o::ErrorCode::Denied),
+            ("provider_copy:Write", o::ErrorCode::Denied),
+            ("root", o::ErrorCode::Denied),
+            ("key_ref", o::ErrorCode::Denied),
+            ("envelope_ref", o::ErrorCode::Denied),
+            ("copy_context", o::ErrorCode::Unsupported),
+        ] {
+            auth.denied.borrow_mut().insert(revoked.into());
+            let failure =
+                parity(&mut service, &scope(), o::Operation::Copy, fields.clone()).unwrap_err();
+            assert_eq!(failure.code, code, "{revoked}");
+            assert_eq!(failure.effects, o::Effects::None);
+            auth.denied.borrow_mut().clear();
+            assert_eq!(service.allocations(), allocations);
+            assert_eq!(service.catalogue().outbox(TENANT), outbox);
+            assert_eq!(
+                service.catalogue().generation(TENANT, GENERATION).unwrap(),
+                generation
+            );
+        }
+        let foreign = o::Scope {
+            tenant: id("other"),
+            principal: id("principal"),
+        };
+        let failure = parity(&mut service, &foreign, o::Operation::Copy, fields).unwrap_err();
+        assert_eq!(failure.code, o::ErrorCode::Denied);
+        assert_eq!(failure.effects, o::Effects::None);
+        assert_eq!(service.allocations(), allocations);
+        assert_eq!(service.catalogue().outbox(TENANT), outbox);
+        assert!(service
+            .catalogue()
+            .lookup(TENANT, "provider_copy", 60, auth.as_ref())
+            .is_err());
+        assert!(!io.copies.is_empty());
+    }
+}

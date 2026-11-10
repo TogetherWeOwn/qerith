@@ -148,6 +148,7 @@ impl ArchiveCache for Io {
             self.verify_provider_completed(work, key, location).await?;
         }
         let copy = self.complete_restore(work).await?;
+        self.provider_retained.insert(copy.location.clone(), key);
         if self.provider_cache_stall == Some("complete") {
             return std::future::pending().await;
         }

@@ -654,12 +654,42 @@ The generated `provider_cache_acknowledgement_rechecks_immutable_record_before_r
 case covers both backends and both boundaries. The completion branch runs the
 actual product job and requires no catalogue publication. Both branches retain
 the completed inventory, key and exact bytes; restoring the original fake record
-allows exact-checkpoint reconciliation without another provider read. Authored,
-not yet observed passing; no pre-fix execution, durable-runtime or eviction
-qualification is claimed. The preceding head `1611f66` passed all 135 feature-on
-composition cases in Actions run `42796677891`, native job `129763524061`, plus
-synthetic clients, WASM/MSRV/deny, CodeQL and PR standards. That is prior-head
-evidence, not verification of this correction.
+allows exact-checkpoint reconciliation without another provider read. These
+assertions passed on head `398f7f4991c00367224e36f72eee95372e37489c`, Actions run
+`42799221257`, native job `129772134268`: all 136 feature-on composition cases
+passed. Default native/Clippy, synthetic clients (`129772134578`), WASM/MSRV/deny/
+ci-ok, CodeQL run `42799212789` and PR standards run `42799221671` passed. This
+also verifies the preceding receipt-checkpoint and journal-interruption additions
+on that head. No pre-fix execution, independent acceptance, durable-runtime or
+eviction qualification is claimed.
+
+## Provider-restored service copy checkpoint
+
+Two generated tests in `tests/composition/provider_native.rs` extend the existing
+service Copy path, rather than creating catalogue aliases directly. REST and MCP
+copies execute independently for each restored backend. The positive case authors
+reference-checkpoint reconnection, a new restore subscription through the actual
+provider/cache job, and exact cache-byte delivery after source deletion and source
+grant revocation. Replacing the destination's logical generation must invalidate
+the old download handle before cache I/O, without deleting the shared immutable
+copy or changing the provider record. The negative case requires current source/
+destination grants, container access, key/envelope binding, vault-copy compatibility
+and tenant scope before allocations or outbox effects. Incompatible contexts remain
+Unsupported; they are not silently converted or made publicly readable.
+
+The reference cache now binds every completed provider restore's exact immutable
+location to its provider key before acknowledgement, not only a Verified upload.
+That existing cache contract is needed for subsequent same-generation jobs to
+reuse the published copy without refetching or manufacturing another key binding.
+The positive test requires unchanged bytes/record and zero new provider reads.
+This is an in-memory test-adapter correction, not a durable runtime implementation.
+
+Both additions are authored, not yet observed passing. The setup's prior eviction
+uses unchanged synthetic NNTP qualification and separate restore inventory, never
+S3 archive or eviction evidence. These are scoped compatible-reference operations,
+not public sharing, a cross-vault crypto policy, ciphertext conversion, a new
+private/public dedupe scope or physical/durable qualification. Public sharing and
+complete client parity remain unfinished; safety-copy eviction is unchanged.
 
 ## Dependency supply-chain record
 
