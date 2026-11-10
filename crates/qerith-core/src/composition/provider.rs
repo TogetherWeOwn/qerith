@@ -104,12 +104,13 @@ pub struct ProviderStorage<L, N, S, C> {
     pub control: C,
 }
 
-async fn invoke<T>(
+async fn interrupt<T, E>(
     control: &impl Control,
     target: &a::Target,
     action: a::Action,
-    operation: impl std::future::Future<Output = a::Result<T>>,
-) -> a::Result<T> {
+    operation: impl std::future::Future<Output = std::result::Result<T, E>>,
+    stopped: impl Fn(a::Failure) -> E,
+) -> std::result::Result<T, E> {
     use std::future::{poll_fn, Future};
     use std::task::Poll;
 
@@ -120,14 +121,43 @@ async fn invoke<T>(
         // polling I/O. Dropping I/O interrupts this invocation, not remote effects;
         // the caller retains its pending journal and physical lease obligations.
         if let Poll::Ready(error) = cancelled.as_mut().poll(cx) {
-            return Poll::Ready(Err(error));
+            return Poll::Ready(Err(stopped(error)));
         }
         if let Err(error) = control.check(target, action) {
-            return Poll::Ready(Err(error));
+            return Poll::Ready(Err(stopped(error)));
         }
         operation.as_mut().poll(cx)
     })
     .await
+}
+
+async fn invoke<T>(
+    control: &impl Control,
+    target: &a::Target,
+    action: a::Action,
+    operation: impl std::future::Future<Output = a::Result<T>>,
+) -> a::Result<T> {
+    interrupt(control, target, action, operation, |error| error).await
+}
+
+async fn cache_read<T>(
+    control: &impl Control,
+    target: &a::Target,
+    operation: impl std::future::Future<Output = std::result::Result<T, IoError>>,
+    completing: bool,
+) -> std::result::Result<T, IoError> {
+    let stopped = |error| {
+        if completing {
+            IoError::Uncertain
+        } else {
+            io(error)
+        }
+    };
+    let value = interrupt(control, target, a::Action::Read, operation, stopped).await?;
+    // The cache may change authority while returning Ready in the same poll.
+    // A dropped completion can already have persisted; never infer absence.
+    control.check(target, a::Action::Read).map_err(stopped)?;
+    Ok(value)
 }
 
 struct RestoreSink<'a, S, C> {
@@ -300,13 +330,26 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
             return self.cache.retrieve(work).await;
         };
         let key = record.identity.cache_key();
-        if !self.cache.reconcile_provider_restore(work, key).await? {
+        if !cache_read(
+            &self.control,
+            &record.identity.target,
+            self.cache.reconcile_provider_restore(work, key),
+            false,
+        )
+        .await?
+        {
             let range = a::Range {
                 offset: 0,
                 bytes: record.identity.bytes,
             };
             let mut stage = RestoreSink {
-                inner: self.cache.begin_provider_restore(work, key).await?,
+                inner: cache_read(
+                    &self.control,
+                    &record.identity.target,
+                    self.cache.begin_provider_restore(work, key),
+                    false,
+                )
+                .await?,
                 control: &self.control,
                 target: &record.identity.target,
                 remaining: range.bytes,
@@ -350,9 +393,14 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     ) -> std::result::Result<CompleteCopy, IoError> {
         match self.record(work)? {
             Some(record) => {
-                self.cache
-                    .complete_provider_restore(work, record.identity.cache_key())
-                    .await
+                cache_read(
+                    &self.control,
+                    &record.identity.target,
+                    self.cache
+                        .complete_provider_restore(work, record.identity.cache_key()),
+                    true,
+                )
+                .await
             }
             None => self.cache.complete_restore(work).await,
         }
@@ -365,9 +413,17 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     ) -> std::result::Result<CompleteCopy, IoError> {
         match self.record(work)? {
             Some(record) => {
-                self.cache
-                    .verify_provider_completed(work, record.identity.cache_key(), location)
-                    .await
+                cache_read(
+                    &self.control,
+                    &record.identity.target,
+                    self.cache.verify_provider_completed(
+                        work,
+                        record.identity.cache_key(),
+                        location,
+                    ),
+                    false,
+                )
+                .await
             }
             None => self.cache.verify_completed(work, location).await,
         }

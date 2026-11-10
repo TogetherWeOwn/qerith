@@ -3,6 +3,8 @@ use super::*;
 use a::{Control, Sink};
 use qerith_core::composition::provider::{ArchiveCache, ProviderStorage, WriteJournal, WritePhase};
 
+#[path = "provider_cache_control.rs"]
+mod cache_control;
 #[path = "provider_clients.rs"]
 mod clients;
 #[path = "provider_lifecycle.rs"]
@@ -78,6 +80,9 @@ impl ArchiveCache for Io {
         work: &Work,
         key: [u8; 32],
     ) -> std::result::Result<bool, IoError> {
+        if self.provider_cache_stall == Some("reconcile") {
+            return std::future::pending().await;
+        }
         if let Some(location) = self
             .completed
             .get(&inventory(work))
@@ -98,6 +103,9 @@ impl ArchiveCache for Io {
         self.provider_keys.insert(inventory(work), key);
         let bytes = self.pending.entry(allocation(work)).or_default();
         bytes.clear();
+        if self.provider_cache_stall == Some("begin") {
+            return std::future::pending().await;
+        }
         Ok(Stage {
             bytes,
             limit: work.budget.max_bytes(),
@@ -111,7 +119,11 @@ impl ArchiveCache for Io {
         if self.provider_keys.get(&inventory(work)) != Some(&key) {
             return Err(IoError::Integrity);
         }
-        self.complete_restore(work).await
+        let copy = self.complete_restore(work).await?;
+        if self.provider_cache_stall == Some("complete") {
+            return std::future::pending().await;
+        }
+        Ok(copy)
     }
     async fn verify_provider_completed(
         &mut self,
@@ -122,7 +134,11 @@ impl ArchiveCache for Io {
         if self.provider_keys.get(&inventory(work)) != Some(&key) {
             return Err(IoError::Integrity);
         }
-        self.verify_completed(work, location).await
+        let copy = self.verify_completed(work, location).await?;
+        if self.provider_cache_stall == Some("verify") {
+            return std::future::pending().await;
+        }
+        Ok(copy)
     }
     async fn cleanup_provider_incomplete(
         &mut self,

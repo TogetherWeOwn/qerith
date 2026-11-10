@@ -347,8 +347,12 @@ format, mode, key epoch or envelope. Even when generated ciphertext is identical
 an old cache key cannot authorize a different immutable provider identity. The
 job must not publish, refetch, heal, overwrite or delete a recorded completed
 copy. Existing completed inventory and keys remain available for trusted repair.
-These tests are authored, not yet observed passing; no pre-fix execution is
-claimed. This tests the existing trusted adapter contract, not a new cache engine.
+These tests passed on head `8f7e6aaa49ed4f807bc9f91bd7ad84f2f5a79ccd`,
+Actions run `42766062922`, native job `129662725391`: all 120 feature-on composition
+cases passed. Default native/Clippy, wasm/MSRV/deny/ci-ok, synthetic clients (job
+`129662725136`), CodeQL run `42766056745` and PR standards run `42766063037` passed.
+No pre-fix execution or independent acceptance is claimed. This tests the existing
+trusted adapter contract, not a new cache engine.
 
 Global capacity admission/reservations, bounded retention, eviction scheduling,
 public-share/key compatibility, backend-specific archive qualification and actual
@@ -356,6 +360,35 @@ durable catalogue/cache/runtime implementation remain unfinished. Attempt-local
 cleanup and completion reconciliation are not those production qualifications.
 The setup still uses synthetic NNTP qualification for its prior eviction; it
 provides no S3 safety-copy eviction authority.
+
+## Cache invocation interruption checkpoint
+
+Provider restore now applies the same trusted event/deadline interruption to
+cache reconciliation, staging allocation, immutable completion and winner
+verification. It registers the control wake before polling cache I/O and checks
+current Read authority again after a ready acknowledgement. A cache future that
+never wakes cannot indefinitely suspend those product restore calls. The legacy
+path and backend selection are unchanged; this adds no executor or cache engine.
+
+An interrupted completion is **uncertain**, including when the immutable copy was
+persisted before its acknowledgement stalled. No publication or cleanup permission
+is inferred from dropping the future. The adapter must retain the exact completion
+inventory and reconcile it after reauthorization, without replacement or refetch.
+Incomplete staging remains attempt-local. Trusted cleanup intentionally does not
+require the revoked Read grant; its own runtime deadline/settlement obligations
+remain mandatory. Journal persistence, physical cache settlement and account-wide
+admission/retention are not implemented by this invocation guard.
+
+Two generated tests in `tests/composition/provider_cache_control.rs` cover both
+backends. Twenty-four stalled-cache scenarios require an actual registered-task
+wake on policy revocation, cancellation or deadline across all four cache calls.
+The first three use the actual product restore job; winner verification uses its
+trusted storage entry point. Completed copies survive interruption and are then
+published through `run_once` with both providers unavailable, without refetch or
+inventory replacement. A ready-completion regression revokes authority during the
+same poll and requires uncertainty with the completed copy retained. The tests
+are authored, not yet observed passing; no pre-fix execution is claimed. Synthetic
+NNTP setup eviction remains unrelated to S3 archival/eviction qualification.
 
 ## Dependency supply-chain record
 

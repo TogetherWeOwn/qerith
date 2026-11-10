@@ -1,6 +1,6 @@
 use super::*;
 
-fn work(service: &s::Service<Access>, restore: JobId) -> Work {
+pub(super) fn work(service: &s::Service<Access>, restore: JobId) -> Work {
     let job = service.catalogue().job(TENANT, restore).unwrap();
     let generation = service
         .catalogue()

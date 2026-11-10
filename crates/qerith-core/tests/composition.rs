@@ -155,6 +155,8 @@ struct Io {
     provider_write: Option<qerith_core::composition::provider::WriteJournal>,
     #[cfg(feature = "archive-provider")]
     provider_keys: BTreeMap<RecoveryInventory, [u8; 32]>,
+    #[cfg(feature = "archive-provider")]
+    provider_cache_stall: Option<&'static str>,
 }
 impl Io {
     async fn new(generation: u64) -> Self {
@@ -205,6 +207,8 @@ impl Io {
             provider_write: None,
             #[cfg(feature = "archive-provider")]
             provider_keys: BTreeMap::new(),
+            #[cfg(feature = "archive-provider")]
+            provider_cache_stall: None,
         }
     }
     fn identity(&self) -> CiphertextIdentity {
