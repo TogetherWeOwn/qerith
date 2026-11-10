@@ -391,10 +391,20 @@ same poll and requires uncertainty with the completed copy retained.
 Head `1eb59465c45bb3c87796c87bc7f4c5cdf05af1d4` failed native Actions run
 `42768537800`, job `129670655373`: 121 composition cases passed and the
 stalled-cache test failed during recovery. It retried at logical time 61 before
-the existing retry policy's `not_before: 62`; the catalogue correctly rejected
-the early claim with `Conflict`. The same-poll authority test passed. The repair
-asserts early-claim refusal with unchanged job/checkpoint, completed inventory and
-provider read count, then retries at 62. It changes no runtime retry policy.
+the retry deadline; the catalogue correctly rejected the early claim with
+`Conflict`. The attempted repair at head
+`da6f6f22e23f26a3fd68280cd4dcd3ce891f879f` also failed (run `42770454651`,
+job `129676760635`, 121 passed / 1 failed): it expected deadline 62, but the
+eviction helper advances the clock from 60 to 61 before the interrupted run,
+so the test policy's two-second delay yields 63. The same-poll authority test
+passed on both heads. Synthetic clients, wasm/MSRV, cargo-deny and CodeQL passed
+on the latter head, not overall CI.
+
+The repair captures the post-eviction logical clock, independently asserts the
+policy's two-second retry delay, requires refusal one tick before that deadline
+with unchanged job/checkpoint, completed inventory and provider read count, then
+retries exactly at the deadline. Verification-only recovery keeps its unchanged
+clock rather than moving it backward. It changes no runtime retry policy.
 The corrected scenarios are authored, not yet observed passing. Synthetic NNTP
 setup eviction remains unrelated to S3 archival/eviction qualification.
 

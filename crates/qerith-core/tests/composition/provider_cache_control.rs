@@ -64,6 +64,7 @@ async fn stalled_provider_cache_calls_wake_without_publication_or_completion_los
                 let time = Time(Cell::new(60));
                 // This setup is unchanged synthetic NNTP eviction, not S3 proof.
                 evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+                let interrupted_at = time.0.get();
                 io.provider_record = Some(record(&io, backend));
                 let mut storage = bridge(io, backend, auth.clone(), Fault::None);
                 let restore = request_restore(
@@ -168,10 +169,17 @@ async fn stalled_provider_cache_calls_wake_without_publication_or_completion_los
                         tokio::time::Instant::now() + Duration::from_secs(30);
                     storage.nntp.fault = Fault::Missing;
                     storage.s3.fault = Fault::Missing;
-                    time.0.set(61);
                     if phase == "complete" {
+                        // Eviction advanced the logical clock before this run.
+                        let retry_at = interrupted_at + 2;
                         let waiting = service.catalogue().job(TENANT, restore).unwrap();
-                        assert_eq!(waiting.state, JobState::RetryWait { not_before: 62 });
+                        assert_eq!(
+                            waiting.state,
+                            JobState::RetryWait {
+                                not_before: retry_at
+                            }
+                        );
+                        time.0.set(retry_at - 1);
                         assert_eq!(
                             run_once(
                                 service.catalogue_mut(),
@@ -191,7 +199,7 @@ async fn stalled_provider_cache_calls_wake_without_publication_or_completion_los
                         assert_eq!(storage.nntp.reads + storage.s3.reads, 1);
                         assert_eq!(storage.cache.copies, copies);
                         assert_eq!(storage.cache.completed, inventory);
-                        time.0.set(62);
+                        time.0.set(retry_at);
                     }
                     run_once(
                         service.catalogue_mut(),
