@@ -1044,6 +1044,8 @@ impl JobPort for MemoryCatalogue {
         Ok(GenerationView {
             metadata: g.metadata.clone(),
             cache_location: g.cache.clone(),
+            #[cfg(feature = "archive-provider")]
+            qualified_s3_record: g.s3_verification.as_ref().map(|proof| proof.record.clone()),
         })
     }
 

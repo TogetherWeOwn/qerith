@@ -440,6 +440,124 @@ async fn s3_qualified_upload_reuses_retained_provider_bound_copy_for_a_new_resto
 }
 
 #[tokio::test]
+async fn s3_qualified_restore_rejects_rebound_inventory_even_with_matching_ciphertext() {
+    for fault in [
+        "backend",
+        "account",
+        "locator",
+        "version",
+        "format",
+        "mode",
+        "key-epoch",
+        "envelope",
+        "operation",
+        "part",
+        "missing-record",
+        "legacy",
+        "legacy-adapter",
+    ] {
+        let (mut c, mut storage, job, auth, time) =
+            staged(a::Backend::S3, WriteFault::Qualify).await;
+        qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0)
+            .await
+            .unwrap();
+        let generation = c.generation(TENANT, GENERATION).unwrap();
+        let qualified = generation.qualified_s3_record.as_ref().unwrap();
+        assert_eq!(Some(qualified), storage.cache.provider_record.as_ref());
+        let location = generation.cache_location.as_ref().unwrap();
+        let original_bytes = storage.cache.copies.clone();
+        let mut changed = qualified.clone();
+        match fault {
+            "backend" => changed.identity.target.backend = a::Backend::Nntp,
+            "account" => changed.identity.target.account = aid("changed-account"),
+            "locator" => changed.identity.target.locator = aid("changed-locator"),
+            "version" => changed.identity.version = aid("changed-version"),
+            "format" => changed.identity.target.encryption.format = aid("changed-format"),
+            "mode" => changed.identity.target.encryption.mode = 1,
+            "key-epoch" => changed.identity.target.encryption.key_epoch = aid("changed-key"),
+            "envelope" => changed.identity.target.encryption.envelope = aid("changed-envelope"),
+            "operation" => changed.operation = aid("changed-operation"),
+            "part" => changed.parts[0].reference = aid("changed-part"),
+            "missing-record" | "legacy" | "legacy-adapter" => {}
+            _ => unreachable!(),
+        }
+        changed.validate().unwrap();
+        // Rebind the entire fake inventory consistently. Record/journal/key
+        // agreement and identical bytes still do not match catalogue qualification.
+        if matches!(fault, "missing-record" | "legacy") {
+            storage.cache.provider_record = None;
+            if fault == "legacy" {
+                storage.cache.provider_write = None;
+            }
+        } else {
+            storage.cache.provider_write = Some(WriteJournal {
+                intent: changed.intent(),
+                phase: WritePhase::Verified {
+                    record: changed.clone(),
+                },
+            });
+            storage.cache.provider_record = Some(changed.clone());
+            storage
+                .cache
+                .provider_retained
+                .insert(location.clone(), changed.identity.cache_key());
+        }
+        let journal = storage.cache.provider_write.clone();
+        let record = storage.cache.provider_record.clone();
+        let bindings = storage.cache.provider_retained.clone();
+        let mut order = storage.cache.order.clone();
+        if matches!(fault, "legacy" | "legacy-adapter") {
+            order.push("cleanup-incomplete");
+        }
+        auth.denied.borrow_mut().insert("object:Write".into());
+        let restore = request_restore(&mut c, "object", 1900, 50, 20, 10, auth.as_ref());
+        let event = job_event(&c, restore);
+        let result = if fault == "legacy-adapter" {
+            run_once(
+                &mut c,
+                &mut storage.cache,
+                TENANT,
+                event,
+                &budget(),
+                &time,
+                &Rules::default(),
+                &S3Qualification(0),
+                auth.as_ref(),
+            )
+            .await
+        } else {
+            qualified_attempt(&mut c, &mut storage, restore, &auth, &time, 0).await
+        };
+        assert_eq!(
+            result,
+            Err(Failure::Io(if fault == "legacy-adapter" {
+                IoError::RepairUnavailable
+            } else {
+                IoError::Integrity
+            })),
+            "{fault}"
+        );
+        assert_ne!(c.job(TENANT, restore).unwrap().state, JobState::Complete);
+        assert_eq!(c.generation(TENANT, GENERATION).unwrap(), generation);
+        assert_eq!(storage.cache.copies, original_bytes);
+        assert_eq!(storage.cache.provider_write, journal);
+        assert_eq!(storage.cache.provider_record, record);
+        assert_eq!(storage.cache.provider_retained, bindings);
+        assert_eq!(
+            storage.cache.order, order,
+            "no restore I/O or legacy fallback: {fault}"
+        );
+        assert!(storage.cache.pending.is_empty());
+        assert!(storage.cache.provider_keys.is_empty());
+        assert_eq!(storage.s3.calls, ["begin", "part", "commit"]);
+        assert_eq!(storage.s3.inner.reads, 1);
+        assert!(storage.nntp.calls.is_empty());
+        assert_eq!(storage.nntp.inner.reads, 0);
+        assert!(storage.cache.trace.0.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn s3_retained_binding_or_bytes_failure_prevents_qualification_and_warm_restore() {
     for completed in [false, true] {
         for fault in 0..4 {

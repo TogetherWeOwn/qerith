@@ -158,6 +158,18 @@ pub trait Storage {
     ) -> std::result::Result<Option<velmora::archive::v1::ObjectRecord>, IoError> {
         Ok(None)
     }
+    /// Cross-check product inventory against the catalogue's immutable qualified
+    /// S3 record before restore I/O and after cache acknowledgements. Matching C
+    /// alone cannot bind a backend/account/version/encryption identity. Legacy
+    /// storage cannot restore a qualified S3 generation by default.
+    #[cfg(feature = "archive-provider")]
+    fn verify_s3_binding(
+        &self,
+        _work: &Work,
+        _qualified: &velmora::archive::v1::ObjectRecord,
+    ) -> std::result::Result<(), IoError> {
+        Err(IoError::RepairUnavailable)
+    }
     /// Reconcile this scoped inventory's exact completed copy (or the catalogue's
     /// retained version) before fetching again. Verify it without replacement;
     /// corrupt/missing recorded completions fail closed, never fall back to a
@@ -537,10 +549,28 @@ async fn execute<C: JobPort, S: Storage>(
             )?;
         }
         JobKind::Restore => {
+            #[cfg(feature = "archive-provider")]
+            let qualified = catalogue
+                .generation(work.tenant, work.job.generation)?
+                .qualified_s3_record;
+            #[cfg(feature = "archive-provider")]
+            if let Some(record) = &qualified {
+                storage
+                    .verify_s3_binding(work, record)
+                    .map_err(Failure::Io)?;
+            }
             storage.retrieve(work).await.map_err(Failure::Io)?;
             guard(catalogue, work, fence, clock, policy, authority)?;
             let copy = storage.complete_restore(work).await.map_err(Failure::Io)?;
             complete(&work.metadata, &copy)?;
+            #[cfg(feature = "archive-provider")]
+            if let Some(record) = &qualified {
+                // Completion may already have persisted; mismatched inventory is
+                // not permission to publish, clean it up or refetch a replacement.
+                storage
+                    .verify_s3_binding(work, record)
+                    .map_err(|_| Failure::Io(IoError::Uncertain))?;
+            }
             let now = guard(catalogue, work, fence, clock, policy, authority)?;
             let result = catalogue.transition(
                 work.tenant,
@@ -567,6 +597,12 @@ async fn execute<C: JobPort, S: Storage>(
                 complete(&work.metadata, &receipt)?;
                 if receipt.location != winner {
                     return Err(Error::IncompleteCopy.into());
+                }
+                #[cfg(feature = "archive-provider")]
+                if let Some(record) = &qualified {
+                    storage
+                        .verify_s3_binding(work, record)
+                        .map_err(Failure::Io)?;
                 }
                 let now = guard(catalogue, work, fence, clock, policy, authority)?;
                 catalogue.transition(

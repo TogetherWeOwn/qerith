@@ -270,6 +270,34 @@ remain unfinished. S3-qualified copies still cannot be evicted, and missing
 recorded retained bytes remain an integrity error, not permission to synthesize
 a cold miss or refetch. Cold-path acceptance cannot bypass those safety fences.
 
+## Qualified S3 restore identity fence
+
+The worker-only generation view now exposes the entire immutable record already
+pinned by S3 qualification, including after the assessment expires. Restore jobs
+cross-check that record against storage inventory before retrieval and again after
+cache completion or winner verification. Backend/account/locator/version/encryption,
+operation and part identity must match, not merely ciphertext length and SHA-256.
+A consistently rebound journal, record and cache key cannot replace catalogue
+qualification. Missing inventory cannot route this generation through the legacy
+reader. Storage adapters without the new binding check refuse qualified S3
+restores by default. No qualified record is exposed through public metadata.
+
+A mismatch after completion remains Uncertain, retaining potentially completed
+bytes without publication, cleanup or refetch permission. Existing qualification
+freshness, current authority, generation fences and safety-copy deletion rules
+remain mandatory. This adds no durable runtime, new provider proof or cold-miss
+permission for a missing retained safety copy.
+
+One generated product-job regression authors thirteen scenarios after actual
+synthetic S3 archive completion: ten consistently rebound identity coordinates,
+missing record, missing record plus journal, and use of a legacy-only storage
+adapter. Each retains the exact original ciphertext while requiring refusal before
+restore/provider I/O, no publication, unchanged catalogue qualification and safety
+bytes, and no inventory repair or replacement. Only attempt-local incomplete
+cleanup is allowed. The existing positive warm-restore case still requires exact
+record reuse with Write revoked. New assertions are authored, not yet observed
+passing; no pre-fix execution or independent acceptance is claimed.
+
 ## Explicitly unfinished boundaries
 
 - The legacy `verify_archive` pair path deliberately fails closed for every
@@ -464,9 +492,13 @@ Write authorized, requires an actual task wake and immediate uncertainty without
 using a timeout to mask missing cancellation, then reauthorizes and reconciles the
 same original session. Committed objects remain irreversible; incomplete outcomes
 retain their backend distinction and every safety byte. No new begin, part replay
-or abort of a committed object is permitted. Assertions are authored, not yet
-observed passing; no pre-fix execution is claimed. This does not wire public
-cancellation, settle physical requests or implement durable runtime recovery.
+or abort of a committed object is permitted. These assertions passed on head
+`101d176c2269d9c26f3d09157940b378c01f372a`, Actions run `42815031534`, native
+job `129825837587`, with all 146 feature-on composition cases passing. Default
+native/Clippy, synthetic clients (`129825838189`), WASM/MSRV/deny/ci-ok, CodeQL
+run `42815024184` and PR standards run `42815031401` passed. No pre-fix execution
+or independent acceptance is claimed. This does not wire public cancellation,
+settle physical requests or implement durable runtime recovery.
 
 ## Bounded restore-stream checkpoint
 

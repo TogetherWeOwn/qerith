@@ -442,6 +442,17 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
         Ok(Some(record))
     }
 
+    fn verify_s3_binding(
+        &self,
+        work: &Work,
+        qualified: &a::ObjectRecord,
+    ) -> std::result::Result<(), IoError> {
+        if self.record(work)?.as_ref() != Some(qualified) {
+            return Err(IoError::Integrity);
+        }
+        Ok(())
+    }
+
     async fn retrieve(&mut self, work: &Work) -> std::result::Result<(), IoError> {
         let Some(record) = self.record(work)? else {
             return self.cache.retrieve(work).await;

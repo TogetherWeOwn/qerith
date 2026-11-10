@@ -325,6 +325,10 @@ pub struct DeletionCandidate {
 pub struct GenerationView {
     pub metadata: CiphertextMetadata,
     pub cache_location: Option<String>,
+    /// Immutable record pinned by backend-specific qualification, including when
+    /// its assessment expires. Expiry never permits a different version/backend.
+    #[cfg(feature = "archive-provider")]
+    pub qualified_s3_record: Option<velmora::archive::v1::ObjectRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
