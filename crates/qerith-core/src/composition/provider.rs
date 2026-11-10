@@ -372,12 +372,20 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
             .retained_location
             .as_deref()
             .ok_or(IoError::Integrity)?;
-        let copy = cache_read(
+        // Qualification needs Write even while retained-byte verification stalls;
+        // the inner read guard alone cannot observe a Write-only revocation.
+        let copy = interrupt(
             &self.control,
             target,
-            self.cache
-                .verify_provider_completed(work, record.identity.cache_key(), location),
-            false,
+            a::Action::Write,
+            cache_read(
+                &self.control,
+                target,
+                self.cache
+                    .verify_provider_completed(work, record.identity.cache_key(), location),
+                false,
+            ),
+            io,
         )
         .await?;
         if copy.location != location || complete(&work.metadata, &copy).is_err() {

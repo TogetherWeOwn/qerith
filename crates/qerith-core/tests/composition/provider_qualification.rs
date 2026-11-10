@@ -304,6 +304,93 @@ async fn s3_retained_binding_or_bytes_failure_prevents_qualification_and_warm_re
 }
 
 #[tokio::test]
+async fn s3_qualification_retained_check_interrupts_on_either_authority_revocation() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for denied in ["object:Write", "object:Restore"] {
+        let (mut c, mut storage, job, auth, time) =
+            staged(a::Backend::S3, WriteFault::Qualify).await;
+        assert_eq!(
+            qualified_attempt(&mut c, &mut storage, job, &auth, &time, 14).await,
+            Err(Failure::Io(IoError::Retryable))
+        );
+        let journal = storage.cache.provider_write.clone();
+        let record = storage.cache.provider_record.clone();
+        let copies = storage.cache.copies.clone();
+        let bindings = storage.cache.provider_retained.clone();
+        time.0.set(13);
+        storage.cache.provider_cache_stall = Some("verify");
+        let events = storage.control.events.clone();
+        {
+            let run = qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0);
+            let mut run = std::pin::pin!(run);
+            let wakes = Arc::new(Wakes::default());
+            let waker = wakes.clone().into();
+            let mut cx = Context::from_waker(&waker);
+            assert!(run.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+            auth.denied.borrow_mut().insert(denied.into());
+            events.send_replace(None);
+            assert!(wakes.0.load(Ordering::SeqCst) > 0);
+            // No timeout/deadline may rescue a missed Write-revocation wake.
+            assert_eq!(
+                run.as_mut().poll(&mut cx),
+                Poll::Ready(Err(Failure::Io(IoError::Cancelled))),
+                "{denied}"
+            );
+        }
+        assert_retained(&c, &storage, job, a::Backend::S3);
+        assert_eq!(storage.cache.provider_write, journal);
+        assert_eq!(storage.cache.provider_record, record);
+        assert_eq!(storage.cache.copies, copies);
+        assert_eq!(storage.cache.provider_retained, bindings);
+        assert_eq!(storage.s3.inner.reads, 1, "no new remote observation");
+        assert!(storage.cache.pending.is_empty());
+        assert!(storage.cache.provider_keys.is_empty());
+        assert_eq!(
+            c.job(TENANT, job).unwrap().state,
+            JobState::RetryWait { not_before: 15 }
+        );
+
+        reconnect(&mut storage);
+        auth.denied.borrow_mut().remove(denied);
+        events.send_replace(None);
+        storage.cache.provider_cache_stall = None;
+        time.0.set(15);
+        qualified_attempt(&mut c, &mut storage, job, &auth, &time, 0)
+            .await
+            .unwrap();
+        assert_eq!(c.job(TENANT, job).unwrap().state, JobState::Complete);
+        assert_eq!(storage.cache.provider_write, journal);
+        assert_eq!(storage.cache.provider_record, record);
+        assert_eq!(storage.cache.copies, copies);
+        assert_eq!(storage.cache.provider_retained, bindings);
+        assert_eq!(storage.s3.calls, ["begin", "part", "commit"]);
+        assert_eq!(
+            storage.s3.inner.reads, 2,
+            "qualification retried, not upload"
+        );
+        assert_eq!(storage.nntp.inner.reads, 0);
+        assert!(storage.nntp.calls.is_empty());
+        assert!(storage.cache.trace.0.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn s3_qualification_rejects_mismatched_or_incomplete_evidence_without_losing_safety() {
     for case in 1..=13 {
         let (mut c, mut storage, job, auth, time) =

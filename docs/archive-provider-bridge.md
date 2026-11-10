@@ -211,12 +211,32 @@ requesting restore: operation ID 100 replayed the original upload intent, yieldi
 `Unavailable` with Write revoked or `Conflict` otherwise. The warm test's pin ID
 101 also collided with the upload commit. The repair uses fresh IDs 1900/1901;
 it retains Write revocation, exact-copy reuse, corruption refusal and no-refetch
-assertions. No runtime authority or idempotency semantics change. The repaired
-additions have not yet been observed passing.
+assertions. No runtime authority or idempotency semantics change. The repair head
+`1b19b2f89492a1428bc007c042e997b629a433d5` passed all 130 feature-on composition
+cases in Actions run `42786948321`, native job `129730468829`. Default native
+and Clippy, WASM/MSRV/deny/ci-ok, synthetic clients (`129730469346`), CodeQL run
+`42786940673` and PR standards run `42786948378` passed. This does not establish
+independent acceptance or production support.
+
+S3 qualification now guards retained-copy verification with both current Write
+and Read event sources. Previously this cache step used only Read control, so a
+Write-only revocation could leave it pending until a separate deadline or Read
+revocation even though qualification requires Write. The outer Write guard uses
+the existing invocation interruption seam; retained-byte verification and remote
+observation still require Read. A generated product-job regression covers both
+authority revocations during a permanently stalled retained check and asserts
+immediate completion on the policy wake, without a timeout/deadline rescuing it.
+The authored recovery assertions preserve the Verified journal, exact record,
+cache binding and safety bytes, respect the retry deadline and complete without
+repeating begin/part/commit. These new assertions await exact-head Actions; no
+red-before execution or physical settlement claim is made.
+
 The reference cache's serialized journal/binding is not a durable database or a
 process-restart receipt. Actual S3-backed cold restore from this new completion
 boundary, runtime assessors, durable catalogue, sharing and global cache lifecycle
-remain unfinished. S3-qualified copies still cannot be evicted.
+remain unfinished. S3-qualified copies still cannot be evicted, and missing
+recorded retained bytes remain an integrity error, not permission to synthesize
+a cold miss or refetch. Cold-path acceptance cannot bypass those safety fences.
 
 ## Explicitly unfinished boundaries
 
