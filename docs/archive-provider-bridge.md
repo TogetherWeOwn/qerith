@@ -323,8 +323,39 @@ backend with oversized, overlong, truncated, ignored-error and corrupt streams.
 It requires no excess bytes or completed copy, then attempt-local cleanup and a
 fresh segmented restore through the actual product job/publication path. The
 existing product-job failure test also includes all four new stream faults and
-requires incomplete cleanup without publication/fallback. These additions are
-authored, not yet observed passing; no pre-fix execution is claimed.
+requires incomplete cleanup without publication/fallback. These additions passed
+on head `b149272248386fe81c17c7b42bf75a848fe4347e`, Actions run `42764127575`,
+native job `129656477585`: all 118 feature-on composition cases passed. Default
+native/Clippy, wasm/MSRV/deny/ci-ok, synthetic clients (job `129656477821`), CodeQL
+run `42764123419` and PR standards run `42764128002` passed. No pre-fix execution
+or independent acceptance is claimed. Subsequent heads need their own receipts.
+
+## Completed-cache lifecycle checkpoint
+
+Two generated tests in `tests/composition/provider_lifecycle.rs` exercise the
+existing provider/cache ports and actual product restore job for both backends.
+A completed but unpublished copy survives cleanup of another attempt's incomplete
+allocation; unrelated incomplete bytes also survive until their own cleanup.
+The exact recorded completion then reaches catalogue publication with both fake
+providers unavailable and no additional provider read, replacement or allocation.
+The provider record is serialized/reloaded; the cache remains the in-memory
+reference adapter, not a durable process or physical restart.
+
+Twenty negative backend/fault scenarios require recorded completion to fail
+closed on missing/corrupt bytes or changed backend, account, locator, version,
+format, mode, key epoch or envelope. Even when generated ciphertext is identical,
+an old cache key cannot authorize a different immutable provider identity. The
+job must not publish, refetch, heal, overwrite or delete a recorded completed
+copy. Existing completed inventory and keys remain available for trusted repair.
+These tests are authored, not yet observed passing; no pre-fix execution is
+claimed. This tests the existing trusted adapter contract, not a new cache engine.
+
+Global capacity admission/reservations, bounded retention, eviction scheduling,
+public-share/key compatibility, backend-specific archive qualification and actual
+durable catalogue/cache/runtime implementation remain unfinished. Attempt-local
+cleanup and completion reconciliation are not those production qualifications.
+The setup still uses synthetic NNTP qualification for its prior eviction; it
+provides no S3 safety-copy eviction authority.
 
 ## Dependency supply-chain record
 

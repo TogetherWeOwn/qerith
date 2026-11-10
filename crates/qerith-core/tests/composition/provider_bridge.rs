@@ -5,6 +5,8 @@ use qerith_core::composition::provider::{ArchiveCache, ProviderStorage, WriteJou
 
 #[path = "provider_clients.rs"]
 mod clients;
+#[path = "provider_lifecycle.rs"]
+mod lifecycle;
 #[path = "provider_native.rs"]
 mod native_clients;
 #[path = "provider_write.rs"]
