@@ -179,8 +179,15 @@ actual product ingest/job/completion path, thirteen invalid qualification cases,
 readback-only refusal, five corrupt/unbounded/incomplete-stream cases, retained
 safety bytes, immutable refresh/replay and refusal of NNTP evidence mixing. They
 use explicitly fake readability/durability assertions; no media keys or physical
-supplier evidence exists. These additions are authored, not yet observed passing
-in Actions. Existing NNTP qualification remains separately exercised. Actual
+supplier evidence exists. On head `9a97860`, native Actions run `42780239920`,
+job `129708250131`, passed 127 composition cases and failed this positive test:
+its deletion request used `now = not_before = 10`, so candidate validation
+correctly returned `Invalid` before evaluating the expected `Unsafe` predicate.
+The repair retains that invalid-input control, uses future deadline 11 to reach
+the safety refusal for both deletion kinds, and checks that neither refusal
+mutates the generation. Runtime deletion policy is unchanged. The repaired test
+has not yet been observed passing in Actions. Existing NNTP qualification remains
+separately exercised. Actual
 S3-backed warm/cold restore from this new completion boundary, runtime assessors,
 durable catalogue, sharing and global cache lifecycle remain unfinished.
 

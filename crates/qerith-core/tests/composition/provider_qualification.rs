@@ -107,14 +107,20 @@ async fn s3_qualified_product_archive_completes_without_nntp_evidence_or_evictio
     );
     assert!(storage.cache.trace.0.is_empty());
     assert!(!storage.cache.order.contains(&"engine-verify-pair"));
+    let before = c.generation(TENANT, GENERATION).unwrap();
     for kind in [
         DeletionKind::DeliveryCache,
         DeletionKind::UnreferencedGeneration,
     ] {
         assert_eq!(
             c.candidate(TENANT, GENERATION, kind, 10, 10, auth.as_ref()),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            c.candidate(TENANT, GENERATION, kind, 10, 11, auth.as_ref()),
             Err(Error::Unsafe)
         );
+        assert_eq!(c.generation(TENANT, GENERATION).unwrap(), before);
     }
     let p = proof(&c, &storage, 10);
     let before = c.generation(TENANT, GENERATION).unwrap();
