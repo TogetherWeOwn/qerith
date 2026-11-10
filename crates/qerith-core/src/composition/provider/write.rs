@@ -46,7 +46,11 @@ pub enum WritePhase {
     },
 }
 
-fn validate(work: &Work, journal: &WriteJournal) -> std::result::Result<(), IoError> {
+fn validate(
+    cache: &impl ArchiveCache,
+    work: &Work,
+    journal: &WriteJournal,
+) -> std::result::Result<(), IoError> {
     let intent = &journal.intent;
     intent.validate().map_err(io)?;
     if work.job.kind != JobKind::Archive
@@ -87,6 +91,14 @@ fn validate(work: &Work, journal: &WriteJournal) -> std::result::Result<(), IoEr
             }
         }
         _ => {}
+    }
+    // Verified and its record are one inventory transaction. An unfinished
+    // journal beside an existing object is not permission to begin/reconcile or
+    // abort it. Check without Read authority: these are Write/Abort operations.
+    match (&journal.phase, cache.archive_record(work)?) {
+        (WritePhase::Verified { record }, Some(saved)) if *record == saved => {}
+        (WritePhase::Verified { .. }, _) | (_, Some(_)) => return Err(IoError::Integrity),
+        (_, None) => {}
     }
     Ok(())
 }
@@ -165,7 +177,7 @@ pub(super) async fn abort(
     work: &Work,
     mut journal: WriteJournal,
 ) -> std::result::Result<a::AbortOutcome, IoError> {
-    validate(work, &journal)?;
+    validate(cache, work, &journal)?;
     control
         .check(&journal.intent.target, a::Action::AbortIncomplete)
         .map_err(io)?;
@@ -273,7 +285,7 @@ pub(super) async fn post(
     work: &Work,
     mut journal: WriteJournal,
 ) -> std::result::Result<(), IoError> {
-    validate(work, &journal)?;
+    validate(cache, work, &journal)?;
     control
         .check(&journal.intent.target, a::Action::Write)
         .map_err(io)?;

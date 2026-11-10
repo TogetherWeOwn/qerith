@@ -103,6 +103,16 @@ effect, lost acknowledgement and failed local record commit remain uncertain.
 Restart reconciles only the original session. No automatic abort, deletion,
 reallocation, alternate account or backend fallback is issued.
 
+Write and explicit abort admission also cross-check the journal against the
+scoped immutable inventory before any checkpoint or provider effect. Verified
+requires its exact record; every unfinished/aborted phase requires no installed
+record. A missing Verified record or conflicting installed object is Integrity,
+not permission to begin, reconcile, abort or acknowledge a terminal state. This
+check does not require Read authority for a Write/Abort invocation. Generated
+regressions author both backend paths across eleven inconsistent states and a
+matching-Verified replay control with Read revoked; Actions execution is pending.
+They do not establish physical settlement or durable inventory repair.
+
 Lost begin responses lack a remote session, and shared v1 cannot reconcile by
 intent alone. `BeginPending` therefore stays uncertain and needs trusted transport
 settlement/recovery; the bridge never retries begin blindly. Partial writes whose

@@ -22,6 +22,111 @@ fn work(c: &MemoryCatalogue, job: JobId) -> Work {
 }
 
 #[tokio::test]
+async fn provider_write_and_abort_refuse_inconsistent_inventory_before_effects() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for fault in [
+            "prepared",
+            "begin-pending",
+            "ready",
+            "effect-pending",
+            "abort-requested",
+            "abort-pending",
+            "aborted",
+            "missing-verified",
+            "changed-version",
+            "changed-account",
+            "changed-envelope",
+        ] {
+            let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
+            let work = work(&c, job);
+            let record = record(&storage.cache, backend);
+            let session = a::WriteSession {
+                intent: record.intent(),
+                remote: aid("original-session"),
+            };
+            writer_mut(&mut storage, backend).session = Some(session.clone());
+            let journal = storage.cache.provider_write.as_mut().unwrap();
+            journal.phase = match fault {
+                "prepared" => WritePhase::Prepared,
+                "begin-pending" => WritePhase::BeginPending,
+                "ready" => WritePhase::Ready {
+                    session,
+                    receipts: Vec::new(),
+                },
+                "effect-pending" => WritePhase::EffectPending { session },
+                "abort-requested" => WritePhase::AbortRequested { session },
+                "abort-pending" => WritePhase::AbortPending { session },
+                "aborted" => WritePhase::Aborted {
+                    session: Some(session),
+                },
+                _ => WritePhase::Verified {
+                    record: record.clone(),
+                },
+            };
+            let mut current = record;
+            match fault {
+                "changed-version" => current.identity.version = aid("different-version"),
+                "changed-account" => current.identity.target.account = aid("different-account"),
+                "changed-envelope" => {
+                    current.identity.target.encryption.envelope = aid("different-envelope");
+                }
+                _ => {}
+            }
+            storage.cache.provider_record = (fault != "missing-verified").then_some(current);
+            reconnect(&mut storage);
+            let journal = storage.cache.provider_write.clone();
+            let record = storage.cache.provider_record.clone();
+            let copies = storage.cache.copies.clone();
+            let order = storage.cache.order.clone();
+            assert_eq!(
+                storage.abort_write(&work).await,
+                Err(IoError::Integrity),
+                "abort {backend:?}/{fault}"
+            );
+            assert_eq!(
+                attempt(&mut c, &mut storage, job, &auth, &time).await,
+                Err(Failure::Io(IoError::Integrity)),
+                "post {backend:?}/{fault}"
+            );
+            assert_eq!(storage.cache.provider_write, journal);
+            assert_eq!(storage.cache.provider_record, record);
+            assert_eq!(storage.cache.copies, copies);
+            assert_eq!(storage.cache.order, order);
+            assert!(writer(&storage, backend).calls.is_empty());
+            assert_retained(&c, &storage, job, backend);
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_verified_write_replay_and_abort_do_not_require_read_authority() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (c, mut storage, job, auth, _) = staged(backend, WriteFault::None).await;
+        let work = work(&c, job);
+        storage.post(&work).await.unwrap();
+        let journal = storage.cache.provider_write.clone();
+        let record = storage.cache.provider_record.clone();
+        let calls = writer(&storage, backend).calls.clone();
+        auth.denied.borrow_mut().insert("object:Restore".into());
+        assert_eq!(
+            storage
+                .control
+                .check(&record.as_ref().unwrap().identity.target, a::Action::Read),
+            Err(a::Failure::Denied)
+        );
+        storage.post(&work).await.unwrap();
+        assert_eq!(
+            storage.abort_write(&work).await,
+            Ok(a::AbortOutcome::Irreversible)
+        );
+        assert_eq!(storage.cache.provider_write, journal);
+        assert_eq!(storage.cache.provider_record, record);
+        assert_eq!(writer(&storage, backend).calls, calls);
+        assert_retained(&c, &storage, job, backend);
+    }
+}
+
+#[tokio::test]
 async fn provider_explicit_abort_before_begin_is_terminal_without_provider_effects() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
