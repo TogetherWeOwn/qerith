@@ -23,6 +23,211 @@ pub(super) fn work(service: &s::Service<Access>, restore: JobId) -> Work {
 }
 
 #[tokio::test]
+async fn provider_journal_and_record_must_agree_before_restore_or_legacy_io() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for fault in [
+            "missing-verified",
+            "missing-prepared",
+            "missing-begin",
+            "missing-aborted",
+            "unverified-record",
+            "aborted-record",
+            "intent",
+            "saved-version",
+            "record-version",
+            "backend",
+            "account",
+            "locator",
+            "envelope",
+            "part",
+        ] {
+            let (mut service, mut io, _, _, auth) = hot_upload().await;
+            let time = Time(Cell::new(60));
+            // Setup eviction remains synthetic NNTP proof, never S3 authority.
+            evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+            let original = record(&io, backend);
+            let mut journal = WriteJournal {
+                intent: original.intent(),
+                phase: WritePhase::Verified {
+                    record: original.clone(),
+                },
+            };
+            let mut current = Some(original);
+            let mut expected = IoError::Integrity;
+            match fault {
+                "missing-verified" => current = None,
+                "missing-prepared" | "missing-begin" | "missing-aborted" => {
+                    current = None;
+                    journal.phase = match fault {
+                        "missing-prepared" => WritePhase::Prepared,
+                        "missing-begin" => WritePhase::BeginPending,
+                        _ => WritePhase::Aborted { session: None },
+                    };
+                    expected = IoError::RepairUnavailable;
+                }
+                "unverified-record" => journal.phase = WritePhase::Prepared,
+                "aborted-record" => journal.phase = WritePhase::Aborted { session: None },
+                "intent" => journal.intent.operation = aid("different-operation"),
+                "saved-version" => {
+                    let WritePhase::Verified { record } = &mut journal.phase else {
+                        unreachable!()
+                    };
+                    record.identity.version = aid("different-version");
+                }
+                "record-version" => current.as_mut().unwrap().identity.version = aid("2"),
+                "backend" => {
+                    current.as_mut().unwrap().identity.target.backend =
+                        if backend == a::Backend::Nntp {
+                            a::Backend::S3
+                        } else {
+                            a::Backend::Nntp
+                        };
+                }
+                "account" => current.as_mut().unwrap().identity.target.account = aid("other"),
+                "locator" => current.as_mut().unwrap().identity.target.locator = aid("other"),
+                "envelope" => {
+                    current
+                        .as_mut()
+                        .unwrap()
+                        .identity
+                        .target
+                        .encryption
+                        .envelope = aid("other");
+                }
+                "part" => current.as_mut().unwrap().parts[0].reference = aid("other-part"),
+                _ => unreachable!(),
+            }
+            // Explicit serialized reference checkpoints, not a durable restart.
+            io.provider_write =
+                Some(serde_json::from_slice(&serde_json::to_vec(&journal).unwrap()).unwrap());
+            io.provider_record = current;
+            let mut storage = bridge(io, backend, auth.clone(), Fault::None);
+            let restore = request_restore(
+                service.catalogue_mut(),
+                "object",
+                905,
+                1000,
+                50,
+                60,
+                auth.as_ref(),
+            );
+            let work = work(&service, restore);
+            let order = storage.cache.order.clone();
+            let attempts = storage.cache.attempts.clone();
+            let copies = storage.cache.copies.clone();
+            let journal = storage.cache.provider_write.clone();
+            let record = storage.cache.provider_record.clone();
+            assert_eq!(
+                storage.retrieve(&work).await,
+                Err(expected.clone()),
+                "{backend:?}/{fault}"
+            );
+            assert_eq!(storage.complete_restore(&work).await, Err(expected.clone()));
+            assert_eq!(
+                storage.verify_completed(&work, "untrusted").await,
+                Err(expected.clone())
+            );
+            assert_eq!(
+                run_once(
+                    service.catalogue_mut(),
+                    &mut storage,
+                    TENANT,
+                    work.event,
+                    &budget(),
+                    &time,
+                    &Rules::default(),
+                    &MockQualification,
+                    auth.as_ref(),
+                )
+                .await,
+                Err(Failure::Io(expected)),
+                "{backend:?}/{fault}",
+            );
+            assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
+            assert_eq!(storage.cache.order, order);
+            assert_eq!(storage.cache.attempts, attempts);
+            assert_eq!(storage.cache.copies, copies);
+            assert_eq!(storage.cache.provider_write, journal);
+            assert_eq!(storage.cache.provider_record, record);
+            assert!(storage.cache.provider_keys.is_empty());
+            assert!(storage.cache.pending.is_empty());
+            assert!(storage.cache.completed.is_empty());
+            assert!(service
+                .catalogue()
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .is_none());
+            assert_ne!(
+                service.catalogue().job(TENANT, restore).unwrap().state,
+                JobState::Complete
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_verified_journal_restores_exact_record_with_write_revoked() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut service, mut io, _, _, auth) = hot_upload().await;
+        let time = Time(Cell::new(60));
+        evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+        let record = record(&io, backend);
+        let journal = WriteJournal {
+            intent: record.intent(),
+            phase: WritePhase::Verified {
+                record: record.clone(),
+            },
+        };
+        io.provider_write =
+            Some(serde_json::from_slice(&serde_json::to_vec(&journal).unwrap()).unwrap());
+        io.provider_record = Some(record);
+        let mut storage = bridge(io, backend, auth.clone(), Fault::None);
+        auth.denied.borrow_mut().insert("object:Write".into());
+        let restore = request_restore(
+            service.catalogue_mut(),
+            "object",
+            906,
+            1000,
+            50,
+            60,
+            auth.as_ref(),
+        );
+        let work = work(&service, restore);
+        run_once(
+            service.catalogue_mut(),
+            &mut storage,
+            TENANT,
+            work.event,
+            &budget(),
+            &time,
+            &Rules::default(),
+            &MockQualification,
+            auth.as_ref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.nntp.reads, usize::from(backend == a::Backend::Nntp));
+        assert_eq!(storage.s3.reads, usize::from(backend == a::Backend::S3));
+        assert_eq!(storage.cache.provider_write, Some(journal));
+        let location = service
+            .catalogue()
+            .generation(TENANT, GENERATION)
+            .unwrap()
+            .cache_location
+            .unwrap();
+        assert_eq!(
+            storage.cache.copies[&location],
+            storage.cache.fixture.bytes()
+        );
+        assert_eq!(
+            service.catalogue().job(TENANT, restore).unwrap().state,
+            JobState::Complete
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_completed_cache_reconciles_without_refetch_and_cleanup_is_attempt_local() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         let (mut service, mut io, _, _, auth) = hot_upload().await;

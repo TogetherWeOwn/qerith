@@ -27,8 +27,10 @@ pub trait ArchiveCache: Storage {
 
     fn archive_record(&self, work: &Work) -> std::result::Result<Option<a::ObjectRecord>, IoError>;
     /// Stable intent selected independently of old-read routing, durably bound to
-    /// this tenant/generation/recovery inventory before any provider effect. None
-    /// means no new-provider write; unknown or corrupt journals are errors.
+    /// this tenant/generation/recovery inventory before any provider effect. The
+    /// original journal must also resolve for restore jobs of that generation,
+    /// independently of the new-write target. None means no new-provider write;
+    /// unknown or corrupt journals are errors.
     fn archive_write(&self, _work: &Work) -> std::result::Result<Option<WriteJournal>, IoError> {
         Ok(None)
     }
@@ -222,10 +224,29 @@ fn io(error: a::Failure) -> IoError {
 
 impl<L: ArchiveCache, N, S, C: Control> ProviderStorage<L, N, S, C> {
     fn record(&self, work: &Work) -> std::result::Result<Option<a::ObjectRecord>, IoError> {
-        let Some(record) = self.cache.archive_record(work)? else {
-            return Ok(None);
+        let record = self.cache.archive_record(work)?;
+        let journal = self.cache.archive_write(work)?;
+        let Some(record) = record else {
+            return match journal {
+                None => Ok(None),
+                Some(WriteJournal {
+                    phase: WritePhase::Verified { .. },
+                    ..
+                }) => Err(IoError::Integrity),
+                Some(_) => Err(IoError::RepairUnavailable),
+            };
         };
         record.validate().map_err(io)?;
+        if let Some(journal) = journal {
+            // Verified and its record share one inventory transaction. Missing or
+            // changed identity is corruption, not permission to read an alternate
+            // version or route an unfinished new-provider write through legacy I/O.
+            if journal.intent != record.intent()
+                || !matches!(journal.phase, WritePhase::Verified { record: saved } if saved == record)
+            {
+                return Err(IoError::Integrity);
+            }
+        }
         if record.identity.target.tenant.as_str() != work.tenant.0.to_string()
             || record.identity.target.generation.as_str() != work.job.generation.0.to_string()
             || record.identity.bytes != work.metadata.identity.length

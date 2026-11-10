@@ -405,8 +405,42 @@ policy's two-second retry delay, requires refusal one tick before that deadline
 with unchanged job/checkpoint, completed inventory and provider read count, then
 retries exactly at the deadline. Verification-only recovery keeps its unchanged
 clock rather than moving it backward. It changes no runtime retry policy.
-The corrected scenarios are authored, not yet observed passing. Synthetic NNTP
-setup eviction remains unrelated to S3 archival/eviction qualification.
+The corrected scenarios passed on head
+`c906d4aae444c93af8b8dc06d547b3bf52f56005`, Actions run `42772292137`,
+native job `129682666627`: all 122 feature-on composition tests passed, including
+both cache-control tests. Default native/Clippy, wasm/MSRV/deny/ci-ok, synthetic
+clients (job `129682666417`), CodeQL run `42772286059` and PR standards run
+`42772292106` passed. This is previous-head evidence, not acceptance of subsequent
+changes or independent review. Synthetic NNTP setup eviction remains unrelated
+to S3 archival/eviction qualification.
+
+## Journal/record consistency checkpoint
+
+A surviving new-provider write journal cannot authorize the legacy reader when
+its immutable record is missing. Before restore retrieval, completion or winner
+verification, the bridge now requires any journal to be `Verified` and its saved
+record and intent to match the entire current immutable record. Missing verified
+inventory is corruption; a journal without a completed record remains unavailable.
+Unfinished or aborted journals alongside a record fail closed. No new account,
+version, encryption identity or part manifest can be substituted merely because
+whole-ciphertext bytes match. Imported records without a local write journal keep
+the existing immutable-record checks; explicit legacy records keep their reader.
+
+Two generated tests cover 28 backend/inconsistency scenarios across trusted restore
+entry points and the actual product job, asserting no provider/legacy I/O, cache
+allocation, publication or journal/record mutation. Matching serialized verified
+journals restore through the product job with Write revoked and Restore retained,
+using only their recorded backend. These additions are authored, not yet observed
+passing. Reference checkpoint serialization is not durable process restart.
+
+Source tracing confirms the remaining qualification boundary is structural:
+`Storage::verify_archive`, `Qualifier` and the catalogue's evidence/completion and
+deletion checks consume two NNTP reconstructions plus independent-backbone and
+separate authenticated-readability evidence. The shared provider's `WriteProof`
+and a consistent `Verified` journal establish none of those qualifications and
+cannot substitute a backend-specific S3 durability/readability decision. This
+change preserves the fail-closed qualifier and every retained safety copy; it
+does not complete S3 archival/catalogue integration or relax eviction.
 
 ## Dependency supply-chain record
 
