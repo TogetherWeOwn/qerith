@@ -455,6 +455,38 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
         )
         .await?
         {
+            if record.identity.bytes == 0 {
+                // A zero-length range can succeed without touching the provider.
+                // On a cold miss, prove the exact empty object exists before
+                // allocating cache staging; its digest alone proves no readback.
+                let observed = match record.identity.target.backend {
+                    a::Backend::Nntp => {
+                        invoke(
+                            &self.control,
+                            &record.identity.target,
+                            a::Action::Read,
+                            self.nntp.stat(&record, &self.control),
+                        )
+                        .await
+                    }
+                    a::Backend::S3 => {
+                        invoke(
+                            &self.control,
+                            &record.identity.target,
+                            a::Action::Read,
+                            self.s3.stat(&record, &self.control),
+                        )
+                        .await
+                    }
+                }
+                .map_err(io)?;
+                self.control
+                    .check(&record.identity.target, a::Action::Read)
+                    .map_err(io)?;
+                if observed != record.identity || self.record(work)?.as_ref() != Some(&record) {
+                    return Err(IoError::Integrity);
+                }
+            }
             let range = a::Range {
                 offset: 0,
                 bytes: record.identity.bytes,
@@ -473,29 +505,31 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
                 digest: Sha256::new(),
                 failed: None,
             };
-            match record.identity.target.backend {
-                a::Backend::Nntp => {
-                    invoke(
-                        &self.control,
-                        &record.identity.target,
-                        a::Action::Read,
-                        self.nntp
-                            .read_range(&record, range, &mut stage, &self.control),
-                    )
-                    .await
+            if range.bytes != 0 {
+                match record.identity.target.backend {
+                    a::Backend::Nntp => {
+                        invoke(
+                            &self.control,
+                            &record.identity.target,
+                            a::Action::Read,
+                            self.nntp
+                                .read_range(&record, range, &mut stage, &self.control),
+                        )
+                        .await
+                    }
+                    a::Backend::S3 => {
+                        invoke(
+                            &self.control,
+                            &record.identity.target,
+                            a::Action::Read,
+                            self.s3
+                                .read_range(&record, range, &mut stage, &self.control),
+                        )
+                        .await
+                    }
                 }
-                a::Backend::S3 => {
-                    invoke(
-                        &self.control,
-                        &record.identity.target,
-                        a::Action::Read,
-                        self.s3
-                            .read_range(&record, range, &mut stage, &self.control),
-                    )
-                    .await
-                }
+                .map_err(io)?;
             }
-            .map_err(io)?;
             stage.finish(record.identity.sha256).map_err(io)?;
         }
         if self.record(work)?.as_ref() != Some(&record) {

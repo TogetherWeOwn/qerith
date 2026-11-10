@@ -254,6 +254,7 @@ struct Provider {
     backend: a::Backend,
     bytes: Vec<u8>,
     reads: usize,
+    stats: usize,
     fault: Fault,
     auth: Rc<Auth>,
 }
@@ -292,10 +293,29 @@ impl a::ArchiveProvider for Provider {
     }
     async fn stat(
         &mut self,
-        _: &a::ObjectRecord,
-        _: &impl Control,
+        record: &a::ObjectRecord,
+        control: &impl Control,
     ) -> a::Result<a::ObjectIdentity> {
-        Err(a::Failure::Unsupported)
+        control.check(&record.identity.target, a::Action::Read)?;
+        assert_eq!(record.identity.target.backend, self.backend);
+        self.stats += 1;
+        match self.fault {
+            Fault::Missing => return Err(a::Failure::Configuration),
+            Fault::UncontrolledStall => return std::future::pending().await,
+            Fault::Revoke => {
+                self.auth
+                    .denied
+                    .borrow_mut()
+                    .insert("object:Restore".into());
+            }
+            _ => {}
+        }
+        let mut observed = record.identity.clone();
+        if matches!(self.fault, Fault::Corrupt) {
+            observed.version = aid("wrong-version");
+        }
+        // Deliberately return Ready after revocation; the caller must recheck.
+        Ok(observed)
     }
     async fn read_range(
         &mut self,
@@ -419,6 +439,7 @@ fn bridge(
         backend: kind,
         bytes: io.fixture.bytes().to_vec(),
         reads: 0,
+        stats: 0,
         fault: if backend == kind { fault } else { Fault::None },
         auth: auth.clone(),
     };

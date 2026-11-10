@@ -62,6 +62,17 @@ verifies whole ciphertext/checksums before returning an immutable cache receipt.
 Only the existing catalogue transition can publish that receipt. Provider or
 cache presence is never a lease, public ETag, dedupe signal or authorization.
 
+An empty-object cold miss requires an exact-identity provider `stat` before cache
+staging. The shared zero-byte range loop performs no fetch, so a successful range
+and the empty SHA-256 cannot establish that the remote object exists. Missing or
+changed identity and same-poll Read revocation refuse staging; a stalled stat is
+interruptible through the same trusted control. A verified warm completion needs
+no new provider access. Three generated storage-boundary tests author these cases
+for both backends; execution is pending. They use empty opaque ciphertext and do
+not qualify an empty encrypted media container, catalogue publication, physical
+provider storage or S3 safety-copy eviction. Nonempty restores retain their full
+bounded authenticated-ciphertext digest path.
+
 Trusted `Control` and the injected transports must enforce current authority,
 resource bounds, cancellation and deadlines during I/O. The canonical
 `Control::cancelled` future must register an actual event source before checking

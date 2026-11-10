@@ -22,6 +22,119 @@ pub(super) fn work(service: &s::Service<Access>, restore: JobId) -> Work {
     }
 }
 
+// Exercise the storage boundary with generated empty ciphertext. This does not
+// qualify an empty media container or authorize eviction of an S3 safety copy.
+async fn empty_restore(
+    backend: a::Backend,
+    fault: Fault,
+) -> (ProviderStorage<Io, Provider, Provider, Current>, Work) {
+    let (mut service, mut io, _, _, auth) = hot_upload().await;
+    let time = Time(Cell::new(60));
+    evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+    let restore = request_restore(
+        service.catalogue_mut(),
+        "object",
+        980,
+        1000,
+        50,
+        60,
+        auth.as_ref(),
+    );
+    let mut work = work(&service, restore);
+    io.fixture = FixtureC::committed(io.fixture.key(), Vec::new());
+    work.metadata.identity = io.identity();
+    work.metadata.checksums.clear();
+    io.provider_record = Some(record(&io, backend));
+    (bridge(io, backend, auth, fault), work)
+}
+
+#[tokio::test]
+async fn empty_provider_restore_requires_exact_stat_but_warm_reuse_does_not() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut storage, work) = empty_restore(backend, Fault::None).await;
+        storage.retrieve(&work).await.unwrap();
+        assert_eq!(storage.nntp.stats, usize::from(backend == a::Backend::Nntp));
+        assert_eq!(storage.s3.stats, usize::from(backend == a::Backend::S3));
+        assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
+        let copy = storage.complete_restore(&work).await.unwrap();
+        assert_eq!(copy.identity, work.metadata.identity);
+        assert!(storage.cache.copies[&copy.location].is_empty());
+        let completed = storage.cache.completed.clone();
+        // A verified completion is independent of subsequent provider availability.
+        storage.nntp.fault = Fault::Missing;
+        storage.s3.fault = Fault::Missing;
+        storage.retrieve(&work).await.unwrap();
+        assert_eq!(storage.nntp.stats + storage.s3.stats, 1);
+        assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
+        assert_eq!(storage.cache.completed, completed);
+        assert_eq!(storage.complete_restore(&work).await.unwrap(), copy);
+    }
+}
+
+#[tokio::test]
+async fn empty_provider_restore_refuses_missing_changed_or_revoked_stat_before_staging() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for (fault, expected) in [
+            (Fault::Missing, IoError::RepairUnavailable),
+            (Fault::Corrupt, IoError::Integrity),
+            (Fault::Revoke, IoError::Cancelled),
+        ] {
+            let (mut storage, work) = empty_restore(backend, fault).await;
+            let original = storage.cache.provider_record.clone();
+            assert_eq!(storage.retrieve(&work).await, Err(expected));
+            assert_eq!(storage.nntp.stats + storage.s3.stats, 1);
+            assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
+            assert!(storage.cache.pending.is_empty());
+            assert!(storage.cache.provider_keys.is_empty());
+            assert!(storage.cache.completed.is_empty());
+            assert!(storage.cache.copies.is_empty());
+            assert_eq!(storage.cache.provider_record, original);
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_provider_stat_is_interrupted_by_current_control() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        let (mut storage, work) = empty_restore(backend, Fault::UncontrolledStall).await;
+        let events = storage.control.events.clone();
+        let wakes = Arc::new(Wakes::default());
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        {
+            let mut retrieve = std::pin::pin!(storage.retrieve(&work));
+            assert!(retrieve.as_mut().poll(&mut cx).is_pending());
+            let before = wakes.0.load(Ordering::SeqCst);
+            events.send_replace(Some(a::Failure::Cancelled));
+            assert!(wakes.0.load(Ordering::SeqCst) > before);
+            assert_eq!(
+                retrieve.as_mut().poll(&mut cx),
+                Poll::Ready(Err(IoError::Cancelled))
+            );
+        }
+        assert_eq!(storage.nntp.stats + storage.s3.stats, 1);
+        assert_eq!(storage.nntp.reads + storage.s3.reads, 0);
+        assert!(storage.cache.pending.is_empty());
+        assert!(storage.cache.provider_keys.is_empty());
+        assert!(storage.cache.completed.is_empty());
+    }
+}
+
 #[tokio::test]
 async fn provider_journal_and_record_must_agree_before_restore_or_legacy_io() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
