@@ -228,6 +228,97 @@ async fn provider_verified_journal_restores_exact_record_with_write_revoked() {
 }
 
 #[tokio::test]
+async fn provider_cache_acknowledgement_rechecks_immutable_record_before_returning_receipt() {
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for checkpoint in ["complete", "verify"] {
+            let (mut service, mut io, _, _, auth) = hot_upload().await;
+            let time = Time(Cell::new(60));
+            // Synthetic prior NNTP proof only; no S3 safety-copy eviction permit.
+            evict(service.catalogue_mut(), &mut io, &time, auth.as_ref());
+            let original = record(&io, backend);
+            io.provider_record = Some(original.clone());
+            let mut storage = bridge(io, backend, auth.clone(), Fault::None);
+            let restore = request_restore(
+                service.catalogue_mut(),
+                "object",
+                907,
+                1000,
+                50,
+                60,
+                auth.as_ref(),
+            );
+            let work = work(&service, restore);
+            if checkpoint == "complete" {
+                storage.cache.provider_record_change = Some(checkpoint);
+                assert_eq!(
+                    run_once(
+                        service.catalogue_mut(),
+                        &mut storage,
+                        TENANT,
+                        work.event,
+                        &budget(),
+                        &time,
+                        &Rules::default(),
+                        &MockQualification,
+                        auth.as_ref(),
+                    )
+                    .await,
+                    Err(Failure::Io(IoError::Uncertain)),
+                    "{backend:?}/{checkpoint}"
+                );
+            } else {
+                storage.retrieve(&work).await.unwrap();
+                let copy = storage.complete_restore(&work).await.unwrap();
+                storage.cache.provider_record_change = Some(checkpoint);
+                assert_eq!(
+                    storage.verify_completed(&work, &copy.location).await,
+                    Err(IoError::Integrity),
+                    "{backend:?}/{checkpoint}"
+                );
+            }
+            assert_ne!(storage.cache.provider_record.as_ref(), Some(&original));
+            assert_ne!(
+                service.catalogue().job(TENANT, restore).unwrap().state,
+                JobState::Complete
+            );
+            assert!(service
+                .catalogue()
+                .generation(TENANT, GENERATION)
+                .unwrap()
+                .cache_location
+                .is_none());
+            assert_eq!(storage.cache.completed.len(), 1);
+            assert_eq!(storage.cache.copies.len(), 1);
+            let location = storage.cache.completed[&inventory(&work)].clone();
+            assert_eq!(
+                storage.cache.copies[&location],
+                storage.cache.fixture.bytes()
+            );
+            let copies = storage.cache.copies.clone();
+            let completed = storage.cache.completed.clone();
+            let keys = storage.cache.provider_keys.clone();
+
+            // Repair only the fake inventory to its original identity. Reconcile
+            // the existing completion, never refetch, replace or delete its bytes.
+            storage.cache.provider_record = Some(original);
+            storage.cache.provider_record_change = None;
+            storage.retrieve(&work).await.unwrap();
+            let copy = storage.complete_restore(&work).await.unwrap();
+            assert_eq!(copy.location, location);
+            assert_eq!(
+                storage.verify_completed(&work, &location).await.unwrap(),
+                copy
+            );
+            assert_eq!(storage.nntp.reads + storage.s3.reads, 1);
+            assert_eq!(storage.cache.copies, copies);
+            assert_eq!(storage.cache.completed, completed);
+            assert_eq!(storage.cache.provider_keys, keys);
+            assert!(storage.cache.pending.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_completed_cache_reconciles_without_refetch_and_cleanup_is_attempt_local() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         let (mut service, mut io, _, _, auth) = hot_upload().await;

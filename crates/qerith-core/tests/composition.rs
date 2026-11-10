@@ -159,6 +159,8 @@ struct Io {
     provider_retained: BTreeMap<String, [u8; 32]>,
     #[cfg(feature = "archive-provider")]
     provider_cache_stall: Option<&'static str>,
+    #[cfg(feature = "archive-provider")]
+    provider_record_change: Option<&'static str>,
 }
 impl Io {
     async fn new(generation: u64) -> Self {
@@ -213,6 +215,8 @@ impl Io {
             provider_retained: BTreeMap::new(),
             #[cfg(feature = "archive-provider")]
             provider_cache_stall: None,
+            #[cfg(feature = "archive-provider")]
+            provider_record_change: None,
         }
     }
     fn identity(&self) -> CiphertextIdentity {

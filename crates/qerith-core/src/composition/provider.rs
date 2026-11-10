@@ -510,14 +510,20 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     ) -> std::result::Result<CompleteCopy, IoError> {
         match self.record(work)? {
             Some(record) => {
-                cache_read(
+                let copy = cache_read(
                     &self.control,
                     &record.identity.target,
                     self.cache
                         .complete_provider_restore(work, record.identity.cache_key()),
                     true,
                 )
-                .await
+                .await?;
+                // Completion may already be durable. A changed or unreadable
+                // inventory cannot authorize publication or incomplete cleanup.
+                if self.record(work).map_err(|_| IoError::Uncertain)?.as_ref() != Some(&record) {
+                    return Err(IoError::Uncertain);
+                }
+                Ok(copy)
             }
             None => self.cache.complete_restore(work).await,
         }
@@ -530,7 +536,7 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
     ) -> std::result::Result<CompleteCopy, IoError> {
         match self.record(work)? {
             Some(record) => {
-                cache_read(
+                let copy = cache_read(
                     &self.control,
                     &record.identity.target,
                     self.cache.verify_provider_completed(
@@ -540,7 +546,11 @@ impl<L: ArchiveCache, N: ArchiveProvider, S: ArchiveProvider, C: Control> Storag
                     ),
                     false,
                 )
-                .await
+                .await?;
+                if self.record(work)?.as_ref() != Some(&record) {
+                    return Err(IoError::Integrity);
+                }
+                Ok(copy)
             }
             None => self.cache.verify_completed(work, location).await,
         }

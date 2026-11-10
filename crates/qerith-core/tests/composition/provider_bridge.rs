@@ -151,6 +151,9 @@ impl ArchiveCache for Io {
         if self.provider_cache_stall == Some("complete") {
             return std::future::pending().await;
         }
+        if self.provider_record_change == Some("complete") {
+            self.provider_record.as_mut().unwrap().identity.version = aid("changed-version");
+        }
         Ok(copy)
     }
     async fn verify_provider_completed(
@@ -167,6 +170,9 @@ impl ArchiveCache for Io {
         let copy = self.verify_completed(work, location).await?;
         if self.provider_cache_stall == Some("verify") {
             return std::future::pending().await;
+        }
+        if self.provider_record_change == Some("verify") {
+            self.provider_record.as_mut().unwrap().identity.version = aid("changed-version");
         }
         Ok(copy)
     }

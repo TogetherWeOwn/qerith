@@ -640,6 +640,27 @@ original committed session; an unchanged Prepared may perform its first begin.
 These assertions are authored, not yet observed passing. No red-before execution,
 durable process restart, provider qualification or eviction claim is made.
 
+## Cache acknowledgement identity fence
+
+Cache completion and completed-winner verification now re-read the scoped
+provider inventory after the cache acknowledges I/O, before returning a receipt.
+A valid but changed immutable record cannot publish bytes checked under the
+previous backend/version/encryption key. Changed or unreadable inventory after
+completion is `Uncertain`: completion may already be durable, so neither cleanup
+nor refetch is authorized. Winner verification refuses a changed record as
+`Integrity`. Existing current-authority checks remain in force.
+
+The generated `provider_cache_acknowledgement_rechecks_immutable_record_before_returning_receipt`
+case covers both backends and both boundaries. The completion branch runs the
+actual product job and requires no catalogue publication. Both branches retain
+the completed inventory, key and exact bytes; restoring the original fake record
+allows exact-checkpoint reconciliation without another provider read. Authored,
+not yet observed passing; no pre-fix execution, durable-runtime or eviction
+qualification is claimed. The preceding head `1611f66` passed all 135 feature-on
+composition cases in Actions run `42796677891`, native job `129763524061`, plus
+synthetic clients, WASM/MSRV/deny, CodeQL and PR standards. That is prior-head
+evidence, not verification of this correction.
+
 ## Dependency supply-chain record
 
 The corrective pin delta from `40dba9a8cedb27748fa22e8a1d63cb2132067efd` changes
