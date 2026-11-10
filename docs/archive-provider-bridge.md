@@ -97,6 +97,27 @@ never aborts/deletes provider objects, uncertain writes, safety copies or anothe
 attempt's completed version. Existing serving pins and protocol-specific range,
 validator and authorization checks are unchanged.
 
+## Mixed-generation inventory checkpoint
+
+`provider_mixed` adds a generated test with one common cache port and three
+explicitly enrolled generation inventories in the same product catalogue. The
+legacy generation uses its unchanged qualified NNTP cold-restore/publication path.
+Two new uploads select NNTP and S3 independently during product ingest; their
+serialized Prepared journals retain those exact backend/account/allocation
+identities when new-write configuration changes and is then removed before the
+outbox workers run in reverse order. Retained-copy reads resolve the original
+Verified inventories, not the current write policy. Unknown tenant, generation or
+recovery references refuse both read and write without fallback. Missing new-write
+configuration refuses staging rather than using legacy NNTP or permanent cache.
+
+This case is authored, not yet observed passing. The scoped adapter and target
+selection are test-only; serialization is not durable runtime recovery. Neither
+new provider is given an authenticated qualification or eviction receipt: archive
+jobs deliberately remain incomplete at the separate assessor boundary, and both
+safety copies remain intact. Only the already-qualified legacy generation is
+evicted and cold-restored. This is not new-provider cold-restore, public-sharing,
+physical storage, configuration or production-support qualification.
+
 ## Product write-ahead checkpoint
 
 `Storage::post` now consumes a product-owned `WriteJournal` through the shared

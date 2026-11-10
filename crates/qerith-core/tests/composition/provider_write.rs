@@ -644,6 +644,9 @@ async fn provider_write_rejects_changed_staging_before_part_io() {
     }
 }
 
+#[path = "provider_mixed.rs"]
+mod mixed;
+
 #[derive(Clone, Copy)]
 enum WriteFault {
     None,
