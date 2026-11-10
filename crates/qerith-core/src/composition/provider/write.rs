@@ -338,9 +338,14 @@ pub(super) async fn post(
         control
             .check(&journal.intent.target, a::Action::Write)
             .map_err(io)?;
-        let bytes = cache
-            .archive_write_part(work, &journal.intent.parts[index])
-            .await?;
+        let bytes = interrupt(
+            control,
+            &journal.intent.target,
+            a::Action::Write,
+            cache.archive_write_part(work, &journal.intent.parts[index]),
+            io,
+        )
+        .await?;
         journal.intent.check_part(index, &bytes).map_err(io)?;
         control
             .check(&journal.intent.target, a::Action::Write)

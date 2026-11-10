@@ -67,6 +67,9 @@ impl ArchiveCache for Io {
         part: &a::Part,
     ) -> std::result::Result<Vec<u8>, IoError> {
         self.check(work)?;
+        if self.provider_cache_stall == Some("write-part") {
+            return std::future::pending().await;
+        }
         let location = work.retained_location.as_ref().ok_or(IoError::Integrity)?;
         let bytes = self.copies.get(location).ok_or(IoError::Integrity)?;
         let start = usize::try_from(part.offset).map_err(|_| IoError::Integrity)?;

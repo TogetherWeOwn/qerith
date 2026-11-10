@@ -304,6 +304,99 @@ async fn provider_uncontrolled_write_futures_are_interrupted_without_settling_ef
 }
 
 #[tokio::test]
+async fn provider_stalled_retained_part_read_wakes_and_resumes_the_original_session() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for stop in [
+            a::Failure::Denied,
+            a::Failure::Cancelled,
+            a::Failure::Deadline,
+        ] {
+            let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
+            storage.cache.provider_cache_stall = Some("write-part");
+            let events = storage.control.events.clone();
+            tokio::time::pause();
+            {
+                let run = attempt(&mut c, &mut storage, job, &auth, &time);
+                let mut run = std::pin::pin!(run);
+                let wakes = Arc::new(Wakes::default());
+                let waker = wakes.clone().into();
+                let mut cx = Context::from_waker(&waker);
+                assert!(run.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+                match stop {
+                    a::Failure::Denied => {
+                        auth.denied.borrow_mut().insert("object:Write".into());
+                        events.send_replace(None);
+                    }
+                    a::Failure::Cancelled => {
+                        events.send_replace(Some(stop));
+                    }
+                    a::Failure::Deadline => {
+                        tokio::time::advance(Duration::from_secs(31)).await;
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    wakes.0.load(Ordering::SeqCst) > 0,
+                    "missing retained-read wake"
+                );
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), run)
+                        .await
+                        .expect("stalled retained read must be interrupted"),
+                    Err(Failure::Io(IoError::Cancelled))
+                );
+            }
+            tokio::time::resume();
+            let saved = storage.cache.provider_write.as_ref().unwrap().clone();
+            let WritePhase::Ready { session, receipts } = &saved.phase else {
+                panic!("no remote part was issued");
+            };
+            assert!(receipts.is_empty());
+            assert_eq!(writer(&storage, backend).session.as_ref(), Some(session));
+            assert_eq!(writer(&storage, backend).calls, ["begin"]);
+            assert!(storage.cache.provider_record.is_none());
+            assert_retained(&c, &storage, job, backend);
+
+            reconnect(&mut storage);
+            auth.denied.borrow_mut().clear();
+            events.send_replace(None);
+            storage.control.deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            storage.cache.provider_cache_stall = None;
+            time.0.set(13);
+            assert_eq!(
+                attempt(&mut c, &mut storage, job, &auth, &time).await,
+                Err(Failure::Io(IoError::RepairUnavailable))
+            );
+            assert_eq!(writer(&storage, backend).calls, ["begin", "part", "commit"]);
+            assert_eq!(writer(&storage, backend).session.as_ref(), Some(session));
+            assert_eq!(
+                storage.cache.provider_record.as_ref().unwrap().intent(),
+                saved.intent
+            );
+            assert_retained(&c, &storage, job, backend);
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_write_scope_and_saved_session_binding_fail_before_effects() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         for field in 0..5 {

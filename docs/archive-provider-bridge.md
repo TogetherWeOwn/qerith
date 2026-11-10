@@ -430,8 +430,13 @@ Two generated tests cover 28 backend/inconsistency scenarios across trusted rest
 entry points and the actual product job, asserting no provider/legacy I/O, cache
 allocation, publication or journal/record mutation. Matching serialized verified
 journals restore through the product job with Write revoked and Restore retained,
-using only their recorded backend. These additions are authored, not yet observed
-passing. Reference checkpoint serialization is not durable process restart.
+using only their recorded backend. These additions passed on head
+`15c40b5ad6991e8a244208ad786ead3bf3cdcf6f`, Actions run `42774573486`,
+native job `129689963096`: all 124 feature-on composition tests passed. Default
+native/Clippy, wasm/MSRV/deny/ci-ok, synthetic clients (job `129689962930`),
+CodeQL run `42774568021` and PR standards run `42774573409` passed. This is
+previous-head evidence, not acceptance of subsequent changes or independent
+review. Reference checkpoint serialization is not durable process restart.
 
 Source tracing confirms the remaining qualification boundary is structural:
 `Storage::verify_archive`, `Qualifier` and the catalogue's evidence/completion and
@@ -441,6 +446,27 @@ and a consistent `Verified` journal establish none of those qualifications and
 cannot substitute a backend-specific S3 durability/readability decision. This
 change preserves the fail-closed qualifier and every retained safety copy; it
 does not complete S3 archival/catalogue integration or relax eviction.
+
+## Retained write-part invocation checkpoint
+
+Before sending each provider part, the bridge now races the retained cache read
+against the same trusted Write-authority, cancellation and deadline event source.
+An unresponsive cache cannot suspend this invocation indefinitely after a control
+event. The existing part hash and post-read authority checks remain mandatory.
+No part has been issued at this point, so interruption retains the original Ready
+session and saved receipts; it is not uncertainty about a new remote part and
+does not authorize begin/reallocation, abort or safety-copy deletion.
+
+One generated product ingest/job test covers both backends across policy
+revocation, cancellation and actual deadline-timer wakes during a permanently
+pending retained read. It asserts a registered-task wake, no part/commit/fallback,
+retained session/safety bytes, then serialized checkpoint recovery and completion
+of the same session after reauthorization without another begin. Six scenarios
+are authored, not yet observed passing. The job still withholds archive
+qualification after remote readback. No physical cache settlement, durable
+restart, global lifecycle or backend-specific durability claim is made. Journal
+persistence itself still needs a bounded durable runtime implementation; this
+read guard is not a transaction-cancellation or CAS-settlement mechanism.
 
 ## Dependency supply-chain record
 
