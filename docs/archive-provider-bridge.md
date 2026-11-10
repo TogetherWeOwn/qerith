@@ -14,13 +14,13 @@ checkpoint, **not an accepted production pin**. Shared exact-head Actions run
 HEAD and completed-reconciliation uncertainty corrections. Shared native
 Crypto/Security/QA acceptance is still a separate gate.
 
-Product head `eb12fdfea98ffdaaa8113cbfddb2bfe634d325a2` passed all five generated
-restore/control tests, all eight journaled-write tests and all 103 feature-on
-composition tests in Actions run `42746036318`, job `129598240848`. Native default
+Product head `2735e171822b6d25a1f9c8d7e832561445121afe` passed all five generated
+restore/control tests, all eleven journaled-write tests and all 106 feature-on
+composition tests in Actions run `42748313369`, job `129605634261`. Native default
 tests/Clippy, wasm, MSRV, cargo-deny and ci-ok passed. The pinned synthetic-client
-job `129598240888` also passed after consuming accepted client runner source from
-PR #17; CodeQL run `42746031713` and PR standards run `42746035616` passed.
-These receipts verify that head, not subsequent multipart test additions or
+job `129605634182` also passed after consuming accepted client runner source from
+PR #17; CodeQL run `42748308579` and PR standards run `42748313362` passed.
+These receipts verify that head, not subsequent client-path additions or
 product/provider durability. Every new consumer head still needs exact-head
 Actions and the applicable independent review gates; the PR remains incomplete.
 
@@ -115,18 +115,32 @@ actual product `ingest` and `run_once` paths for both backends: successful remot
 observation without fabricated qualification; lost commit plus serialized journal
 reconnect; lost begin/part; bad proof and failed local commit; early/late Write
 revocation with Read retained; stalled-part cancellation; scope/session/receipt
-binding rejection; and changed retained staging rejection. The first eight passed
+binding rejection; and changed retained staging rejection. All eleven passed
 on the head cited above.
 
-Three new tests add two-part recovery: a saved first receipt resumes without
+Three tests add two-part recovery: a saved first receipt resumes without
 reallocating or replaying that part; an uncertain second part cannot progress
 unless the transport explicitly reports settled absence, after which only the
 original session/intent/parts are retried; and an invalid returned receipt cannot
 be checkpointed or reach commit. The fake validates the full original session,
-exact retained part bytes and every commit receipt. The three additions are
-authored, not yet observed passing. Serialized journal reconnection and a fake
-settlement flag are not durable process restart, physical settlement or safe-abort
+exact retained part bytes and every commit receipt. The three additions passed
+on the head cited above. Serialized journal reconnection and a fake settlement
+flag are not durable process restart, physical settlement or safe-abort
 qualification. All cases retain safety bytes and withhold archive completion.
+
+## S3 client read-path checkpoint
+
+Two generated tests in `tests/composition/provider_clients.rs` carry restored
+NNTP/S3 bytes through `run_once`, a coalesced restore for independently authorized
+same-tenant catalogue references and the existing `s3::archive::Adapter`. They
+assert exact full ciphertext, inclusive/suffix ranges, HEAD, validators and invalid
+range outcomes, then cross-tenant denial, mid-cache-I/O revocation, alias deletion
+and continued source isolation. Only the selected fake provider is read once;
+the client adapter receives only the qualified whole-generation cache, with no
+provider transport or capacity fallback available. Catalogue links are not a
+public-share implementation or proof of vault/key compatibility. These two tests
+are authored, not yet observed passing; no HTTP/SigV4, live-provider, durable
+catalogue, S3 archival completion or eviction qualification is claimed.
 
 ## Explicitly unfinished boundaries
 

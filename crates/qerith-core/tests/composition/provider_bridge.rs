@@ -3,6 +3,8 @@ use super::*;
 use a::{Control, Sink};
 use qerith_core::composition::provider::{ArchiveCache, ProviderStorage, WriteJournal, WritePhase};
 
+#[path = "provider_clients.rs"]
+mod clients;
 #[path = "provider_write.rs"]
 mod write;
 use velmora::archive::v1 as a;
