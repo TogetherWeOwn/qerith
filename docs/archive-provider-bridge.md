@@ -115,7 +115,12 @@ Actions run `42826864569`, native job `129866350593` (147 passed, 1 failed):
 the post-worker storage check looked up an outbox event already retired by terminal
 assessor refusal. The test now captures original work before running the jobs and
 asserts both FailedUnrecoverable state and retired notifications, retaining all
-safety-copy and routing assertions. The correction is not yet observed passing.
+safety-copy and routing assertions. The repaired head
+`f8cc88a23ed20da9ffae3783a393c748436e81b5` passed this case and all 148
+feature-on composition cases in Actions run `42829489111`, native job
+`129875489705`. Default native/Clippy, synthetic clients (`129875490405`),
+WASM/MSRV/deny/ci-ok, CodeQL run `42829478987` and PR standards run `42829489283`
+passed. This is exact-head synthetic evidence, not independent acceptance.
 The scoped adapter and target selection are test-only; serialization is not durable
 runtime recovery. Neither
 new provider is given an authenticated qualification or eviction receipt: archive
@@ -835,6 +840,34 @@ remaining fixture/runtime boundary is not weakened to claim parity. Shared
 provider acceptance, actual assessors, durable inventory/runtime and physical
 settlement remain unshipped. No supplier activation, charged fallback, safety-copy
 eviction or new supported-backend claim follows.
+
+## Shared S3 adapter consumer checkpoint
+
+Two generated tests in `tests/composition/provider_shared_s3.rs` connect the
+actual product ingest/outbox worker and journal/cache ports to the pinned
+`velmora::archive::v1::s3::Provider<SafeTransport>`, rather than returning a
+fabricated `WriteProof` from the generic provider fake. The injected transport
+is entirely in memory and asserts exact config, intent, original upload ID,
+part bytes and ordered completion receipts. It provides no full-object provider
+checksum, so the shared adapter must perform exact-version byte readback before
+the product can install its Verified record and retained-cache binding.
+
+A positive case authors the full worker path through remote completion,
+readback, S3 observation and default independent-assessor refusal. Three fault
+scenarios author lost completion acknowledgement, a mismatched GET version and
+corrupt readback. The remote object already exists, but the product must retain
+EffectPending and safety bytes without installing a record. Invalid readback
+must remain uncertain through original-session reconciliation; exact readback
+then installs the original immutable version without replaying begin, part or
+complete. Neither backend fallback nor abort is permitted. These assertions are
+authored, not yet observed passing.
+
+This is executable shared-adapter consumer coverage, not an implementation of a
+safe network transport, signer, durable remote journal, physical settlement,
+authenticated media readability or supplier durability. Default qualification
+still refuses archive completion; all safety bytes remain. It supplies no S3
+cold-miss/eviction, actual NNTP adapter or production-support receipt. No runtime,
+crypto, dependency, workflow or eviction-policy change is included.
 
 ## Dependency supply-chain record
 

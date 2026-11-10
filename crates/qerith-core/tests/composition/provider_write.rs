@@ -646,6 +646,8 @@ async fn provider_write_rejects_changed_staging_before_part_io() {
 
 #[path = "provider_mixed.rs"]
 mod mixed;
+#[path = "provider_shared_s3.rs"]
+mod shared_s3;
 
 #[derive(Clone, Copy)]
 enum WriteFault {
