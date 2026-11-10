@@ -138,9 +138,17 @@ range outcomes, then cross-tenant denial, mid-cache-I/O revocation, alias deleti
 and continued source isolation. Only the selected fake provider is read once;
 the client adapter receives only the qualified whole-generation cache, with no
 provider transport or capacity fallback available. Catalogue links are not a
-public-share implementation or proof of vault/key compatibility. These two tests
-are authored, not yet observed passing; no HTTP/SigV4, live-provider, durable
-catalogue, S3 archival completion or eviction qualification is claimed.
+public-share implementation or proof of vault/key compatibility. Both tests passed
+on head `f4c0ce5fa3b4e6124d81cf014da7f63504cec1ee` in Actions run `42753005672`,
+native job `129620794203`. That job still FAILED overall: 108/109 feature-on
+composition tests passed; the native-profile guard failed on an incorrect
+hard-coded validator expectation before reaching GET/HEAD. The native service
+assigns an upload-bound validator, not the input ciphertext identifier. The guard
+now snapshots the actual committed metadata, checks that its validator is
+unquoted and that the alias matches its source, and retains the post-read
+no-mutation/no-byte-I/O assertions. This correction is authored, not observed
+passing. No HTTP/SigV4, live-provider, durable catalogue, S3 archival completion or
+eviction qualification is claimed.
 
 ## Explicitly unfinished boundaries
 

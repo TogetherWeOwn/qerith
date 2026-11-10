@@ -348,7 +348,19 @@ async fn provider_restored_native_profile_is_not_silently_rewritten_for_s3_clien
             .lookup(TENANT, "bucket/object", 60, session.auth.as_ref())
             .unwrap()
             .metadata;
-        assert_eq!(metadata.validator, "opaque_C");
+        assert!(
+            !metadata.validator.is_empty() && !metadata.validator.starts_with('"'),
+            "native service commits an unquoted validator, not an S3 wire ETag"
+        );
+        assert_eq!(
+            reader
+                .catalogue
+                .lookup(TENANT, "object", 60, session.auth.as_ref())
+                .unwrap()
+                .metadata,
+            metadata,
+            "the alias retains the native source's committed metadata"
+        );
         let mut cache = Cache {
             io: &io,
             calls: 0,
