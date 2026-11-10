@@ -317,6 +317,188 @@ async fn provider_lost_revoked_or_interrupted_abort_retains_pending_journal_with
     }
 }
 
+struct AbortControl {
+    inner: Current,
+    revoked: tokio::sync::watch::Sender<bool>,
+}
+impl Control for AbortControl {
+    fn check(&self, target: &a::Target, action: a::Action) -> a::Result<()> {
+        if matches!(action, a::Action::AbortIncomplete) && *self.revoked.borrow() {
+            return Err(a::Failure::Denied);
+        }
+        self.inner.check(target, action)
+    }
+    async fn cancelled<'a>(&'a self, target: &'a a::Target, action: a::Action) -> a::Failure {
+        if !matches!(action, a::Action::AbortIncomplete) {
+            return self.inner.cancelled(target, action).await;
+        }
+        let mut revoked = self.revoked.subscribe();
+        loop {
+            if let Err(error) = self.check(target, action) {
+                return error;
+            }
+            tokio::select! {
+                error = self.inner.cancelled(target, action) => return error,
+                result = revoked.changed() => {
+                    if result.is_err() {
+                        return a::Failure::Denied;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_abort_reconciliation_observes_independent_abort_revocation() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for committed in [false, true] {
+            for stalled in [false, true] {
+                let fault = if committed {
+                    WriteFault::Commit
+                } else {
+                    WriteFault::Part
+                };
+                let (mut c, mut storage, job, auth, time) = staged(backend, fault).await;
+                assert_eq!(
+                    attempt(&mut c, &mut storage, job, &auth, &time).await,
+                    Err(Failure::Io(IoError::Uncertain))
+                );
+                let work = work(&c, job);
+                let original_session = writer(&storage, backend).session.clone().unwrap();
+                let copies = storage.cache.copies.clone();
+                let revoked = tokio::sync::watch::channel(false).0;
+                let selected = writer_mut(&mut storage, backend);
+                selected.settled_absent = !committed;
+                selected.abort_revocation = Some(revoked.clone());
+                selected.fault = if stalled {
+                    WriteFault::StallReconcile
+                } else {
+                    WriteFault::ReconcileAbortRevoke
+                };
+                let ProviderStorage {
+                    cache,
+                    nntp,
+                    s3,
+                    control,
+                } = storage;
+                let mut guarded = ProviderStorage {
+                    cache,
+                    nntp,
+                    s3,
+                    control: AbortControl {
+                        inner: control,
+                        revoked: revoked.clone(),
+                    },
+                };
+                let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+                let waker = Waker::from(wakes.clone());
+                let mut cx = Context::from_waker(&waker);
+                let mut future = Box::pin(guarded.abort_write(&work));
+                if stalled {
+                    assert!(std::future::Future::poll(future.as_mut(), &mut cx).is_pending());
+                    let before = wakes.0.load(Ordering::SeqCst);
+                    revoked.send_replace(true);
+                    assert!(wakes.0.load(Ordering::SeqCst) > before);
+                }
+                assert_eq!(
+                    std::future::Future::poll(future.as_mut(), &mut cx),
+                    Poll::Ready(Err(IoError::Uncertain)),
+                    "{backend:?}/committed={committed}/stalled={stalled}"
+                );
+                drop(future);
+                assert_eq!(
+                    guarded
+                        .control
+                        .check(&original_session.intent.target, a::Action::Write),
+                    Ok(())
+                );
+                assert_eq!(
+                    guarded.cache.provider_write.as_ref().unwrap().phase,
+                    WritePhase::AbortRequested {
+                        session: original_session.clone()
+                    }
+                );
+                assert!(guarded.cache.provider_record.is_none());
+                assert_eq!(guarded.cache.copies, copies);
+                // Reauthorize only this abort, then settle the same original
+                // session. No allocation, write replay or safety-copy deletion.
+                revoked.send_replace(false);
+                let ProviderStorage {
+                    cache,
+                    nntp,
+                    s3,
+                    control,
+                } = guarded;
+                storage = ProviderStorage {
+                    cache,
+                    nntp,
+                    s3,
+                    control: control.inner,
+                };
+                writer_mut(&mut storage, backend).fault = WriteFault::None;
+                reconnect(&mut storage);
+                assert_eq!(
+                    storage.abort_write(&work).await,
+                    Ok(if committed || backend == a::Backend::Nntp {
+                        a::AbortOutcome::Irreversible
+                    } else {
+                        a::AbortOutcome::IncompleteRemoved
+                    })
+                );
+                let selected = writer(&storage, backend);
+                assert_eq!(
+                    selected
+                        .calls
+                        .iter()
+                        .filter(|&&call| call == "begin")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    selected
+                        .calls
+                        .iter()
+                        .filter(|&&call| call == "part")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    selected
+                        .calls
+                        .iter()
+                        .filter(|&&call| call == "abort")
+                        .count(),
+                    usize::from(!committed)
+                );
+                if committed {
+                    assert_eq!(
+                        storage.cache.provider_record.as_ref(),
+                        selected.proof.as_ref().map(|p| &p.record)
+                    );
+                }
+                assert_eq!(storage.cache.copies, copies);
+                assert_retained(&c, &storage, job, backend);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn provider_abort_checks_scope_session_and_durable_terminal_acknowledgement() {
     let backend = a::Backend::S3;

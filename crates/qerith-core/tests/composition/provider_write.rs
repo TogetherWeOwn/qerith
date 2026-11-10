@@ -664,6 +664,7 @@ enum WriteFault {
     AbortLost,
     AbortRevoke,
     AbortStall,
+    ReconcileAbortRevoke,
 }
 struct Writer {
     inner: Provider,
@@ -673,6 +674,7 @@ struct Writer {
     session: Option<a::WriteSession>,
     settled_absent: bool,
     proof: Option<a::WriteProof>,
+    abort_revocation: Option<tokio::sync::watch::Sender<bool>>,
 }
 impl a::ArchiveProvider for Writer {
     fn capabilities(&self) -> a::Capabilities {
@@ -865,6 +867,9 @@ impl a::ArchiveProvider for Writer {
         if matches!(self.fault, WriteFault::StallReconcile) {
             return std::future::pending().await;
         }
+        if matches!(self.fault, WriteFault::ReconcileAbortRevoke) {
+            self.abort_revocation.as_ref().unwrap().send_replace(true);
+        }
         if self.settled_absent {
             return Ok(a::Reconciled::Absent);
         }
@@ -914,6 +919,7 @@ fn write_storage(
         session: None,
         settled_absent: false,
         proof: None,
+        abort_revocation: None,
     };
     ProviderStorage {
         cache,

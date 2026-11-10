@@ -216,14 +216,25 @@ pub(super) async fn abort(
             }
             // Reconcile the original request before touching its incomplete
             // session. Object absence after a lost abort cannot prove removal.
-            match invoke(
+            let reconciled = invoke(
                 control,
                 &journal.intent.target,
-                a::Action::Write,
-                provider.reconcile(&session, control),
+                a::Action::AbortIncomplete,
+                invoke(
+                    control,
+                    &journal.intent.target,
+                    a::Action::Write,
+                    provider.reconcile(&session, control),
+                ),
             )
-            .await
-            {
+            .await;
+            // Reconciliation requires Write, but belongs to this explicit abort
+            // invocation. Abort-only revocation must interrupt it too, including
+            // a policy change during a ready acknowledgement before local CAS.
+            control
+                .check(&journal.intent.target, a::Action::AbortIncomplete)
+                .map_err(|_| IoError::Uncertain)?;
+            match reconciled {
                 Ok(a::Reconciled::Absent) => session,
                 Ok(a::Reconciled::Verified(proof)) => {
                     verified(cache, control, work, &mut journal, *proof).await?;

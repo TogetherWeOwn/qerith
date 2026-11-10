@@ -67,10 +67,14 @@ staging. The shared zero-byte range loop performs no fetch, so a successful rang
 and the empty SHA-256 cannot establish that the remote object exists. Missing or
 changed identity and same-poll Read revocation refuse staging; a stalled stat is
 interruptible through the same trusted control. A verified warm completion needs
-no new provider access. Three generated storage-boundary tests author these cases
-for both backends; execution is pending. They use empty opaque ciphertext and do
-not qualify an empty encrypted media container, catalogue publication, physical
-provider storage or S3 safety-copy eviction. Nonempty restores retain their full
+no new provider access. Three generated storage-boundary tests cover these cases
+for both backends and passed on head `368128576a20554a826c57feea05cdf7555be60f`,
+Actions run `42812414078`, native job `129816906345`, with all 145 feature-on
+composition cases. Default native/Clippy, synthetic clients (`129816906340`),
+WASM/MSRV/deny/ci-ok, CodeQL run `42812405745` and PR standards run `42812414142`
+passed. These are exact-head synthetic receipts, not independent acceptance.
+They use empty opaque ciphertext and do not qualify an empty encrypted media
+container, catalogue publication, physical provider storage or S3 safety-copy eviction. Nonempty restores retain their full
 bounded authenticated-ciphertext digest path.
 
 Trusted `Control` and the injected transports must enforce current authority,
@@ -442,6 +446,27 @@ independent review clearance. All cases retain safety bytes and withhold archive
 completion. No live provider, durable
 restart, public cancellation, physical settlement, lease-release or safety-copy
 eviction qualification is claimed.
+
+## Abort-reconciliation authority checkpoint
+
+Reconciliation of an uncertain write still requires the canonical Write control,
+but when invoked by explicit abort it now also registers the AbortIncomplete
+control wake. A separate abort-policy revocation must interrupt a stalled
+reconciliation even while Write remains authorized. Abort authority is rechecked
+after a ready response, before either incomplete abort or Verified journal
+persistence. Interrupted or revoked reconciliation remains Uncertain with the
+original AbortRequested checkpoint; it does not imply absence or remote removal.
+
+A generated test in `tests/composition/provider_abort.rs` authors eight scenarios
+across both backends, lost-part versus lost-commit state and permanently stalled
+versus same-poll reconciliation. Its independent abort-only policy channel leaves
+Write authorized, requires an actual task wake and immediate uncertainty without
+using a timeout to mask missing cancellation, then reauthorizes and reconciles the
+same original session. Committed objects remain irreversible; incomplete outcomes
+retain their backend distinction and every safety byte. No new begin, part replay
+or abort of a committed object is permitted. Assertions are authored, not yet
+observed passing; no pre-fix execution is claimed. This does not wire public
+cancellation, settle physical requests or implement durable runtime recovery.
 
 ## Bounded restore-stream checkpoint
 
