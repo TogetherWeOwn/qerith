@@ -169,6 +169,30 @@ async fn stalled_provider_cache_calls_wake_without_publication_or_completion_los
                     storage.nntp.fault = Fault::Missing;
                     storage.s3.fault = Fault::Missing;
                     time.0.set(61);
+                    if phase == "complete" {
+                        let waiting = service.catalogue().job(TENANT, restore).unwrap();
+                        assert_eq!(waiting.state, JobState::RetryWait { not_before: 62 });
+                        assert_eq!(
+                            run_once(
+                                service.catalogue_mut(),
+                                &mut storage,
+                                TENANT,
+                                work.event,
+                                &limits,
+                                &time,
+                                &rules,
+                                &MockQualification,
+                                auth.as_ref(),
+                            )
+                            .await,
+                            Err(Failure::Catalogue(Error::Conflict))
+                        );
+                        assert_eq!(service.catalogue().job(TENANT, restore).unwrap(), waiting);
+                        assert_eq!(storage.nntp.reads + storage.s3.reads, 1);
+                        assert_eq!(storage.cache.copies, copies);
+                        assert_eq!(storage.cache.completed, inventory);
+                        time.0.set(62);
+                    }
                     run_once(
                         service.catalogue_mut(),
                         &mut storage,

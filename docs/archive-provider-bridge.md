@@ -386,9 +386,17 @@ The first three use the actual product restore job; winner verification uses its
 trusted storage entry point. Completed copies survive interruption and are then
 published through `run_once` with both providers unavailable, without refetch or
 inventory replacement. A ready-completion regression revokes authority during the
-same poll and requires uncertainty with the completed copy retained. The tests
-are authored, not yet observed passing; no pre-fix execution is claimed. Synthetic
-NNTP setup eviction remains unrelated to S3 archival/eviction qualification.
+same poll and requires uncertainty with the completed copy retained.
+
+Head `1eb59465c45bb3c87796c87bc7f4c5cdf05af1d4` failed native Actions run
+`42768537800`, job `129670655373`: 121 composition cases passed and the
+stalled-cache test failed during recovery. It retried at logical time 61 before
+the existing retry policy's `not_before: 62`; the catalogue correctly rejected
+the early claim with `Conflict`. The same-poll authority test passed. The repair
+asserts early-claim refusal with unchanged job/checkpoint, completed inventory and
+provider read count, then retries at 62. It changes no runtime retry policy.
+The corrected scenarios are authored, not yet observed passing. Synthetic NNTP
+setup eviction remains unrelated to S3 archival/eviction qualification.
 
 ## Dependency supply-chain record
 
