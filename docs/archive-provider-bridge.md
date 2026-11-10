@@ -130,7 +130,7 @@ qualification. All cases retain safety bytes and withhold archive completion.
 
 ## S3 client read-path checkpoint
 
-Two generated tests in `tests/composition/provider_clients.rs` carry restored
+Two generated positive tests in `tests/composition/provider_clients.rs` carry restored
 NNTP/S3 bytes through `run_once`, a coalesced restore for independently authorized
 same-tenant catalogue references and the existing `s3::archive::Adapter`. They
 assert exact full ciphertext, inclusive/suffix ranges, HEAD, validators and invalid
@@ -139,16 +139,14 @@ and continued source isolation. Only the selected fake provider is read once;
 the client adapter receives only the qualified whole-generation cache, with no
 provider transport or capacity fallback available. Catalogue links are not a
 public-share implementation or proof of vault/key compatibility. Both tests passed
-on head `f4c0ce5fa3b4e6124d81cf014da7f63504cec1ee` in Actions run `42753005672`,
-native job `129620794203`. That job still FAILED overall: 108/109 feature-on
-composition tests passed; the native-profile guard failed on an incorrect
-hard-coded validator expectation before reaching GET/HEAD. The native service
-assigns an upload-bound validator, not the input ciphertext identifier. The guard
-now snapshots the actual committed metadata, checks that its validator is
-unquoted and that the alias matches its source, and retains the post-read
-no-mutation/no-byte-I/O assertions. This correction is authored, not observed
-passing. No HTTP/SigV4, live-provider, durable catalogue, S3 archival completion or
-eviction qualification is claimed.
+on head `d8ca1249c8b4eb8c7da11e81cbfe1408ce9e839f` in Actions run `42755882416`,
+native job `129630031119`, along with the corrected native-profile guard. The
+native service assigns an upload-bound validator, not the input ciphertext
+identifier. The guard snapshots the actual committed metadata, checks that its
+validator is unquoted and that the alias matches its source, and retains the
+post-read no-mutation/no-byte-I/O assertions. All 109 feature-on composition
+cases passed on that head. No HTTP/SigV4, live-provider, durable catalogue, S3
+archival completion or eviction qualification is claimed.
 
 ## Explicitly unfinished boundaries
 
@@ -197,6 +195,35 @@ ETag, discard headers or expose native ciphertext under an S3 profile. This is
 fail-closed incompatibility coverage, not cross-profile parity or a supported
 client-visible conversion. Catalogue aliases are not public-share/vault-key
 compatibility receipts.
+
+## Native REST/MCP delivery checkpoint
+
+Head `d8ca1249c8b4eb8c7da11e81cbfe1408ce9e839f` passed all 109 feature-on
+composition cases in Actions run `42755882416`, native job `129630031119`,
+including all three provider-to-S3 read/profile tests. The corrected native
+metadata guard passed. Default native/Clippy, wasm/MSRV/deny/ci-ok and synthetic
+clients (job `129630031470`) passed; CodeQL run `42755878607` and PR standards
+run `42755882628` passed. This is previous-head evidence, not acceptance of
+subsequent additions, a missing review gate or a production pin.
+
+Two new generated cases in `tests/composition/provider_native.rs` extend the
+actual product path for each backend: cold download denial without allocations;
+REST/MCP explicit restore and reference-checkpoint reconnection; shared-provider
+restore job and catalogue publication; then actual native, REST and MCP download
+handles redeemed through `Service::read_download`. The MCP handle is redeemed on
+its own independently projected service, not merely compared with a REST response.
+A second case requires native ranges to retain `InvalidRange` without allocations,
+foreign-tenant and missing-envelope grants to fail before cache I/O, and key
+revocation during I/O to withhold all bytes and prevent a subsequent cache read.
+Cache delivery has no provider transport available and does not delete bytes on
+revocation. These additions are authored, not yet observed passing.
+
+This remains synthetic full-ciphertext service/cache qualification. The setup's
+prior eviction still uses the existing synthetic NNTP proof, never an S3 proof;
+no stored fixtures, supplier calls, new profile, decryption, public share service,
+physical settlement or durable database/runtime is introduced. Native byte
+ranges stay unsupported. Backend-specific proof, durable runtime, bounded cache
+lifecycle and complete upload/share/client parity remain unfinished.
 
 ## Dependency supply-chain record
 
