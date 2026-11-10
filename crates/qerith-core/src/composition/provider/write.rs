@@ -93,15 +93,34 @@ fn validate(work: &Work, journal: &WriteJournal) -> std::result::Result<(), IoEr
 
 async fn save(
     cache: &mut impl ArchiveCache,
+    control: &impl Control,
     work: &Work,
     journal: &mut WriteJournal,
     phase: WritePhase,
 ) -> std::result::Result<(), IoError> {
+    let action = match &phase {
+        WritePhase::AbortRequested { .. }
+        | WritePhase::AbortPending { .. }
+        | WritePhase::Aborted { .. } => a::Action::AbortIncomplete,
+        _ => a::Action::Write,
+    };
     let next = WriteJournal {
         intent: journal.intent.clone(),
         phase,
     };
-    cache.save_archive_write(work, journal, &next).await?;
+    // Dropping a pending CAS does not prove it failed: the runtime must reconcile
+    // its exact original/next checkpoint before retrying any provider effect.
+    interrupt(
+        control,
+        &journal.intent.target,
+        action,
+        cache.save_archive_write(work, journal, &next),
+        |_| IoError::Uncertain,
+    )
+    .await?;
+    control
+        .check(&journal.intent.target, action)
+        .map_err(|_| IoError::Uncertain)?;
     *journal = next;
     Ok(())
 }
@@ -128,6 +147,7 @@ async fn verified(
         .map_err(|_| IoError::Uncertain)?;
     save(
         cache,
+        control,
         work,
         journal,
         WritePhase::Verified {
@@ -153,6 +173,7 @@ pub(super) async fn abort(
         WritePhase::Prepared => {
             save(
                 cache,
+                control,
                 work,
                 &mut journal,
                 WritePhase::Aborted { session: None },
@@ -171,6 +192,7 @@ pub(super) async fn abort(
             if matches!(journal.phase, WritePhase::EffectPending { .. }) {
                 save(
                     cache,
+                    control,
                     work,
                     &mut journal,
                     WritePhase::AbortRequested {
@@ -204,6 +226,7 @@ pub(super) async fn abort(
         .map_err(io)?;
     save(
         cache,
+        control,
         work,
         &mut journal,
         WritePhase::AbortPending {
@@ -227,6 +250,7 @@ pub(super) async fn abort(
         a::AbortOutcome::IncompleteRemoved => {
             save(
                 cache,
+                control,
                 work,
                 &mut journal,
                 WritePhase::Aborted {
@@ -271,7 +295,7 @@ pub(super) async fn post(
         WritePhase::Aborted { .. } => return Err(IoError::Cancelled),
         WritePhase::Verified { .. } => return Ok(()),
         WritePhase::Prepared => {
-            save(cache, work, &mut journal, WritePhase::BeginPending).await?;
+            save(cache, control, work, &mut journal, WritePhase::BeginPending).await?;
             let session = invoke(
                 control,
                 &journal.intent.target,
@@ -285,6 +309,7 @@ pub(super) async fn post(
             }
             save(
                 cache,
+                control,
                 work,
                 &mut journal,
                 WritePhase::Ready {
@@ -312,6 +337,7 @@ pub(super) async fn post(
                     // Reuse the same session and exact parts, not begin/reallocation.
                     save(
                         cache,
+                        control,
                         work,
                         &mut journal,
                         WritePhase::Ready {
@@ -352,6 +378,7 @@ pub(super) async fn post(
             .map_err(io)?;
         save(
             cache,
+            control,
             work,
             &mut journal,
             WritePhase::EffectPending {
@@ -375,6 +402,7 @@ pub(super) async fn post(
         receipts.push(receipt);
         save(
             cache,
+            control,
             work,
             &mut journal,
             WritePhase::Ready {
@@ -390,6 +418,7 @@ pub(super) async fn post(
         .map_err(io)?;
     save(
         cache,
+        control,
         work,
         &mut journal,
         WritePhase::EffectPending {

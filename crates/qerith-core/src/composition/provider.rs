@@ -39,8 +39,10 @@ pub trait ArchiveCache: Storage {
     /// binds the verified retained copy's exact location to its provider cache key.
     /// That binding must resolve for later jobs of this generation, not only the
     /// archive job's inventory. Never acknowledge a non-durable update;
-    /// uncertainty requires original-state reconciliation. The journal retains
-    /// the safety copy, never grants eviction.
+    /// uncertainty requires original-state reconciliation. The invocation may be
+    /// interrupted before acknowledgement; settle the original CAS and expose its
+    /// actual checkpoint before accepting a retry, never infer rollback from drop.
+    /// The journal retains the safety copy, never grants eviction.
     async fn save_archive_write(
         &mut self,
         _work: &Work,

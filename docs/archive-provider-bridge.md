@@ -578,13 +578,43 @@ REST/MCP restore and download authorization, and actual `Service::read_download`
 bytes from the original retained cache copy. No provider refetch, new cache
 allocation or safety-copy eviction is involved. A negative test revokes the bound
 key before the upload worker and requires denial before storage I/O, outbox
-commit or journal mutation for either backend. These additions are authored,
-not yet observed passing. The test helper extraction changes no runtime code.
+commit or journal mutation for either backend. Both additions passed on head
+`63adc0e131b41efac5f8ef064b0b3ee342d6d94d`, Actions run `42792065801`, native job
+`129747718371`: all 133 feature-on composition cases passed. Default native and
+Clippy, WASM/MSRV/deny/ci-ok, synthetic clients (`129747717838`), CodeQL run
+`42792058444` and PR standards run `42792065932` passed. This is exact-head
+synthetic evidence, not independent acceptance. The test helper extraction changes
+no runtime code.
 
 This is not a native wire-upload, HTTP/SigV4 S3 upload, public-share, physical
 provider, durable process restart or production receipt. It does not implement
 runtime assessors, a durable catalogue/cache, global admission/retention or the
 still-prohibited S3 safety-copy eviction/cold boundary.
+
+## Write-journal invocation interruption checkpoint
+
+Every write/abort journal CAS now registers the trusted current-action event and
+deadline before polling persistence. An unresponsive store cannot hold the product
+invocation after revocation, cancellation or deadline. Abort phases require
+`AbortIncomplete`; posting and Verified persistence require Write. Authority is
+rechecked after an acknowledged CAS before the next provider effect. Interrupted
+persistence always returns Uncertain, including when the store committed before
+its acknowledgement stalled. Dropping the future proves neither rollback nor
+absence, and never releases safety bytes or physical leases.
+
+The durable adapter must settle the original CAS and expose its actual checkpoint
+before admitting a retry. This invocation guard does not implement database
+transaction cancellation, fencing, physical settlement or runtime recovery.
+
+One generated product ingest/job test authors 24 scenarios across both backends,
+three actual control wakes and four journal stalls: before/after BeginPending
+persistence and before/after Verified persistence. It requires immediate completion
+on the wake without timeout masking, retained safety bytes and serialized journal
+reconnection. A saved BeginPending remains uncertain without a blind begin; a
+saved Verified resumes without remote effects; an unsaved Verified reconciles the
+original committed session; an unchanged Prepared may perform its first begin.
+These assertions are authored, not yet observed passing. No red-before execution,
+durable process restart, provider qualification or eviction claim is made.
 
 ## Dependency supply-chain record
 

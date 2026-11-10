@@ -50,6 +50,14 @@ impl ArchiveCache for Io {
         if matches!(next.phase, WritePhase::Aborted { .. }) && self.inject == Injection::Uncertain {
             return Err(IoError::Uncertain);
         }
+        let checkpoint = match next.phase {
+            WritePhase::BeginPending => "journal-begin",
+            WritePhase::Verified { .. } => "journal-verified",
+            _ => "journal-other",
+        };
+        if self.provider_cache_stall == Some(checkpoint) {
+            return std::future::pending().await;
+        }
         if let WritePhase::Verified { record } = &next.phase {
             if self.inject == Injection::Uncertain {
                 return Err(IoError::Uncertain);
@@ -63,6 +71,13 @@ impl ArchiveCache for Io {
         // Serialized state is an explicit fake checkpoint, not a durable DB.
         self.provider_write =
             Some(serde_json::from_slice(&serde_json::to_vec(next).unwrap()).unwrap());
+        if matches!(
+            (checkpoint, self.provider_cache_stall),
+            ("journal-begin", Some("journal-begin-saved"))
+                | ("journal-verified", Some("journal-verified-saved"))
+        ) {
+            return std::future::pending().await;
+        }
         Ok(())
     }
     async fn archive_write_part(

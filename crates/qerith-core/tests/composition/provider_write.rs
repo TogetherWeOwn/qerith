@@ -399,6 +399,128 @@ async fn provider_stalled_retained_part_read_wakes_and_resumes_the_original_sess
 }
 
 #[tokio::test]
+async fn provider_journal_stalls_wake_and_reconcile_without_reallocating() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Wake};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for backend in [a::Backend::Nntp, a::Backend::S3] {
+        for phase in [
+            "journal-begin",
+            "journal-begin-saved",
+            "journal-verified",
+            "journal-verified-saved",
+        ] {
+            for stop in [
+                a::Failure::Denied,
+                a::Failure::Cancelled,
+                a::Failure::Deadline,
+            ] {
+                let (mut c, mut storage, job, auth, time) = staged(backend, WriteFault::None).await;
+                storage.cache.provider_cache_stall = Some(phase);
+                let events = storage.control.events.clone();
+                tokio::time::pause();
+                {
+                    let run = attempt(&mut c, &mut storage, job, &auth, &time);
+                    let mut run = std::pin::pin!(run);
+                    let wakes = Arc::new(Wakes::default());
+                    let waker = wakes.clone().into();
+                    let mut cx = Context::from_waker(&waker);
+                    assert!(run.as_mut().poll(&mut cx).is_pending());
+                    match stop {
+                        a::Failure::Denied => {
+                            auth.denied.borrow_mut().insert("object:Write".into());
+                            events.send_replace(None);
+                        }
+                        a::Failure::Cancelled => {
+                            events.send_replace(Some(stop));
+                        }
+                        a::Failure::Deadline => {
+                            tokio::time::advance(Duration::from_secs(31)).await;
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(wakes.0.load(Ordering::SeqCst) > 0, "missing journal wake");
+                    assert_eq!(
+                        run.as_mut().poll(&mut cx),
+                        std::task::Poll::Ready(Err(Failure::Io(IoError::Uncertain))),
+                        "journal persistence must finish on the control wake"
+                    );
+                }
+                tokio::time::resume();
+                let saved = storage.cache.provider_write.as_ref().unwrap().clone();
+                match phase {
+                    "journal-begin" => assert_eq!(saved.phase, WritePhase::Prepared),
+                    "journal-begin-saved" => assert_eq!(saved.phase, WritePhase::BeginPending),
+                    "journal-verified" => {
+                        assert!(matches!(saved.phase, WritePhase::EffectPending { .. }));
+                    }
+                    "journal-verified-saved" => {
+                        assert!(matches!(saved.phase, WritePhase::Verified { .. }));
+                    }
+                    _ => unreachable!(),
+                }
+                let calls = writer(&storage, backend).calls.clone();
+                if phase.starts_with("journal-begin") {
+                    assert!(calls.is_empty());
+                    assert!(storage.cache.provider_record.is_none());
+                } else {
+                    assert_eq!(calls, ["begin", "part", "commit"]);
+                    assert_eq!(
+                        storage.cache.provider_record.is_some(),
+                        phase.ends_with("saved")
+                    );
+                }
+                assert_retained(&c, &storage, job, backend);
+
+                reconnect(&mut storage);
+                auth.denied.borrow_mut().clear();
+                events.send_replace(None);
+                storage.control.deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                storage.cache.provider_cache_stall = None;
+                time.0.set(13);
+                assert_eq!(
+                    attempt(&mut c, &mut storage, job, &auth, &time).await,
+                    Err(Failure::Io(if phase == "journal-begin-saved" {
+                        IoError::Uncertain
+                    } else {
+                        IoError::RepairUnavailable
+                    }))
+                );
+                let expected = match phase {
+                    "journal-begin" => vec!["begin", "part", "commit"],
+                    "journal-verified" => vec!["begin", "part", "commit", "reconcile"],
+                    _ => calls,
+                };
+                assert_eq!(writer(&storage, backend).calls, expected);
+                if phase == "journal-begin-saved" {
+                    assert_eq!(storage.cache.provider_write.as_ref(), Some(&saved));
+                } else {
+                    assert!(matches!(
+                        storage.cache.provider_write.as_ref().unwrap().phase,
+                        WritePhase::Verified { .. }
+                    ));
+                }
+                assert_retained(&c, &storage, job, backend);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn provider_write_scope_and_saved_session_binding_fail_before_effects() {
     for backend in [a::Backend::Nntp, a::Backend::S3] {
         for field in 0..5 {
