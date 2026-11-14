@@ -341,12 +341,15 @@ class FdObservationTests(unittest.TestCase):
                     "test_heartbeat_fd_is_not_inherited_by_workers")
                 with mock.patch("subprocess.Popen", return_value=parent), \
                      mock.patch.object(Path, "read_text", side_effect=["11", "12", "5"]), \
-                     mock.patch("os.readlink", side_effect=failure), \
+                     mock.patch("os.readlink", return_value="pipe:[heartbeat]"), \
+                     mock.patch(__name__ + ".assert_heartbeat_not_inherited",
+                                side_effect=failure) as observe, \
                      mock.patch.object(fixture, "assert_session_drained") as drain, \
                      mock.patch.object(supervisor, "session_groups", return_value=set()):
                     result = unittest.TestResult()
                     fixture.run(result)
                 self.assertEqual(len(result.failures) + len(result.errors), 1)
+                observe.assert_called_once_with(fixture, (11, 12), "pipe:[heartbeat]")
                 parent.kill.assert_called_once()
                 parent.wait.assert_called_once_with(timeout=10)
                 drain.assert_called_once_with(parent)
