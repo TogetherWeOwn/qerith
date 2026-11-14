@@ -1,6 +1,6 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 
 const run = (sql, ...args) => env.DB.prepare(sql).bind(...args).run();
@@ -12,10 +12,13 @@ const insert = (id, parent = null, kind = 'folder', owner = 'alice') => run(
 const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries ORDER BY id'),
   counts: await rows('SELECT * FROM drive_folder_counts ORDER BY folder_id') });
 
-it('upgrades seeded entries and maintains direct counts through mutations', async () => {
+beforeEach(async () => {
   await env.DB.exec(`CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
     CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;
     INSERT INTO test_members VALUES ('alice', 1), ('bob', 1);`);
+});
+
+it('upgrades seeded entries and maintains direct counts through mutations', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0002_private_metadata.sql'));
   await insert('a'); await insert('b'); await insert('nested', 'a');
   await insert('file', 'nested', 'file'); await insert('foreign', null, 'folder', 'bob');
