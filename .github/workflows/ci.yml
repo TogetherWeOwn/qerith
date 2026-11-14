@@ -333,6 +333,20 @@ jobs:
         run: node --import tsx --test tests/xml-parser.test.ts
       - name: Test fail-closed Worker entrypoint
         run: node --import tsx --test tests/worker.test.ts
+      - name: Check types
+        run: npm run check
+      - name: Test
+        run: npm test
+      - name: Build and validate Workers bundle
+        run: |
+          npm run build
+          git diff --exit-code -- src/worker.ts
+          test ! -e .svelte-kit/adapter-wrangler.json
+          test -s .svelte-kit/cloudflare/_worker.js
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
+          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
+      - name: Exercise Workers runtime
+        run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
 
   ci-ok:
     name: ci-ok
