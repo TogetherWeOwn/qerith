@@ -100,6 +100,7 @@ it('rolls back maximum-limb overflow, missing counters and batched failures', as
     expect(await snapshot()).toEqual(before);
   };
   await unchanged(() => run('UPDATE drive_entries SET size_bytes = 3 WHERE id = ?', 'a'));
+  await unchanged(() => run('UPDATE OR IGNORE drive_entries SET size_bytes = 3 WHERE id = ?', 'a'));
   await unchanged(() => file('overflow', 'alice', 1));
   await file('zero', 'alice', 0);
   await run('UPDATE drive_entries SET size_bytes = 1 WHERE id = ?', 'a');

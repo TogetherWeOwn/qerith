@@ -47,4 +47,5 @@ BEGIN
     high = high + NEW.size_bytes / 1000000000 + (low + NEW.size_bytes % 1000000000) / 1000000000,
     low = (low + NEW.size_bytes % 1000000000) % 1000000000
     WHERE owner_id = NEW.owner_id;
+  SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'owner usage overflow or missing') END;
 END;
