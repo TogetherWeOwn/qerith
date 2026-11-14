@@ -174,6 +174,8 @@ def worker_fd_links(pid):
     os.stat(fd_dir)
     if not links:
         raise RuntimeError(f"no inspectable file descriptors for worker {pid}")
+    if supervisor._stat_fields(pid)[0] in ("Z", "X", "x"):
+        raise RuntimeError(f"worker {pid} is dead during file descriptor inspection")
     return links
 
 
@@ -300,6 +302,11 @@ class SupervisedTeardownTests(unittest.TestCase):
 
 
 class FdObservationTests(unittest.TestCase):
+    def setUp(self):
+        fields = mock.patch.object(supervisor, "_stat_fields", return_value=["S"])
+        fields.start()
+        self.addCleanup(fields.stop)
+
     @mock.patch("os.stat")
     @mock.patch("os.readlink", side_effect=[FileNotFoundError(), "pipe:[other]"])
     @mock.patch("os.listdir", return_value=["3", "4"])
@@ -318,6 +325,14 @@ class FdObservationTests(unittest.TestCase):
     @mock.patch("os.listdir", return_value=["3"])
     def test_empty_scan_fails(self, _list, _read, _stat):
         with self.assertRaisesRegex(RuntimeError, "no inspectable"):
+            worker_fd_links(123)
+
+    @mock.patch.object(supervisor, "_stat_fields", return_value=["Z"])
+    @mock.patch("os.stat")
+    @mock.patch("os.readlink", side_effect=["pipe:[other]", FileNotFoundError()])
+    @mock.patch("os.listdir", return_value=["3", "4"])
+    def test_worker_dies_during_partial_scan(self, _list, _read, _stat, _fields):
+        with self.assertRaisesRegex(RuntimeError, "worker 123.*dead"):
             worker_fd_links(123)
 
     @mock.patch("os.listdir", side_effect=PermissionError())
