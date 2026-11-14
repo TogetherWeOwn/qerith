@@ -31,9 +31,10 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
   for (const [width, height] of [[1280, 800], [390, 844]]) {
-    const page = await browser.newPage({ viewport: { width, height }, serviceWorkers: 'block' });
-    await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    await page.routeWebSocket('**/*', socket => socket.close());
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
     await page.goto(origin, { waitUntil: 'networkidle' });
     await waitForFixture(page);
     await page.screenshot({ path: resolve(output, `${width}x${height}.png`) });
@@ -44,9 +45,9 @@ try {
     await writeFile(resolve(output, `axe-${width}x${height}.json`), JSON.stringify(results, null, 2));
     assert.equal(results.violations.length, 0, `axe violations at ${width}x${height}`);
     const keyboard = await exerciseKeyboard(page);
-    assert(keyboard && keyboard.length, 'Keyboard evidence is required');
+    assert(keyboard && typeof keyboard === 'object' && Object.keys(keyboard).length, 'Keyboard evidence is required');
     await writeFile(resolve(output, `keyboard-${width}x${height}.json`), JSON.stringify(keyboard, null, 2));
-    await page.close();
+    await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...[1280, 390].flatMap((width, i) => {

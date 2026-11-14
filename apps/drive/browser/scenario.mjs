@@ -13,5 +13,5 @@ export async function exerciseKeyboard(page) {
   await page.keyboard.press('Enter');
   const status = await page.getByRole('status').textContent();
   assert.equal(status, 'Activated');
-  return [{ key: 'Tab', focused }, { key: 'Enter', status }];
+  return { tab: { focused }, enter: { status } };
 }

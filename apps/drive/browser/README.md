@@ -19,6 +19,8 @@ WCAG 2/2.1 A/AA and 2.2 AA JSON reports, and keyboard JSON for 1280x800 and
 390x844. Missing files, head mismatch, axe violations and scenario failures fail
 the job. Axe `incomplete` items need human review; a passing automated scan is
 not a complete accessibility audit. Evidence is uploaded only after success.
+Only the clean Actions checkout provides exact-head evidence; local runs can
+include uncommitted changes and must not be treated as commit provenance.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended
