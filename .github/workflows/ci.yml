@@ -270,9 +270,20 @@ jobs:
             *) exit 1 ;;
           esac
 
+  drive-lock-verifier:
+    name: drive lock verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, drive-lock-verifier]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
