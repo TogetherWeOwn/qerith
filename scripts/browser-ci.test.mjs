@@ -42,9 +42,20 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     const files = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
       [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
     await assert.rejects(verifyEvidence(dir, head));
-    for (const file of files) await writeFile(join(dir, file), file === 'head.txt' ? head : 'x');
+    for (const file of files) {
+      const content = file === 'head.txt' ? head : file.endsWith('.png')
+        ? Buffer.from('89504e470d0a1a0a', 'hex') : file.startsWith('axe-')
+          ? '{"violations":[]}' : '{"tab":true}';
+      await writeFile(join(dir, file), content);
+    }
     await verifyEvidence(dir, head);
     await assert.rejects(verifyEvidence(dir, base), /does not match/);
+    await writeFile(join(dir, 'axe-1280x800.json'), '{"violations":[{}]}');
+    await assert.rejects(verifyEvidence(dir, head), /Invalid axe/);
+    await writeFile(join(dir, 'axe-1280x800.json'), '{"violations":[]}');
+    await writeFile(join(dir, 'keyboard-1280x800.json'), '{}');
+    await assert.rejects(verifyEvidence(dir, head), /Invalid axe/);
+    await writeFile(join(dir, 'keyboard-1280x800.json'), '{"tab":true}');
     await writeFile(join(dir, '390x844.png'), '');
     await assert.rejects(verifyEvidence(dir, head), /Empty evidence/);
   } finally {

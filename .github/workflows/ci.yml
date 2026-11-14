@@ -445,7 +445,12 @@ jobs:
         env:
           DRIVE_BROWSER_HEAD: ${{ steps.browser-source.outputs.tested }}
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
-        run: npm test --prefix apps/drive/browser
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          npm test --prefix apps/drive/browser
+          git diff --exit-code
+          git diff --cached --exit-code
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
@@ -454,7 +459,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TESTED_SHA"
-          node ../integration/scripts/browser-evidence.mjs
+          git -C ../integration show "$SNAPSHOT_SHA:scripts/browser-evidence.mjs" > "$RUNNER_TEMP/browser-evidence.mjs"
+          node "$RUNNER_TEMP/browser-evidence.mjs"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: drive-browser-${{ github.event.pull_request.head.sha || github.sha }}
