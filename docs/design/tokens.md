@@ -52,12 +52,12 @@ A hairline is never the only way to find a control or read a state.
 
 | Token | Value | Use |
 |---|---|---|
-| `color.accent.default` | `#FF9C36` | The one primary action; your progress fills. |
+| `color.accent.default` | `#FF9C36` | The one primary action; the progress fills of your own uploads; the K20 tick. |
 | `color.accent.hover` | `#FFAA47` | Hover on ember surfaces. |
 | `color.focus.ring` | `#FF9C36` | 2 px outline, 3 px offset, every focusable element. |
 | `color.focus.ring-on-accent` | `#1D0B00` | Focus ring on an ember surface. |
 
-**Ember is rationed:** one ember surface per view. If two things on screen are ember-filled, one of them is wrong.
+**Ember is rationed:** one ember surface per view (the primary action), plus small "yours" marks: the A15 progress fills of your own uploads (the K14 summary bar and K15 rows), the K20 tick, `text.link` and the focus ring. A "yours" mark is never a button or a panel. Apart from those marks, if two things on screen are ember-filled, one of them is wrong.
 
 ### 1.5 State (one meaning each)
 
@@ -171,6 +171,13 @@ Where [components.md](components.md) gives a text size in px (15 px, 14 px, 13 p
 | `size.row.dense` / `admin` | 56px / 40px | Two-line rows at ≤ 820 px / table rows at 1280. |
 | `size.header.compact` | 60px | The J1 header at every width. |
 | `size.focus.width` / `offset` | 2px / 3px | Focus ring. |
+| `size.line` | 1px | Hairlines, inset outlines (A4, A11), the running-text link underline. |
+| `size.progress` / `progress-row` | 8px / 6px | A15 bar height / the same bar in K15 rows. |
+| `size.sheet-row` | 52px | Nav rows in the B2 menu sheet. |
+| `size.menu.min` | 200px | Minimum width of the K5 menu popover. |
+| `size.column.size` / `modified` / `kind` / `actions` | 104px / 152px / 120px / 52px | K2 table column widths at 1280 (Name fills the rest). |
+
+The last five rows are Drive's own: the components used these sizes before Drive had its own tokens, and the values are unchanged.
 
 ## 4. Elevation
 
@@ -204,7 +211,7 @@ Mobile first in CSS, desktop first in design. **One layout switch** at 820 px. N
 | `motion.duration.base` | 160ms | Colour and background on hover and focus. |
 | `motion.duration.slow` | 240ms | Sheet and menu sheet open and close (with an 8 px slide). |
 
-**What moves:** colour transitions and sheets. **What never moves:** progress and status change by swapping text; no pulse, count-up, shimmer, skeleton or spinner under 1 s.
+**What moves:** colour transitions, sheets, and the loading spinner once an action has taken over 1 s ([accessibility.md](accessibility.md) §5). **What never moves:** progress and status change by swapping text; no pulse, count-up, shimmer or skeleton, and no spinner under 1 s.
 
 **Reduced motion:** every transition is written inside `@media (prefers-reduced-motion: no-preference)`. The token stylesheet also sets every duration to `0ms` and the easing to `linear` under `reduce`, as a second guard.
 

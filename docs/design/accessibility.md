@@ -30,7 +30,9 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 ## 5. Motion (SC 2.2.2, 2.3.3 as a target)
 
 - All animation and transition CSS sits inside `@media (prefers-reduced-motion: no-preference)`. The token stylesheet also zeroes durations under `reduce` ([tokens.md](tokens.md) §6).
-- Nothing auto-moves. Progress updates by swapping text and bar width at most once a second, never by animating.
+- Nothing auto-moves for more than 5 s. No carousels, tickers, count-ups, pulsing dots, shimmers or skeletons.
+- **One exception, the loading indicator:** the 16 px stroke spinner in a busy control ([components.md](components.md), common states, `loading`). It appears only once the person's own action has taken over 1 s, rotates until that action ends, and is the only thing that rotates. Under `reduce` it shows but does not rotate.
+- Progress updates by swapping text and bar width at most once a second, never by animating.
 
 ## 6. Status region (SC 4.1.3)
 

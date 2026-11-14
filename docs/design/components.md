@@ -1,6 +1,6 @@
 # Drive components
 
-Every component Drive uses: its job, anatomy, sizing, states, content rules and accessible name and role. Values are Drive tokens ([tokens.md](tokens.md)); a raw hex or pixel value in a component is a bug unless this page names it. Icons are in [icons.md](icons.md), words in [voice.md](voice.md), accessibility rules in [accessibility.md](accessibility.md). The screens that use them are in [drive-v0.md](drive-v0.md).
+Every component Drive uses: its job, anatomy, sizing, states, content rules and accessible name and role. Values are Drive tokens ([tokens.md](tokens.md)). Where this page writes a size in px, it means the token in tokens.md with that value; every such size has one, and a size with no token is a bug in this page. Icons are in [icons.md](icons.md), words in [voice.md](voice.md), accessibility rules in [accessibility.md](accessibility.md). The screens that use them are in [drive-v0.md](drive-v0.md).
 
 **Where these came from.** The base components (A, B, C, I, J) are restated from the Ember Hours components at `TogetherWeOwn/two-design-kit` tag v0.3.1, cut down to what Drive uses and with the same values, so Drive keeps that look. The K components were drafted for Drive. The ids are kept so build PRs and the screen spec can name them (K2, A14…); they are Drive's ids now and don't track the kit.
 
@@ -100,7 +100,7 @@ Inline message for a section, not a toast. `radius.m`, 16 px padding, the matchi
 
 ### A15. Progress bar
 
-8 px (6 px in K15 rows), `radius.pill`, track `bg.overlay`, fill `accent.default` (your uploads) or the state colour the K15 table names. Always paired with the numbers in text ("1.2 of 5.4 GB"). A native `<progress>` labelled by the file name.
+`size.progress` (`size.progress-row` in K15 rows), `radius.pill`, track `bg.overlay`, fill `accent.default` (your uploads) or the state colour the K15 table names. Always paired with the numbers in text ("1.2 of 5.4 GB"). A native `<progress>` labelled by the file name.
 
 ### A16. Skip link
 
@@ -112,7 +112,7 @@ First focusable element. A `primary sm` pill, off-screen until focused, then at 
 
 ### B2. Menu sheet
 
-Opens from the J1 Menu button at ≤ 820 px. Full-width sheet under the header, `bg.sheet` with `elevation.blur`, nav links as 52 px rows, then "Sign out". Opens with a `motion.duration.slow` fade and 8 px slide under `no-preference` only. `aria-expanded` on the button; focus moves to the first link; Tab is trapped inside; Escape and the Menu button close it and return focus to the button. The page behind is `inert`.
+Opens from the J1 Menu button at ≤ 820 px. Full-width sheet under the header, `bg.sheet` with `elevation.blur`, nav links as `size.sheet-row` rows, then "Sign out". Opens with a `motion.duration.slow` fade and 8 px slide under `no-preference` only. `aria-expanded` on the button; focus moves to the first link; Tab is trapped inside; Escape and the Menu button close it and return focus to the button. The page behind is `inert`.
 
 ---
 
@@ -188,7 +188,7 @@ Components for the file screens. They follow every rule above.
 
 **Job:** show a folder's items and let the person sort, open and act on them, at any size up to 5,000 items and beyond.
 
-**Anatomy:** a J13 table (`<table>` with a visually hidden caption "Contents of {folder}, sorted by name, A to Z. Times in Europe/London."). Columns at 1280: **Name** (fills; K3 name cell) · **Size** (104, right, tabular; "—" for folders) · **Modified** (152) · **Kind** (120, words: "Folder", "PDF", "MP4 video", "JPEG image", "File") · **Actions** (52, the K5 menu button). Folders first, then files, in every sort. Rows `size.row.admin`, hairlines between, hover `bg.surface`, the row whose menu is open `bg.raised`.
+**Anatomy:** a J13 table (`<table>` with a visually hidden caption "Contents of {folder}, sorted by name, A to Z. Times in Europe/London."). Columns at 1280: **Name** (fills; K3 name cell) · **Size** (`size.column.size`, right, tabular; "—" for folders) · **Modified** (`size.column.modified`) · **Kind** (`size.column.kind`, words: "Folder", "PDF", "MP4 video", "JPEG image", "File") · **Actions** (`size.column.actions`, the K5 menu button). Folders first, then files, in every sort. Rows `size.row.admin`, hairlines between, hover `bg.surface`, the row whose menu is open `bg.raised`.
 
 **At ≤ 820 px:** the table becomes a `role="list"` of two-line rows, `size.row.dense` minimum: line 1 the name cell; line 2 mono `text.tertiary` "5.4 GB · 14 Nov" (folders: "Folder · 14 Nov"); the K5 button on the right. Sorting moves to the "Sort" select in the K4 action row.
 
@@ -228,7 +228,7 @@ The action row of the Drive page header (the page's one primary sits in the page
 
 **Job:** every action on one item, from one button.
 
-**Anatomy:** A3 icon button (more, three dots), `aria-label="Actions for {name}"`, `aria-haspopup="menu"`, `aria-expanded`. Opens a `role="menu"` popover (`bg.overlay`, hairline-strong, `radius.m`, 4 px padding, min-width 200) anchored to the button, flipped to stay on screen. Items are 40 px `role="menuitem"` rows with a 16 px icon and a verb: **own item:** Download (files) · Share · Rename · Move · Details · separator · Delete (text `state.danger`). **Shared with you:** Download (files) · Details. Items that don't apply are absent, never disabled.
+**Anatomy:** A3 icon button (more, three dots), `aria-label="Actions for {name}"`, `aria-haspopup="menu"`, `aria-expanded`. Opens a `role="menu"` popover (`bg.overlay`, hairline-strong, `radius.m`, `space.1` padding, min-width `size.menu.min`) anchored to the button, flipped to stay on screen. Items are 40 px `role="menuitem"` rows with a 16 px icon and a verb: **own item:** Download (files) · Share · Rename · Move · Details · separator · Delete (text `state.danger`). **Shared with you:** Download (files) · Details. Items that don't apply are absent, never disabled.
 
 **Behaviour:** arrow keys move between items, Home and End jump, typing a letter jumps, Enter or Space activates. Escape closes the menu and returns focus to the button. Tab and Shift+Tab close it and move focus on as if from the button (Tab to the next row's name, Shift+Tab to this row's name), so the menu adds no extra stop. Choosing an item opens its dialog (K8, K9, K10, K13) and focus returns to this button when that closes, unless the action removed the row (move, delete): then focus follows K2 "item just removed". The same menu opens on right-click on a row (pointer only; the button is always there). At ≤ 820 px the menu opens as a K7 sheet from the bottom with the item name as its title.
 
@@ -257,7 +257,7 @@ Dragging files over the window marks the folder's list area: a 2 px dashed `line
 | error | A14 danger notice at the top of the body, `role="alert"` (the person's own action), saying what to do; the fields keep their values; focus moves to the notice's first link or the field at fault |
 | done | the dialog closes and the page's status region announces the result ("Renamed to Taxes 2026") |
 
-**A11y:** `aria-labelledby` the H2; `aria-describedby` the first body sentence when it explains a consequence (Delete, Share). One primary per dialog; it is the only ember surface while the dialog is open.
+**A11y:** `aria-labelledby` the H2; `aria-describedby` the first body sentence when it explains a consequence (Delete, Share). One primary per dialog; it is the only ember action while the dialog is open ("yours" marks, [tokens.md](tokens.md) §1.4, may still show behind it).
 
 ### K8. Name dialog (rename and new folder)
 
@@ -336,7 +336,7 @@ K7, title "Share "{name}"". Body in this order:
 
 ### K15. Upload item
 
-**Anatomy:** a row in the tray: kind glyph · name (middle truncation) · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (6 px) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
+**Anatomy:** a row in the tray: kind glyph · name (middle truncation) · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (`size.progress-row`) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
 
 | State | Line | Bar | Actions |
 |---|---|---|---|
