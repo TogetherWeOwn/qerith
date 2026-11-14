@@ -43,24 +43,25 @@ export class PrivateMetadata {
 
   async list(principalId: string, parentId: string | null, cursor: ListCursor | null = null): Promise<EntryPage> {
     const result = await this.db.prepare(`SELECT ${columns},
-      CASE WHEN kind = 'folder' THEN (SELECT COUNT(*) FROM drive_entries child
-        WHERE child.owner_id = drive_entries.owner_id AND child.parent_id = drive_entries.id)
-        ELSE NULL END AS item_count
+      CASE WHEN kind = 'folder' THEN (SELECT item_count FROM drive_folder_counts
+        WHERE folder_id = drive_entries.id) ELSE NULL END AS item_count
       FROM drive_entries
       WHERE owner_id = ? AND parent_id IS ? AND ${active}
-        AND (? IS NULL OR name > ? OR (name = ? AND id > ?))
+        ${cursor ? 'AND (name, id) > (?, ?)' : ''}
       ORDER BY name, id LIMIT 101`).bind(principalId, parentId, principalId,
-        cursor?.name ?? null, cursor?.name ?? null, cursor?.name ?? null, cursor?.id ?? null).all<ListedEntry>();
+        ...(cursor ? [cursor.name, cursor.id] : [])).all<ListedEntry>();
     const entries = result.results.slice(0, 100);
     const last = entries[entries.length - 1];
     return { entries, nextCursor: result.results.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
-  // Only completed files have metadata rows. Return decimal text to avoid JS precision loss.
+  // Decimal text preserves precision beyond JavaScript's safe integer range.
   async usage(principalId: string): Promise<{ bytes: string } | null> {
-    return this.db.prepare(`SELECT CAST(COALESCE(SUM(size_bytes), 0) AS TEXT) AS bytes
-      FROM drive_entries WHERE owner_id = ? AND kind = 'file' AND ${active}
-      HAVING ${active}`).bind(principalId, principalId, principalId).first<{ bytes: string }>();
+    return this.db.prepare(`SELECT CAST(COALESCE(high, 0) AS TEXT) ||
+        printf('%09d', COALESCE(low, 0)) AS bytes
+      FROM (SELECT 1) LEFT JOIN drive_owner_usage ON owner_id = ?
+      WHERE ${active}`).bind(principalId, principalId).first<{ bytes: string }>()
+      .then(result => result === null ? null : { bytes: result.bytes.replace(/^0+(?=\d)/, '') });
   }
 
   async createFolder(principalId: string, parentId: string | null, name: string): Promise<Entry | null> {

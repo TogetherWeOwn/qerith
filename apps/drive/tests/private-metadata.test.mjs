@@ -11,7 +11,9 @@ function setup() {
     CREATE VIEW drive_active_members AS SELECT id FROM members WHERE active = 1;
     INSERT INTO members VALUES ('alice', 1), ('bob', 1), ('revoked', 0);`);
   sql.exec(readFileSync(new URL('../migrations/0002_private_metadata.sql', import.meta.url), 'utf8'));
+  const queries = [];
   const db = { prepare(query) {
+    queries.push(query);
     return { bind(...args) {
       return {
         async first() { return sql.prepare(query).get(...args) ?? null; },
@@ -19,7 +21,7 @@ function setup() {
       };
     } };
   } };
-  return { sql, service: new PrivateMetadata(db) };
+  return { sql, queries, service: new PrivateMetadata(db) };
 }
 
 test('private entries require live membership for each operation', async () => {
@@ -67,7 +69,7 @@ test('cycles and object identity changes are rejected without copying bytes', as
 });
 
 test('listing is bounded and continues without crossing owners', async () => {
-  const { service } = setup();
+  const { sql, queries, service } = setup();
   for (let i = 0; i < 105; i++) {
     await service.createFolder('alice', null, `entry-${String(i).padStart(3, '0')}`);
   }
@@ -80,6 +82,11 @@ test('listing is bounded and continues without crossing owners', async () => {
   assert.equal(second.nextCursor, null);
   assert.equal(new Set([...first.entries, ...second.entries].map(entry => entry.id)).size, 105);
   assert.ok(second.entries.every(entry => entry.owner_id === 'alice'));
+  const plan = sql.prepare(`EXPLAIN QUERY PLAN ${queries.at(-1)}`)
+    .all('alice', null, 'alice', first.nextCursor.name, first.nextCursor.id)
+    .map(row => row.detail);
+  assert.ok(plan.some(detail => /drive_entries_owner_parent.*\(name,id\)>\(\?,\?\)/.test(detail)), plan.join('\n'));
+  assert.ok(plan.every(detail => !detail.includes('TEMP B-TREE')), plan.join('\n'));
 });
 
 test('folder listings count direct items only and follow membership and moves', async () => {
@@ -119,6 +126,58 @@ test('usage reflects only the active owner’s completed files', async () => {
   sql.exec("DELETE FROM drive_entries WHERE id = 'a'");
   assert.equal((await service.usage('alice')).bytes, '0');
   assert.throws(() => insert.run('bad', 'alice', 'bad', 'file', 'key-bad', null));
+});
+
+test('usage remains exact when the total exceeds SQLite integer range', async () => {
+  const { sql, service } = setup();
+  const insert = sql.prepare('INSERT INTO drive_entries VALUES (?, ?, NULL, ?, ?, ?, ?)');
+  for (let i = 0; i < 1025; i++) {
+    insert.run(`large-${i}`, 'alice', `large-${i}`, 'file', `key-${i}`, 9007199254740991);
+  }
+  assert.equal((await service.usage('alice')).bytes, (1025n * 9007199254740991n).toString());
+});
+
+test('counter updates are exact and rolled back with rejected mutations', async () => {
+  const { sql, service } = setup();
+  const a = await service.createFolder('alice', null, 'A');
+  const b = await service.createFolder('alice', null, 'B');
+  const insert = sql.prepare('INSERT INTO drive_entries VALUES (?, ?, ?, ?, ?, ?, ?)');
+  insert.run('f', 'alice', a.id, 'file', 'file', 'key-f', 1000000001);
+  insert.run('g', 'alice', a.id, 'other', 'file', 'key-g', 999999999);
+  assert.equal((await service.usage('alice')).bytes, '2000000000');
+  sql.exec("UPDATE drive_entries SET size_bytes = 1 WHERE id = 'f'");
+  assert.equal((await service.usage('alice')).bytes, '1000000000');
+  await service.move('alice', 'g', b.id, 'other');
+  await assert.rejects(service.move('alice', 'f', b.id, 'other'));
+  const folders = (await service.list('alice', null)).entries;
+  assert.equal(folders.find(row => row.id === a.id).item_count, 1);
+  assert.equal(folders.find(row => row.id === b.id).item_count, 1);
+  assert.throws(() => sql.prepare('DELETE FROM drive_entries WHERE id = ?').run(a.id));
+  assert.equal((await service.usage('alice')).bytes, '1000000000');
+  sql.exec("DELETE FROM drive_entries WHERE id = 'g'");
+  assert.equal((await service.usage('alice')).bytes, '1');
+  assert.equal((await service.list('alice', null)).entries.find(row => row.id === b.id).item_count, 0);
+});
+
+test('synthetic counter limits reject writes atomically', async () => {
+  const { sql, service } = setup();
+  const a = await service.createFolder('alice', null, 'A');
+  const b = await service.createFolder('alice', null, 'B');
+  sql.prepare('INSERT INTO drive_entries VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('f', 'alice', a.id, 'file', 'file', 'key', 1);
+  sql.exec("UPDATE drive_owner_usage SET high = 9007199254740991, low = 999999998 WHERE owner_id = 'alice'");
+  sql.exec("UPDATE drive_entries SET size_bytes = 2 WHERE id = 'f'");
+  assert.equal((await service.usage('alice')).bytes, '9007199254740991999999999');
+  assert.throws(() => sql.exec("UPDATE drive_entries SET size_bytes = 3 WHERE id = 'f'"));
+  assert.equal(sql.prepare("SELECT size_bytes FROM drive_entries WHERE id = 'f'").get().size_bytes, 2);
+  assert.equal((await service.usage('alice')).bytes, '9007199254740991999999999');
+  sql.prepare('UPDATE drive_folder_counts SET item_count = 9007199254740991 WHERE folder_id = ?').run(b.id);
+  await assert.rejects(service.move('alice', 'f', b.id, 'file'));
+  assert.equal((await service.get('alice', 'f')).parent_id, a.id);
+  const counts = sql.prepare('SELECT item_count FROM drive_folder_counts WHERE folder_id = ?');
+  assert.equal(counts.get(a.id).item_count, 1);
+  assert.equal(counts.get(b.id).item_count, 9007199254740991);
+  assert.equal((await service.usage('alice')).bytes, '9007199254740991999999999');
 });
 
 test('entry names are bounded on create and move', async () => {
