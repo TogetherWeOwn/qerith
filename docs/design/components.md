@@ -169,7 +169,7 @@ I1 at tool density, for any list of records: `size.row.admin` rows, `<table>` wi
 Components for the file screens. They follow every rule above.
 
 **Sizes and numbers in every K component.**
-- **Bytes** are decimal with one decimal place from 10 units down and none above: "0 bytes", "1 byte", "980 bytes", "1.2 KB", "4.7 MB", "5.4 GB", "12 GB" (1 KB = 1,000 bytes). Wherever a size is shown, its `<data value="5368709120">` carries the exact byte count, and the details line (K3) prints it in full ("5,368,709,120 bytes").
+- **Bytes** are decimal; KB and larger show one decimal place below 100 units (a trailing ".0" included) and none from 100 up: "0 bytes", "1 byte", "980 bytes", "1.2 KB", "4.7 MB", "18.2 GB", "41.0 GB", "214 GB" (1 KB = 1,000 bytes). Wherever a size is shown, its `<data value="5368709120">` carries the exact byte count, and the details line (K3) prints it in full ("5,368,709,120 bytes").
 - **Times** are viewer-local: "09:12" today, "Yesterday 18:40", "14 Nov" this year, "14 Nov 2025" before. The list caption names the zone once ("Times in Europe/London"); each time is a `<time datetime>` with the full instant.
 - **File names are user data.** Render them as text, never HTML; keep every character, including Unicode and emoji, with `unicode-bidi: plaintext` so a right-to-left name can't reorder the row. A long name is truncated in the middle with an ellipsis so the extension stays visible ("Quarterly-report-final…v3.pdf"); the full name is the row's accessible name and is shown in the details line.
 
@@ -375,7 +375,7 @@ Shown inline in a K15 item (and as a single K7 when one file is dropped and the 
 | link used, expired or cancelled | "This link doesn't work any more" | — (no button) | "Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one." |
 | account revoked | "Your access is turned off" | — | "The owner turned off your access to Drive. Your files are kept. Ask them if you think this is a mistake." |
 | too many tries | unchanged | quiet, `aria-disabled`, "Try again in 1 min" | "Too many tries. Wait a minute, then try again." |
-| signed in, success | — | redirects to My Drive (first time: the empty My Drive state) | — |
+| signed in, success | — | sign in: redirects to `next` (a same-origin Drive path only) or My Drive; invite and recovery: My Drive (first time: the empty My Drive state) | — |
 
 **A11y:** the device prompt is the browser's; the card announces the result via `role="alert"` only for the person's own failed action. Never show which part of a link failed (used vs expired vs never existed): one state covers all three.
 
