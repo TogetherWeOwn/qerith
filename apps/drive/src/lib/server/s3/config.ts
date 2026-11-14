@@ -18,7 +18,8 @@ export function validateConfig(config: S3Config): Readonly<S3Config> {
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname);
   if (
     (endpoint.protocol !== 'https:' && !(config.allowLocalHttp === true && local && endpoint.protocol === 'http:')) ||
-    endpoint.username || endpoint.password || endpoint.pathname !== '/' ||
+    endpoint.username || endpoint.password || !/^https?:\/\/[^/?#]+\/?$/i.test(config.endpoint) ||
+    endpoint.pathname !== '/' ||
     config.endpoint.includes('?') || config.endpoint.includes('#') ||
     config.endpoint.includes('\\') || config.endpoint.trim() !== config.endpoint
   ) throw new Error('Invalid S3 endpoint');
@@ -26,7 +27,7 @@ export function validateConfig(config: S3Config): Readonly<S3Config> {
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) ||
     config.bucket.includes('..') || /^\d+\.\d+\.\d+\.\d+$/.test(config.bucket) ||
-    !config.region || !config.accessKeyId || !config.secretAccessKey
+    !config.region.trim() || !config.accessKeyId.trim() || !config.secretAccessKey.trim()
   ) throw new Error('Invalid S3 configuration');
 
   return Object.freeze({ ...config, endpoint: endpoint.origin });

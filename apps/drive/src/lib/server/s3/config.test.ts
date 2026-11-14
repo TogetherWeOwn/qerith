@@ -17,10 +17,14 @@ test('accepts HTTPS and explicitly enabled loopback HTTP fixtures', () => {
 test('rejects unsafe endpoints and invalid buckets', () => {
   for (const endpoint of [
     'http://localhost:9000', 'http://example.test', 'https://user:pass@example.test',
-    'https://example.test/path', 'https://example.test?x=1', 'https://example.test#fragment',
+    'https://example.test/path', 'https://example.test/tenant/..', 'https://example.test/%2e',
+    'https://example.test?x=1', 'https://example.test#fragment',
   ]) assert.throws(() => validateConfig({ ...config, endpoint }), /Invalid S3 endpoint/);
   assert.throws(() => validateConfig({ ...config, endpoint: 'http://example.test', allowLocalHttp: true }));
   for (const bucket of ['UPPER', 'ab', 'bad..name', '192.168.1.1', 'bad/name']) {
     assert.throws(() => validateConfig({ ...config, bucket }), /Invalid S3 configuration/);
+  }
+  for (const field of ['region', 'accessKeyId', 'secretAccessKey'] as const) {
+    assert.throws(() => validateConfig({ ...config, [field]: '  ' }), /Invalid S3 configuration/);
   }
 });

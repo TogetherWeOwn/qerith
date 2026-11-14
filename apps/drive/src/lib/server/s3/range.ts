@@ -11,5 +11,5 @@ export function validateRange(value: string): string {
       (first !== undefined && last !== undefined && first > last)) {
     throw new Error('Invalid byte range');
   }
-  return value;
+  return `bytes=${match[1]}-${match[2]}`;
 }
