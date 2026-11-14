@@ -120,6 +120,15 @@ Avatar initials (`avatar-text` on `avatar.0`…`11`): 5.50 · 10.39 · 6.82 · 1
 
 Both are SIL OFL. Drive uses no serif accent.
 
+**Font files.** Serve these two files from Drive's own origin; never load a font from a third-party host. Copy them from [assets/fonts/](assets/fonts/) with their licence files.
+
+| File | Face | Made from |
+|---|---|---|
+| `MonaSans-latin.woff2` (sha256 `16ed4676…0c297`) | `@font-face { font-family: "Mona Sans"; font-weight: 200 900; font-stretch: 75% 125%; }` | `MonaSansVF[wdth,opsz,wght].woff2` (sha256 `875ad1fa…f80d3`) from [github/mona-sans v2.0.27](https://github.com/github/mona-sans/releases/tag/v2.0.27) `mona-sans-webfonts-v2.0.27.zip`; opsz axis dropped (text default), subset to Latin |
+| `FragmentMono-Regular-latin.woff2` (sha256 `e950f87a…05323`) | `@font-face { font-family: "Fragment Mono"; font-weight: 400; }` | `FragmentMono-Regular.woff2` (sha256 `f8d6f30e…0f888`) from [weiweihuanghuang/fragment-mono 1.21](https://github.com/weiweihuanghuang/fragment-mono/releases/tag/1.21), subset to Latin |
+
+Latin subset (both files): `U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD`, made with `pyftsubset --layout-features='*' --flavor=woff2`; set the same range as `unicode-range`. Other characters (names in other scripts) fall back to `system-ui` / `ui-monospace` per glyph, which is expected. Preload only Mona Sans (`<link rel="preload" as="font" type="font/woff2" crossorigin>`).
+
 | Token | Value |
 |---|---|
 | `font-weight.regular` / `medium` / `display` / `semibold` | 400 / 500 / 560 / 600 |
