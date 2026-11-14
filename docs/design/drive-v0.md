@@ -1,8 +1,8 @@
 # Drive v0: screen spec
 
-**Status:** UX Designer spec, 2026-11-14. Covers the Drive v0 scope, sections 3 and 7. Built from `TogetherWeOwn/two-design-kit` (Ember Hours tokens). The kit additions it needs are components **K1–K20**, template **T10**, voice **§8** and the Drive icons. They are in two-design-kit PR #12 (`docs/components.md` §K). Component ids below (A1, J1, K2…) refer to the kit's `docs/components.md`.
+**Status:** UX Designer spec, 2026-11-14. Covers the Drive v0 scope, sections 3 and 7. Drive's design is self-contained in this folder: [tokens.md](tokens.md) (every value, `--drive-*` in CSS), [components.md](components.md) (base components and K1–K20), [voice.md](voice.md), [icons.md](icons.md) and [accessibility.md](accessibility.md) (rules, checks and the design QA checklist). Component ids in the text (A14, J1, K2…) refer to [components.md](components.md). Ids in section titles (M1, A3, U1…) are the scope's requirement ids.
 
-**How to use this:** build each screen from the kit components named here, render every state in its "Must render" list, and attach screenshots at 1280 × 800 and 390 × 844 plus the kit's design QA checklist (kit `AGENTS.md` §4). Design QA (UX Designer) checks the build against this spec. Where this spec and the kit disagree, the kit wins. Flag the conflict and I'll fix one of them.
+**How to use this:** build each screen from the components named here, render every state in its "Must render" list, and attach screenshots at 1280 × 800 and 390 × 844 plus the design QA checklist ([accessibility.md](accessibility.md) §12). Design QA (UX Designer) checks the build against this spec. Where this spec and [components.md](components.md) disagree, flag the conflict on the build card and I'll fix one of them; until then, ask rather than pick.
 
 **Out of scope here** (scope §5): pricing, plans, quotas, public links, previews beyond the optional image preview, trash, versions, search beyond the nice-to-have, notifications, and the owner browsing other people's files.
 
@@ -10,7 +10,7 @@
 
 ## 0. Shell (every signed-in screen)
 
-Pattern **P6** with no rail (kit T10). Dark Ember Hours ground; one ember action per view.
+One column in the container (`layout.container`, gutters `layout.gutter.wide` / `compact`), no rail. Dark ground (`bg.canvas`); one ember action per view. **Shell, in DOM order:** skip link (A16) · J1 · `<main id="main">` (page header, then the content) · `<footer>` with a source line (licence offer and version, `text.tertiary`). **Page header:** K1 breadcrumb · H1 at `font-size.h3`, one colour, no serif, with the K4 action row at the end of the H1 row (under the count line at ≤ 820 px) · mono count line.
 
 ```
 1280 ─────────────────────────────────────────────────────────────────────────
@@ -44,11 +44,13 @@ Receipts                         H1
 ```
 
 - **J1 Drive form:** mark + "Drive" · nav "My Drive", "Shared with me", "Users and invites" (owner only; members never see the link and the route is not-found for them) · avatar + name opens a K5 menu: "Sign out". No project switcher, no spend meter.
-- **Status region:** one `role="status"` per page (kit accessibility §6). It announces the result of the person's own actions and the K14 upload milestones. Nothing else is live.
+- **Status region:** one `role="status"` per page ([accessibility.md](accessibility.md) §6). It announces the result of the person's own actions and the K14 upload milestones. Nothing else is live.
 - **Session expired:** any request that returns 401 sends the person to Sign in, then brings them back to the same URL. Uploads in progress are kept in the tray as "interrupted" (K15).
-- **Header:** only J1 sticks (kit tool surfaces rule 4). The page header, with Upload in it (P6 rule 1), scrolls with the page; drop (K6) still uploads at any scroll position.
+- **Header:** only J1 sticks; nothing else on Drive is sticky. The page header, with Upload in it (the page's one primary sits in the page header), scrolls with the page; drop (K6) still uploads at any scroll position. The page scrolls as a page; only the K14 list, dialog bodies (K7) and wide tables in their own region (J13) scroll inside themselves.
+- **Desktop first, not desktop only:** at 390 every action a person can take is still there by tapping; only drag and drop is desktop-only (Upload is always the picker).
 - **Signed-out pages** (sign-in, invite, recovery) use K17 on a bare page: mark only, no nav, no footer links except the source line.
 - **Page titles:** `{folder} · Drive`, `Shared with me · Drive`, `Users and invites · Drive`, `Sign in · Drive`.
+- **Shell must render:** every K2 state (empty, shared-empty, load failed, 5,000 items with "Show 200 more"), every K15 item state, K11 not-found, the K17 states, and the owner screens with no other people and with a revoked person (each detailed in its section below).
 
 ---
 
@@ -217,7 +219,7 @@ At 390: two lists of cards (K19), the primary full width under the H1.
 
 ## 11. Accessibility checks specific to Drive
 
-On top of the kit's checks (accessibility.md §11):
+On top of the checks in [accessibility.md](accessibility.md) §11:
 - K2 is a real table at 1280 with a caption that names the folder, the sort and the time zone; `aria-sort` on the sorted column.
 - K5 follows the APG menu-button pattern (Tab leaves the menu and moves on; it doesn't return to the button); K9 uses plain buttons in a list, never a listbox with nested controls; K13 the APG combobox pattern; K7 uses native `<dialog>` with `showModal()`, focus in, trapped, and back to the opener.
 - Upload progress is never announced. Starts, failures, clashes and batch completion are, through the one status region.
@@ -229,11 +231,11 @@ On top of the kit's checks (accessibility.md §11):
 
 Each UI build PR names the screen sections above it implements and attaches:
 1. Screenshots at 1280 × 800 and 390 × 844 for every "Must render" state of those sections.
-2. The kit `AGENTS.md` §4 checklist filled in, with the component ids used (K1, K2…).
+2. The design QA checklist ([accessibility.md](accessibility.md) §12) filled in, with the component ids used (K1, K2…).
 3. Axe at both widths with 0 violations, plus the keyboard and screen-reader notes from §11 for the components it adds.
-4. Copy matching this spec and kit voice §8 word for word, or a note on each change and why.
+4. Copy matching this spec and [voice.md](voice.md) word for word, or a note on each change and why.
 
-Design QA rejects raw colours, spacing, radii or durations, hover-only actions, a second ember action in one view, states shown by colour alone, and any copy that tells a person whether a hidden item or link exists.
+Design QA rejects raw colours, spacing, radii or durations, any `--two-*` property in place of a `--drive-*` token, hover-only actions, a second ember action in one view, states shown by colour alone, and any copy that tells a person whether a hidden item or link exists.
 
 ## 13. Open points for the Engineering Lead (they don't block building)
 
