@@ -331,6 +331,8 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
       - name: Test strict XML parsing
         run: node --import tsx --test tests/xml-parser.test.ts
+      - name: Test fail-closed Worker entrypoint
+        run: node --import tsx --test tests/worker.test.ts
 
   drive:
     name: drive checks and Workers build
