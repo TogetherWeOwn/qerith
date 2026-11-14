@@ -1,8 +1,18 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 import { findActivePrincipal } from '../../drive/src/lib/server/identity/membership.ts';
+
+beforeEach(async () => {
+  // D1 state is shared between tests in this file; reset the migration ledger too.
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_folder_counts;
+    DROP TABLE IF EXISTS drive_entries;
+    DROP TABLE IF EXISTS drive_owner_usage;
+    DROP TABLE IF EXISTS d1_migrations;
+    DROP VIEW IF EXISTS drive_active_members;
+    DROP TABLE IF EXISTS drive_principals;`);
+});
 
 it('initializes and reapplies the available actual migration directory', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
