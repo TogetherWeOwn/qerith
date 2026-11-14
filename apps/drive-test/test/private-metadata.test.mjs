@@ -41,21 +41,21 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   }
   expect((await metadata.createFolder('alice', null, '😀'.repeat(63) + 'abc')).name).toBe('😀'.repeat(63) + 'abc');
   for (const name of ['😀'.repeat(64), '..', ' . ']) {
-    await expect(env.DB.prepare("INSERT INTO drive_entries VALUES (?, 'alice', NULL, ?, 'folder', NULL, NULL)")
+    await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, 'alice', NULL, ?, 'folder', NULL, NULL)")
       .bind(crypto.randomUUID(), name).run()).rejects.toThrow();
   }
   await expect(metadata.createFolder('alice', null, 'private')).rejects.toThrow();
   await expect(metadata.createFolder('alice', folder.id, 'child')).rejects.toThrow();
   await expect(metadata.createFolder('alice', 'missing', 'child')).rejects.toThrow();
   await expect(metadata.createFolder('bob', folder.id, 'child')).rejects.toThrow();
-  await env.DB.prepare("INSERT INTO drive_entries VALUES (?, ?, NULL, ?, 'file', ?, ?)")
+  await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, NULL, ?, 'file', ?, ?)")
     .bind('file', 'alice', 'file', 'object', 1).run();
   for (const size of [null, -1, 1.5, 9007199254740992]) {
-    await expect(env.DB.prepare("INSERT INTO drive_entries VALUES (?, ?, NULL, ?, 'file', ?, ?)")
+    await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, NULL, ?, 'file', ?, ?)")
       .bind(`bad-${size}`, 'alice', `bad-${size}`, `key-${size}`, size).run()).rejects.toThrow();
   }
-  await expect(env.DB.prepare("INSERT INTO drive_entries VALUES ('dup', 'alice', NULL, 'dup', 'file', 'object', 0)").run()).rejects.toThrow();
-  await expect(env.DB.prepare("INSERT INTO drive_entries VALUES ('bad-folder', 'alice', NULL, 'bad-folder', 'folder', NULL, 0)").run()).rejects.toThrow();
+  await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES ('dup', 'alice', NULL, 'dup', 'file', 'object', 0)").run()).rejects.toThrow();
+  await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES ('bad-folder', 'alice', NULL, 'bad-folder', 'folder', NULL, 0)").run()).rejects.toThrow();
   await expect(metadata.createFolder('alice', 'file', 'child')).rejects.toThrow();
   for (const [column, value] of [['id', 'changed'], ['owner_id', 'bob'], ['kind', 'file'], ['object_key', 'changed']]) {
     await expect(env.DB.prepare(`UPDATE drive_entries SET ${column} = ? WHERE id = ?`)
@@ -77,7 +77,7 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   await env.DB.prepare('UPDATE test_members SET active = 0 WHERE id = ?').bind('alice').run();
   expect(await metadata.get('alice', folder.id)).toBeNull();
   expect(await metadata.createFolder('alice', null, 'no')).toBeNull();
-  expect((await env.DB.prepare('SELECT name FROM d1_migrations').all()).results)
+  expect((await env.DB.prepare("SELECT name FROM d1_migrations WHERE name = '0002_private_metadata.sql'").all()).results)
     .toEqual([{ name: '0002_private_metadata.sql' }]);
   expect((await env.DB.prepare('PRAGMA table_info(drive_entries)').all()).results
     .find((column) => column.name === 'size_bytes').type).toBe('INTEGER');
