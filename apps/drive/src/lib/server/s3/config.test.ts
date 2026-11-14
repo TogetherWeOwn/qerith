@@ -25,9 +25,14 @@ test('rejects unsafe endpoints and invalid buckets', () => {
   for (const bucket of ['UPPER', 'ab', 'bad..name', '192.168.1.1', 'bad/name']) {
     assert.throws(() => validateConfig({ ...config, bucket }), /Invalid S3 configuration/);
   }
-  for (const region of [' test-1', 'test-1\n', 'test region', 'test/region', 'test\tregion', 'test\0region']) {
+  for (const region of [' test-1', 'test-1\n', 'test region', 'test/region', 'test\tregion', 'test\0region', 'test,region', 'tést-1', 'test=region']) {
     assert.throws(() => validateConfig({ ...config, region }), /Invalid S3 configuration/);
   }
+  for (const accessKeyId of ['key/id', 'key\rvalue', 'key\nvalue', 'key,value', 'kéy', 'key id']) {
+    assert.throws(() => validateConfig({ ...config, accessKeyId }), /Invalid S3 configuration/);
+  }
+  assert.equal(validateConfig({ ...config, accessKeyId: 'Key+=._-123' }).accessKeyId, 'Key+=._-123');
+  assert.equal(validateConfig({ ...config, region: 'Test-1' }).region, 'Test-1');
   for (const field of ['region', 'accessKeyId', 'secretAccessKey'] as const) {
     assert.throws(() => validateConfig({ ...config, [field]: '  ' }), /Invalid S3 configuration/);
   }

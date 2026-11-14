@@ -27,8 +27,8 @@ export function validateConfig(config: S3Config): Readonly<S3Config> {
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) ||
     config.bucket.includes('..') || /^\d+\.\d+\.\d+\.\d+$/.test(config.bucket) ||
-    !config.region || /[\s/\x00-\x1f\x7f]/.test(config.region) ||
-    !config.accessKeyId.trim() || !config.secretAccessKey.trim()
+    !config.region || /[^a-zA-Z0-9-]/.test(config.region) ||
+    !config.accessKeyId || /[^\x21-\x2b\x2d-\x2e\x30-\x7e]/.test(config.accessKeyId) || !config.secretAccessKey.trim()
   ) throw new Error('Invalid S3 configuration');
 
   return Object.freeze({ ...config, endpoint: endpoint.origin });
