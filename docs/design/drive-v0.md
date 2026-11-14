@@ -14,10 +14,9 @@ Pattern **P6** with no rail (kit T10). Dark Ember Hours ground; one ember action
 
 ```
 1280 ─────────────────────────────────────────────────────────────────────────
-[mark] Drive   My Drive · Shared with me · Users and invites*      (◯ Mora ▾)   J1 (60 px, sticky)
-[Upload] [New folder]                                    Opening Taxes…         K4 toolbar (sticky)
+[mark] Drive   My Drive · Shared with me · Users and invites*      (◯ Mora ▾)   J1 (60 px, the only sticky bar)
 My Drive / Taxes 2025 / Receipts                                                K1
-Receipts                                                                        H1 (font-size.h3)
+Receipts                         Opening Taxes…   [Upload] [New folder]         H1 (font-size.h3) + K4 row
 214 items · 18.2 GB                                                             mono count line
 ┌ Name ▲ ─────────────────────────────── Size ── Modified ──── Kind ─────── ⋯ ┐ K2
 │ ▭ Scans                                  —     14 Nov        Folder       ⋯ │
@@ -35,7 +34,7 @@ footer: source line                                └────────�
 ← Up to Taxes 2025               K1 compact
 Receipts                         H1
 214 items · 18.2 GB
-[        Upload        ]         full width primary
+[        Upload        ]         K4 row: full width primary
 [New folder]   [Sort: Name A–Z ▾]
 ▭ Scans                      ⋯   K2 two-line rows (size.row.dense)
   Folder · 14 Nov
@@ -47,6 +46,7 @@ Receipts                         H1
 - **J1 Drive form:** mark + "Drive" · nav "My Drive", "Shared with me", "Users and invites" (owner only; members never see the link and the route is not-found for them) · avatar + name opens a K5 menu: "Sign out". No project switcher, no spend meter.
 - **Status region:** one `role="status"` per page (kit accessibility §6). It announces the result of the person's own actions and the K14 upload milestones. Nothing else is live.
 - **Session expired:** any request that returns 401 sends the person to Sign in, then brings them back to the same URL. Uploads in progress are kept in the tray as "interrupted" (K15).
+- **Header:** only J1 sticks (kit tool surfaces rule 4). The page header, with Upload in it (P6 rule 1), scrolls with the page; drop (K6) still uploads at any scroll position.
 - **Signed-out pages** (sign-in, invite, recovery) use K17 on a bare page: mark only, no nav, no footer links except the source line.
 - **Page titles:** `{folder} · Drive`, `Shared with me · Drive`, `Users and invites · Drive`, `Sign in · Drive`.
 
@@ -54,7 +54,7 @@ Receipts                         H1
 
 ## 1. Sign in (M1, A1, A9)
 
-**Route:** `/sign-in` (every other page redirects here when signed out, keeping `?next=`).
+**Route:** `/sign-in`. When signed out, every signed-in page redirects here, keeping `?next=`. Three public routes never redirect: `/sign-in` itself, `/invite/{token}` and `/recover/{token}` (section 2), because those are how a person without a working passkey gets one.
 
 **Job:** prove it's you with a passkey. **Primary:** "Sign in with a passkey".
 
@@ -80,7 +80,7 @@ No "Create account", no "Forgot password", no email field anywhere (A2).
 
 ## 2. Invite redemption and recovery (M2, M3, A3, A5)
 
-**Routes:** `/invite/{token}` and `/recover/{token}`.
+**Routes:** `/invite/{token}` and `/recover/{token}`. Both are public: they open signed out and are never redirected to Sign in (section 1).
 
 **Job:** set up sign-in from a link the owner sent. **Primary:** "Set up a passkey".
 
@@ -110,7 +110,7 @@ No "Create account", no "Forgot password", no email field anywhere (A2).
 - empty folder: C3 "This folder is empty." · "Drop files here or use Upload."
 - 1 item, 5,000 items (paged), mixed folders and files, Unicode and emoji names (U7), a name long enough to truncate in the middle
 - each sort, both directions, at 1280 (column headers) and at 390 (Sort select)
-- loading: server-rendered first paint; folder-to-folder navigation keeps old rows with `aria-busy` and "Opening {folder}…" after 1 s
+- loading: server-rendered first paint; folder-to-folder navigation keeps old rows with `aria-busy` and "Opening {folder}…" after 1 s. The breadcrumb, H1 and count line keep the previous folder until the new rows arrive, so every visible row belongs to the folder named above it. If the navigation fails, the load-failed state replaces the old rows.
 - load failed: A14 danger "This folder didn't load. Check your connection, then try again." · ghost "Try again"
 - not found or not yours (A7): K11 "This folder isn't here", same page for both
 - drag over (K6), owner's own folder
@@ -123,11 +123,11 @@ No "Create account", no "Forgot password", no email field anywhere (A2).
 
 **Tray (K14) and items (K15):** up to 3 files in flight, the rest "Waiting". Per-file progress text and bar, updated at most once a second. Batch summary in the tray header.
 
-**Resume (U3):** the item matches an earlier unfinished upload by name, size and modified time in the same folder, shows "Resuming · 2.1 of 5.4 GB already uploaded", and its bar starts there. After a closed tab, the reopened tab lists the unfinished upload as "interrupted" with "Pick file". The person re-selects the same file and the upload carries on. If the server can't list unfinished uploads to the browser, the "interrupted" row is dropped and resume happens silently when the same file is picked again, still showing the "Resuming" line.
+**Resume (U3):** the item finds an earlier unfinished upload by name, size and modified time in the same folder, checks the uploaded parts against the picked file's bytes (K15 rules; a mismatch starts from zero), shows "Resuming · 2.1 of 5.4 GB already uploaded", and its bar starts there. After a closed tab, the reopened tab lists the unfinished upload as "interrupted" with "Pick file". The person re-selects the same file and the upload carries on. If the server can't list unfinished uploads to the browser, the "interrupted" row is dropped and resume happens silently when the same file is picked again, still showing the "Resuming" line.
 
 **Cancel (U5):** "Cancel" on the item removes it at once. The server cleans up the parts. No confirmation for one file; "Cancel all" asks in place: "Cancel 17 uploads? *Cancel uploads* · Keep going".
 
-**Name clash (U6, K16):** "There's already a file called "report.pdf" in Taxes." · "Keep both" · "Replace" · "Skip". Replace confirms in place, naming the existing file's size and date. "Do this for the other 4 clashes" appears when there are more. Nothing is silently overwritten.
+**Name clash (U6, K16):** "There's already a file called "report.pdf" in Taxes." · "Keep both" · "Replace" · "Skip". Replace confirms in place, naming the existing file's size and date, and replaces only that version (K16). "Do this for the other 4 clashes" appears when there are more. Nothing is silently overwritten.
 
 **Failure isolation (U4):** one item failing shows its reason and "Try again". The others carry on.
 
@@ -139,7 +139,7 @@ No "Create account", no "Forgot password", no email field anywhere (A2).
 
 ## 5. Download (M5, D1–D5)
 
-A file name is a link that downloads; K5 "Download" does the same. Both are plain `<a href download>` to the server's download URL, so the browser handles progress, resume and Range (K12). Filenames download exactly as listed (U7).
+A file name is a link that downloads; K5 "Download" does the same. Both are plain `<a href download>` to the server's download URL, so the browser handles progress, resume and Range (K12). Filenames download exactly as listed (U7). A failure before any bytes comes back as a redirect (K12): signed out → Sign in with `next` = the folder; anything else → the folder with the failed notice.
 
 **Must render:** "Preparing download…" (only if the URL is fetched first) · download failed notice "{name} didn't download. Try again." · a file that was deleted or unshared since the page loaded: the same notice, then the row is removed on the next list refresh.
 
@@ -148,8 +148,9 @@ A file name is a link that downloads; K5 "Download" does the same. Both are plai
 ## 6. Rename, move and delete (M8, M9, F3–F5)
 
 - **Rename (K8):** title "Rename "Taxes 2025.pdf"" · the name up to the extension is preselected · "Rename". Validation copy is in K8. Instant; no progress beyond "Renaming…".
-- **Move (K9):** browse your own folders from My Drive. The item itself, its descendants and its current folder are not choosable (with the reason shown). Primary names the target: "Move to Taxes". Clash error: "There's already a file called "x" in Taxes. Rename one of them first." Done: the row leaves the list, and an ok notice "Moved to Taxes · *Open Taxes*" appears above it.
-- **Delete (K10):** title "Delete "Receipts"?" · body states what is deleted (counts and size for a folder), that it's permanent with no bin, and who loses access if it was shared · a K20 check box for non-empty folders · "Delete permanently" (I1 destructive, ghost with danger text) · "Cancel" focused first. Done: rows gone, focus moves to the next row, status "Deleted Receipts".
+- **Move (K9):** browse your own folders from My Drive; the folder being browsed is the target, and each subfolder is a plain button that opens it (no listbox). The item itself can't be opened (reason shown), so its descendants are out of reach; in the item's current folder the primary is quiet with "Already here". Primary names the target: "Move to Taxes". Clash error: "There's already a file called "x" in Taxes. Rename one of them first." Done: the row leaves the list, and an ok notice "Moved to Taxes · *Open Taxes*" appears above it.
+- **Delete (K10):** title "Delete "Receipts"?" · body states what is deleted (counts and size for a folder), that it's permanent with no bin, and who loses access if it was shared · a K20 check box for non-empty folders · "Delete permanently" (I1 destructive, ghost with danger text) · "Cancel" focused first. Done: rows gone, focus moves to the next row, status "Deleted Receipts". Move and delete both send focus to the next row (K2 "item just removed"), not back to the removed row's menu.
+- **While saving,** none of these dialogs can be dismissed (K7): the result is always shown.
 
 **Must render:** each dialog's default, saving, error (each K8 message, move clash, move target gone, delete failed "Receipts wasn't deleted. Try again.") and done states, at both widths (bottom sheets at 390).
 
@@ -157,7 +158,7 @@ A file name is a link that downloads; K5 "Download" does the same. Both are plai
 
 **Entry:** K5 "Share" on your own file or folder.
 
-**Dialog (K13):** title "Share "Taxes 2025"" · the read-only rule line (folders add "They also see anything you add to it later.") · "Add people" combobox of active people only (no email entry; S5) · chips for picked people · primary "Share" / "Share with 2 people" · "People with access" list: "You · owner" first, then each person with "Can view" and "Remove" (confirm in place) · "Done".
+**Dialog (K13):** title "Share "Taxes 2025"" · the read-only rule line (folders add "They also see anything you add to it later.") · "Add people" combobox of active people only (no email entry; S5) · chips for picked people · primary "Share" / "Share with 2 people" · "People with access" list: "You · owner" first, then each person with "Can view" and "Remove" (confirm in place) · footer: "Share" then ghost "Done". With nobody picked, Share stays in the footer as a quiet `aria-disabled` pill with "Pick someone to share with", and Done closes.
 
 **Must render (K13 table):** not shared · picking · sharing · shared · removing · removed · nobody else on the drive (owner sees "Invite someone", member sees "Ask the owner to invite them.") · an item that inherits access from a shared folder ("Through Taxes", no Remove) · error on share and on remove.
 
@@ -218,7 +219,7 @@ At 390: two lists of cards (K19), the primary full width under the H1.
 
 On top of the kit's checks (accessibility.md §11):
 - K2 is a real table at 1280 with a caption that names the folder, the sort and the time zone; `aria-sort` on the sorted column.
-- K5 follows the APG menu-button pattern; K13 the APG combobox pattern; K7 uses native `<dialog>` with `showModal()`, focus in, trapped, and back to the opener.
+- K5 follows the APG menu-button pattern (Tab leaves the menu and moves on; it doesn't return to the button); K9 uses plain buttons in a list, never a listbox with nested controls; K13 the APG combobox pattern; K7 uses native `<dialog>` with `showModal()`, focus in, trapped, and back to the opener.
 - Upload progress is never announced. Starts, failures, clashes and batch completion are, through the one status region.
 - Keyboard-only run: upload (picker), make a folder, rename, move, share, remove a share, delete, invite, copy link, revoke and restore, all without a pointer.
 - Screen reader run (NVDA + Firefox or VoiceOver + Safari) on My Drive, the upload tray, the share dialog and Users and invites.
