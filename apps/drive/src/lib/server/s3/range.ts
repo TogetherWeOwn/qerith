@@ -1,6 +1,6 @@
 /** Validate a single HTTP byte range without interpreting the object's size. */
 export function validateRange(value: string): string {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value);
   if (!match || (!match[1] && !match[2])) throw new Error('Invalid byte range');
 
   const first = match[1] ? Number(match[1]) : undefined;

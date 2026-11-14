@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { validateRange } from './range.ts';
 
 test('accepts single bounded, open and suffix byte ranges', () => {
-  for (const range of ['bytes=0-0', 'bytes=2-999', 'bytes=2-', 'bytes=-3', 'bytes=-99']) {
+  for (const range of ['bytes=0-0', 'bytes=2-999', 'bytes=2-', 'bytes=-3', 'bytes=-99', 'Bytes=0-1', 'BYTES=-3']) {
     assert.equal(validateRange(range), range);
   }
 });
