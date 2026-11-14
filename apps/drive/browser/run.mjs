@@ -45,8 +45,10 @@ try {
     await writeFile(resolve(output, `axe-${width}x${height}.json`), JSON.stringify(results, null, 2));
     assert.equal(results.violations.length, 0, `axe violations at ${width}x${height}`);
     const keyboard = await exerciseKeyboard(page);
-    assert(keyboard && typeof keyboard === 'object' && Object.keys(keyboard).length, 'Keyboard evidence is required');
-    await writeFile(resolve(output, `keyboard-${width}x${height}.json`), JSON.stringify(keyboard, null, 2));
+    const keyboardJson = JSON.stringify(keyboard, null, 2);
+    const recordedKeyboard = keyboardJson && JSON.parse(keyboardJson);
+    assert(recordedKeyboard && typeof recordedKeyboard === 'object' && Object.keys(recordedKeyboard).length, 'Keyboard evidence is required');
+    await writeFile(resolve(output, `keyboard-${width}x${height}.json`), keyboardJson);
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
