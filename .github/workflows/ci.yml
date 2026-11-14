@@ -302,9 +302,39 @@ jobs:
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
 
+  drive-bootstrap:
+    name: drive dependency bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Test alternate lockfile guard
+        run: bash tests/reject-shrinkwrap.test.sh
+      - name: Verify locked release ages and integrity
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+      - name: Install reviewed lock without scripts
+        run: |
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test strict XML parsing
+        run: node --import tsx --test tests/xml-parser.test.ts
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, drive-lock-verifier]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, drive-lock-verifier, drive-bootstrap]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
