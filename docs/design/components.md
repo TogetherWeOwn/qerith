@@ -146,7 +146,7 @@ Density: `size.row.admin` (40 px) rows, 14 px text, hairlines between rows, `bg.
 
 The Drive top bar. 60 px (`size.header.compact`) at every width, sticky, `bg.sticky` with `elevation.blur`, bottom hairline. The only sticky element on Drive.
 
-**Anatomy (1280):** product mark + "Drive" · section nav: "My Drive", "Shared with me", "Users and invites" (owner only), as 36 px pills, 15 px medium, `text.secondary`; the current section `bg.raised` + `text.primary` · end cluster: avatar + name, an A3-style button that opens a K5 menu with "Sign out". No project switcher, no spend status.
+**Anatomy (1280):** product mark (glyph + "Drive", [icons.md](icons.md)) · section nav: "My Drive", "Shared with me", "Users and invites" (owner only), as 36 px pills, 15 px medium, `text.secondary`; the current section `bg.raised` + `text.primary` · end cluster: avatar + name, an A3-style button that opens a K5 menu with "Sign out". No project switcher, no spend status.
 
 **At ≤ 820 px:** mark · avatar · Menu icon button (B2 sheet holds the sections and "Sign out").
 
@@ -361,7 +361,7 @@ Shown inline in a K15 item (and as a single K7 when one file is dropped and the 
 
 **Job:** sign in, or set up sign-in from an invite, with a passkey and no password.
 
-**Anatomy:** a card (`bg.surface`, hairline-strong, `radius.l`, `space.inset.card-lg`) centred in a narrow page (max `layout.rail.max`) under a header with only the product mark. H1 at `font-size.h3` · one sentence · primary `md` full width · a 14 px `text.secondary` explanation · a lock line ("No passwords. Your passkey stays on your device or password manager.").
+**Anatomy:** a card (`bg.surface`, hairline-strong, `radius.l`, `space.inset.card-lg`) centred in a narrow page (max `layout.rail.max`) under a header with only the product mark ([icons.md](icons.md), "Product mark"; plain text here, not a link). H1 at `font-size.h3` · one sentence · primary `md` full width · a 14 px `text.secondary` explanation · a lock line ("No passwords. Your passkey stays on your device or password manager.").
 
 | State | H1 | Primary | Body |
 |---|---|---|---|
@@ -371,7 +371,7 @@ Shown inline in a K15 item (and as a single K7 when one file is dropped and the 
 | waiting for the device | unchanged | "Waiting for your device…" (`aria-busy`) | "Follow your browser's prompt." · link button "Cancel" |
 | cancelled or timed out | unchanged | the button returns | A14 info: "Nothing was saved. Try again when you're ready." |
 | no passkey on this device (sign in) | unchanged | unchanged | A14 info: "This device doesn't have a passkey for Drive. Use the device you set it up on, or ask the owner for a sign-in link." |
-| browser can't do passkeys | unchanged | quiet `aria-disabled` "Set up a passkey" | warn notice: "This browser can't use passkeys. Try an up-to-date Chrome, Edge, Firefox or Safari." |
+| browser can't do passkeys | unchanged | the same label, quiet and `aria-disabled` (sign in: "Sign in with a passkey"; invite and recovery: "Set up a passkey") | warn notice: "This browser can't use passkeys. Try an up-to-date Chrome, Edge, Firefox or Safari." |
 | link used, expired or cancelled | "This link doesn't work any more" | — (no button) | "Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one." |
 | account revoked | "Your access is turned off" | — | "The owner turned off your access to Drive. Your files are kept. Ask them if you think this is a mistake." |
 | too many tries | unchanged | quiet, `aria-disabled`, "Try again in 1 min" | "Too many tries. Wait a minute, then try again." |
