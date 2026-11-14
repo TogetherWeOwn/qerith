@@ -65,11 +65,14 @@ export function createS3Signer(options: S3SignerOptions) {
       keys.add(key);
     }
     if (init.keepalive && init.body != null) throw new Error('S3 keepalive requests with a body are unsupported');
-    const body = init.body;
+    let body = init.body;
     if (body != null && typeof body !== 'string' && !(body instanceof Blob) &&
         !(body instanceof URLSearchParams) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body)) {
       throw new Error('Unsupported S3 request body');
     }
+    if (body instanceof URLSearchParams) body = new URLSearchParams(body);
+    else if (body instanceof ArrayBuffer) body = body.slice(0);
+    else if (ArrayBuffer.isView(body)) body = new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
     const request = new Request(parsed, { ...init, headers, redirect: 'manual', duplex: 'half' } as RequestInit);
     if (request.method !== request.method.toUpperCase()) throw new Error('Unsupported S3 method');
     const datetime = (options.now?.() ?? new Date()).toISOString().replace(/[:-]|\.\d{3}/g, '');

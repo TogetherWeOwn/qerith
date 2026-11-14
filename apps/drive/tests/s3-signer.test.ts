@@ -59,6 +59,22 @@ test('signs the actual normalized request and preserves fetch options', async ()
   }), /keepalive/);
 });
 
+test('snapshots mutable bodies before asynchronous signing', async () => {
+  const signer = createS3Signer({ ...options, fetch });
+  const bytes = new Uint8Array([1, 2]);
+  const parameters = new URLSearchParams('a=1');
+  const first = signer.sign('https://example.com/', {
+    method: 'PUT', body: bytes, headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }
+  });
+  const second = signer.sign('https://example.com/', {
+    method: 'PUT', body: parameters, headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }
+  });
+  bytes[0] = 9;
+  parameters.set('a', '2');
+  assert.deepEqual(new Uint8Array(await (await first).arrayBuffer()), new Uint8Array([1, 2]));
+  assert.equal(await (await second).text(), 'a=1');
+});
+
 test('fails closed for query parameters the signer cannot canonicalize', async () => {
   const signer = createS3Signer({ ...options, fetch });
   const init = { headers: { 'x-amz-content-sha256': emptyHash } };
