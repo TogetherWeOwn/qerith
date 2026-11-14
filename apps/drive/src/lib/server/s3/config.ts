@@ -21,13 +21,14 @@ export function validateConfig(config: S3Config): Readonly<S3Config> {
     endpoint.username || endpoint.password || !/^https?:\/\/[^/?#]+\/?$/i.test(config.endpoint) ||
     endpoint.pathname !== '/' ||
     config.endpoint.includes('?') || config.endpoint.includes('#') ||
-    config.endpoint.includes('\\') || config.endpoint.trim() !== config.endpoint
+    config.endpoint.includes('\\') || /\s/.test(config.endpoint)
   ) throw new Error('Invalid S3 endpoint');
 
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) ||
     config.bucket.includes('..') || /^\d+\.\d+\.\d+\.\d+$/.test(config.bucket) ||
-    !config.region.trim() || !config.accessKeyId.trim() || !config.secretAccessKey.trim()
+    !config.region.trim() || config.region.trim() !== config.region ||
+    !config.accessKeyId.trim() || !config.secretAccessKey.trim()
   ) throw new Error('Invalid S3 configuration');
 
   return Object.freeze({ ...config, endpoint: endpoint.origin });

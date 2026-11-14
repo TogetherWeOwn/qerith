@@ -19,10 +19,14 @@ test('rejects unsafe endpoints and invalid buckets', () => {
     'http://localhost:9000', 'http://example.test', 'https://user:pass@example.test',
     'https://example.test/path', 'https://example.test/tenant/..', 'https://example.test/%2e',
     'https://example.test?x=1', 'https://example.test#fragment',
+    'https://exa\nmple.test', 'https://exa\tmple.test', 'https://exa\rmple.test',
   ]) assert.throws(() => validateConfig({ ...config, endpoint }), /Invalid S3 endpoint/);
   assert.throws(() => validateConfig({ ...config, endpoint: 'http://example.test', allowLocalHttp: true }));
   for (const bucket of ['UPPER', 'ab', 'bad..name', '192.168.1.1', 'bad/name']) {
     assert.throws(() => validateConfig({ ...config, bucket }), /Invalid S3 configuration/);
+  }
+  for (const region of [' test-1', 'test-1\n']) {
+    assert.throws(() => validateConfig({ ...config, region }), /Invalid S3 configuration/);
   }
   for (const field of ['region', 'accessKeyId', 'secretAccessKey'] as const) {
     assert.throws(() => validateConfig({ ...config, [field]: '  ' }), /Invalid S3 configuration/);
