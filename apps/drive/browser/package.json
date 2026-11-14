@@ -1,0 +1,12 @@
+{
+  "name": "qerith-drive-browser-evidence",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "axe-core": "4.10.3",
+    "playwright": "1.55.0"
+  }
+}
