@@ -3,6 +3,7 @@
 interface Statement {
   bind(...values: (string | null)[]): Statement;
   first<T>(): Promise<T | null>;
+  all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
 
@@ -13,6 +14,10 @@ export interface Entry {
   name: string;
   kind: 'file' | 'folder';
 }
+
+export interface Cursor { name: string; id: string }
+export interface ListedEntry extends Entry { item_count: number | null }
+export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
 
 const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
@@ -41,6 +46,32 @@ export class PrivateMetadata {
     return this.db.prepare(`SELECT ${columns} FROM drive_entries
       WHERE id = ? AND owner_id = ? AND ${active}`)
       .bind(id, principalId, principalId).first<Entry>();
+  }
+
+  async list(principalId: string, parentId: string | null, cursor: Cursor | null = null): Promise<Page> {
+    if (cursor !== null && (typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
+      throw new TypeError('Invalid cursor');
+    }
+    const boundary = cursor === null ? '' : 'AND (name, id) > (?, ?)';
+    const query = this.db.prepare(`SELECT ${columns},
+      (SELECT item_count FROM drive_folder_counts WHERE folder_id = drive_entries.id) AS item_count FROM drive_entries
+      WHERE owner_id = ? AND COALESCE(parent_id, '') = COALESCE(?, '') AND ${active}
+        AND (? IS NULL OR EXISTS (SELECT 1 FROM drive_entries AS parent
+          WHERE parent.id = ? AND parent.owner_id = ? AND parent.kind = 'folder'))
+        ${boundary} ORDER BY name, id LIMIT 101`);
+    const values = [principalId, parentId, principalId, parentId, parentId, principalId];
+    if (cursor !== null) values.push(cursor.name, cursor.id);
+    const rows = (await query.bind(...values).all<ListedEntry>()).results;
+    const entries = rows.slice(0, 100);
+    const last = entries[entries.length - 1];
+    return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
+  }
+
+  async move(principalId: string, id: string, parentId: string | null, name: string): Promise<Entry | null> {
+    validateName(name);
+    return this.db.prepare(`UPDATE drive_entries SET parent_id = ?, name = ?
+      WHERE id = ? AND owner_id = ? AND ${active}
+      RETURNING ${columns}`).bind(parentId, name, id, principalId, principalId).first<Entry>();
   }
 
   async createFolder(principalId: string, parentId: string | null, name: string): Promise<Entry | null> {

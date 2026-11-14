@@ -115,10 +115,21 @@ Avatar initials (`avatar-text` on `avatar.0`…`11`): 5.50 · 10.39 · 6.82 · 1
 
 | Token | Value | Job |
 |---|---|---|
-| `font.ui` | `Mona Sans, system-ui, sans-serif` | All UI text: body, buttons, nav, fields, headings. Self-hosted variable font (wdth 75–125, wght 200–900), latin subset, preloaded, `font-display: swap`. |
+| `font.ui` | `"Qerith Sans", system-ui, sans-serif` | All UI text: body, buttons, nav, fields, headings. Self-hosted variable font, renamed from Mona Sans (wdth 75–125, wght 200–900), latin subset, preloaded, `font-display: swap`. |
 | `font.data` | `Fragment Mono, ui-monospace, monospace` | Sizes, times, counts, labels, links in copy fields. Latin subset, `font-display: optional`. |
 
 Both are SIL OFL. Drive uses no serif accent.
+
+**Font files.** Serve these two files from Drive's own origin; never load a font from a third-party host. Copy them from [assets/fonts/](assets/fonts/) with their licence files.
+
+| File | Face | Made from |
+|---|---|---|
+| `QerithSans-latin.woff2` (sha256 `e4a70c25d2b47250212bbf0040257be7a6aef5cc87572ddb827b1a33f07a1bea`) | `@font-face { font-family: "Qerith Sans"; src: url("/fonts/QerithSans-latin.woff2") format("woff2"); font-weight: 200 900; font-stretch: 75% 125%; font-display: swap; }` | `MonaSansVF[wdth,opsz,wght].woff2` (sha256 `875ad1fa…f80d3`) from [github/mona-sans v2.0.27](https://github.com/github/mona-sans/releases/tag/v2.0.27) `mona-sans-webfonts-v2.0.27.zip`; opsz axis dropped (text default), subset to Latin, then renamed (see below). Licence: `OFL-QerithSans.txt`, the Mona Sans OFL unchanged. |
+| `FragmentMono-Regular-latin.woff2` (sha256 `e950f87ac4bb70974bdc546081015200a981252a0232e67ff63d862e4b805323`) | `@font-face { font-family: "Fragment Mono"; src: url("/fonts/FragmentMono-Regular-latin.woff2") format("woff2"); font-weight: 400; font-display: optional; }` | `FragmentMono-Regular.woff2` (sha256 `f8d6f30e…0f888`) from [weiweihuanghuang/fragment-mono 1.21](https://github.com/weiweihuanghuang/fragment-mono/releases/tag/1.21), subset to Latin. Licence: `OFL-FragmentMono.txt`, unchanged. |
+
+**Why the UI font is called Qerith Sans.** The Mona Sans licence reserves the font name "Mona" (`OFL-QerithSans.txt`, line 1). Clause 3 of the OFL says a modified version must not use a reserved name as its primary font name without written permission. Our file is modified: the opsz axis is removed and it is subset. So it is renamed to **Qerith Sans**: family and typographic family `Qerith Sans`, full name `Qerith Sans`, PostScript name `QerithSans-Regular`, variations PostScript prefix `QerithSans`, vendor ID `NONE`. The copyright notice (name ID 0) and the licence are kept, and the version string says it is modified from Mona Sans 2.027. Only the name table, the OS/2 vendor ID and the head checksum changed: the outlines, axes and layout tables match the subset byte for byte, so it looks exactly like Mona Sans. Fragment Mono has no reserved name, so it keeps its name. Never write "Mona Sans" in `font-family` or a file name; use `Qerith Sans`.
+
+Latin subset (both files): `U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD`, made with `pyftsubset --layout-features='*' --flavor=woff2`; set the same range as `unicode-range`. Other characters (names in other scripts) fall back to `system-ui` / `ui-monospace` per glyph, which is expected. Serve both files at `/fonts/` on Drive's origin, the same URLs as the `src` above. Preload only Qerith Sans, with the same URL: `<link rel="preload" href="/fonts/QerithSans-latin.woff2" as="font" type="font/woff2" crossorigin>`. Keep `crossorigin` even though the file is same-origin; fonts are fetched in CORS mode, and without it the browser downloads the file twice.
 
 | Token | Value |
 |---|---|
