@@ -57,6 +57,20 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES ('dup', 'alice', NULL, 'dup', 'file', 'object', 0)").run()).rejects.toThrow();
   await expect(env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES ('bad-folder', 'alice', NULL, 'bad-folder', 'folder', NULL, 0)").run()).rejects.toThrow();
   await expect(metadata.createFolder('alice', 'file', 'child')).rejects.toThrow();
+  const beforeReplace = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
+  const replace = env.DB.prepare('INSERT OR REPLACE INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (const values of [
+    [folder.id, 'alice', child.id, 'cycle', 'folder', null, null],
+    [folder.id, 'bob', null, 'owned', 'folder', null, null],
+    ['file', 'alice', null, 'file-changed', 'file', 'new-object', 1],
+    ['new-file', 'alice', null, 'other', 'file', 'object', 1],
+    ['new-folder', 'alice', null, 'private', 'folder', null, null],
+  ]) {
+    await expect(replace.bind(...values).run()).rejects.toThrow();
+    expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(beforeReplace);
+  }
+  await replace.bind('ordinary', 'alice', child.id, 'ordinary', 'folder', null, null).run();
+  expect((await env.DB.prepare('SELECT parent_id FROM drive_entries WHERE id = ?').bind('ordinary').first()).parent_id).toBe(child.id);
   for (const [column, value] of [['id', 'changed'], ['owner_id', 'bob'], ['kind', 'file'], ['object_key', 'changed']]) {
     await expect(env.DB.prepare(`UPDATE drive_entries SET ${column} = ? WHERE id = ?`)
       .bind(value, folder.id).run()).rejects.toThrow();

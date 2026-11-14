@@ -17,6 +17,18 @@ CREATE UNIQUE INDEX drive_entries_sibling_name
   ON drive_entries(owner_id, COALESCE(parent_id, ''), name);
 CREATE INDEX drive_entries_owner_parent ON drive_entries(owner_id, parent_id);
 
+-- Reject all insert conflicts before SQLite can replace an existing row.
+CREATE TRIGGER drive_entries_insert_conflict
+BEFORE INSERT ON drive_entries
+WHEN EXISTS (
+  SELECT 1 FROM drive_entries WHERE id = NEW.id
+    OR (NEW.object_key IS NOT NULL AND object_key = NEW.object_key)
+    OR (owner_id = NEW.owner_id AND COALESCE(parent_id, '') = COALESCE(NEW.parent_id, '') AND name = NEW.name)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'conflicting metadata');
+END;
+
 CREATE TRIGGER drive_entries_insert_parent
 BEFORE INSERT ON drive_entries WHEN NEW.parent_id IS NOT NULL
 BEGIN
