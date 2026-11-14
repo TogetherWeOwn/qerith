@@ -329,6 +329,10 @@ jobs:
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check Drive project types and configuration coverage
+        run: |
+          npm run check
+          node --test tests/typecheck.test.mjs
       - name: Test strict XML parsing
         run: node --import tsx --test tests/xml-parser.test.ts
       - name: Test fail-closed Worker entrypoint
