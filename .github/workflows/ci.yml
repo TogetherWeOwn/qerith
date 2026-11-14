@@ -287,6 +287,13 @@ jobs:
         run: |
           test "$(npm --version)" = '11.19.0'
           npm ci --ignore-scripts
+      - name: Prepare Drive project configuration for shared metadata source
+        working-directory: apps/drive
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
       - name: Run local D1 smoke test
         working-directory: apps/drive-test
         run: npm test
@@ -329,6 +336,10 @@ jobs:
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check Drive project types and configuration coverage
+        run: |
+          npm run check
+          node --test tests/typecheck.test.mjs
       - name: Test strict XML parsing
         run: node --import tsx --test tests/xml-parser.test.ts
       - name: Test fail-closed Worker entrypoint
