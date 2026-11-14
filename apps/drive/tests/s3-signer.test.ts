@@ -14,7 +14,8 @@ const scope = 'AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east
 
 test('signs the published ranged GET and sends it through the injected fetch', async () => {
   let sent: Request | undefined;
-  const signer = createS3Signer({ ...options, fetch: async (input) => {
+  const signer = createS3Signer({ ...options, fetch: async function (this: unknown, input) {
+    assert.equal(this, undefined);
     sent = input as Request;
     return new Response('ok');
   } });

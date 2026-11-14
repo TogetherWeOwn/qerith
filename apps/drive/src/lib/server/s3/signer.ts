@@ -87,7 +87,8 @@ export function createS3Signer(options: S3SignerOptions) {
   return {
     sign,
     async fetch(url: string, init: RequestInit = {}): Promise<Response> {
-      return options.fetch(await sign(url, init));
+      const transport = options.fetch;
+      return transport(await sign(url, init));
     }
   };
 }
