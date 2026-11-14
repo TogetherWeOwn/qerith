@@ -38,6 +38,16 @@ BEGIN
   ) THEN RAISE(ABORT, 'invalid parent') END;
 END;
 
+CREATE TRIGGER drive_entries_update_conflict
+BEFORE UPDATE OF parent_id, name ON drive_entries
+WHEN EXISTS (
+  SELECT 1 FROM drive_entries WHERE id != OLD.id AND owner_id = NEW.owner_id
+    AND COALESCE(parent_id, '') = COALESCE(NEW.parent_id, '') AND name = NEW.name
+)
+BEGIN
+  SELECT RAISE(ABORT, 'conflicting metadata');
+END;
+
 CREATE TRIGGER drive_entries_immutable
 BEFORE UPDATE OF id, owner_id, kind, object_key ON drive_entries
 WHEN NEW.id IS NOT OLD.id OR NEW.owner_id IS NOT OLD.owner_id
