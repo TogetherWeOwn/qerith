@@ -84,7 +84,10 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
           length += part.value.byteLength;
         }
       }
-      return { status: response.status, headers: response.headers, body: result.subarray(0, length) };
+      // Compact partial responses so the returned body does not retain unused capacity.
+      // At most one additional response-sized copy is transiently allocated.
+      const responseBody = length === result.byteLength ? result : result.slice(0, length);
+      return { status: response.status, headers: response.headers, body: responseBody };
     } catch (error) {
       controller.abort(error);
       if (reader) void reader.cancel(error).catch(() => {});

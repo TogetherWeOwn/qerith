@@ -75,6 +75,20 @@ test('handles bucket requests, conditional responses, and fragmented bodies', as
   assert.deepEqual((await request(operation)).body, new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]));
 });
 
+test('returns compact backing buffers for small and empty responses', async () => {
+  let count = 0;
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () =>
+    ++count === 1 ? new Response('ok') : new Response(null)
+  });
+  const limit = 16 * 1024 * 1024;
+  const small = await request({ ...operation, maxResponseBytes: limit });
+  assert.deepEqual(small.body, new TextEncoder().encode('ok'));
+  assert.equal(small.body.buffer.byteLength, 2);
+  const empty = await request({ ...operation, method: 'HEAD', maxResponseBytes: limit });
+  assert.equal(empty.body.byteLength, 0);
+  assert.equal(empty.body.buffer.byteLength, 0);
+});
+
 test('rejects redirects and bounded response overflow with one attempt', async () => {
   let count = 0;
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () => {
