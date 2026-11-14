@@ -297,7 +297,9 @@ jobs:
         with:
           node-version: '24.21.0'
       - name: Verify locked release ages and integrity
-        run: node scripts/verify-lock-age.mjs
+        run: |
+          test ! -e npm-shrinkwrap.json && test ! -L npm-shrinkwrap.json
+          node scripts/verify-lock-age.mjs
       - name: Install reviewed lock without scripts
         run: |
           test "$(npm --version)" = 11.19.0
