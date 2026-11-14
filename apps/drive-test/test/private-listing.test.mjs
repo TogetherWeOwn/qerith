@@ -4,10 +4,8 @@ import { expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 
 it('lists private root and nested pages with indexed keyset boundaries', async () => {
-  await env.DB.exec(`CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
-    CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;
-    INSERT INTO test_members VALUES ('alice', 1), ('bob', 1), ('revoked', 0);`);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
   const insert = (id, owner, parent, name, kind = 'folder') => env.DB.prepare(`INSERT INTO drive_entries
     (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, owner, parent, name, kind, kind === 'file' ? `object-${id}` : null, kind === 'file' ? 0 : null);
@@ -49,7 +47,7 @@ it('lists private root and nested pages with indexed keyset boundaries', async (
     expect(await metadata.list(principal, null)).toEqual({ entries: [], nextCursor: null });
   }
   const first = await metadata.list('alice', null);
-  await env.DB.prepare("UPDATE test_members SET active = 0 WHERE id = 'alice'").run();
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
   expect(await metadata.list('alice', null, first.nextCursor)).toEqual({ entries: [], nextCursor: null });
   await env.DB.exec('DROP VIEW drive_active_members');
   await expect(metadata.list('alice', null)).rejects.toThrow();

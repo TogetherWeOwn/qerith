@@ -2,12 +2,14 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
+import { findActivePrincipal } from '../../drive/src/lib/server/identity/membership.ts';
 
 it('initializes and reapplies the available actual migration directory', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const ledger = () => env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all();
   const initial = (await ledger()).results;
-  expect(initial.filter(({ name }) => name === '0002_private_metadata.sql')).toHaveLength(1);
+  expect(initial.map(({ name }) => name)).toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
+  expect(new Set(initial.map(({ name }) => name)).size).toBe(env.DRIVE_MIGRATIONS.length);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect((await ledger()).results).toEqual(initial);
   expect((await env.DB.prepare('PRAGMA table_info(drive_entries)').all()).results.map(({ name, type, notnull, pk }) => [name, type, notnull, pk]))
@@ -17,16 +19,22 @@ it('initializes and reapplies the available actual migration directory', async (
     .toEqual(expect.arrayContaining(['drive_entries_immutable', 'drive_entries_insert_parent', 'drive_entries_move_parent']));
 });
 
-it('uses live test-only membership for private folder creation and lookup', async () => {
-  // Test-only pre-metadata schema and data; not the production identity migration.
-  await env.DB.exec(`CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL, role TEXT NOT NULL);
-    CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;`);
-  await env.DB.prepare('INSERT INTO test_members VALUES (?, ?, ?), (?, ?, ?)')
-    .bind('alice', 1, 'member', 'bob', 1, 'owner').run();
+it('upgrades seeded actual identity and uses live membership for private metadata', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+    .bind('alice', 'member', 'active', 'bob', 'owner', 'active', 'revoked', 'member', 'revoked').run();
+  const principals = (await env.DB.prepare('SELECT * FROM drive_principals ORDER BY id').all()).results;
+  const beforeLedger = (await env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all()).results;
+  expect(beforeLedger).toEqual([{ name: '0001_identity.sql' }]);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  expect((await env.DB.prepare('SELECT * FROM test_members ORDER BY id').all()).results)
-    .toEqual([{ id: 'alice', active: 1, role: 'member' }, { id: 'bob', active: 1, role: 'owner' }]);
+  expect((await env.DB.prepare('SELECT * FROM drive_principals ORDER BY id').all()).results).toEqual(principals);
+  expect((await env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all()).results.map(({ name }) => name))
+    .toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
+  expect(await findActivePrincipal(env.DB, 'alice')).toEqual({ id: 'alice', role: 'member' });
+  expect(await findActivePrincipal(env.DB, 'bob')).toEqual({ id: 'bob', role: 'owner' });
+  expect(await findActivePrincipal(env.DB, 'absent')).toBeNull();
+  expect(await findActivePrincipal(env.DB, 'revoked')).toBeNull();
   const metadata = new PrivateMetadata(env.DB);
   const folder = await metadata.createFolder('alice', null, 'private');
   expect(folder).toMatchObject({ owner_id: 'alice', parent_id: null, name: 'private', kind: 'folder' });
@@ -96,7 +104,8 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   expect(await metadata.get('alice', child.id)).toEqual(child);
   expect(await metadata.createFolder('absent', null, 'no')).toBeNull();
   expect(await metadata.get('absent', folder.id)).toBeNull();
-  await env.DB.prepare('UPDATE test_members SET active = 0 WHERE id = ?').bind('alice').run();
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind('alice').run();
+  expect(await findActivePrincipal(env.DB, 'alice')).toBeNull();
   expect(await metadata.get('alice', folder.id)).toBeNull();
   expect(await metadata.createFolder('alice', null, 'no')).toBeNull();
   expect((await env.DB.prepare("SELECT name FROM d1_migrations WHERE name = '0002_private_metadata.sql'").all()).results)
@@ -106,4 +115,19 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   await env.DB.exec('DROP VIEW drive_active_members');
   await expect(metadata.get('alice', folder.id)).rejects.toThrow();
   await expect(metadata.createFolder('alice', null, 'no')).rejects.toThrow();
+});
+
+it('enforces principal constraints and propagates lookup failures', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  const insert = env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?)');
+  await insert.bind('owner', 'owner', 'revoked').run();
+  for (const values of [
+    ['', 'member', 'active'], [null, 'member', 'active'], ['bad-role', 'admin', 'active'],
+    ['bad-status', 'member', 'pending'], ['null-role', null, 'active'], ['null-status', 'member', null], ['second-owner', 'owner', 'active'],
+    ['owner', 'member', 'active'],
+  ]) await expect(insert.bind(...values).run()).rejects.toThrow();
+  await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'owner'").run();
+  expect(await findActivePrincipal(env.DB, 'owner')).toEqual({ id: 'owner', role: 'owner' });
+  await env.DB.exec('DROP VIEW drive_active_members; DROP TABLE drive_principals;');
+  await expect(findActivePrincipal(env.DB, 'owner')).rejects.toThrow();
 });

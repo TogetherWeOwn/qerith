@@ -19,10 +19,9 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
-    DROP TABLE IF EXISTS test_members;
-    CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
-    CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;
-    INSERT INTO test_members VALUES ('alice', 1), ('bob', 1), ('revoked', 0);`);
+    DROP TABLE IF EXISTS drive_principals;`);
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
 });
 
 it('upgrades seeded entries exactly and enforces live owner membership', async () => {
@@ -40,15 +39,15 @@ it('upgrades seeded entries exactly and enforces live owner membership', async (
   const after = await snapshot();
   expect({ entries: after.entries, counts: after.counts }).toEqual(before);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
+    .toEqual(['0001_identity.sql', '0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
   const metadata = new PrivateMetadata(env.DB);
   expect(await metadata.usage('alice')).toEqual({ bytes: (1027n * 9007199254740991n).toString() });
   expect(await metadata.usage('bob')).toEqual({ bytes: '17' });
   expect(await metadata.usage('revoked')).toBeNull();
   expect(await metadata.usage('absent')).toBeNull();
-  await run("UPDATE test_members SET active = 0 WHERE id = 'alice'");
+  await run("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'");
   expect(await metadata.usage('alice')).toBeNull();
-  await run("UPDATE test_members SET active = 1 WHERE id = 'alice'");
+  await run("UPDATE drive_principals SET status = 'active' WHERE id = 'alice'");
   expect(await metadata.usage('alice')).toEqual({ bytes: (1027n * 9007199254740991n).toString() });
   await env.DB.exec('DROP VIEW drive_active_members');
   await expect(metadata.usage('alice')).rejects.toThrow();
@@ -65,7 +64,7 @@ it('rolls back a failed upgrade and retries without changing entries or counts',
   expect(await rows('SELECT * FROM drive_folder_counts ORDER BY folder_id')).toEqual(counts);
   expect(await rows("SELECT name FROM sqlite_master WHERE name IN ('drive_owner_usage', 'drive_usage_backfill')")).toEqual([]);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0002_private_metadata.sql', '0003_private_folder_counts.sql']);
+    .toEqual(['0001_identity.sql', '0002_private_metadata.sql', '0003_private_folder_counts.sql']);
   await env.DB.exec('DROP TRIGGER drive_usage_insert');
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect(await new PrivateMetadata(env.DB).usage('alice')).toEqual({ bytes: '19' });
