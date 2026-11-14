@@ -45,6 +45,15 @@ test('signs the actual normalized request and preserves fetch options', async ()
   assert.match(request.headers.get('authorization') ?? '', /SignedHeaders=content-type;host;/);
   assert.equal(await request.text(), 'hello');
   await assert.rejects(signer.sign('https://example.com/', {
+    method: 'propfind', headers: { 'x-amz-content-sha256': emptyHash }
+  }), /method/);
+  await assert.rejects(signer.sign('https://example.com/', {
+    method: 'PUT', body: new FormData(), headers: { 'x-amz-content-sha256': emptyHash }
+  }), /body/);
+  await assert.rejects(signer.sign('https://example.com/', {
+    method: 'PUT', body: new ReadableStream(), headers: { 'x-amz-content-sha256': emptyHash }
+  } as RequestInit), /body/);
+  await assert.rejects(signer.sign('https://example.com/', {
     method: 'PUT', body: 'hello', keepalive: true,
     headers: { 'x-amz-content-sha256': emptyHash }
   }), /keepalive/);
@@ -54,6 +63,7 @@ test('fails closed for query parameters the signer cannot canonicalize', async (
   const signer = createS3Signer({ ...options, fetch });
   const init = { headers: { 'x-amz-content-sha256': emptyHash } };
   await assert.rejects(signer.sign('https://example.com/?a=1&a=2', init), /query/);
+  await assert.rejects(signer.sign('https://example.com/?a=1&&b=2', init), /query/);
   await assert.rejects(signer.sign('https://example.com/?=value', init), /query/);
   await assert.rejects(signer.sign('https://example.com/a+b', init), /URL/);
   await assert.rejects(signer.sign('https://example.com/a%2Fb', init), /URL/);
@@ -67,7 +77,11 @@ test('fails closed for query parameters the signer cannot canonicalize', async (
   await assert.rejects(signer.sign('https://example.com/?prefix=a+b', init), /query/);
   await assert.rejects(signer.sign('https://example.com/'), /payload hash/);
   await assert.rejects(signer.sign('https://example.com/', { headers: { 'x-amz-content-sha256': '' } }), /payload hash/);
-  const query = await signer.sign('https://example.com/?prefix=archive/../', init);
+  await assert.rejects(signer.sign('https://example.com/?prefix=archive/../', init), /query/);
+  await assert.rejects(signer.sign('https://example.com/%7Efile', init), /encoding/);
+  await assert.rejects(signer.sign('https://example.com/%FF', init), /encoding/);
+  await assert.rejects(signer.sign('https://example.com/?prefix=%GG', init), /encoding/);
+  const query = await signer.sign('https://example.com/?prefix=archive%2F..%2F', init);
   assert.equal(new URL(query.url).searchParams.get('prefix'), 'archive/../');
   const injected = await signer.sign('https://example.com/', { ...init, url: 'http://example.com/' } as RequestInit);
   assert.equal(injected.url, 'https://example.com/');
