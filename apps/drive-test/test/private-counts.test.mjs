@@ -19,6 +19,7 @@ beforeEach(async () => {
     DROP TRIGGER IF EXISTS drive_counts_delete;
     DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
+    DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS test_members;
@@ -34,7 +35,7 @@ it('upgrades seeded entries and maintains direct counts through mutations', asyn
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0002_private_metadata.sql', '0003_private_folder_counts.sql']);
+    .toEqual(['0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
   const metadata = new PrivateMetadata(env.DB);
   const root = () => metadata.list('alice', null);
   expect((await root()).entries.map(({ id, item_count }) => [id, item_count])).toEqual([['a', 1], ['b', 0]]);

@@ -67,6 +67,15 @@ export class PrivateMetadata {
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
+  // Decimal text preserves precision beyond JavaScript's safe integer range.
+  async usage(principalId: string): Promise<{ bytes: string } | null> {
+    const result = await this.db.prepare(`SELECT CAST(COALESCE(high, 0) AS TEXT) ||
+      printf('%09d', COALESCE(low, 0)) AS bytes
+      FROM (SELECT 1) LEFT JOIN drive_owner_usage ON owner_id = ?
+      WHERE ${active}`).bind(principalId, principalId).first<{ bytes: string }>();
+    return result === null ? null : { bytes: result.bytes.replace(/^0+(?=\d)/, '') };
+  }
+
   async move(principalId: string, id: string, parentId: string | null, name: string): Promise<Entry | null> {
     validateName(name);
     return this.db.prepare(`UPDATE drive_entries SET parent_id = ?, name = ?
