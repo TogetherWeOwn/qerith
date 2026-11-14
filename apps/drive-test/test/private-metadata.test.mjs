@@ -3,14 +3,28 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 
+it('initializes and reapplies the available actual migration directory', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  expect((await env.DB.prepare('SELECT name FROM d1_migrations').all()).results)
+    .toEqual([{ name: '0002_private_metadata.sql' }]);
+  expect((await env.DB.prepare('PRAGMA table_info(drive_entries)').all()).results.map(({ name, type, notnull, pk }) => [name, type, notnull, pk]))
+    .toEqual([['id', 'TEXT', 1, 1], ['owner_id', 'TEXT', 1, 0], ['parent_id', 'TEXT', 0, 0],
+      ['name', 'TEXT', 1, 0], ['kind', 'TEXT', 1, 0], ['object_key', 'TEXT', 0, 0], ['size_bytes', 'INTEGER', 0, 0]]);
+  expect((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all()).results.map(({ name }) => name))
+    .toEqual(['drive_entries_immutable', 'drive_entries_insert_parent', 'drive_entries_move_parent']);
+});
+
 it('uses live test-only membership for private folder creation and lookup', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  // Test-only stand-in, not the production identity integration.
+  // Test-only pre-metadata schema and data; not the production identity migration.
   await env.DB.exec(`CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL, role TEXT NOT NULL);
     CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;`);
   await env.DB.prepare('INSERT INTO test_members VALUES (?, ?, ?), (?, ?, ?)')
     .bind('alice', 1, 'member', 'bob', 1, 'owner').run();
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  expect((await env.DB.prepare('SELECT * FROM test_members ORDER BY id').all()).results)
+    .toEqual([{ id: 'alice', active: 1, role: 'member' }, { id: 'bob', active: 1, role: 'owner' }]);
   const metadata = new PrivateMetadata(env.DB);
   const folder = await metadata.createFolder('alice', null, 'private');
   expect(folder).toMatchObject({ owner_id: 'alice', parent_id: null, name: 'private', kind: 'folder' });
