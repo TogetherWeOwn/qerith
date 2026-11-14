@@ -47,6 +47,34 @@ test('snapshots and hashes a 16 MiB body, and rejects larger bodies', async () =
   await assert.rejects(request({ ...operation, method: 'PUT', body: new Uint8Array(16 * 1024 * 1024 + 1) }), /part limit/);
 });
 
+test('snapshots Buffer bodies before asynchronous signing', async () => {
+  let sent: Request | undefined;
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (input) => {
+    sent = input as Request;
+    return new Response();
+  } });
+  const body = Buffer.from([42]);
+  const pending = request({ ...operation, method: 'PUT', body });
+  body[0] = 9;
+  await pending;
+  assert.deepEqual(new Uint8Array(await sent!.arrayBuffer()), new Uint8Array([42]));
+});
+
+test('handles bucket requests, conditional responses, and fragmented bodies', async () => {
+  let sent: Request | undefined;
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (input) => {
+    sent = input as Request;
+    if (sent.url.endsWith('/')) return new Response(null, { status: 304 });
+    return new Response(new ReadableStream({ start(controller) {
+      for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array([i]));
+      controller.close();
+    } }));
+  } });
+  assert.equal((await request({ ...operation, key: '' })).status, 304);
+  assert.equal(sent?.url, 'https://storage.example/test-bucket/');
+  assert.deepEqual((await request(operation)).body, new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]));
+});
+
 test('rejects redirects and bounded response overflow with one attempt', async () => {
   let count = 0;
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () => {

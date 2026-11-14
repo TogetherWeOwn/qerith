@@ -41,7 +41,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     if (!Number.isSafeInteger(operation.maxResponseBytes) || operation.maxResponseBytes < 0 || operation.maxResponseBytes > MAX_PART_BYTES) {
       throw new Error('Invalid S3 response limit');
     }
-    if (!operation.key || operation.key.split('/').some((segment) => segment === '.' || segment === '..')) {
+    if (operation.key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
     if (operation.body && operation.body.byteLength > MAX_PART_BYTES) throw new Error('S3 request body exceeds part limit');
@@ -51,7 +51,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     const headers = new Headers(operation.headers);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
     // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
-    const body = operation.body?.slice();
+    const body = operation.body && new Uint8Array(operation.body);
     const controller = new AbortController();
     const forwardAbort = () => controller.abort(operation.signal?.reason);
     if (operation.signal?.aborted) forwardAbort();
@@ -68,26 +68,23 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       if (controller.signal.aborted) throw controller.signal.reason;
       const transport = options.fetch;
       const response = await abortable(transport(signed), controller.signal);
-      if (response.status >= 300 && response.status < 400) {
+      if (response.status >= 300 && response.status < 400 && response.status !== 304) {
         void response.body?.cancel().catch(() => {});
         throw new Error('S3 redirects are not allowed');
       }
-      const chunks: Uint8Array[] = [];
+      const result = new Uint8Array(operation.maxResponseBytes);
       let length = 0;
       reader = response.body?.getReader();
       if (reader) {
         for (;;) {
           const part = await abortable(reader.read(), controller.signal);
           if (part.done) break;
+          if (part.value.byteLength > operation.maxResponseBytes - length) throw new Error('S3 response exceeds limit');
+          result.set(part.value, length);
           length += part.value.byteLength;
-          if (length > operation.maxResponseBytes) throw new Error('S3 response exceeds limit');
-          chunks.push(part.value);
         }
       }
-      const result = new Uint8Array(length);
-      let offset = 0;
-      for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
-      return { status: response.status, headers: response.headers, body: result };
+      return { status: response.status, headers: response.headers, body: result.subarray(0, length) };
     } catch (error) {
       controller.abort(error);
       if (reader) void reader.cancel(error).catch(() => {});
