@@ -282,6 +282,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
+      - name: Verify locked package release ages
+        working-directory: apps/drive
+        run: |
+          node --test tests/lock-age.test.mjs
+          node scripts/verify-lock-age.mjs
       - name: Install locked dependencies without scripts
         working-directory: apps/drive
         run: |
@@ -301,8 +306,11 @@ jobs:
         run: |
           npm run build
           test -s .svelte-kit/cloudflare/_worker.js
-          npx --no-install wrangler deploy --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
           npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
+      - name: Exercise Workers runtime
+        working-directory: apps/drive
+        run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
 
   ci-ok:
     name: ci-ok
