@@ -7,7 +7,10 @@ export default defineConfig(async () => ({
       compatibilityDate: '2026-11-09',
       compatibilityFlags: ['nodejs_compat'],
       d1Databases: ['DB'],
-      bindings: { TEST_MIGRATIONS: await readD1Migrations('./test-migrations') },
+      bindings: {
+        TEST_MIGRATIONS: await readD1Migrations('./test-migrations'),
+        DRIVE_MIGRATIONS: await readD1Migrations('../drive/migrations'),
+      },
     },
   })],
 }));
