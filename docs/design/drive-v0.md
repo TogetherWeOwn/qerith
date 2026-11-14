@@ -61,7 +61,7 @@ Receipts                         H1
 **Job:** prove it's you with a passkey. **Primary:** "Sign in with a passkey".
 
 ```
-            [mark]
+          [▰ Drive]   product mark (icons.md)
   ┌─────────────────────────────┐
   │ Sign in to Drive            │  K17
   │ Drive is invite-only. If you│
@@ -74,7 +74,7 @@ Receipts                         H1
   └─────────────────────────────┘
 ```
 
-**Must render (K17):** sign in · waiting for the device · cancelled or timed out · no passkey on this device · browser can't do passkeys · account revoked (shown after a passkey that belongs to a revoked person) · too many tries (A9) · success → `next` or My Drive.
+**Must render (K17):** sign in · waiting for the device · cancelled or timed out · no passkey on this device · browser can't do passkeys (the primary keeps "Sign in with a passkey", quiet and `aria-disabled`) · account revoked (shown after a passkey that belongs to a revoked person) · too many tries (A9) · success → `next` or My Drive.
 
 No "Create account", no "Forgot password", no email field anywhere (A2).
 
