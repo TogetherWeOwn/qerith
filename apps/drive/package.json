@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --import tsx --test 'tests/*.test.ts' 'src/**/*.test.ts'"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && svelte-check --tsconfig ./tsconfig.test.json",
+    "test": "node --import tsx --test \"tests/*.test.ts\" \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@xmldom/xmldom": "0.9.12",

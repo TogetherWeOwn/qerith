@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "*"],
+  "exclude": ["src/service-worker"],
+  "compilerOptions": {
+    "types": ["$app/types", "estree", "node"]
+  }
+}
