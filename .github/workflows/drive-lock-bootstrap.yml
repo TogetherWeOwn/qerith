@@ -1,4 +1,4 @@
-name: drive lock bootstrap
+name: drive CI
 
 on:
   pull_request:
@@ -19,17 +19,20 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
-      - name: Resolve lockfile with age and script controls
+      - name: Install locked dependencies without scripts
         working-directory: apps/drive
         run: |
           set -euo pipefail
           test "$(npm --version)" = 11.19.0
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: drive-lock-${{ github.event.pull_request.head.sha }}
-          path: apps/drive/package-lock.json
-          if-no-files-found: error
-          retention-days: 7
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check types
+        working-directory: apps/drive
+        run: npm run check
+      - name: Test
+        working-directory: apps/drive
+        run: npm test
+      - name: Build Workers app
+        working-directory: apps/drive
+        run: npm run build
