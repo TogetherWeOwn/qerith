@@ -270,6 +270,27 @@ jobs:
             *) exit 1 ;;
           esac
 
+  d1-test:
+    name: workers D1 smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Install locked dependencies without lifecycle scripts
+        working-directory: apps/drive-test
+        run: |
+          test "$(npm --version)" = '11.19.0'
+          npm ci --ignore-scripts
+      - name: Run local D1 smoke test
+        working-directory: apps/drive-test
+        run: npm test
+
   drive-lock-verifier:
     name: drive lock verifier
     runs-on: ubuntu-latest
@@ -283,7 +304,7 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, drive-lock-verifier]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, drive-lock-verifier]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
