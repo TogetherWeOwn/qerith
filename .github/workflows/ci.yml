@@ -305,6 +305,8 @@ jobs:
         working-directory: apps/drive
         run: |
           npm run build
+          git diff --exit-code -- src/worker.ts
+          test ! -e .svelte-kit/adapter-wrangler.json
           test -s .svelte-kit/cloudflare/_worker.js
           npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
           npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
