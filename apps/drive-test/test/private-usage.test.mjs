@@ -105,7 +105,7 @@ it('rolls back maximum-limb overflow, missing counters and batched failures', as
   await run('UPDATE drive_entries SET size_bytes = 1 WHERE id = ?', 'a');
   expect(await metadata.usage('alice')).toEqual({ bytes: '9007199254740991999999998' });
   await unchanged(() => env.DB.batch([
-    env.DB.prepare('UPDATE drive_entries SET size_bytes = 1 WHERE id = ?').bind('a'),
+    env.DB.prepare('UPDATE drive_entries SET size_bytes = 0 WHERE id = ?').bind('a'),
     env.DB.prepare('INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, ?, ?)').bind('a', 'alice', 'a', 'folder'),
   ]));
   await run('UPDATE drive_owner_usage SET high = 0, low = 0 WHERE owner_id = ?', 'alice');
