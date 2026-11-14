@@ -26,3 +26,28 @@ test('Drive project configuration covers server source and rejects type errors',
   assert.ok(program.getSemanticDiagnostics().some((diagnostic) =>
     diagnostic.file?.fileName === filename && diagnostic.code === 2322));
 });
+
+test('application globals exclude Node while tooling remains checked', () => {
+  const readConfig = (name) => {
+    const config = ts.readConfigFile(`${root}${name}`, ts.sys.readFile);
+    assert.equal(config.error, undefined);
+    const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
+    assert.deepEqual(parsed.errors, []);
+    return parsed;
+  };
+  const app = readConfig('tsconfig.json');
+  const tooling = readConfig('tsconfig.tooling.json');
+  const viteConfig = `${root}vite.config.js`;
+  assert.ok(!app.fileNames.includes(viteConfig));
+  assert.ok(tooling.fileNames.includes(viteConfig));
+
+  const filename = `${root}src/worker.ts`;
+  const host = ts.createCompilerHost(app.options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (name, ...args) => name === filename
+    ? ts.createSourceFile(name, "export const invalid = Buffer.from('browser');", ts.ScriptTarget.Latest)
+    : getSourceFile(name, ...args);
+  const program = ts.createProgram(app.fileNames, app.options, host);
+  assert.ok(program.getSemanticDiagnostics().some((diagnostic) =>
+    diagnostic.file?.fileName === filename && diagnostic.code === 2591));
+});

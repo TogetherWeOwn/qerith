@@ -340,6 +340,19 @@ jobs:
         run: |
           npm run check
           node --test tests/typecheck.test.mjs
+      - name: Reject Node globals in application source
+        run: |
+          set -euo pipefail
+          fixture=src/__node_global_check__.ts
+          test ! -e "$fixture"
+          trap 'rm -f "$fixture"' EXIT
+          printf '%s\n' "export const invalid = Buffer.from('browser');" > "$fixture"
+          if npx --no-install svelte-check --tsconfig ./tsconfig.json > "$RUNNER_TEMP/app-global-check.log" 2>&1; then
+            echo 'Application check unexpectedly accepted Buffer'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/app-global-check.log"
+          grep -F "Cannot find name 'Buffer'" "$RUNNER_TEMP/app-global-check.log"
       - name: Test strict XML parsing
         run: node --import tsx --test tests/xml-parser.test.ts
       - name: Test fail-closed Worker entrypoint
