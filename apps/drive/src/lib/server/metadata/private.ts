@@ -65,6 +65,13 @@ export class PrivateMetadata {
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
+  async move(principalId: string, id: string, parentId: string | null, name: string): Promise<Entry | null> {
+    validateName(name);
+    return this.db.prepare(`UPDATE drive_entries SET parent_id = ?, name = ?
+      WHERE id = ? AND owner_id = ? AND ${active}
+      RETURNING ${columns}`).bind(parentId, name, id, principalId, principalId).first<Entry>();
+  }
+
   async createFolder(principalId: string, parentId: string | null, name: string): Promise<Entry | null> {
     validateName(name);
     return this.db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind)
