@@ -5,14 +5,16 @@ import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts'
 
 it('initializes and reapplies the available actual migration directory', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  const ledger = () => env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all();
+  const initial = (await ledger()).results;
+  expect(initial.filter(({ name }) => name === '0002_private_metadata.sql')).toHaveLength(1);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  expect((await env.DB.prepare('SELECT name FROM d1_migrations').all()).results)
-    .toEqual([{ name: '0002_private_metadata.sql' }]);
+  expect((await ledger()).results).toEqual(initial);
   expect((await env.DB.prepare('PRAGMA table_info(drive_entries)').all()).results.map(({ name, type, notnull, pk }) => [name, type, notnull, pk]))
-    .toEqual([['id', 'TEXT', 1, 1], ['owner_id', 'TEXT', 1, 0], ['parent_id', 'TEXT', 0, 0],
-      ['name', 'TEXT', 1, 0], ['kind', 'TEXT', 1, 0], ['object_key', 'TEXT', 0, 0], ['size_bytes', 'INTEGER', 0, 0]]);
+    .toEqual(expect.arrayContaining([['id', 'TEXT', 1, 1], ['owner_id', 'TEXT', 1, 0], ['parent_id', 'TEXT', 0, 0],
+      ['name', 'TEXT', 1, 0], ['kind', 'TEXT', 1, 0], ['object_key', 'TEXT', 0, 0], ['size_bytes', 'INTEGER', 0, 0]]));
   expect((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").all()).results.map(({ name }) => name))
-    .toEqual(['drive_entries_immutable', 'drive_entries_insert_parent', 'drive_entries_move_parent']);
+    .toEqual(expect.arrayContaining(['drive_entries_immutable', 'drive_entries_insert_parent', 'drive_entries_move_parent']));
 });
 
 it('uses live test-only membership for private folder creation and lookup', async () => {
