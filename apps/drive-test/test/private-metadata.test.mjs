@@ -34,9 +34,10 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   expect(await metadata.get('bob', 'missing')).toBeNull();
   const child = await metadata.createFolder('alice', folder.id, 'child');
   expect(await metadata.createFolder('alice', null, 'x'.repeat(255))).not.toBeNull();
-  for (const name of ['', 'x'.repeat(256), 'bad/name', 'bad\0name']) {
+  for (const name of ['', 'x'.repeat(256), 'bad/name', 'bad\0name', '\ud800', '\udc00']) {
     await expect(metadata.createFolder('alice', null, name)).rejects.toThrow();
   }
+  expect((await metadata.createFolder('alice', null, '😀')).name).toBe('😀');
   await expect(metadata.createFolder('alice', null, 'private')).rejects.toThrow();
   await expect(metadata.createFolder('alice', folder.id, 'child')).rejects.toThrow();
   await expect(metadata.createFolder('alice', 'missing', 'child')).rejects.toThrow();

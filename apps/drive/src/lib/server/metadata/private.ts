@@ -18,8 +18,13 @@ const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
 
 function validateName(name: string): void {
-  if (typeof name !== 'string' || Array.from(name).length < 1 || Array.from(name).length > 255 || /[\/\0]/.test(name)) {
-    throw new TypeError('Invalid entry name');
+  if (typeof name !== 'string' || name.length === 0) throw new TypeError('Invalid entry name');
+  let count = 0;
+  for (const character of name) {
+    const code = character.codePointAt(0)!;
+    if (++count > 255 || character === '/' || code === 0 || (code >= 0xd800 && code <= 0xdfff)) {
+      throw new TypeError('Invalid entry name');
+    }
   }
 }
 
