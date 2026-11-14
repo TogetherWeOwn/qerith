@@ -21,13 +21,17 @@ export function createS3Signer(options: S3SignerOptions) {
     region: options.region
   });
 
-  async function sign(url: string | URL, init: RequestInit = {}): Promise<Request> {
+  async function sign(url: string, init: RequestInit = {}): Promise<Request> {
+    if (/\/(?:\.|%2e){1,2}(?=\/|[?#]|$)/i.test(url)) throw new Error('Unsupported S3 URL');
     const parsed = new URL(url);
-    if (parsed.username || parsed.password || parsed.pathname.includes('+') || /%2f/i.test(parsed.pathname)) {
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname.includes('+') || /%2f/i.test(parsed.pathname)) {
       throw new Error('Unsupported S3 URL');
     }
     const headers = new Headers(init.headers);
-    if (headers.has('authorization') || headers.has('host')) throw new Error('Unsupported S3 headers');
+    for (const name of ['authorization', 'host', 'connection', 'user-agent', 'content-length', 'expect', 'x-amzn-trace-id']) {
+      if (headers.has(name)) throw new Error('Unsupported S3 headers');
+    }
+    if (!headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is required');
     const keys = new Set<string>();
     for (const key of parsed.searchParams.keys()) {
       if (!key || keys.has(key)) throw new Error('Unsupported S3 query parameters');
@@ -39,7 +43,7 @@ export function createS3Signer(options: S3SignerOptions) {
 
   return {
     sign,
-    async fetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
+    async fetch(url: string, init: RequestInit = {}): Promise<Response> {
       return options.fetch(await sign(url, init));
     }
   };

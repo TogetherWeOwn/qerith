@@ -35,10 +35,15 @@ test('signs the published list query independently of query order', async () => 
 
 test('fails closed for query parameters the signer cannot canonicalize', async () => {
   const signer = createS3Signer({ ...options, fetch });
-  await assert.rejects(signer.sign('https://example.com/?a=1&a=2'));
-  await assert.rejects(signer.sign('https://example.com/?=value'));
+  const init = { headers: { 'x-amz-content-sha256': emptyHash } };
+  await assert.rejects(signer.sign('https://example.com/?a=1&a=2', init), /query/);
+  await assert.rejects(signer.sign('https://example.com/?=value', init), /query/);
   await assert.rejects(signer.sign('https://example.com/a+b'));
   await assert.rejects(signer.sign('https://example.com/a%2Fb'));
   await assert.rejects(signer.sign('https://user:password@example.com/'));
-  await assert.rejects(signer.sign('https://example.com/', { headers: { authorization: 'stale' } }));
+  await assert.rejects(signer.sign('https://example.com/', { headers: { authorization: 'stale' } }), /headers/);
+  await assert.rejects(signer.sign('https://example.com/', { headers: { 'user-agent': 'unstable' } }), /headers/);
+  await assert.rejects(signer.sign('http://example.com/', init), /URL/);
+  await assert.rejects(signer.sign('https://example.com/a/%2e%2e/b', init), /URL/);
+  await assert.rejects(signer.sign('https://example.com/'), /payload hash/);
 });
