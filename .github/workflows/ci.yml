@@ -270,9 +270,23 @@ jobs:
             *) exit 1 ;;
           esac
 
+  drive-metadata:
+    name: drive metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.21.0
+      - run: node --test apps/drive/tests/private-metadata.test.mjs
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, drive-metadata]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
