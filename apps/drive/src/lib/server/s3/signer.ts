@@ -23,7 +23,7 @@ export function createS3Signer(options: S3SignerOptions) {
 
   async function sign(url: string, init: RequestInit = {}): Promise<Request> {
     const pathAndAuthority = url.split(/[?#]/, 1)[0];
-    if (pathAndAuthority.includes('\\') || /\/(?:\.|%2e){1,2}(?=\/|$)/i.test(pathAndAuthority)) {
+    if (/[\x00-\x20\x7f]/.test(url) || pathAndAuthority.includes('\\') || /\/(?:\.|%2e){1,2}(?=\/|$)/i.test(pathAndAuthority)) {
       throw new Error('Unsupported S3 URL');
     }
     const parsed = new URL(url);
@@ -36,15 +36,20 @@ export function createS3Signer(options: S3SignerOptions) {
     }
     const payloadHash = headers.get('x-amz-content-sha256') ?? '';
     if (!/^(?:[0-9a-f]{64}|UNSIGNED-PAYLOAD)$/.test(payloadHash)) throw new Error('Valid S3 payload hash is required');
+    if (parsed.search.includes('+')) throw new Error('Unsupported S3 query parameters');
     const keys = new Set<string>();
     for (const key of parsed.searchParams.keys()) {
       if (!key || keys.has(key)) throw new Error('Unsupported S3 query parameters');
       keys.add(key);
     }
+    if (init.keepalive && init.body != null) throw new Error('S3 keepalive requests with a body are unsupported');
+    const request = new Request(parsed, { ...init, headers, redirect: 'manual', duplex: 'half' } as RequestInit);
     const datetime = (options.now?.() ?? new Date()).toISOString().replace(/[:-]|\.\d{3}/g, '');
     return client.sign(parsed, {
-      method: init.method, headers, body: init.body, signal: init.signal,
-      redirect: 'manual', aws: { datetime, allHeaders: true }
+      method: request.method, headers: request.headers, body: request.body, signal: request.signal,
+      cache: request.cache, credentials: request.credentials, integrity: request.integrity,
+      keepalive: request.keepalive, mode: request.mode, referrer: request.referrer,
+      referrerPolicy: request.referrerPolicy, redirect: 'manual', aws: { datetime, allHeaders: true }
     });
   }
 
