@@ -1,0 +1,29 @@
+name: D1 test lock bootstrap
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Resolve lock without executing lifecycle scripts
+        working-directory: apps/drive-test
+        run: |
+          test "$(npm --version)" = '11.19.0'
+          npm install --package-lock-only --ignore-scripts --min-release-age=3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: d1-lock-${{ github.event.pull_request.head.sha }}
+          path: apps/drive-test/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
