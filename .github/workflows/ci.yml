@@ -296,9 +296,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
+      - name: Test alternate lockfile guard
+        run: bash tests/reject-shrinkwrap.test.sh
       - name: Verify locked release ages and integrity
         run: |
-          test ! -e npm-shrinkwrap.json && test ! -L npm-shrinkwrap.json
+          bash scripts/reject-shrinkwrap.sh .
           node scripts/verify-lock-age.mjs
       - name: Install reviewed lock without scripts
         run: |
