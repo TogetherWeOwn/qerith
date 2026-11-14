@@ -9,7 +9,7 @@ export default defineConfig(async () => ({
       d1Databases: ['DB'],
       bindings: {
         TEST_MIGRATIONS: await readD1Migrations('./test-migrations'),
-        METADATA_MIGRATIONS: await readD1Migrations('../drive/migrations'),
+        DRIVE_MIGRATIONS: await readD1Migrations('../drive/migrations'),
       },
     },
   })],
