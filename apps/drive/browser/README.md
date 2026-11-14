@@ -3,7 +3,9 @@
 This isolated Vite/Svelte fixture does not use the Worker, app hooks, routes,
 authentication or storage. It proves the harness only; it does not test sign-in.
 The server binds loopback on an ephemeral port, and browser requests outside its
-origin are aborted. No preview is published.
+origin are aborted, WebSockets are closed, and service workers are blocked. This
+is browser request interception, not an OS-level network sandbox. No preview is
+published.
 
 CI installs `apps/drive` and this package with `npm ci --ignore-scripts`, installs
 Playwright's pinned Chromium on the Actions runner, and runs:
@@ -19,8 +21,9 @@ the job. Axe `incomplete` items need human review; a passing automated scan is
 not a complete accessibility audit. Evidence is uploaded only after success.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
-`scenario.mjs` in the consuming change. The scenario must assert real keyboard
-focus and activation behavior and return a nonempty JSON-serializable record;
+`scenario.mjs` in the consuming change. The scenario must wait for the intended
+fixture state before capture, assert real keyboard focus and activation behavior,
+and return a nonempty JSON-serializable record;
 the runner applies it at both sizes. Keep this test isolated and synthetic; do
 not introduce secrets, real accounts or network dependencies into artifacts.
 

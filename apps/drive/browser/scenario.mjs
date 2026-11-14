@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 
-// Replace this fixture-specific scenario alongside the test component.
+// Replace these fixture-specific checks alongside the test component.
+export async function waitForFixture(page) {
+  await page.getByRole('button', { name: 'Activate fixture' }).waitFor({ state: 'visible' });
+  await page.getByText('Not activated', { exact: true }).waitFor({ state: 'visible' });
+}
+
 export async function exerciseKeyboard(page) {
   await page.keyboard.press('Tab');
   const focused = await page.evaluate(() => document.activeElement?.textContent?.trim());

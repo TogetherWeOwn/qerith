@@ -362,9 +362,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
+      - name: Verify Drive lock release ages and integrity
+        working-directory: apps/drive
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
       - name: Verify browser lock release ages and integrity
         working-directory: apps/drive/browser
         run: |
+          bash ../scripts/reject-shrinkwrap.sh .
           node --input-type=module <<'JS'
           import { readFile } from 'node:fs/promises';
           import { verifyLock } from '../scripts/verify-lock-age.mjs';

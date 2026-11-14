@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
-import { exerciseKeyboard } from './scenario.mjs';
+import { exerciseKeyboard, waitForFixture } from './scenario.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
@@ -31,9 +31,11 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
   for (const [width, height] of [[1280, 800], [390, 844]]) {
-    const page = await browser.newPage({ viewport: { width, height } });
+    const page = await browser.newPage({ viewport: { width, height }, serviceWorkers: 'block' });
     await page.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await page.routeWebSocket('**/*', socket => socket.close());
     await page.goto(origin, { waitUntil: 'networkidle' });
+    await waitForFixture(page);
     await page.screenshot({ path: resolve(output, `${width}x${height}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, {
