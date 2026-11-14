@@ -11,7 +11,7 @@ CREATE TABLE drive_entries (
   CHECK ((kind = 'folder' AND object_key IS NULL AND size_bytes IS NULL) OR
          (kind = 'file' AND object_key IS NOT NULL AND length(object_key) > 0
           AND typeof(size_bytes) = 'integer' AND size_bytes BETWEEN 0 AND 9007199254740991))
-);
+) WITHOUT ROWID;
 
 CREATE UNIQUE INDEX drive_entries_sibling_name
   ON drive_entries(owner_id, COALESCE(parent_id, ''), name);

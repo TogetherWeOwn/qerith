@@ -69,8 +69,14 @@ it('uses live test-only membership for private folder creation and lookup', asyn
     await expect(replace.bind(...values).run()).rejects.toThrow();
     expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(beforeReplace);
   }
-  await expect(env.DB.prepare("UPDATE OR REPLACE drive_entries SET name = 'private' WHERE id = 'file'").run()).rejects.toThrow();
-  expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(beforeReplace);
+  for (const sql of [
+    "UPDATE OR REPLACE drive_entries SET name = 'private' WHERE id = 'file'",
+    "INSERT OR REPLACE INTO drive_entries (rowid, id, owner_id, name, kind) VALUES ((SELECT rowid FROM drive_entries WHERE id = 'file'), 'new', 'alice', 'new', 'folder')",
+    `UPDATE OR REPLACE drive_entries SET rowid = (SELECT rowid FROM drive_entries WHERE id = 'file') WHERE id = '${child.id}'`,
+  ]) {
+    await expect(env.DB.prepare(sql).run()).rejects.toThrow();
+    expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(beforeReplace);
+  }
   await replace.bind('ordinary', 'alice', child.id, 'ordinary', 'folder', null, null).run();
   expect((await env.DB.prepare('SELECT parent_id FROM drive_entries WHERE id = ?').bind('ordinary').first()).parent_id).toBe(child.id);
   for (const [column, value] of [['id', 'changed'], ['owner_id', 'bob'], ['kind', 'file'], ['object_key', 'changed']]) {
