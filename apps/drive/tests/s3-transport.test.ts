@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { createS3Transport } from '../src/lib/server/s3/transport';
 
 const config = { endpoint: 'https://storage.example', bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'access', secretAccessKey: 'secret' };
@@ -58,6 +59,63 @@ test('snapshots Buffer bodies before asynchronous signing', async () => {
   body[0] = 9;
   await pending;
   assert.deepEqual(new Uint8Array(await sent!.arrayBuffer()), new Uint8Array([42]));
+});
+
+test('captures operation metadata and cancellation binding before signing', async () => {
+  let sent: Request | undefined;
+  const original = new AbortController();
+  const replacement = new AbortController();
+  const input = { method: 'PUT' as 'PUT' | 'POST', key: 'key', body: new Uint8Array([1]), maxResponseBytes: 2, signal: original.signal };
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (value) => {
+    sent = value as Request;
+    return new Response('123');
+  } });
+  const pending = request(input);
+  input.method = 'POST';
+  input.maxResponseBytes = 100;
+  input.signal = replacement.signal;
+  await assert.rejects(pending, /exceeds limit/);
+  assert.equal(sent?.method, 'PUT');
+
+  const stalled = createS3Transport(config, { timeoutMs: 1000, fetch: async () => new Promise<Response>(() => {}) });
+  const next = stalled(input);
+  input.signal = original.signal;
+  replacement.abort(new Error('original binding'));
+  await assert.rejects(next, /original binding/);
+});
+
+test('ready empty chunks yield to cancellation and respect the deadline', async () => {
+  let pulls = 0;
+  const stream = () => new ReadableStream<Uint8Array>({ pull(controller) {
+    if (++pulls > 100000) controller.close();
+    else controller.enqueue(new Uint8Array());
+  } });
+  const request = createS3Transport(config, { timeoutMs: 10, fetch: async () => new Response(stream()) });
+  await assert.rejects(request(operation), /timed out/);
+  assert.ok(pulls <= 100000);
+  pulls = 0;
+  const controller = new AbortController();
+  const cancelRequest = createS3Transport(config, { timeoutMs: 1000, fetch: async () => {
+    setTimeout(() => controller.abort(new Error('cancelled ready stream')), 0);
+    return new Response(stream());
+  } });
+  await assert.rejects(cancelRequest({ ...operation, signal: controller.signal }), /cancelled ready stream/);
+  assert.ok(pulls <= 100000);
+});
+
+test('cancellation at the fetch boundary does not leak unhandled rejections', () => {
+  const script = `
+    import { createS3Transport } from './src/lib/server/s3/transport.ts';
+    const controller = new AbortController();
+    const request = createS3Transport(${JSON.stringify(config)}, { timeoutMs: 1000, fetch: async () => {
+      const stream = new ReadableStream({ start(s) { queueMicrotask(() => { controller.abort(new Error('cancelled')); s.error(new Error('stream failed')); }); } });
+      return new Response(stream);
+    } });
+    await request({ method: 'GET', key: 'x', maxResponseBytes: 8, signal: controller.signal }).then(() => { throw new Error('unexpected success'); }, () => {});
+    await new Promise(resolve => setTimeout(resolve, 20));
+  `;
+  const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--import', 'tsx', '--input-type=module', '-e', script], { cwd: process.cwd(), encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.status, 0, child.stderr || String(child.error));
 });
 
 test('handles bucket requests, conditional responses, and fragmented bodies', async () => {

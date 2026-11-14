@@ -22,11 +22,14 @@ function encode(value: string): string {
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     const abort = () => reject(signal.reason);
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', abort); reject(error); }
+    );
   });
 }
 
@@ -38,52 +41,66 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
   const signer = createS3Signer({ ...settings, fetch: options.fetch, now: options.now });
 
   return async function request(operation: Operation): Promise<{ status: number; headers: Headers; body: Uint8Array }> {
-    if (!Number.isSafeInteger(operation.maxResponseBytes) || operation.maxResponseBytes < 0 || operation.maxResponseBytes > MAX_PART_BYTES) {
+    const { method, key, query: queryParams, signal, maxResponseBytes, body: inputBody, headers: inputHeaders } = operation;
+    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 0 || maxResponseBytes > MAX_PART_BYTES) {
       throw new Error('Invalid S3 response limit');
     }
-    if (operation.key.split('/').some((segment) => segment === '.' || segment === '..')) {
+    if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
-    if (operation.body && operation.body.byteLength > MAX_PART_BYTES) throw new Error('S3 request body exceeds part limit');
-    const path = operation.key.split('/').map(encode).join('/');
-    const query = Object.entries(operation.query ?? {}).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
+    if (inputBody && inputBody.byteLength > MAX_PART_BYTES) throw new Error('S3 request body exceeds part limit');
+    const path = key.split('/').map(encode).join('/');
+    const query = Object.entries(queryParams ?? {}).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
     const url = `${settings.endpoint}/${settings.bucket}/${path}${query ? `?${query}` : ''}`;
-    const headers = new Headers(operation.headers);
+    const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
     // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
-    const body = operation.body && new Uint8Array(operation.body);
+    const body = inputBody && new Uint8Array(inputBody);
     const controller = new AbortController();
-    const forwardAbort = () => controller.abort(operation.signal?.reason);
-    if (operation.signal?.aborted) forwardAbort();
-    else operation.signal?.addEventListener('abort', forwardAbort, { once: true });
-    const timer = setTimeout(() => controller.abort(new Error('S3 request timed out')), options.timeoutMs);
+    const forwardAbort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener('abort', forwardAbort, { once: true });
+    const timeoutError = new Error('S3 request timed out');
+    const deadline = performance.now() + options.timeoutMs;
+    const timer = setTimeout(() => controller.abort(timeoutError), options.timeoutMs);
+    const checkAbort = () => {
+      if (!controller.signal.aborted && performance.now() >= deadline) controller.abort(timeoutError);
+      if (controller.signal.aborted) throw controller.signal.reason;
+    };
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const hash = body ? await abortable(crypto.subtle.digest('SHA-256', body), controller.signal) : undefined;
       headers.set('x-amz-content-sha256', hash ? Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('') : EMPTY_HASH);
-      if (controller.signal.aborted) throw controller.signal.reason;
+      checkAbort();
       const signed = await abortable(signer.sign(url, {
-        method: operation.method, headers, body, signal: controller.signal, redirect: 'manual'
+        method, headers, body, signal: controller.signal, redirect: 'manual'
       }), controller.signal);
-      if (controller.signal.aborted) throw controller.signal.reason;
+      checkAbort();
       const transport = options.fetch;
       const response = await abortable(transport(signed), controller.signal);
+      checkAbort();
       if (response.status >= 300 && response.status < 400 && response.status !== 304) {
         void response.body?.cancel().catch(() => {});
         throw new Error('S3 redirects are not allowed');
       }
-      const result = new Uint8Array(operation.maxResponseBytes);
+      const result = new Uint8Array(maxResponseBytes);
       let length = 0;
+      let chunks = 0;
       reader = response.body?.getReader();
       if (reader) {
         for (;;) {
+          checkAbort();
           const part = await abortable(reader.read(), controller.signal);
+          checkAbort();
           if (part.done) break;
-          if (part.value.byteLength > operation.maxResponseBytes - length) throw new Error('S3 response exceeds limit');
+          if (part.value.byteLength > maxResponseBytes - length) throw new Error('S3 response exceeds limit');
           result.set(part.value, length);
           length += part.value.byteLength;
+          // Ready streams can otherwise starve timers and external cancellation.
+          if (++chunks % 64 === 0) await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
         }
       }
+      checkAbort();
       // Compact partial responses so the returned body does not retain unused capacity.
       // At most one additional response-sized copy is transiently allocated.
       const responseBody = length === result.byteLength ? result : result.slice(0, length);
@@ -94,7 +111,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       throw error;
     } finally {
       clearTimeout(timer);
-      operation.signal?.removeEventListener('abort', forwardAbort);
+      signal?.removeEventListener('abort', forwardAbort);
     }
   };
 }
