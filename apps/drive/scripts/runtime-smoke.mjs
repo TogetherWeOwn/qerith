@@ -1,22 +1,26 @@
 import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
-import { setTimeout as delay } from 'node:timers/promises';
 import { relative } from 'node:path';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
-    env: { ...process.env, CI: 'true' }, stdio: ['ignore', 'pipe', 'pipe']
+    env: { ...process.env, CI: 'true' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
   });
   let output = '';
   worker.stdout.on('data', (chunk) => { output += chunk; });
   worker.stderr.on('data', (chunk) => { output += chunk; });
   try {
-    let ready = false;
-    for (let i = 0; i < 60; i++) {
-      if (worker.exitCode !== null) throw new Error('Wrangler exited before readiness');
-      try { await fetch('http://127.0.0.1:18787/'); ready = true; break; } catch { await delay(500); }
-    }
-    if (!ready) throw new Error('Wrangler readiness timed out');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Wrangler readiness timed out')), 30000);
+      worker.once('exit', () => { clearTimeout(timer); reject(new Error('Wrangler exited before readiness')); });
+      worker.on('message', (raw) => {
+        const message = JSON.parse(raw);
+        if (message.event !== 'DEV_SERVER_READY') return;
+        clearTimeout(timer);
+        if (message.ip !== '127.0.0.1' || message.port !== 18787) reject(new Error('Unexpected Wrangler address'));
+        else resolve();
+      });
+    });
     for (const [path, status, body] of assertions) {
       const response = await fetch(`http://127.0.0.1:18787${path}`);
       const text = await response.text();

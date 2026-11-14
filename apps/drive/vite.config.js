@@ -10,7 +10,7 @@ import { resolve } from 'node:path';
 // The adapter writes its output to Wrangler's main, so never point it at the
 // fail-closed source Worker. Keep the generated-app config temporary instead.
 const configPath = resolve('.svelte-kit/adapter-wrangler.json');
-const cloudflare = adapter({ config: configPath });
+const cloudflare = adapter({ config: configPath, platformProxy: { configPath: 'wrangler.build.jsonc' } });
 const buildAdapter = {
   ...cloudflare,
   /** @param {import('@sveltejs/kit').Builder} builder */
