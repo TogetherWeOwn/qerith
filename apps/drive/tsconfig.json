@@ -1,7 +1,7 @@
 {
   "extends": "$app/tsconfig",
   "include": ["src", "*"],
-  "exclude": ["src/service-worker", "src/**/*.test.ts"],
+  "exclude": ["src/service-worker", "src/**/*.test.ts", "vite.config.js"],
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
@@ -12,6 +12,7 @@
     "sourceMap": true,
     "strict": true,
     "moduleResolution": "bundler",
-    "types": ["$app/types", "estree"]
+    "types": ["$app/types", "estree"],
+    "typeRoots": ["./types", "./node_modules/@types", "./node_modules"]
   }
 }

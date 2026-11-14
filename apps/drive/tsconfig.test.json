@@ -3,6 +3,7 @@
   "include": ["src", "*"],
   "exclude": ["src/service-worker"],
   "compilerOptions": {
-    "types": ["$app/types", "estree", "node"]
+    "types": ["$app/types", "estree", "node"],
+    "typeRoots": ["./node_modules/@types", "./node_modules"]
   }
 }
