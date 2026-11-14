@@ -3,7 +3,8 @@ CREATE TABLE drive_entries (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
   owner_id TEXT NOT NULL CHECK (length(owner_id) > 0),
   parent_id TEXT REFERENCES drive_entries(id),
-  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 255 AND instr(name, '/') = 0 AND instr(name, char(0)) = 0),
+  name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 255 AND length(trim(name, ' .')) > 0
+    AND instr(name, '/') = 0 AND instr(name, char(0)) = 0),
   kind TEXT NOT NULL CHECK (kind IN ('file', 'folder')),
   object_key TEXT UNIQUE,
   size_bytes INTEGER,

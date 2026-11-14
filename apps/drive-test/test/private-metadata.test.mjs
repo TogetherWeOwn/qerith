@@ -34,10 +34,14 @@ it('uses live test-only membership for private folder creation and lookup', asyn
   expect(await metadata.get('bob', 'missing')).toBeNull();
   const child = await metadata.createFolder('alice', folder.id, 'child');
   expect(await metadata.createFolder('alice', null, 'x'.repeat(255))).not.toBeNull();
-  for (const name of ['', 'x'.repeat(256), 'bad/name', 'bad\0name', '\ud800', '\udc00']) {
+  for (const name of ['', 'x'.repeat(256), '😀'.repeat(64), '..', ' . ', 'bad/name', 'bad\0name', '\ud800', '\udc00']) {
     await expect(metadata.createFolder('alice', null, name)).rejects.toThrow();
   }
-  expect((await metadata.createFolder('alice', null, '😀')).name).toBe('😀');
+  expect((await metadata.createFolder('alice', null, '😀'.repeat(63) + 'abc')).name).toBe('😀'.repeat(63) + 'abc');
+  for (const name of ['😀'.repeat(64), '..', ' . ']) {
+    await expect(env.DB.prepare("INSERT INTO drive_entries VALUES (?, 'alice', NULL, ?, 'folder', NULL, NULL)")
+      .bind(crypto.randomUUID(), name).run()).rejects.toThrow();
+  }
   await expect(metadata.createFolder('alice', null, 'private')).rejects.toThrow();
   await expect(metadata.createFolder('alice', folder.id, 'child')).rejects.toThrow();
   await expect(metadata.createFolder('alice', 'missing', 'child')).rejects.toThrow();
