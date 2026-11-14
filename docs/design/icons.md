@@ -40,3 +40,13 @@ Drive draws its own inline-SVG stroke icons. The drawing rules and the general i
 | menu | three lines | J1 Menu at ≤ 820 px |
 
 The kind glyphs (file, image, video, audio, document, archive) are one page outline with a different mark inside, so they differ by shape. Kind comes from the file extension and stored type; anything unknown is "file".
+
+## Product mark
+
+The product mark is the Drive glyph followed by the word "Drive". It is the only thing in the K17 header and the start of the J1 header.
+
+- **Glyph:** [assets/drive-mark.svg](assets/drive-mark.svg). A solid folder with a slot cut through it, on the 24 px grid. Unlike the icons it is filled, not stroked, so it never reads as the outline `folder` icon. Inline it (don't load it with `<img>`), keep `fill="currentColor"` and `aria-hidden="true"`, and draw it at 24 px (`size.icon.grid`).
+- **Colour:** `color.text.primary`, never ember: the one ember surface belongs to the primary action. In forced colours it takes `CanvasText` through `currentColor`.
+- **Word:** "Drive" in `font.ui`, `font-size.ui` (15 px), weight 600, `text.primary`, 8 px (`space.2`) after the glyph, glyph and word centred on one line.
+- **Name for assistive tech:** the word is the name. In J1 the lockup is a link to My Drive named "Drive, My Drive" (`aria-label`). In K17 it is plain text inside `<header>`, not a link, because a signed-out person has nowhere to go.
+- **Favicon:** the same glyph, `#F6F1EA` on `#15100F` with a 4 px corner radius at 32 px. Not required for the first sign-in build.
