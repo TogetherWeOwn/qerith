@@ -5,11 +5,33 @@ helper with a test-only migration. It uses an ephemeral local binding and no
 Cloudflare credentials; it does not establish remote D1 deployment parity or
 cover the Drive metadata contract.
 
-CI uses Node 24.21.0 and npm 11.19.0, checks the npm version, performs `npm ci`
-with lifecycle scripts disabled, and runs `npm test`. The project `.npmrc`
-sets `ignore-scripts=true` and `min-release-age=3` (days). Explicit `npm test`
-still runs the named test script. No dependency lifecycle-script exceptions are
-approved.
+CI uses Node 24.21.0 and npm 11.19.0. Before running this fixture, prepare the
+sibling Drive project: shared metadata imports use its generated `$app/tsconfig`.
+From the repository root, with those Node and npm versions, run:
+
+```sh
+set -eu
+test "$(npm --version)" = '11.19.0'
+(
+  cd apps/drive
+  bash scripts/reject-shrinkwrap.sh .
+  node scripts/verify-lock-age.mjs
+  npm ci --ignore-scripts --no-audit --no-fund
+  npm run check
+)
+(
+  cd apps/drive-test
+  npm ci --ignore-scripts
+  npm test
+)
+```
+
+This mirrors CI's guarded, age/integrity-verified Drive preparation before the
+D1 tests. `npm run check` explicitly generates the SvelteKit configuration
+and checks the Drive project; do not commit generated files. Each project's
+`.npmrc` sets `ignore-scripts=true` and `min-release-age=3` (days). Explicit
+`npm run check` and `npm test` still run their named scripts. No dependency
+lifecycle-script exceptions are approved.
 
 The initial lockfile was resolved in GitHub Actions on the bootstrap commit
 `328b9d5b05a7ec8ac18444915d47d57c250a6d93` with npm 11.19.0 using
