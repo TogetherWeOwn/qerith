@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -160,6 +161,28 @@ def gone(pid):
     return stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
 
 
+def worker_fd_links(pid):
+    fd_dir = f"/proc/{pid}/fd"
+    links = set()
+    for entry in os.listdir(fd_dir):
+        try:
+            links.add(os.readlink(f"{fd_dir}/{entry}"))
+        except FileNotFoundError:
+            # A transient fd can close after listdir; the process itself must
+            # still be inspectable and at least one fd must have been read.
+            continue
+    os.stat(fd_dir)
+    if not links:
+        raise RuntimeError(f"no inspectable file descriptors for worker {pid}")
+    return links
+
+
+def assert_heartbeat_not_inherited(test, pids, target):
+    for pid in pids:
+        test.assertNotIn(target, worker_fd_links(pid),
+                         f"{pid} holds the supervisor heartbeat writer")
+
+
 class SupervisedTeardownTests(unittest.TestCase):
     def test_main_watcher_unwinds_after_non_init_subreaper_adoption(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -188,6 +211,7 @@ class SupervisedTeardownTests(unittest.TestCase):
             [sys.executable, "-I", "-c", FAKE_PARENT],
             env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self.cleanup_fixture_parent, parent)
         deadline = time.monotonic() + 15
         worker_pid = descendant_pid = None
         while time.monotonic() < deadline:
@@ -201,6 +225,21 @@ class SupervisedTeardownTests(unittest.TestCase):
         self.assertIsNotNone(worker_pid, "fixture worker never reported its pid")
         self.assertIsNotNone(descendant_pid, "fixture descendant never reported its pid")
         return parent, worker_pid, descendant_pid
+
+    def cleanup_fixture_parent(self, parent):
+        try:
+            if parent.poll() is None:
+                parent.kill()
+            parent.wait(timeout=10)
+        finally:
+            try:
+                self.assert_session_drained(parent)
+            finally:
+                for group in supervisor.session_groups(parent.pid):
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def assert_session_drained(self, parent):
         deadline = time.monotonic() + 20
@@ -241,11 +280,7 @@ class SupervisedTeardownTests(unittest.TestCase):
             heartbeat_fd = int((private / "heartbeat.fd").read_text())
             target = os.readlink(f"/proc/{parent.pid}/fd/{heartbeat_fd}")
             self.assertTrue(target.startswith("pipe:"), target)
-            for pid in (worker_pid, descendant_pid):
-                links = {os.readlink(f"/proc/{pid}/fd/{entry}")
-                         for entry in os.listdir(f"/proc/{pid}/fd")}
-                self.assertNotIn(target, links,
-                                 f"{pid} holds the supervisor heartbeat writer")
+            assert_heartbeat_not_inherited(self, (worker_pid, descendant_pid), target)
             parent.kill()
             parent.wait(timeout=10)
             self.assert_session_drained(parent)
@@ -262,6 +297,59 @@ class SupervisedTeardownTests(unittest.TestCase):
                     log.read_text() if log.exists() else ""):
                 time.sleep(0.1)
             self.assertIn("drained", log.read_text())
+
+
+class FdObservationTests(unittest.TestCase):
+    @mock.patch("os.stat")
+    @mock.patch("os.readlink", side_effect=[FileNotFoundError(), "pipe:[other]"])
+    @mock.patch("os.listdir", return_value=["3", "4"])
+    def test_disappearing_fd_does_not_hide_other_links(self, _list, _read, _stat):
+        self.assertEqual(worker_fd_links(123), {"pipe:[other]"})
+
+    @mock.patch("os.stat")
+    @mock.patch("os.readlink", return_value="pipe:[heartbeat]")
+    @mock.patch("os.listdir", return_value=["4"])
+    def test_inherited_heartbeat_fails(self, _list, _read, _stat):
+        with self.assertRaisesRegex(AssertionError, "heartbeat writer"):
+            assert_heartbeat_not_inherited(self, (123,), "pipe:[heartbeat]")
+
+    @mock.patch("os.stat")
+    @mock.patch("os.readlink", side_effect=FileNotFoundError())
+    @mock.patch("os.listdir", return_value=["3"])
+    def test_empty_scan_fails(self, _list, _read, _stat):
+        with self.assertRaisesRegex(RuntimeError, "no inspectable"):
+            worker_fd_links(123)
+
+    @mock.patch("os.listdir", side_effect=PermissionError())
+    def test_inaccessible_worker_fails(self, _list):
+        with self.assertRaises(PermissionError):
+            worker_fd_links(123)
+
+    @mock.patch("os.stat", side_effect=FileNotFoundError())
+    @mock.patch("os.readlink", return_value="pipe:[other]")
+    @mock.patch("os.listdir", return_value=["3"])
+    def test_vanished_worker_fails(self, _list, _read, _stat):
+        with self.assertRaises(FileNotFoundError):
+            worker_fd_links(123)
+
+    def test_fixture_cleanup_runs_on_observation_failure(self):
+        for failure in (AssertionError("inherited"), PermissionError("read")):
+            with self.subTest(failure=failure):
+                parent = mock.Mock(pid=123)
+                parent.poll.return_value = None
+                fixture = SupervisedTeardownTests(
+                    "test_heartbeat_fd_is_not_inherited_by_workers")
+                with mock.patch("subprocess.Popen", return_value=parent), \
+                     mock.patch.object(Path, "read_text", side_effect=["11", "12", "5"]), \
+                     mock.patch("os.readlink", side_effect=failure), \
+                     mock.patch.object(fixture, "assert_session_drained") as drain, \
+                     mock.patch.object(supervisor, "session_groups", return_value=set()):
+                    result = unittest.TestResult()
+                    fixture.run(result)
+                self.assertEqual(len(result.failures) + len(result.errors), 1)
+                parent.kill.assert_called_once()
+                parent.wait.assert_called_once_with(timeout=10)
+                drain.assert_called_once_with(parent)
 
 
 if __name__ == "__main__":
