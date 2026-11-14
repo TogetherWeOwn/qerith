@@ -33,7 +33,7 @@ async function exercise(args, assertions) {
     throw error;
   } finally {
     worker.kill('SIGTERM');
-    if (worker.exitCode === null) await new Promise((resolve) => worker.once('exit', resolve));
+    if (worker.exitCode === null && worker.signalCode === null) await new Promise((resolve) => worker.once('exit', resolve));
   }
 }
 
