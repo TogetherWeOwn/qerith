@@ -13,7 +13,16 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
   counts: await rows('SELECT * FROM drive_folder_counts ORDER BY folder_id') });
 
 beforeEach(async () => {
-  await env.DB.exec(`CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
+  // D1 state is shared between tests in this file; reset the migration ledger too.
+  await env.DB.exec(`DROP TRIGGER IF EXISTS drive_counts_insert;
+    DROP TRIGGER IF EXISTS drive_counts_move;
+    DROP TRIGGER IF EXISTS drive_counts_delete;
+    DROP TABLE IF EXISTS drive_folder_counts;
+    DROP TABLE IF EXISTS drive_entries;
+    DROP TABLE IF EXISTS d1_migrations;
+    DROP VIEW IF EXISTS drive_active_members;
+    DROP TABLE IF EXISTS test_members;
+    CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
     CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;
     INSERT INTO test_members VALUES ('alice', 1), ('bob', 1);`);
 });
