@@ -27,7 +27,7 @@ export function validateConfig(config: S3Config): Readonly<S3Config> {
   if (
     !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket) ||
     config.bucket.includes('..') || /^\d+\.\d+\.\d+\.\d+$/.test(config.bucket) ||
-    !config.region.trim() || config.region.trim() !== config.region ||
+    !config.region || /[\s/\x00-\x1f\x7f]/.test(config.region) ||
     !config.accessKeyId.trim() || !config.secretAccessKey.trim()
   ) throw new Error('Invalid S3 configuration');
 
