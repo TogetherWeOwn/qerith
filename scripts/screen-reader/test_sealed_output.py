@@ -61,6 +61,12 @@ class SealedOutputTest(unittest.TestCase):
                 self.copy()
         self.assertEqual(list(self.quarantine.iterdir()), [])
 
+    def test_scans_from_start_after_caller_enumeration(self):
+        (self.output / "result.bin").write_bytes(b"ok")
+        with os.scandir(self.output_fd) as entries:
+            list(entries)
+        self.assertEqual(self.copy()["bytes"], 2)
+
     def test_rejects_symlink(self):
         (self.output / "result.bin").symlink_to("/etc/passwd")
         self.assert_rejected()
@@ -69,7 +75,7 @@ class SealedOutputTest(unittest.TestCase):
         os.mkfifo(self.output / "result.bin")
         with mock.patch.object(sealed_output.os, "open", wraps=os.open) as open_file:
             self.assert_rejected()
-            open_file.assert_not_called()
+            self.assertNotIn("result.bin", [call.args[0] for call in open_file.call_args_list])
 
     def test_rejects_hard_link(self):
         other = pathlib.Path(self.temp.name) / "other"
@@ -99,12 +105,22 @@ class SealedOutputTest(unittest.TestCase):
     def test_source_close_error_removes_copy(self):
         (self.output / "result.bin").write_bytes(b"test")
         real_close = os.close
+        real_open = os.open
+        source_fds = set()
+
+        def track_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == "result.bin" and not flags & os.O_CREAT:
+                source_fds.add(fd)
+            return fd
 
         def fail_close(fd):
             real_close(fd)
-            raise OSError("close failed")
+            if fd in source_fds:
+                raise OSError("close failed")
 
-        with mock.patch.object(sealed_output.os, "close", side_effect=fail_close):
+        with mock.patch.object(sealed_output.os, "open", side_effect=track_open), \
+                mock.patch.object(sealed_output.os, "close", side_effect=fail_close):
             self.assert_rejected()
 
     def test_copy_error_removes_partial_file(self):

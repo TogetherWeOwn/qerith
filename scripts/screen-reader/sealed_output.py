@@ -29,10 +29,14 @@ def copy_result(output_fd, expected_device, quarantine_fd):
     directory = os.fstat(output_fd)
     if not stat.S_ISDIR(directory.st_mode) or directory.st_dev != expected_device:
         raise ValueError("unexpected output directory or device")
-    with os.scandir(output_fd) as entries:
-        first = next(entries, None)
-        if first is None or first.name != "result.bin" or next(entries, None) is not None:
-            raise ValueError("output must contain only result.bin")
+    scan_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=output_fd)
+    try:
+        with os.scandir(scan_fd) as entries:
+            first = next(entries, None)
+            if first is None or first.name != "result.bin" or next(entries, None) is not None:
+                raise ValueError("output must contain only result.bin")
+    finally:
+        os.close(scan_fd)
 
     entry = os.stat("result.bin", dir_fd=output_fd, follow_symlinks=False)
     if not stat.S_ISREG(entry.st_mode):
