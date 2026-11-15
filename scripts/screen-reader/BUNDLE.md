@@ -13,11 +13,12 @@ Review pin and lock changes as supply-chain changes.
 Protect the trusted lockfile and bundle from modification between verification
 and use. Verification rejects missing, extra, altered, empty, oversized and
 symbolic-link entries, so the glob below selects only verified package bytes.
-With absolute paths `BUNDLE` and `LOCK` and an empty private working directory:
+With absolute paths `REPO` (the trusted checkout), `BUNDLE` and `LOCK`, run
+from an empty private working directory:
 
 ```sh
 set -eu
-python3 -I scripts/screen-reader/bundle_bytes.py verify "$LOCK" "$BUNDLE"
+python3 -I "$REPO/scripts/screen-reader/bundle_bytes.py" verify "$LOCK" "$BUNDLE"
 mkdir tool cache project
 tar -xJf "$BUNDLE/node-v24.21.0-linux-x64.tar.xz" -C tool
 export PATH="$PWD/tool/node-v24.21.0-linux-x64/bin:$PATH"
@@ -26,8 +27,8 @@ test "$(npm --version)" = 11.19.0
 for artifact in "$BUNDLE"/*.tgz; do
   npm cache add "$artifact" --offline --ignore-scripts --cache "$PWD/cache"
 done
-cp apps/drive/package.json "$LOCK" project/
-npm ci --prefix project --offline --ignore-scripts --no-audit --no-fund \
+cp "$REPO/apps/drive/package.json" "$LOCK" project/
+npm ci --prefix project --offline --ignore-scripts --include=dev --no-audit --no-fund \
   --min-release-age=3 --cache "$PWD/cache"
 ```
 
