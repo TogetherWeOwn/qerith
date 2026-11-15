@@ -32,11 +32,41 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
   try {
     const xml = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     validateCharactersAndReferences(xml);
+    // xmldom accepts non-XML whitespace after the document element.
+    const trailingWhitespace = />\s*$/.exec(xml)?.[0].slice(1);
+    if (trailingWhitespace && /[^\x20\t\r\n]/.test(trailingWhitespace)) throw new Error();
+    // The CDATA terminator is forbidden in character data, but allowed in attributes.
+    for (let i = 0; i < xml.length;) {
+      if (xml[i] !== '<') {
+        const end = xml.indexOf('<', i);
+        const textEnd = end === -1 ? xml.length : end;
+        if (xml.slice(i, textEnd).includes(']]>')) throw new Error();
+        i = textEnd;
+      } else {
+        const ending = xml.startsWith('<!--', i) ? '-->' : xml.startsWith('<![CDATA[', i) ? ']]>' : xml.startsWith('<?', i) ? '?>' : undefined;
+        if (ending) {
+          const end = xml.indexOf(ending, i + 2);
+          if (end === -1) throw new Error();
+          i = end + ending.length;
+        } else {
+          let quote = '';
+          for (i++; i < xml.length; i++) {
+            const c = xml[i];
+            if (quote && c === quote) quote = '';
+            else if (!quote && (c === '"' || c === "'")) quote = c;
+            else if (!quote && c === '>') { i++; break; }
+          }
+        }
+      }
+    }
     const markup = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE/gi;
     for (const match of xml.matchAll(markup)) {
       if (/^<!DOCTYPE/i.test(match[0])) throw new Error();
     }
-    const document = new DOMParser({ onError: (level, message) => {
+    const document = new DOMParser({
+      // XML 1.0 normalizes CR and CRLF, not the additional XML 1.1 line endings.
+      normalizeLineEndings: (input) => input.replace(/\r\n?/g, '\n'),
+      onError: (level, message) => {
       // Fatal UTF-8 decoding above already distinguishes valid U+FFFD from invalid bytes.
       if (level !== 'warning' || message !== 'Unicode replacement character detected, source encoding issues?') {
         throw new Error();

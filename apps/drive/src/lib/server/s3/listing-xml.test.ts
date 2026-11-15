@@ -15,6 +15,11 @@ test('reads direct listing fields with their text preserved', () => {
   assert.equal(listingText(mixed, 'Key'), 'abc');
 });
 
+test('preserves XML 1.0 Unicode text while normalizing CR and CRLF', () => {
+  const root = parseListingXml(bytes('<Result><Key>a\u0085b c d\re\r\nf&#13;g</Key></Result>'), 'Result');
+  assert.equal(listingText(root, 'Key'), 'a\u0085b c d\ne\nf\rg');
+});
+
 test('validates XML characters and references without rejecting literal replacement characters', () => {
   const root = parseListingXml(bytes('<Result><Key>�&#xFFFD;&#65533;<![CDATA[&bad;]]><!-- &bad; --><?p &bad;?></Key></Result>'), 'Result');
   assert.equal(listingText(root, 'Key'), '���&bad;');
@@ -23,6 +28,14 @@ test('validates XML characters and references without rejecting literal replacem
   }
   assert.throws(() => parseListingXml(bytes('<Result attr="&amp"/>'), 'Result'), /^Error: Invalid S3 listing XML$/);
   assert.throws(() => parseListingXml(new Uint8Array([0x3c, 0x52, 0x2f, 0x3e, 0xef, 0xbf]), 'R'), /^Error: Invalid S3 listing XML$/);
+});
+
+test('rejects illegal character data and trailing non-XML whitespace', () => {
+  for (const xml of ['<Result><Key>bad]]>text</Key></Result>', '<Result/> ']) {
+    assert.throws(() => parseListingXml(bytes(xml), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  const root = parseListingXml(bytes('<Result attr="]]>"><Key><![CDATA[]]>]]&gt;</Key></Result> \r\n'), 'Result');
+  assert.equal(listingText(root, 'Key'), ']]>');
 });
 
 test('accepts a large valid page of maximum-length keys', () => {
