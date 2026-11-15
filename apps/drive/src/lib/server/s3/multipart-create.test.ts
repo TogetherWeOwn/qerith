@@ -37,6 +37,12 @@ test('accepts namespace prefixes and comments without changing the upload ID', a
   }
 });
 
+test('accepts delimiters in opaque text and quoted namespace values', async () => {
+  const xml = `<InitiateMultipartUploadResult xmlns:x="urn:greater>than"><UploadId>${'x'.repeat(8192)}&lt;tag&gt;</UploadId></InitiateMultipartUploadResult>`;
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+  assert.deepEqual(await create('key'), { uploadId: `${'x'.repeat(8192)}<tag>` });
+});
+
 test('preserves literal replacement characters but rejects invalid UTF-8', async () => {
   const valid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response('<InitiateMultipartUploadResult><UploadId>a�\u0085  b</UploadId></InitiateMultipartUploadResult>') });
   assert.deepEqual(await valid('key'), { uploadId: 'a�\u0085  b' });
@@ -76,6 +82,9 @@ test('rejects malformed, oversized and ambiguous response bodies', async () => {
     '<InitiateMultipartUploadResult><UploadId>a<!--bad--comment-->b</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>' + '<![CDATA['.repeat(5000) + '</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>trailing',
+    '<'.repeat(65536),
+    '<InitiateMultipartUploadResult><UploadId>id</UploadId><'.repeat(500),
+    '<InitiateMultipartUploadResult><UploadId>id</UploadId',
     'x'.repeat(65537)
   ]) {
     const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });

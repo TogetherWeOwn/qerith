@@ -28,8 +28,21 @@ function uploadIdFromResponse(body: Uint8Array): string {
   const nameStart = String.raw`A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\u{10000}-\u{effff}`;
   // Some XML name characters are JavaScript whitespace, but delimiters must use XML whitespace.
   const nameChars = new RegExp(`[${nameStart}0-9.\\-\\u00b7\\u0300-\\u036f\\u203f-\\u2040]`, 'gu');
-  for (const tag of markup.match(/<[^>]*>/g) ?? []) {
-    if (/"[^"]*<|'[^']*</u.test(tag) || /[^\S\x20\x09\x0a\x0d]|[\u007f-\u009f]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, '').replace(nameChars, ''))) return invalid();
+  // Advance once through each tag; never retry an unterminated suffix at another opener.
+  for (let start = markup.indexOf('<'); start >= 0;) {
+    let end = start + 1;
+    let quote = '';
+    for (; end < markup.length; end++) {
+      const char = markup[end];
+      if (char === '<') return invalid();
+      if (quote) { if (char === quote) quote = ''; }
+      else if (char === '"' || char === "'") quote = char;
+      else if (char === '>') break;
+    }
+    if (end === markup.length) return invalid();
+    const tag = markup.slice(start, end + 1);
+    if (/[^\S\x20\x09\x0a\x0d]|[\u007f-\u009f]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, '').replace(nameChars, ''))) return invalid();
+    start = markup.indexOf('<', end + 1);
   }
   for (const match of markup.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
