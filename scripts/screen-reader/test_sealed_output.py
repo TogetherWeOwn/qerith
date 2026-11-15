@@ -43,6 +43,24 @@ class SealedOutputTest(unittest.TestCase):
         (self.output / "extra").touch()
         self.assert_rejected()
 
+    def test_stops_enumerating_after_second_entry(self):
+        class Entries:
+            def __enter__(self):
+                def iterate():
+                    yield type("Entry", (), {"name": "result.bin"})()
+                    yield type("Entry", (), {"name": "extra"})()
+                    raise AssertionError("enumerated beyond second entry")
+                return iterate()
+
+            def __exit__(self, *args):
+                pass
+
+        with mock.patch.object(sealed_output.os, "scandir", return_value=Entries()), \
+                mock.patch.object(sealed_output.os, "listdir", side_effect=AssertionError("unbounded listing")):
+            with self.assertRaises(ValueError):
+                self.copy()
+        self.assertEqual(list(self.quarantine.iterdir()), [])
+
     def test_rejects_symlink(self):
         (self.output / "result.bin").symlink_to("/etc/passwd")
         self.assert_rejected()
@@ -77,6 +95,17 @@ class SealedOutputTest(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.copy()
         self.assertEqual(existing.read_bytes(), b"old")
+
+    def test_source_close_error_removes_copy(self):
+        (self.output / "result.bin").write_bytes(b"test")
+        real_close = os.close
+
+        def fail_close(fd):
+            real_close(fd)
+            raise OSError("close failed")
+
+        with mock.patch.object(sealed_output.os, "close", side_effect=fail_close):
+            self.assert_rejected()
 
     def test_copy_error_removes_partial_file(self):
         (self.output / "result.bin").write_bytes(b"test")

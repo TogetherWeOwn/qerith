@@ -29,8 +29,10 @@ def copy_result(output_fd, expected_device, quarantine_fd):
     directory = os.fstat(output_fd)
     if not stat.S_ISDIR(directory.st_mode) or directory.st_dev != expected_device:
         raise ValueError("unexpected output directory or device")
-    if os.listdir(output_fd) != ["result.bin"]:
-        raise ValueError("output must contain only result.bin")
+    with os.scandir(output_fd) as entries:
+        first = next(entries, None)
+        if first is None or first.name != "result.bin" or next(entries, None) is not None:
+            raise ValueError("output must contain only result.bin")
 
     entry = os.stat("result.bin", dir_fd=output_fd, follow_symlinks=False)
     if not stat.S_ISREG(entry.st_mode):
@@ -58,9 +60,12 @@ def copy_result(output_fd, expected_device, quarantine_fd):
                     digest.update(data)
                 if copied != info.st_size:
                     raise ValueError("result size changed during copy")
+            source_to_close, source = source, None
+            os.close(source_to_close)
             return {"bytes": copied, "sha256": digest.hexdigest()}
         except BaseException:
             os.unlink("result.bin", dir_fd=quarantine_fd)
             raise
     finally:
-        os.close(source)
+        if source is not None:
+            os.close(source)
