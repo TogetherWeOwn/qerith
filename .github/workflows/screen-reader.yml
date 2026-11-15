@@ -54,7 +54,9 @@ jobs:
           sudo timeout --signal=TERM --kill-after=10s 180s unshare --net bash -c '
             set -euo pipefail
             ip link set lo up
-            test "$(ls /sys/class/net | wc -l)" -eq 1
+            ip -o link show
+            test "$(ip -o link show | wc -l)" -eq 1
+            ip -o link show dev lo | grep -q "<.*UP"
             exec runuser -u runner -- env -i PATH=/usr/bin:/bin HOME="$1" \
               XDG_CONFIG_HOME="$1/config" XDG_CACHE_HOME="$1/cache" XDG_RUNTIME_DIR="$1/runtime" \
               LANG=C.UTF-8 EVIDENCE_DIR="$2" FIXTURE="$3" \
