@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Screen reader harness self-test</title></head>
+<body>
+  <main>
+    <h1>Orca capture self-test</h1>
+    <button id="announce" type="button">Announce test message</button>
+    <p id="status" role="status"></p>
+  </main>
+  <script>
+    document.querySelector('#announce').addEventListener('click', () => {
+      document.querySelector('#status').textContent = 'Synthetic announcement received';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+name: screen-reader self-test
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/screen-reader.yml'
+      - 'scripts/screen-reader/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test fail-closed evidence validation
+        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p test_verify.py -v
+      - name: Install desktop and speech packages
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            orca speech-dispatcher speech-dispatcher-espeak-ng at-spi2-core \
+            dbus-x11 xvfb xauth openbox xdotool pulseaudio pulseaudio-utils
+      - name: Record exact provenance
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p "$RUNNER_TEMP/sr-evidence"
+          {
+            printf 'tested_sha=%s\nworkflow_sha=%s\nrun_id=%s\nrun_attempt=%s\n' "$EXPECTED_SHA" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'runner_image=%s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            date -u +%Y-%m-%dT%H:%M:%SZ
+            google-chrome --version
+            dpkg-query -W orca speech-dispatcher speech-dispatcher-espeak-ng at-spi2-core dbus-x11 xvfb xauth openbox xdotool pulseaudio pulseaudio-utils
+            sha256sum scripts/screen-reader/fixture.html scripts/screen-reader/session.sh
+          } > "$RUNNER_TEMP/sr-evidence/provenance.txt"
+      - name: Run synthetic fixture in loopback-only namespace
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/sr-evidence
+          FIXTURE: ${{ github.workspace }}/scripts/screen-reader/fixture.html
+          SESSION: ${{ github.workspace }}/scripts/screen-reader/session.sh
+          PRIVATE_HOME: ${{ runner.temp }}/sr-home
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRIVATE_HOME"
+          sudo timeout --signal=TERM --kill-after=10s 180s unshare --net bash -c '
+            set -euo pipefail
+            ip link set lo up
+            test "$(ls /sys/class/net | wc -l)" -eq 1
+            exec runuser -u runner -- env -i PATH=/usr/bin:/bin HOME="$1" \
+              XDG_CONFIG_HOME="$1/config" XDG_CACHE_HOME="$1/cache" XDG_RUNTIME_DIR="$1/runtime" \
+              LANG=C.UTF-8 EVIDENCE_DIR="$2" FIXTURE="$3" \
+              dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24" bash "$4"
+          ' _ "$PRIVATE_HOME" "$EVIDENCE_DIR" "$FIXTURE" "$SESSION"
+      - name: Require real speech submissions and non-silent audio
+        run: python3 -I scripts/screen-reader/verify.py "$RUNNER_TEMP/sr-evidence"
+      - name: Upload raw self-test evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: screen-reader-self-test-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/sr-evidence/
+          if-no-files-found: error
+          retention-days: 7
