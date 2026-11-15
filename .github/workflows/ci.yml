@@ -351,9 +351,11 @@ jobs:
             npm cache add "$artifact" --offline --ignore-scripts --cache "$PWD/cache"
           done
           cp "$GITHUB_WORKSPACE/apps/drive/package.json" "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/
-          NODE_ENV=production npm ci --prefix project --offline --ignore-scripts --include=dev --no-audit --no-fund --min-release-age=3 --cache "$PWD/cache"
+          NODE_ENV=production npm_config_omit=optional npm ci --prefix project --offline --ignore-scripts --include=dev --include=optional --no-audit --no-fund --min-release-age=3 --cache "$PWD/cache"
           test -f project/node_modules/vite/package.json
           test -f project/node_modules/svelte/package.json
+          test -f project/node_modules/@esbuild/linux-x64/bin/esbuild
+          test -f project/node_modules/@rolldown/binding-linux-x64-gnu/rolldown-binding.linux-x64-gnu.node
           cmp "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/package-lock.json
 
   drive-bootstrap:

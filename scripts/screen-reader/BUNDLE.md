@@ -28,7 +28,7 @@ for artifact in "$BUNDLE"/*.tgz; do
   npm cache add "$artifact" --offline --ignore-scripts --cache "$PWD/cache"
 done
 cp "$REPO/apps/drive/package.json" "$LOCK" project/
-npm ci --prefix project --offline --ignore-scripts --include=dev --no-audit --no-fund \
+npm ci --prefix project --offline --ignore-scripts --include=dev --include=optional --no-audit --no-fund \
   --min-release-age=3 --cache "$PWD/cache"
 ```
 
