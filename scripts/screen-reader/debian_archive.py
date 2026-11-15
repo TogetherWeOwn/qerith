@@ -82,7 +82,7 @@ def binary_from_tar(data):
         raw_name = header[:100].split(b"\0", 1)[0]
         raw_prefix = header[345:500].split(b"\0", 1)[0]
         if (not raw_name or raw_name.startswith(b"/") or raw_prefix.startswith(b"/") or
-                member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and raw_name.endswith(b"/")):
+                header[156:157] in (tarfile.REGTYPE, tarfile.AREGTYPE) and raw_name.endswith(b"/")):
             raise ValueError("unsafe tar entry name")
         start = offset + 512
         end = start + member.size

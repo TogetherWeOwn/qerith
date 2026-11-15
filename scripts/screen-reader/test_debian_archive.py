@@ -75,6 +75,7 @@ class ArchiveTests(unittest.TestCase):
                                               ("./bin/", tarfile.DIRTYPE, b""), binary])), b"abc")
         for entries in ([('/', tarfile.DIRTYPE, b''), binary],
                         [('bin/busybox/', tarfile.REGTYPE, b'abc')],
+                        [('bin/', tarfile.AREGTYPE, b''), binary],
                         [('', tarfile.DIRTYPE, b''), binary]):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 binary_from_tar(tar(entries))
