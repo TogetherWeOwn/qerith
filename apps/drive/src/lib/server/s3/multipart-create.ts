@@ -25,9 +25,11 @@ function uploadIdFromResponse(body: Uint8Array): string {
     position = end + 3;
   }
   if (!xmlChars.test(xml) || markup.includes(']]>') || /<!|<\?(?!xml\s)/i.test(markup) || /&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(markup)) return invalid();
-  // Only XML whitespace is valid between tag names and delimiters.
+  const nameStart = String.raw`A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\u{10000}-\u{effff}`;
+  // Some XML name characters are JavaScript whitespace, but delimiters must use XML whitespace.
+  const nameChars = new RegExp(`[${nameStart}0-9.\\-\\u00b7\\u0300-\\u036f\\u203f-\\u2040]`, 'gu');
   for (const tag of markup.match(/<[^>]*>/g) ?? []) {
-    if (/[^\S\x20\x09\x0a\x0d]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, ''))) return invalid();
+    if (/[^\S\x20\x09\x0a\x0d]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, '').replace(nameChars, ''))) return invalid();
   }
   for (const match of markup.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
@@ -35,13 +37,15 @@ function uploadIdFromResponse(body: Uint8Array): string {
   }
   const declaration = /^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>)?/;
   const content = markup.replace(declaration, '');
-  const nameStart = String.raw`A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\u{10000}-\u{effff}`;
   const prefix = `[${nameStart}][${nameStart}0-9.\\-\\u00b7\\u0300-\\u036f\\u203f-\\u2040]*`;
   const envelope = new RegExp(String.raw`^[\x20\x09\x0a\x0d]*<((?:${prefix}:)?InitiateMultipartUploadResult)(?:[\x20\x09\x0a\x0d]+xmlns(?::${prefix})?[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"[^"]*"|'[^']*'))*[\x20\x09\x0a\x0d]*>[\s\S]*<\/\1[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$`, 'u');
   if (!envelope.test(content)) return invalid();
   let document: Document;
   try {
-    document = new DOMParser({ onError: () => { throw new Error('Invalid XML'); } }).parseFromString(xml.trimStart(), 'application/xml') as unknown as Document;
+    document = new DOMParser({ onError: (level, message) => {
+      // Fatal UTF-8 decoding already distinguishes a literal replacement character from bad bytes.
+      if (level !== 'warning' || message !== 'Unicode replacement character detected, source encoding issues?') throw new Error('Invalid XML');
+    } }).parseFromString(xml.replace(/^[\x20\x09\x0a\x0d]*/, ''), 'application/xml') as unknown as Document;
   } catch { return invalid(); }
   const root = document.documentElement;
   if (!root || root.localName !== 'InitiateMultipartUploadResult' || !['', namespace].includes(root.namespaceURI ?? '') || (root.prefix && !root.namespaceURI)) return invalid();

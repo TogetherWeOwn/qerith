@@ -30,11 +30,18 @@ test('accepts XML declaration, namespace spacing and opaque CDATA', async () => 
 });
 
 test('accepts namespace prefixes and comments without changing the upload ID', async () => {
-  for (const prefix of ['s', 'é', '名', 'á']) {
+  for (const prefix of ['s', 'é', '名', 'á', ' ', '﻿', '�']) {
     const xml = `<!--before--><${prefix}:InitiateMultipartUploadResult xmlns:${prefix}="http://s3.amazonaws.com/doc/2006-03-01/"><!--child--><${prefix}:UploadId>one<!-- comment &unknown; -->two<![CDATA[<!--literal-->]]></${prefix}:UploadId></${prefix}:InitiateMultipartUploadResult><!--after-->`;
     const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
     assert.deepEqual(await create('key'), { uploadId: 'onetwo<!--literal-->' });
   }
+});
+
+test('preserves literal replacement characters but rejects invalid UTF-8', async () => {
+  const valid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response('<InitiateMultipartUploadResult><UploadId>a�b</UploadId></InitiateMultipartUploadResult>') });
+  assert.deepEqual(await valid('key'), { uploadId: 'a�b' });
+  const invalid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(new Uint8Array([0xff])) });
+  await assert.rejects(invalid('key'), { message: 'S3 multipart create allocation uncertain' });
 });
 
 test('reports uncertain allocations without exposing provider details or retrying', async () => {
