@@ -339,6 +339,27 @@ jobs:
           set -euo pipefail
           python3 -I scripts/screen-reader/bundle_bytes.py acquire apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
           python3 -I scripts/screen-reader/bundle_bytes.py verify apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
+      - name: Install from verified bytes without lifecycle scripts
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/consume"
+          cd "$RUNNER_TEMP/consume"
+          python3 -I "$GITHUB_WORKSPACE/scripts/screen-reader/bundle_bytes.py" verify "$GITHUB_WORKSPACE/apps/drive/package-lock.json" "$RUNNER_TEMP/bundle"
+          mkdir tool cache project
+          tar -xJf "$RUNNER_TEMP/bundle/node-v24.21.0-linux-x64.tar.xz" -C tool
+          export PATH="$PWD/tool/node-v24.21.0-linux-x64/bin:$PATH"
+          test "$(node --version)" = v24.21.0
+          test "$(npm --version)" = 11.19.0
+          for artifact in "$RUNNER_TEMP/bundle"/*.tgz; do
+            npm cache add "$artifact" --offline --ignore-scripts --cache "$PWD/cache"
+          done
+          cp "$GITHUB_WORKSPACE/apps/drive/package.json" "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/
+          NODE_ENV=production npm_config_omit=optional npm ci --prefix project --offline --ignore-scripts --include=dev --include=optional --no-audit --no-fund --min-release-age=3 --cache "$PWD/cache"
+          test -f project/node_modules/vite/package.json
+          test -f project/node_modules/svelte/package.json
+          test -f project/node_modules/@esbuild/linux-x64/bin/esbuild
+          test -f project/node_modules/@rolldown/binding-linux-x64-gnu/rolldown-binding.linux-x64-gnu.node
+          cmp "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/package-lock.json
 
   drive-bootstrap:
     name: drive dependency bootstrap
