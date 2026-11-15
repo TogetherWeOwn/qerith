@@ -38,6 +38,9 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
+    page.on('pageerror', error => console.error('Browser page error:', error));
+    page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
+    page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
     await page.goto(`${origin}/?state=${state}`, { waitUntil: 'networkidle' });
     await waitForFixture(page, state);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
