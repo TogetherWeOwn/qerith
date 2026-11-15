@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 import extract_source
+import prepare_target
 
 
 class ExtractionTest(unittest.TestCase):
@@ -37,6 +38,25 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(manifest["source_commit"], self.sha)
         self.assertEqual(len(manifest["files"]), len(extract_source.SOURCE_FILES))
         self.assertEqual(manifest["files"][0]["path"], name)
+
+    def test_target_fixture_stays_separate_from_extracted_source(self):
+        fixture = pathlib.Path(__file__).parent / "target-fixture"
+        before = {name: (fixture / name).read_bytes() for name in ("Fixture.svelte", "main.js", "index.html")}
+        extract_source.extract(self.repo, self.sha, self.out)
+        self.assertEqual(before, {name: (fixture / name).read_bytes() for name in before})
+        self.assertTrue(all(not (self.out / name).exists() for name in before))
+        self.assertIn(b"./source/apps/drive/src/lib/SignInPage.svelte", before["Fixture.svelte"])
+
+    def test_prepares_fixture_with_separate_pinned_source(self):
+        (self.repo / extract_source.SOURCE_FILES[0]).write_text("uncommitted change")
+        prepare_target.prepare(self.repo, self.sha, self.out)
+        fixture = pathlib.Path(__file__).parent / "target-fixture"
+        for name in prepare_target.FIXTURE_FILES:
+            self.assertEqual((self.out / name).read_bytes(), (fixture / name).read_bytes())
+        self.assertEqual((self.out / "source" / extract_source.SOURCE_FILES[0]).read_text(), extract_source.SOURCE_FILES[0])
+        self.assertEqual(json.loads((self.out / "source" / "source-manifest.json").read_text())["source_commit"], self.sha)
+        with self.assertRaises(ValueError):
+            prepare_target.prepare(self.repo, self.sha, self.out)
 
     def test_rejects_partial_sha_and_nonempty_destination(self):
         with self.assertRaises(ValueError):
