@@ -38,8 +38,8 @@ test('accepts namespace prefixes and comments without changing the upload ID', a
 });
 
 test('preserves literal replacement characters but rejects invalid UTF-8', async () => {
-  const valid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response('<InitiateMultipartUploadResult><UploadId>a�b</UploadId></InitiateMultipartUploadResult>') });
-  assert.deepEqual(await valid('key'), { uploadId: 'a�b' });
+  const valid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response('<InitiateMultipartUploadResult><UploadId>a�\u0085  b</UploadId></InitiateMultipartUploadResult>') });
+  assert.deepEqual(await valid('key'), { uploadId: 'a�\u0085  b' });
   const invalid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(new Uint8Array([0xff])) });
   await assert.rejects(invalid('key'), { message: 'S3 multipart create allocation uncertain' });
 });
@@ -71,6 +71,8 @@ test('rejects malformed, oversized and ambiguous response bodies', async () => {
     '<s:InitiateMultipartUploadResult xmlns:s="urn:wrong"><s:UploadId>id</s:UploadId></s:InitiateMultipartUploadResult>',
     '<é:InitiateMultipartUploadResult xmlns:é="urn:wrong"><é:UploadId>id</é:UploadId></é:InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId >id</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId\u0080>id�</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult xmlns:x="urn:<bad"><UploadId>id�</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>a<!--bad--comment-->b</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>' + '<![CDATA['.repeat(5000) + '</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>trailing',

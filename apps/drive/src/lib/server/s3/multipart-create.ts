@@ -29,7 +29,7 @@ function uploadIdFromResponse(body: Uint8Array): string {
   // Some XML name characters are JavaScript whitespace, but delimiters must use XML whitespace.
   const nameChars = new RegExp(`[${nameStart}0-9.\\-\\u00b7\\u0300-\\u036f\\u203f-\\u2040]`, 'gu');
   for (const tag of markup.match(/<[^>]*>/g) ?? []) {
-    if (/[^\S\x20\x09\x0a\x0d]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, '').replace(nameChars, ''))) return invalid();
+    if (/"[^"]*<|'[^']*</u.test(tag) || /[^\S\x20\x09\x0a\x0d]|[\u007f-\u009f]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, '').replace(nameChars, ''))) return invalid();
   }
   for (const match of markup.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
@@ -42,7 +42,7 @@ function uploadIdFromResponse(body: Uint8Array): string {
   if (!envelope.test(content)) return invalid();
   let document: Document;
   try {
-    document = new DOMParser({ onError: (level, message) => {
+    document = new DOMParser({ normalizeLineEndings: (input) => input.replace(/\r\n?/g, '\n'), onError: (level, message) => {
       // Fatal UTF-8 decoding already distinguishes a literal replacement character from bad bytes.
       if (level !== 'warning' || message !== 'Unicode replacement character detected, source encoding issues?') throw new Error('Invalid XML');
     } }).parseFromString(xml.replace(/^[\x20\x09\x0a\x0d]*/, ''), 'application/xml') as unknown as Document;
