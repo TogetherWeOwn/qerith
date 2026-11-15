@@ -16,6 +16,14 @@ test('distinguishes embedded error documents from successful completions', () =>
   });
 });
 
+test('accepts keepalive whitespace, checksums, literal CDATA, and replacement characters', () => {
+  assert.deepEqual(parse(bytes(' \n\t<?xml version="1.0"?><CompleteMultipartUploadResult><ETag>"e"</ETag><Key><![CDATA[a&b]]>�</Key><ChecksumCRC32> 123 </ChecksumCRC32><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>')), {
+    kind: 'success', etag: '"e"', bucket: undefined, key: 'a&b�', location: undefined,
+    checksums: { ChecksumCRC32: ' 123 ', ChecksumType: 'COMPOSITE' }
+  });
+  assert.equal(parse(bytes('<Error><Code>&#65533;</Code></Error>')).kind, 'error');
+});
+
 test('rejects malformed, ambiguous, and unsupported documents', () => {
   for (const xml of [
     '', '<CompleteMultipartUploadResult/>', '<Error/>', '<Error><Code> </Code></Error>',
@@ -23,6 +31,10 @@ test('rejects malformed, ambiguous, and unsupported documents', () => {
     '<CompleteMultipartUploadResult><ETag>"a"</ETag><ETag>"b"</ETag></CompleteMultipartUploadResult>',
     '<Error><Code>x</Code><Code>y</Code></Error>', '<Error><Code><x/></Code></Error>',
     '<Error><Code>&unknown;</Code></Error>', '<Error><Code>&#0;</Code></Error>',
+    '<Error><Code>a&b</Code></Error>', '<Error><Code>&amp</Code></Error>',
+    '<Error><Code>&#4294967297;</Code></Error>', '<Error><Code>&#x110000;</Code></Error>',
+    '<Error><Code>&#xD800;</Code></Error>', '<Error><Code>�&bad;</Code></Error>',
+    '<CompleteMultipartUploadResult><ETag>"a"</ETag><ChecksumSHA256>x</ChecksumSHA256><ChecksumSHA256>y</ChecksumSHA256></CompleteMultipartUploadResult>',
     '<Error><Code>x</Error>', '<!DOCTYPE Error [<!ENTITY x "a">]><Error><Code>&x;</Code></Error>',
     '<Error xmlns="urn:other"><Code>x</Code></Error>', '<Error><Code xmlns="urn:other">x</Code></Error>',
     '<Error><Code>x</Code><Other>y</Other></Error>', '<Error><Code>x</Code></Error><Error><Code>y</Code></Error>',

@@ -5,7 +5,7 @@ const S3_NAMESPACE = 'http://s3.amazonaws.com/doc/2006-03-01/';
 const XML_CHARS = /^[\u0009\u000a\u000d -퟿-�\u{10000}-\u{10ffff}]*$/u;
 
 export type MultipartCompletionResponse =
-  | { kind: 'success'; etag: string; bucket?: string; key?: string; location?: string }
+  | { kind: 'success'; etag: string; bucket?: string; key?: string; location?: string; checksums?: Record<string, string> }
   | { kind: 'error'; code: string; message?: string; requestId?: string; hostId?: string };
 
 /** Parse an already bounded transport body. A thrown error means completion is uncertain. */
@@ -15,10 +15,19 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
   if (!XML_CHARS.test(xml) || /<!DOCTYPE/i.test(xml)) return invalid();
+  // References in CDATA are literal; all other references must be legal XML 1.0.
+  const references = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  if (/&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(references)) return invalid();
+  for (const match of references.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
+    const number = match[1].startsWith('x') ? Number.parseInt(match[1].slice(1), 16) : Number(match[1]);
+    if (!Number.isSafeInteger(number) || number > 0x10ffff || !XML_CHARS.test(String.fromCodePoint(number))) return invalid();
+  }
   let document: Document;
   try {
-    document = new DOMParser({ onError: () => { throw new Error('Invalid XML'); } })
-      .parseFromString(xml, 'application/xml') as unknown as Document;
+    document = new DOMParser({ onError: (level, message) => {
+      if (level === 'warning' && message === 'Unicode replacement character detected, source encoding issues?') return;
+      throw new Error('Invalid XML');
+    } }).parseFromString(xml.replace(/^[\x20\x09\x0a\x0d]+/, ''), 'application/xml') as unknown as Document;
   } catch { return invalid(); }
   const root = document.documentElement;
   if (!root || document.doctype || !['CompleteMultipartUploadResult', 'Error'].includes(root.tagName) ||
@@ -30,9 +39,10 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   for (const attr of Array.from(root.attributes)) {
     if (attr.name !== 'xmlns' || attr.value !== S3_NAMESPACE) return invalid();
   }
+  const checksumFields = ['ChecksumCRC32', 'ChecksumCRC32C', 'ChecksumCRC64NVME', 'ChecksumSHA1', 'ChecksumSHA256', 'ChecksumType'];
   const allowed = root.tagName === 'Error'
     ? ['Code', 'Message', 'RequestId', 'HostId']
-    : ['ETag', 'Bucket', 'Key', 'Location'];
+    : ['ETag', 'Bucket', 'Key', 'Location', ...checksumFields];
   const values = new Map<string, string>();
   for (const node of Array.from(root.childNodes)) {
     if (node.nodeType === 3 && !node.nodeValue?.trim()) continue;
@@ -55,5 +65,7 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   }
   const etag = values.get('ETag');
   if (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) return invalid();
-  return { kind: 'success', etag, bucket: values.get('Bucket'), key: values.get('Key'), location: values.get('Location') };
+  const checksums = Object.fromEntries(checksumFields.filter((field) => values.has(field)).map((field) => [field, values.get(field)!]));
+  return { kind: 'success', etag, bucket: values.get('Bucket'), key: values.get('Key'), location: values.get('Location'),
+    ...(Object.keys(checksums).length ? { checksums } : {}) };
 }
