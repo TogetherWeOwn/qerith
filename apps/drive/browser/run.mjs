@@ -21,6 +21,7 @@ const server = await createServer({
   configFile: false,
   root: resolve(here, 'fixture'),
   tsconfig: resolve(here, 'fixture/tsconfig.json'),
+  optimizeDeps: { rolldownOptions: { tsconfig: resolve(here, 'fixture/tsconfig.json') } },
   plugins: [svelte()],
   server: { host: '127.0.0.1', port: 0, strictPort: false },
   logLevel: 'error'
