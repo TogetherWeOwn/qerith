@@ -3,7 +3,7 @@
 This is not a sandbox or a sealing check. Before calling, the supervisor must
 have created an initially empty, inode-bounded private output tmpfs, stopped all
 writers and helpers, observed their cgroup empty, remounted the same mount
-read-only, and verified its identity and effective read-only state. No process
+read-only, and verified its identity and effective read-only and nodev state. No process
 may reattach or modify it during this call. The caller supplies an open directory
 FD and the device ID recorded for that verified mount; neither may come from the
 guest. A trusted, private quarantine directory on bounded local storage must be
@@ -32,6 +32,9 @@ def copy_result(output_fd, expected_device, quarantine_fd):
     if os.listdir(output_fd) != ["result.bin"]:
         raise ValueError("output must contain only result.bin")
 
+    entry = os.stat("result.bin", dir_fd=output_fd, follow_symlinks=False)
+    if not stat.S_ISREG(entry.st_mode):
+        raise ValueError("result is not a regular file")
     source = os.open("result.bin", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=output_fd)
     try:
         info = os.fstat(source)

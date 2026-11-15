@@ -49,7 +49,9 @@ class SealedOutputTest(unittest.TestCase):
 
     def test_rejects_fifo_without_blocking(self):
         os.mkfifo(self.output / "result.bin")
-        self.assert_rejected()
+        with mock.patch.object(sealed_output.os, "open", wraps=os.open) as open_file:
+            self.assert_rejected()
+            open_file.assert_not_called()
 
     def test_rejects_hard_link(self):
         other = pathlib.Path(self.temp.name) / "other"
