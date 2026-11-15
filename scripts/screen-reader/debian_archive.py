@@ -114,6 +114,7 @@ def verify_static_amd64(data):
             or not 0 < phnum <= 128 or phoff < 64 or phoff + phentsize * phnum > len(data)):
         raise ValueError("unexpected ELF header")
     executable_entry = False
+    load_pages = []
     for index in range(phnum):
         pos = phoff + index * phentsize
         segment_type, flags = struct.unpack_from("<II", data, pos)
@@ -122,10 +123,17 @@ def verify_static_amd64(data):
         if segment_type == 1:
             offset, vaddr = struct.unpack_from("<QQ", data, pos + 8)
             filesz, memsz, align = struct.unpack_from("<QQQ", data, pos + 32)
-            if (align > 1 and (align & (align - 1) or (vaddr - offset) % align)):
+            if ((vaddr - offset) % 4096 or
+                    align > 1 and (align & (align - 1) or (vaddr - offset) % align)):
                 raise ValueError("invalid ELF load alignment")
             if filesz > memsz or offset + filesz > len(data) or vaddr + memsz > 2**64:
                 raise ValueError("invalid ELF load segment")
+            if memsz:
+                page_start = vaddr // 4096
+                page_end = (vaddr + memsz + 4095) // 4096
+                if any(page_start < end and start < page_end for start, end in load_pages):
+                    raise ValueError("overlapping ELF load pages")
+                load_pages.append((page_start, page_end))
             if flags & 1 and vaddr <= entry < vaddr + filesz:
                 executable_entry = True
     if not executable_entry:

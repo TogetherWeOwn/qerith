@@ -81,13 +81,24 @@ class ArchiveTests(unittest.TestCase):
         valid = bytearray(elf())
         struct.pack_into("<Q", valid, 112, 4096)
         verify_static_amd64(valid)
-        for alignment, address in ((3, 0x400000), (4096, 0x400001)):
+        for alignment, address in ((3, 0x400000), (4096, 0x400001), (1, 0x400001), (0, 0x400001)):
             altered = bytearray(valid)
             struct.pack_into("<Q", altered, 80, address)
             struct.pack_into("<Q", altered, 24, address)
             struct.pack_into("<Q", altered, 112, alignment)
             with self.subTest(alignment=alignment), self.assertRaises(ValueError):
                 verify_static_amd64(altered)
+
+    def test_elf_rejects_overlapping_load_pages(self):
+        data = bytearray(elf()) + bytearray(56)
+        struct.pack_into("<H", data, 56, 2)
+        struct.pack_into("<QQ", data, 96, len(data), len(data))
+        struct.pack_into("<IIQQQQQQ", data, 120, 1, 4, 0, 0x400000, 0,
+                         len(data), len(data), 4096)
+        with self.assertRaises(ValueError):
+            verify_static_amd64(data)
+        struct.pack_into("<Q", data, 136, 0x401000)
+        verify_static_amd64(data)
 
     def test_elf_rejects_dynamic_and_invalid_headers(self):
         verify_static_amd64(elf())
