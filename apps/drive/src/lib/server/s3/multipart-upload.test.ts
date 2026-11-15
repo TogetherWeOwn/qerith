@@ -23,6 +23,17 @@ test('uploads a part once with opaque identifiers and preserves its quoted ETag'
   assert.equal(calls, 1);
 });
 
+test('reports the sent size if the caller detaches the input during upload', async () => {
+  const body = new Uint8Array([1, 2, 3]);
+  const upload = createMultipartUpload(config, { timeoutMs: 1000, fetch: async (input) => {
+    structuredClone(body.buffer, { transfer: [body.buffer] });
+    assert.deepEqual(new Uint8Array(await (input as Request).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    return new Response(null, { status: 200, headers: { etag: '"part"' } });
+  } });
+  assert.deepEqual(await upload('key', 'id', 1, body), { partNumber: 1, etag: '"part"', size: 3 });
+  assert.equal(body.byteLength, 0);
+});
+
 test('rejects invalid input before sending and reports uncertain results without retries', async () => {
   let calls = 0;
   let response: () => Promise<Response> = async () => new Response(null, { status: 200 });
