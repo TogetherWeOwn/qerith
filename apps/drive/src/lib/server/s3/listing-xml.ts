@@ -68,6 +68,8 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
             if (quote && c === quote) quote = '';
             else if (!quote && (c === '"' || c === "'")) quote = c;
             else if (!quote && c === '>') { i++; break; }
+            // xmldom treats U+0080 as tag whitespace although XML 1.0 does not.
+            else if (!quote && c === '\u0080') throw new Error();
             else if (!quote && /[\x20\t\r\n]/.test(c) && !/[\x20\t\r\n]/.test(xml[i - 1])) {
               if (++markupUnits > MAX_MARKUP_UNITS) throw new Error();
             }

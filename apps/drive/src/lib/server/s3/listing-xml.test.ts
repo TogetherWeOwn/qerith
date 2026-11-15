@@ -31,7 +31,7 @@ test('validates XML characters and references without rejecting literal replacem
 });
 
 test('rejects illegal character data and trailing non-XML whitespace', () => {
-  for (const xml of ['<Result><Key>bad]]>text</Key></Result>', '<Result/> ']) {
+  for (const xml of ['<Result><Key>bad]]>text</Key></Result>', '<Result/> ', ' <Result/>', '<Result/> <!--x-->', '<!--x--> <Result/>']) {
     assert.throws(() => parseListingXml(bytes(xml), 'Result'), /^Error: Invalid S3 listing XML$/);
   }
   const root = parseListingXml(bytes('<Result attr="]]>"><Key><![CDATA[]]>]]&gt;</Key></Result> \r\n'), 'Result');
@@ -50,6 +50,10 @@ test('bounds markup and attribute allocation before DOM parsing', () => {
     `<Result>${'<!--x-->'.repeat(50_000)}</Result>`,
     `<Result${' a="x"'.repeat(50_000)}/>`
   ]) assert.throws(() => parseListingXml(bytes(xml), 'Result'), /^Error: Invalid S3 listing XML$/);
+  const attributes = Array.from({ length: 100_000 }, (_, i) => `\u0080a${i}="x"`).join('');
+  assert.throws(() => parseListingXml(bytes(`<Result${attributes}/>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  const valid = parseListingXml(bytes('<Result attr="\u0080"><Key>\u0080</Key></Result>'), 'Result');
+  assert.equal(listingText(valid, 'Key'), '\u0080');
   const root = parseListingXml(bytes(`<Result><Key><![CDATA[${'<a/>'.repeat(50_000)}]]></Key></Result>`), 'Result');
   assert.equal(listingText(root, 'Key')?.length, 200_000);
 });
