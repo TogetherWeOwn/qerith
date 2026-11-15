@@ -3,8 +3,11 @@
 set -euo pipefail
 ulimit -f 20480
 export NO_AT_BRIDGE=0 ACCESSIBILITY_ENABLED=1
-mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$EVIDENCE_DIR"
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$EVIDENCE_DIR" "$XDG_CONFIG_HOME/pulse"
 chmod 700 "$XDG_RUNTIME_DIR"
+# Shared-memory segments can exceed the per-file evidence limit.
+printf 'enable-shm = no\n' >"$XDG_CONFIG_HOME/pulse/daemon.conf"
+printf 'enable-shm = no\n' >"$XDG_CONFIG_HOME/pulse/client.conf"
 cleanup() { jobs -pr | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
 openbox >"$EVIDENCE_DIR/window-manager.log" 2>&1 &
