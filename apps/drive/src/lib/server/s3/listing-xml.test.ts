@@ -54,6 +54,13 @@ test('bounds markup and attribute allocation before DOM parsing', () => {
   assert.equal(listingText(root, 'Key')?.length, 200_000);
 });
 
+test('rejects repeated unterminated markup prefixes', () => {
+  for (const prefix of ['<!--', '<![CDATA[', '<?']) {
+    const input = bytes(`<Result>${prefix.repeat(100_000)}</Result>`);
+    assert.throws(() => parseListingXml(input, 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+});
+
 test('rejects malformed, oversized, non-UTF-8, foreign-root and DTD documents', () => {
   for (const input of [
     bytes('<ListBucketResult><x></ListBucketResult>'),

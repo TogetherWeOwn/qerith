@@ -17,13 +17,21 @@ function validateCharactersAndReferences(xml: string): void {
     if (!xmlCharacter(character.codePointAt(0)!)) throw new Error();
   }
   // Entity references are not interpreted inside comments, CDATA, or processing instructions.
-  const content = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, ' ');
-  for (let index = content.indexOf('&'); index !== -1; index = content.indexOf('&', index + 1)) {
-    const reference = /^(?:&(amp|lt|gt|apos|quot);|&#([0-9]+);|&#x([0-9a-fA-F]+);)/.exec(content.slice(index));
-    if (!reference) throw new Error();
-    if ((reference[2] || reference[3]) &&
-        !xmlCharacter(parseInt(reference[2] || reference[3], reference[2] ? 10 : 16))) throw new Error();
-    index += reference[0].length - 1;
+  const reference = /(?:&(amp|lt|gt|apos|quot);|&#([0-9]+);|&#x([0-9a-fA-F]+);)/y;
+  for (let index = 0; index < xml.length;) {
+    const ending = xml.startsWith('<!--', index) ? '-->' : xml.startsWith('<![CDATA[', index) ? ']]>' : xml.startsWith('<?', index) ? '?>' : undefined;
+    if (ending) {
+      const end = xml.indexOf(ending, index + 2);
+      if (end === -1) throw new Error();
+      index = end + ending.length;
+    } else if (xml[index] === '&') {
+      reference.lastIndex = index;
+      const match = reference.exec(xml);
+      if (!match) throw new Error();
+      if ((match[2] || match[3]) &&
+          !xmlCharacter(parseInt(match[2] || match[3], match[2] ? 10 : 16))) throw new Error();
+      index = reference.lastIndex;
+    } else index++;
   }
 }
 
@@ -53,6 +61,7 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
           if (end === -1) throw new Error();
           i = end + ending.length;
         } else {
+          if (xml.slice(i, i + 9).toUpperCase() === '<!DOCTYPE') throw new Error();
           let quote = '';
           for (i++; i < xml.length; i++) {
             const c = xml[i];
@@ -65,10 +74,6 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
           }
         }
       }
-    }
-    const markup = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE/gi;
-    for (const match of xml.matchAll(markup)) {
-      if (/^<!DOCTYPE/i.test(match[0])) throw new Error();
     }
     const document = new DOMParser({
       // XML 1.0 normalizes CR and CRLF, not the additional XML 1.1 line endings.
