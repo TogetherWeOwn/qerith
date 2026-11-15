@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +55,13 @@ try {
     const recordedKeyboard = keyboardJson && JSON.parse(keyboardJson);
     assert(recordedKeyboard && typeof recordedKeyboard === 'object' && Object.keys(recordedKeyboard).length, 'Keyboard evidence is required');
     await writeFile(resolve(output, `keyboard-${size}.json`), keyboardJson);
+    if (state === 'sign-in') {
+      const viewport = `${width}x${height}`;
+      for (const prefix of ['', 'axe-', 'keyboard-']) {
+        const extension = prefix ? 'json' : 'png';
+        await copyFile(resolve(output, `${prefix}${size}.${extension}`), resolve(output, `${prefix}${viewport}.${extension}`));
+      }
+    }
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
