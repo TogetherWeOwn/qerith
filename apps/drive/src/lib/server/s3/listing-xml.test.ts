@@ -11,6 +11,18 @@ test('reads direct listing fields with their text preserved', () => {
   assert.equal(listingText(root, 'NextContinuationToken', false), undefined);
   const cdata = parseListingXml(bytes('<Result><!-- <!DOCTYPE ignored> --><Key><![CDATA[<!DOCTYPE notes]]></Key></Result>'), 'Result');
   assert.equal(listingText(cdata, 'Key'), '<!DOCTYPE notes');
+  const mixed = parseListingXml(bytes('<?probe <!DOCTYPE ignored?><Result><Key>a<!-- comment -->b<?probe data?>c</Key></Result>'), 'Result');
+  assert.equal(listingText(mixed, 'Key'), 'abc');
+});
+
+test('validates XML characters and references without rejecting literal replacement characters', () => {
+  const root = parseListingXml(bytes('<Result><Key>�&#xFFFD;&#65533;<![CDATA[&bad;]]><!-- &bad; --><?p &bad;?></Key></Result>'), 'Result');
+  assert.equal(listingText(root, 'Key'), '���&bad;');
+  for (const value of ['&', '&amp', '&#;', '&#x;', '&#0;', '&#xD800;', '&#x110000;', '&#12x;', '\u0001', '￾']) {
+    assert.throws(() => parseListingXml(bytes(`<Result><Key>${value}</Key></Result>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  assert.throws(() => parseListingXml(bytes('<Result attr="&amp"/>'), 'Result'), /^Error: Invalid S3 listing XML$/);
+  assert.throws(() => parseListingXml(new Uint8Array([0x3c, 0x52, 0x2f, 0x3e, 0xef, 0xbf]), 'R'), /^Error: Invalid S3 listing XML$/);
 });
 
 test('accepts a large valid page of maximum-length keys', () => {
