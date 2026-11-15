@@ -14,9 +14,10 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   if (body.byteLength > MAX_RESPONSE_BYTES) return invalid();
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
-  if (!XML_CHARS.test(xml) || /<!DOCTYPE/i.test(xml)) return invalid();
-  // References in CDATA are literal; all other references must be legal XML 1.0.
+  if (!XML_CHARS.test(xml)) return invalid();
+  // CDATA content is literal, not a declaration or an XML reference.
   const references = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  if (/<!DOCTYPE/i.test(references)) return invalid();
   if (/&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(references)) return invalid();
   for (const match of references.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const number = match[1].startsWith('x') ? Number.parseInt(match[1].slice(1), 16) : Number(match[1]);

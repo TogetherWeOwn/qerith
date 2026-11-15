@@ -17,8 +17,8 @@ test('distinguishes embedded error documents from successful completions', () =>
 });
 
 test('accepts keepalive whitespace, checksums, literal CDATA, and replacement characters', () => {
-  assert.deepEqual(parse(bytes(' \n\t<?xml version="1.0"?><CompleteMultipartUploadResult><ETag>"e"</ETag><Key><![CDATA[a&b]]>�</Key><ChecksumCRC32> 123 </ChecksumCRC32><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>')), {
-    kind: 'success', etag: '"e"', bucket: undefined, key: 'a&b�', location: undefined,
+  assert.deepEqual(parse(bytes(' \n\t<?xml version="1.0"?><CompleteMultipartUploadResult><ETag>"e"</ETag><Key><![CDATA[a&b<!DOCTYPE-report]]>�</Key><ChecksumCRC32> 123 </ChecksumCRC32><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>')), {
+    kind: 'success', etag: '"e"', bucket: undefined, key: 'a&b<!DOCTYPE-report�', location: undefined,
     checksums: { ChecksumCRC32: ' 123 ', ChecksumType: 'COMPOSITE' }
   });
   assert.equal(parse(bytes('<Error><Code>&#65533;</Code></Error>')).kind, 'error');
