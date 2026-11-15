@@ -44,6 +44,16 @@ test('accepts a large valid page of maximum-length keys', () => {
   assert.equal(listingChildren(root, 'Contents').length, 1000);
 });
 
+test('bounds markup and attribute allocation before DOM parsing', () => {
+  for (const xml of [
+    `<Result>${'<a/>'.repeat(50_000)}</Result>`,
+    `<Result>${'<!--x-->'.repeat(50_000)}</Result>`,
+    `<Result${' a="x"'.repeat(50_000)}/>`
+  ]) assert.throws(() => parseListingXml(bytes(xml), 'Result'), /^Error: Invalid S3 listing XML$/);
+  const root = parseListingXml(bytes(`<Result><Key><![CDATA[${'<a/>'.repeat(50_000)}]]></Key></Result>`), 'Result');
+  assert.equal(listingText(root, 'Key')?.length, 200_000);
+});
+
 test('rejects malformed, oversized, non-UTF-8, foreign-root and DTD documents', () => {
   for (const input of [
     bytes('<ListBucketResult><x></ListBucketResult>'),

@@ -3,6 +3,7 @@ import { DOMParser } from '@xmldom/xmldom';
 type ListingElement = NonNullable<ReturnType<DOMParser['parseFromString']>['documentElement']>;
 
 const MAX_XML_BYTES = 8 * 1024 * 1024;
+const MAX_MARKUP_UNITS = 50_000;
 const S3_NAMESPACE = 'http://s3.amazonaws.com/doc/2006-03-01/';
 
 function xmlCharacter(value: number): boolean {
@@ -35,6 +36,8 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
     // xmldom accepts non-XML whitespace after the document element.
     const trailingWhitespace = />\s*$/.exec(xml)?.[0].slice(1);
     if (trailingWhitespace && /[^\x20\t\r\n]/.test(trailingWhitespace)) throw new Error();
+    // Bound DOM nodes and attributes before parsing; whitespace runs bound attribute count.
+    let markupUnits = 0;
     // The CDATA terminator is forbidden in character data, but allowed in attributes.
     for (let i = 0; i < xml.length;) {
       if (xml[i] !== '<') {
@@ -43,6 +46,7 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
         if (xml.slice(i, textEnd).includes(']]>')) throw new Error();
         i = textEnd;
       } else {
+        if (++markupUnits > MAX_MARKUP_UNITS) throw new Error();
         const ending = xml.startsWith('<!--', i) ? '-->' : xml.startsWith('<![CDATA[', i) ? ']]>' : xml.startsWith('<?', i) ? '?>' : undefined;
         if (ending) {
           const end = xml.indexOf(ending, i + 2);
@@ -55,6 +59,9 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
             if (quote && c === quote) quote = '';
             else if (!quote && (c === '"' || c === "'")) quote = c;
             else if (!quote && c === '>') { i++; break; }
+            else if (!quote && /[\x20\t\r\n]/.test(c) && !/[\x20\t\r\n]/.test(xml[i - 1])) {
+              if (++markupUnits > MAX_MARKUP_UNITS) throw new Error();
+            }
           }
         }
       }
