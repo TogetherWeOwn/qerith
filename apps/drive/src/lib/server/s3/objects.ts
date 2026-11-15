@@ -45,7 +45,13 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
         throw new Error(options.signal?.aborted ? 'S3 request cancelled' : 'S3 request failed');
       }
       const metadata = { etag: response.headers.get('etag'), contentLength: response.headers.get('content-length'), contentRange: response.headers.get('content-range') };
-      if (response.status === 200 || response.status === 206) return { status: response.status as 200 | 206, ...metadata, body: response.body };
+      if (response.status === 200 || response.status === 206) {
+        if (response.headers.has('content-encoding')) {
+          void response.body.cancel().catch(() => {});
+          throw new Error('S3 encoded response unsupported');
+        }
+        return { status: response.status as 200 | 206, ...metadata, body: response.body };
+      }
       void response.body.cancel().catch(() => {});
       if (response.status === 304 || response.status === 404 || response.status === 412 || response.status === 416) {
         return { status: response.status as 304 | 404 | 412 | 416, ...metadata };

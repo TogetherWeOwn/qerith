@@ -23,6 +23,33 @@ test('GET streams a range with signed validators and preserves response metadata
   assert.match(sent?.headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
 });
 
+test('GET rejects encoded success bodies before handoff and cancels them', async () => {
+  for (const status of [200, 206]) {
+    for (const encoding of ['gzip', 'identity', '']) {
+      let cancelled = false;
+      let calls = 0;
+      const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => {
+        calls++;
+        return new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+          status, headers: { 'content-encoding': encoding, 'content-length': '3', 'content-range': 'bytes 0-2/3' }
+        });
+      } });
+      await assert.rejects(objects.get('key', { maxResponseBytes: 3 }), { message: 'S3 encoded response unsupported' });
+      assert.equal(cancelled, true);
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test('GET preserves encoded 304 metadata', async () => {
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response(null, {
+    status: 304, headers: { 'content-encoding': 'gzip', etag: '"v1"', 'content-length': '3' }
+  }) });
+  assert.deepEqual(await objects.get('key', { maxResponseBytes: 0 }), {
+    status: 304, etag: '"v1"', contentLength: '3', contentRange: null
+  });
+});
+
 test('GET cancels non-success bodies and reports conditional and range statuses', async () => {
   for (const status of [304, 404, 412, 416, 503]) {
     let cancelled = false;
