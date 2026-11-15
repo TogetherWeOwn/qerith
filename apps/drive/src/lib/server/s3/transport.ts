@@ -49,11 +49,12 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0) throw new Error('Invalid S3 timeout');
   const signer = createS3Signer({ ...settings, fetch: options.fetch, now: options.now });
 
-  return async function request(operation: Operation): Promise<{ status: number; headers: Headers; body: Uint8Array }> {
+  async function execute(operation: Operation, streaming: boolean): Promise<{ status: number; headers: Headers; body: Uint8Array | ReadableStream<Uint8Array> }> {
     const { method, key, query: queryParams, signal, maxResponseBytes, body: inputBody, headers: inputHeaders } = operation;
-    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 0 || maxResponseBytes > MAX_PART_BYTES) {
+    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 0 || (!streaming && maxResponseBytes > MAX_PART_BYTES)) {
       throw new Error('Invalid S3 response limit');
     }
+    if (streaming && (method !== 'GET' || inputBody)) throw new Error('S3 streaming requires GET');
     if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
@@ -78,6 +79,11 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     };
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let response: Response | undefined;
+    let handedOff = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', forwardAbort);
+    };
     try {
       const hash = body ? await abortable(crypto.subtle.digest('SHA-256', body), controller.signal) : undefined;
       headers.set('x-amz-content-sha256', hash ? Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('') : EMPTY_HASH);
@@ -91,6 +97,70 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       checkAbort();
       if (response.status >= 300 && response.status < 400 && response.status !== 304) {
         throw new Error('S3 redirects are not allowed');
+      }
+      if (streaming) {
+        reader = response.body?.getReader();
+        let length = 0;
+        let chunksSinceYield = 0;
+        let yieldAt = performance.now() + 4;
+        let finished = false;
+        let onAbort: () => void;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          controller.signal.removeEventListener('abort', onAbort);
+          cleanup();
+        };
+        const stream = new ReadableStream<Uint8Array>({
+          start(output) {
+            onAbort = () => {
+              if (finished) return;
+              finish();
+              void reader?.cancel().catch(() => {});
+              output.error(new Error('S3 stream aborted or timed out'));
+            };
+            controller.signal.addEventListener('abort', onAbort, { once: true });
+            if (controller.signal.aborted) onAbort();
+          },
+          async pull(output) {
+            try {
+              checkAbort();
+              if (++chunksSinceYield >= 1024 || performance.now() >= yieldAt) {
+                await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
+                chunksSinceYield = 0;
+                yieldAt = performance.now() + 4;
+              }
+              const part = reader ? await abortable(reader.read(), controller.signal) : { done: true as const, value: undefined };
+              checkAbort();
+              if (finished) return;
+              if (part.done) {
+                finish();
+                output.close();
+              } else if (part.value.byteLength > maxResponseBytes - length) {
+                finish();
+                controller.abort();
+                void reader?.cancel().catch(() => {});
+                output.error(new Error('S3 response exceeds limit'));
+              } else {
+                length += part.value.byteLength;
+                output.enqueue(part.value);
+              }
+            } catch {
+              if (finished) return;
+              finish();
+              controller.abort();
+              void reader?.cancel().catch(() => {});
+              output.error(new Error('S3 stream failed'));
+            }
+          },
+          cancel() {
+            finish();
+            controller.abort();
+            void reader?.cancel().catch(() => {});
+          }
+        }, { highWaterMark: 0 });
+        handedOff = true;
+        return { status: response.status, headers: response.headers, body: stream };
       }
       const result = new Uint8Array(maxResponseBytes);
       let length = 0;
@@ -123,10 +193,21 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       controller.abort(error);
       if (reader) void reader.cancel(error).catch(() => {});
       else if (response) cancelResponse(response);
+      if (streaming) throw new Error('S3 stream request failed');
       throw error;
     } finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', forwardAbort);
+      if (!handedOff) cleanup();
+    }
+  }
+
+  const request = async (operation: Operation) =>
+    await execute(operation, false) as { status: number; headers: Headers; body: Uint8Array };
+  request.stream = async (operation: Omit<Operation, 'method' | 'body'> & { method: 'GET' }) => {
+    try {
+      return await execute(operation, true) as { status: number; headers: Headers; body: ReadableStream<Uint8Array> };
+    } catch {
+      throw new Error('S3 stream request failed');
     }
   };
+  return request;
 }
