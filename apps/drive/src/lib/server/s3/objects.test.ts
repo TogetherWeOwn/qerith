@@ -15,6 +15,7 @@ test('GET streams a range with signed validators and preserves response metadata
   assert.equal(result.etag, '"v1"');
   assert.equal(result.contentRange, 'bytes 1-3/5');
   assert.equal(result.contentLength, '3');
+  assert.ok('body' in result);
   assert.equal(await new Response(result.body).text(), 'abc');
   assert.equal(sent?.headers.get('range'), 'bytes=1-3');
   assert.equal(sent?.headers.get('if-match'), '"v1"');
@@ -40,6 +41,7 @@ test('GET enforces streaming limits and redacts invalid input and cancellation',
   let calls = 0;
   const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => { calls++; return new Response('abcd'); } });
   const result = await objects.get('key', { maxResponseBytes: 3 });
+  assert.ok('body' in result);
   await assert.rejects(new Response(result.body).text(), { message: 'S3 response exceeds limit' });
   await assert.rejects(objects.get('key', { maxResponseBytes: 3, range: 'secret\nvalue' }), { message: 'S3 request failed' });
   await assert.rejects(objects.get('a/../b', { maxResponseBytes: 3 }), { message: 'Invalid S3 object key' });
