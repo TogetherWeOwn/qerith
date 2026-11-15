@@ -152,7 +152,7 @@ test('cancellation at the fetch boundary does not leak unhandled rejections', ()
   assert.equal(child.status, 0, child.stderr || String(child.error));
 });
 
-test('cancels response bodies abandoned at the fetch boundary', async () => {
+test('cancels response bodies abandoned at the fetch boundary', { timeout: 5000 }, async () => {
   for (const timing of ['before-reader', 'late-response'] as const) {
     const controller = new AbortController();
     let cancelled = 0;
@@ -162,15 +162,14 @@ test('cancels response bodies abandoned at the fetch boundary', async () => {
     const response = new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled++; return Promise.reject(new Error('cleanup failed')); } }));
     const request = createS3Transport(config, { timeoutMs: 1000, fetch: () => {
       dispatched();
-      if (timing === 'before-reader') return new Promise<Response>((resolve) => {
-        resolve(response);
-        queueMicrotask(() => controller.abort(new Error('cancelled')));
-      });
       return new Promise<Response>((resolve) => { release = resolve; });
     } });
     const pending = request({ ...operation, signal: controller.signal });
-    await started;
-    if (timing === 'late-response') controller.abort(new Error('cancelled'));
+    await Promise.race([started, pending.then(() => { throw new Error('unexpected success'); })]);
+    if (timing === 'before-reader') {
+      release(response);
+      queueMicrotask(() => controller.abort(new Error('cancelled')));
+    } else controller.abort(new Error('cancelled'));
     await assert.rejects(pending, /cancelled/);
     if (timing === 'late-response') release(response);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
