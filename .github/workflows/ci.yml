@@ -308,6 +308,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+      - name: Test offline bundle lock input validation
+        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p test_bundle_inputs.py -v
 
   drive-bootstrap:
     name: drive dependency bootstrap
