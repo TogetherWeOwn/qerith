@@ -19,8 +19,17 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 def git(repo, *args):
-    env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
-    return subprocess.check_output(["git", "-C", str(repo), *args], timeout=30, env=env)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update({"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    command = ["git", "-C", str(repo)]
+    # Older Git versions cannot disable lazy fetching. Reject partial-clone
+    # configuration before asking Git to resolve any object instead.
+    config = subprocess.check_output([*command, "config", "--null", "--list"], timeout=30, env=env)
+    for entry in config.split(b"\0"):
+        key = entry.partition(b"\n")[0].lower()
+        if key == b"extensions.partialclone" or (key.startswith(b"remote.") and key.endswith(b".promisor")):
+            raise ValueError("partial clone configuration is not supported")
+    return subprocess.check_output([*command, *args], timeout=30, env=env)
 
 
 def extract(repo, sha, destination):

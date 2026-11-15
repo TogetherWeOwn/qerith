@@ -1,8 +1,10 @@
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import extract_source
 import prepare_target
@@ -49,6 +51,30 @@ class ExtractionTest(unittest.TestCase):
         extract_source.extract(self.repo, self.sha, self.out)
         self.assertEqual((self.out / name).read_text(), name)
         self.assertEqual(json.loads((self.out / "source-manifest.json").read_text())["source_commit"], self.sha)
+
+    def test_rejects_partial_clone_before_missing_object_fetch(self):
+        oid = self.git("rev-parse", self.sha + ":" + extract_source.SOURCE_FILES[0]).strip()
+        (self.repo / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
+        marker = pathlib.Path(self.temp.name) / "transport-ran"
+        transport = pathlib.Path(self.temp.name) / "transport"
+        transport.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\n")
+        transport.chmod(0o755)
+        self.git("config", "remote.origin.url", str(self.repo))
+        self.git("config", "remote.origin.promisor", "true")
+        self.git("config", "remote.origin.uploadpack", str(transport))
+        with self.assertRaisesRegex(ValueError, "partial clone"):
+            extract_source.extract(self.repo, self.sha, self.out)
+        self.assertFalse(marker.exists())
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_ignores_inherited_repository_environment(self):
+        other = pathlib.Path(self.temp.name) / "other"
+        other.mkdir()
+        subprocess.check_call(["git", "-C", str(other), "init", "-q"])
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other),
+                                         "GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects")}):
+            extract_source.extract(self.repo, self.sha, self.out)
+        self.assertEqual((self.out / extract_source.SOURCE_FILES[0]).read_text(), extract_source.SOURCE_FILES[0])
 
     def test_target_fixture_stays_separate_from_extracted_source(self):
         fixture = pathlib.Path(__file__).parent / "target-fixture"
