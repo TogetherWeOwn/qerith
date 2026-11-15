@@ -103,6 +103,27 @@ test('ready empty chunks yield to cancellation and respect the deadline', async 
   assert.ok(pulls > 0);
 });
 
+test('frozen clock still yields ready chunks to timer cancellation', () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import { createS3Transport } from './src/lib/server/s3/transport.ts';
+    Object.defineProperty(performance, 'now', { value: () => 0 });
+    let pulls = 0;
+    const controller = new AbortController();
+    const request = createS3Transport(${JSON.stringify(config)}, { timeoutMs: 1000, fetch: async () => {
+      setTimeout(() => controller.abort(new Error('timer cancellation')), 0);
+      return new Response(new ReadableStream({ pull(stream) {
+        if (++pulls <= 8192) stream.enqueue(new Uint8Array());
+        else stream.close();
+      } }));
+    } });
+    await assert.rejects(request({ method: 'GET', key: 'x', maxResponseBytes: 8, signal: controller.signal }), /timer cancellation/);
+    assert.ok(pulls > 0 && pulls <= 8192);
+  `;
+  const child = spawnSync(process.execPath, ['--unhandled-rejections=strict', '--import', 'tsx', '--input-type=module', '-e', script], { cwd: process.cwd(), encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.status, 0, child.stderr || String(child.error));
+});
+
 test('reads a highly fragmented bounded response', async () => {
   let remaining = 16384;
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () =>
