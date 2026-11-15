@@ -4,7 +4,7 @@ import struct
 import tarfile
 import unittest
 
-from debian_archive import binary_from_tar, data_archive, verify_static_amd64
+from debian_archive import AMD64_USER_END, binary_from_tar, data_archive, verify_static_amd64
 
 
 def ar(members):
@@ -69,6 +69,16 @@ class ArchiveTests(unittest.TestCase):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 binary_from_tar(tar(entries))
 
+    def test_tar_preserves_name_safety_before_normalization(self):
+        binary = ("./bin/busybox", tarfile.REGTYPE, b"abc")
+        self.assertEqual(binary_from_tar(tar([("./", tarfile.DIRTYPE, b""),
+                                              ("./bin/", tarfile.DIRTYPE, b""), binary])), b"abc")
+        for entries in ([('/', tarfile.DIRTYPE, b''), binary],
+                        [('bin/busybox/', tarfile.REGTYPE, b'abc')],
+                        [('', tarfile.DIRTYPE, b''), binary]):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                binary_from_tar(tar(entries))
+
     def test_tar_requires_valid_headers_and_termination(self):
         valid = tar([("./bin/busybox", tarfile.REGTYPE, b"abc")])
         self.assertEqual(binary_from_tar(valid), b"abc")
@@ -87,6 +97,21 @@ class ArchiveTests(unittest.TestCase):
             struct.pack_into("<Q", altered, 24, address)
             struct.pack_into("<Q", altered, 112, alignment)
             with self.subTest(alignment=alignment), self.assertRaises(ValueError):
+                verify_static_amd64(altered)
+
+    def test_elf_loads_stay_in_amd64_userspace(self):
+        valid = bytearray(elf())
+        struct.pack_into("<Q", valid, 80, AMD64_USER_END - 4096)
+        struct.pack_into("<Q", valid, 24, AMD64_USER_END - 4096)
+        struct.pack_into("<Q", valid, 104, 4096)
+        verify_static_amd64(valid)
+        for address, size in ((0xffff800000000000, 120),
+                              (AMD64_USER_END - 4096, 4097), (AMD64_USER_END, 120)):
+            altered = bytearray(valid)
+            struct.pack_into("<Q", altered, 80, address)
+            struct.pack_into("<Q", altered, 24, address)
+            struct.pack_into("<Q", altered, 104, size)
+            with self.subTest(address=address, size=size), self.assertRaises(ValueError):
                 verify_static_amd64(altered)
 
     def test_elf_rejects_overlapping_load_pages(self):

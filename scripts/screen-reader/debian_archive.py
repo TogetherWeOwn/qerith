@@ -13,6 +13,8 @@ from debian_metadata import decompress_index
 MAX_DEB = 4 * 1024 * 1024
 MAX_TAR = 16 * 1024 * 1024
 MAX_BINARY = 8 * 1024 * 1024
+# Linux x86-64 TASK_SIZE_MAX (five-level paging), exclusive.
+AMD64_USER_END = 2**56 - 4096
 
 
 def data_archive(deb):
@@ -77,6 +79,11 @@ def binary_from_tar(data):
             member = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
         except (tarfile.HeaderError, UnicodeError) as exc:
             raise ValueError("invalid tar header") from exc
+        raw_name = header[:100].split(b"\0", 1)[0]
+        raw_prefix = header[345:500].split(b"\0", 1)[0]
+        if (not raw_name or raw_name.startswith(b"/") or raw_prefix.startswith(b"/") or
+                member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and raw_name.endswith(b"/")):
+            raise ValueError("unsafe tar entry name")
         start = offset + 512
         end = start + member.size
         offset = start + ((member.size + 511) // 512) * 512
@@ -126,7 +133,8 @@ def verify_static_amd64(data):
             if ((vaddr - offset) % 4096 or
                     align > 1 and (align & (align - 1) or (vaddr - offset) % align)):
                 raise ValueError("invalid ELF load alignment")
-            if filesz > memsz or offset + filesz > len(data) or vaddr + memsz > 2**64:
+            if (filesz > memsz or offset + filesz > len(data) or vaddr >= AMD64_USER_END
+                    or vaddr + memsz > AMD64_USER_END):
                 raise ValueError("invalid ELF load segment")
             if memsz:
                 page_start = vaddr // 4096
