@@ -69,6 +69,8 @@ test('consumer cancellation and idle timeout cancel upstream', async () => {
 test('redacts fetch, source and caller abort errors', async () => {
   const failing = createS3Transport(config, { timeoutMs: 1000, fetch: async () => { throw new Error('secret fetch'); } });
   await assert.rejects(failing.stream(operation), (error: Error) => error.message === 'S3 stream request failed');
+  await assert.rejects(failing.stream({ ...operation, headers: { 'x-test': 'secret\nvalue' } }),
+    (error: Error) => error.message === 'S3 stream request failed');
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () => new Response(
     new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error('secret source')); } }, { highWaterMark: 0 })) });
   await assert.rejects((await request.stream(operation)).body.getReader().read(), (error: Error) => error.message === 'S3 stream failed');

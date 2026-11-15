@@ -102,6 +102,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
         reader = response.body?.getReader();
         let length = 0;
         let chunksSinceYield = 0;
+        let yieldAt = performance.now() + 4;
         let finished = false;
         let onAbort: () => void;
         const finish = () => {
@@ -124,9 +125,10 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
           async pull(output) {
             try {
               checkAbort();
-              if (++chunksSinceYield >= 1024) {
+              if (++chunksSinceYield >= 1024 || performance.now() >= yieldAt) {
                 await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
                 chunksSinceYield = 0;
+                yieldAt = performance.now() + 4;
               }
               const part = reader ? await abortable(reader.read(), controller.signal) : { done: true as const, value: undefined };
               checkAbort();
@@ -200,7 +202,12 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
 
   const request = async (operation: Operation) =>
     await execute(operation, false) as { status: number; headers: Headers; body: Uint8Array };
-  request.stream = async (operation: Omit<Operation, 'method' | 'body'> & { method: 'GET' }) =>
-    await execute(operation, true) as { status: number; headers: Headers; body: ReadableStream<Uint8Array> };
+  request.stream = async (operation: Omit<Operation, 'method' | 'body'> & { method: 'GET' }) => {
+    try {
+      return await execute(operation, true) as { status: number; headers: Headers; body: ReadableStream<Uint8Array> };
+    } catch {
+      throw new Error('S3 stream request failed');
+    }
+  };
   return request;
 }
