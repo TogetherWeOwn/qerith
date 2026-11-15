@@ -6,10 +6,27 @@ import tarfile
 import unittest
 
 from debian_metadata import InvalidMetadata, decompress_index, index_entry, package_entry, verify_bytes
-from qualify_busybox import binary_from_tar, data_archive, verify_static_amd64
+from qualify_busybox import PRIMARY, SIGNER, binary_from_tar, check_signatures, data_archive, verify_static_amd64
 
 
 class MetadataTests(unittest.TestCase):
+    def test_release_requires_pinned_valid_signature_and_only_missing_other_keys(self):
+        good = ("[GNUPG:] PLAINTEXT 74 0\n[GNUPG:] NEWSIG\n"
+                f"[GNUPG:] KEY_CONSIDERED {PRIMARY} 0\n[GNUPG:] SIG_ID x 2026-07-11 1\n"
+                "[GNUPG:] GOODSIG 6ED0E7B82643E131 Debian\n"
+                f"[GNUPG:] VALIDSIG {SIGNER} 2026-07-11 1 0 4 0 1 8 01 {PRIMARY}\n")
+        missing = ("[GNUPG:] NEWSIG\n[GNUPG:] ERRSIG 1234 1 8 01 1 9 FINGERPRINT\n"
+                   "[GNUPG:] NO_PUBKEY 1234\n")
+        check_signatures(0, good)
+        check_signatures(2, good + missing)
+        for code, status in ((2, missing), (0, good + missing), (2, good),
+                             (2, good.replace(SIGNER, "0" * 40) + missing),
+                             (2, good + missing.replace(" 9 FINGERPRINT", " 4 FINGERPRINT")),
+                             (2, good + "[GNUPG:] NEWSIG\n[GNUPG:] BADSIG 1234 bad\n"),
+                             (2, good + missing + "[GNUPG:] FAILURE verify 1\n")):
+            with self.subTest(code=code, status=status), self.assertRaises(ValueError):
+                check_signatures(code, status)
+
     def test_authentication_checks_size_and_digest(self):
         payload = b"index"
         digest = hashlib.sha256(payload).hexdigest()

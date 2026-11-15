@@ -31,6 +31,42 @@ def fetch(url, path, maximum):
     return path.read_bytes()
 
 
+def check_signatures(returncode, status):
+    # A Debian InRelease may contain signatures by keys outside our pinned
+    # keyring. gpgv exits 2 for those missing keys even when our signature is valid.
+    groups = []
+    for line in status.splitlines():
+        if not line.startswith("[GNUPG:] "):
+            raise ValueError("unexpected gpgv status output")
+        fields = line.split()[1:]
+        if fields[0] == "NEWSIG":
+            groups.append([])
+        elif fields[0] == "PLAINTEXT" and not groups:
+            continue
+        elif not groups:
+            raise ValueError("status outside signature")
+        else:
+            groups[-1].append(fields)
+    trusted = 0
+    missing = 0
+    for group in groups:
+        kinds = [fields[0] for fields in group]
+        if kinds == ["KEY_CONSIDERED", "SIG_ID", "GOODSIG", "VALIDSIG"]:
+            valid = group[-1]
+            if len(valid) != 11 or valid[1] != SIGNER or valid[-1] != PRIMARY:
+                raise ValueError("unexpected release signer")
+            trusted += 1
+        elif kinds == ["ERRSIG", "NO_PUBKEY"]:
+            error, no_key = group
+            if len(error) != 8 or error[6] != "9" or len(no_key) != 2 or error[1] != no_key[1]:
+                raise ValueError("unexpected signature error")
+            missing += 1
+        else:
+            raise ValueError("gpgv rejected signature")
+    if trusted != 1 or returncode != (2 if missing else 0):
+        raise ValueError("gpgv did not verify the pinned signer")
+
+
 def verified_release(root):
     keydir = root / "key"
     keydir.mkdir(mode=0o700)
@@ -53,11 +89,10 @@ def verified_release(root):
         ["gpgv", "--keyring", str(keydir / "pubring.kbx"), "--status-fd", "1",
          "--output", str(release), str(signed)], check=False, capture_output=True, text=True, timeout=30,
     )
-    if result.returncode:
-        raise ValueError("gpgv rejected release: " + repr(result.stdout + result.stderr))
-    signatures = [line.split() for line in result.stdout.splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
-    if len(signatures) != 1 or signatures[0][2] != SIGNER or signatures[0][-1] != PRIMARY:
-        raise ValueError("unexpected release signer")
+    try:
+        check_signatures(result.returncode, result.stdout)
+    except ValueError as error:
+        raise ValueError("gpgv rejected release: " + repr(result.stdout + result.stderr)) from error
     return release.read_bytes(), hashlib.sha256(raw).hexdigest()
 
 
