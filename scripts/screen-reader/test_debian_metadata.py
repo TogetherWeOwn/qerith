@@ -21,7 +21,8 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(index_entry(("SHA256: \t\n\t" + line.lstrip()).encode(), "main/binary-amd64/Packages.xz"), (123, "a" * 64))
         release = "Description: first SHA256:\nSHA256:\n" + line
         self.assertEqual(index_entry(release.replace("\n", "\r\n").encode(), "main/binary-amd64/Packages.xz"), (123, "a" * 64))
-        for data in ("SHA256:\n", "SHA256:\n" + line + line, "SHA256:\n" + line + "SHA256:\n"):
+        for data in ("SHA256:\n", "SHA256:\n" + line + line, "SHA256:\n" + line + "SHA256:\n",
+                     "SHA256:\n" + line.replace(" 123", " 123")):
             with self.subTest(data=data), self.assertRaises(InvalidMetadata):
                 index_entry(data.encode(), "main/binary-amd64/Packages.xz")
 

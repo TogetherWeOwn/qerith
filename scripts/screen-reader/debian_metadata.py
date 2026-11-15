@@ -28,7 +28,7 @@ def index_entry(release, path):
     for line in lines[sections[0] + 1 :]:
         if not line.startswith((" ", "\t")):
             break
-        parts = line.split()
+        parts = re.split(r"[ \t]+", line.strip(" \t"))
         if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]):
             raise InvalidMetadata("invalid SHA256 entry")
         if not parts[1].isascii() or not parts[1].isdigit():
