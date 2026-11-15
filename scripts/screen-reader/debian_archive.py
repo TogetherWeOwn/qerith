@@ -4,7 +4,6 @@ The caller must authenticate the complete package before invoking these helpers.
 The selected binary is returned in memory; no archive paths are extracted to disk.
 """
 
-import io
 import re
 import struct
 import tarfile
@@ -65,31 +64,40 @@ def binary_from_tar(data):
     """Accept only known package entries and return exactly one regular binary."""
     if len(data) > MAX_TAR:
         raise ValueError("oversized data tar")
-    binary, seen = None, set()
-    try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
-            for member in archive:
-                name = member.name.removeprefix("./").rstrip("/") or "."
-                parts = name.split("/")
-                if (name.startswith("/") or any(p in ("", ".", "..") for p in parts)
-                        and name != "." or name in seen or member.pax_headers):
-                    raise ValueError("unsafe or duplicate tar entry")
-                seen.add(name)
-                if name in DIRECTORIES and member.isdir():
-                    continue
-                if name == "bin/busybox" and member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and 0 < member.size <= MAX_BINARY:
-                    stream = archive.extractfile(member)
-                    binary = stream.read(member.size + 1)
-                    if len(binary) != member.size:
-                        raise ValueError("truncated binary")
-                    continue
-                if (member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and member.size <= 2 * 1024 * 1024 and
-                        (name in PACKAGE_FILES or name.startswith((
-                            "usr/share/doc/busybox-static/", "usr/share/man/man1/")))):
-                    continue
-                raise ValueError("unexpected tar entry")
-    except (tarfile.TarError, EOFError) as exc:
-        raise ValueError("invalid data tar") from exc
+    binary, seen, offset = None, set(), 0
+    while True:
+        header = data[offset : offset + 512]
+        if len(header) != 512:
+            raise ValueError("truncated tar header")
+        if header == bytes(512):
+            if len(data) - offset < 1024 or any(data[offset:]):
+                raise ValueError("invalid tar termination")
+            break
+        try:
+            member = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+        except (tarfile.HeaderError, UnicodeError) as exc:
+            raise ValueError("invalid tar header") from exc
+        start = offset + 512
+        end = start + member.size
+        offset = start + ((member.size + 511) // 512) * 512
+        if member.size < 0 or offset > len(data):
+            raise ValueError("truncated tar entry")
+        name = member.name.removeprefix("./").rstrip("/") or "."
+        parts = name.split("/")
+        if (name.startswith("/") or any(p in ("", ".", "..") for p in parts)
+                and name != "." or name in seen):
+            raise ValueError("unsafe or duplicate tar entry")
+        seen.add(name)
+        if name in DIRECTORIES and member.isdir() and member.size == 0:
+            continue
+        if name == "bin/busybox" and member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and 0 < member.size <= MAX_BINARY:
+            binary = data[start:end]
+            continue
+        if (member.type in (tarfile.REGTYPE, tarfile.AREGTYPE) and member.size <= 2 * 1024 * 1024 and
+                (name in PACKAGE_FILES or name.startswith((
+                    "usr/share/doc/busybox-static/", "usr/share/man/man1/")))):
+            continue
+        raise ValueError("unexpected tar entry")
     if binary is None:
         raise ValueError("missing BusyBox binary")
     return binary
@@ -113,7 +121,9 @@ def verify_static_amd64(data):
             raise ValueError("ELF has dynamic segment or interpreter")
         if segment_type == 1:
             offset, vaddr = struct.unpack_from("<QQ", data, pos + 8)
-            filesz, memsz = struct.unpack_from("<QQ", data, pos + 32)
+            filesz, memsz, align = struct.unpack_from("<QQQ", data, pos + 32)
+            if (align > 1 and (align & (align - 1) or (vaddr - offset) % align)):
+                raise ValueError("invalid ELF load alignment")
             if filesz > memsz or offset + filesz > len(data) or vaddr + memsz > 2**64:
                 raise ValueError("invalid ELF load segment")
             if flags & 1 and vaddr <= entry < vaddr + filesz:

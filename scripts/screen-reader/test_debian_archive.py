@@ -69,6 +69,26 @@ class ArchiveTests(unittest.TestCase):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 binary_from_tar(tar(entries))
 
+    def test_tar_requires_valid_headers_and_termination(self):
+        valid = tar([("./bin/busybox", tarfile.REGTYPE, b"abc")])
+        self.assertEqual(binary_from_tar(valid), b"abc")
+        for ending in (b"x" * 512, b"x" * 100, b"", bytes(512),
+                       bytes(1024) + b"x"):
+            with self.subTest(ending=len(ending)), self.assertRaises(ValueError):
+                binary_from_tar(valid[:1024] + ending)
+
+    def test_elf_load_alignment(self):
+        valid = bytearray(elf())
+        struct.pack_into("<Q", valid, 112, 4096)
+        verify_static_amd64(valid)
+        for alignment, address in ((3, 0x400000), (4096, 0x400001)):
+            altered = bytearray(valid)
+            struct.pack_into("<Q", altered, 80, address)
+            struct.pack_into("<Q", altered, 24, address)
+            struct.pack_into("<Q", altered, 112, alignment)
+            with self.subTest(alignment=alignment), self.assertRaises(ValueError):
+                verify_static_amd64(altered)
+
     def test_elf_rejects_dynamic_and_invalid_headers(self):
         verify_static_amd64(elf())
         for offset, fmt, value in ((18, "<H", 183), (16, "<H", 3), (20, "<I", 0),
