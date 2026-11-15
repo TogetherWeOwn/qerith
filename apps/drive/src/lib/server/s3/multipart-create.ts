@@ -8,16 +8,17 @@ function uploadIdFromResponse(body: Uint8Array): string {
   const invalid = (): never => { throw new Error('Invalid multipart create response'); };
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
-  if (!xmlChars.test(xml) || xml.includes(']]>') || /<!|<\?(?!xml\s)/i.test(xml) || /&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(xml)) return invalid();
+  const markup = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, 'CDATA');
+  if (!xmlChars.test(xml) || markup.includes(']]>') || /<!|<\?(?!xml\s)/i.test(markup) || /&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(markup)) return invalid();
   // Only XML whitespace is valid between tag names and delimiters.
-  for (const tag of xml.match(/<[^>]*>/g) ?? []) {
+  for (const tag of markup.match(/<[^>]*>/g) ?? []) {
     if (/[^\x00-\x7f]/.test(tag)) return invalid();
   }
-  for (const match of xml.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
+  for (const match of markup.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
     if (!Number.isSafeInteger(code) || code > 0x10ffff || !xmlChars.test(String.fromCodePoint(code))) return invalid();
   }
-  if (!/^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?[\x20\x09\x0a\x0d]*\?>[\x20\x09\x0a\x0d]*)?<InitiateMultipartUploadResult(?:[\x20\x09\x0a\x0d]+xmlns=(['"])http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/\3)?[\x20\x09\x0a\x0d]*>[\s\S]*<\/InitiateMultipartUploadResult[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(xml)) return invalid();
+  if (!/^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>[\x20\x09\x0a\x0d]*)?<InitiateMultipartUploadResult(?:[\x20\x09\x0a\x0d]+xmlns[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/\4)?[\x20\x09\x0a\x0d]*>[\s\S]*<\/InitiateMultipartUploadResult[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(markup)) return invalid();
   let document: Document;
   try {
     document = new DOMParser({ onError: () => { throw new Error('Invalid XML'); } }).parseFromString(xml.trimStart(), 'application/xml') as unknown as Document;
@@ -32,7 +33,7 @@ function uploadIdFromResponse(body: Uint8Array): string {
     if (!['Bucket', 'Key', 'UploadId'].includes(element.tagName) || values.has(element.tagName) || element.attributes.length || (element.namespaceURI ?? '') !== (root.namespaceURI ?? '')) return invalid();
     let value = '';
     for (const child of Array.from(element.childNodes)) {
-      if (child.nodeType !== 3) return invalid();
+      if (child.nodeType !== 3 && child.nodeType !== 4) return invalid();
       value += child.nodeValue ?? '';
     }
     values.set(element.tagName, value);

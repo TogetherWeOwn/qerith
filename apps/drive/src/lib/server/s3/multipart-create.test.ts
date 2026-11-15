@@ -21,6 +21,14 @@ test('creates one signed upload and preserves opaque identifiers', async () => {
   assert.equal(calls, 1);
 });
 
+test('accepts XML declaration, namespace spacing and opaque CDATA', async () => {
+  for (const declaration of ['<?xml version="1.0" standalone="yes"?>', "<?xml version='1.0' encoding='UTF-8' standalone='no'?>"]) {
+    const xml = `${declaration}<InitiateMultipartUploadResult xmlns = "http://s3.amazonaws.com/doc/2006-03-01/"><UploadId>before<![CDATA[&unknown; <tag> &#0;]]>after&amp;</UploadId></InitiateMultipartUploadResult>`;
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+    assert.deepEqual(await create('key'), { uploadId: 'before&unknown; <tag> &#0;after&' });
+  }
+});
+
 test('reports uncertain allocations without exposing provider details or retrying', async () => {
   let calls = 0;
   let response: () => Promise<Response> = async () => { throw new Error('secret'); };
@@ -40,6 +48,9 @@ test('rejects malformed, oversized and ambiguous response bodies', async () => {
     '<InitiateMultipartUploadResult><UploadId/></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>a</UploadId><UploadId>b</UploadId></InitiateMultipartUploadResult>',
     '<!DOCTYPE x><InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>',
+    '<![CDATA[x]]><InitiateMultipartUploadResult><UploadId>id</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId><![CDATA[unfinished</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>&#0;<![CDATA[ok]]></UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>&unknown;</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>trailing',
     'x'.repeat(65537)
