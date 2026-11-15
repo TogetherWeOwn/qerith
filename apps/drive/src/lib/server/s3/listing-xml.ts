@@ -4,6 +4,9 @@ type ListingElement = NonNullable<ReturnType<DOMParser['parseFromString']>['docu
 
 const MAX_XML_BYTES = 8 * 1024 * 1024;
 const MAX_MARKUP_UNITS = 50_000;
+const MAX_XML_DEPTH = 64;
+const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+const XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
 const S3_NAMESPACE = 'http://s3.amazonaws.com/doc/2006-03-01/';
 
 function xmlCharacter(value: number): boolean {
@@ -41,11 +44,15 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
   try {
     const xml = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     validateCharactersAndReferences(xml);
+    if (/^<\?xml(?:[\x20\t\r\n]|\?>)/.test(xml) &&
+        !/^<\?xml[\x20\t\r\n]+version[\x20\t\r\n]*=[\x20\t\r\n]*(['"])1\.0\1(?:[\x20\t\r\n]+encoding[\x20\t\r\n]*=[\x20\t\r\n]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\t\r\n]+standalone[\x20\t\r\n]*=[\x20\t\r\n]*(['"])(?:yes|no)\3)?[\x20\t\r\n]*\?>/.test(xml)) throw new Error();
     // xmldom accepts non-XML whitespace after the document element.
     const trailingWhitespace = />\s*$/.exec(xml)?.[0].slice(1);
     if (trailingWhitespace && /[^\x20\t\r\n]/.test(trailingWhitespace)) throw new Error();
     // Bound DOM nodes and attributes before parsing; whitespace runs bound attribute count.
     let markupUnits = 0;
+    let depth = 0;
+    const attributeCounts: number[] = [];
     // The CDATA terminator is forbidden in character data, but allowed in attributes.
     for (let i = 0; i < xml.length;) {
       if (xml[i] !== '<') {
@@ -62,12 +69,24 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
           i = end + ending.length;
         } else {
           if (xml.slice(i, i + 9).toUpperCase() === '<!DOCTYPE') throw new Error();
+          const closing = xml[i + 1] === '/';
+          let attributes = 0;
           let quote = '';
           for (i++; i < xml.length; i++) {
             const c = xml[i];
             if (quote && c === quote) quote = '';
             else if (!quote && (c === '"' || c === "'")) quote = c;
-            else if (!quote && c === '>') { i++; break; }
+            else if (!quote && c === '>') {
+              if (closing) depth--;
+              else {
+                attributeCounts.push(attributes);
+                if (++depth > MAX_XML_DEPTH) throw new Error();
+                if (xml[i - 1] === '/') depth--;
+              }
+              if (depth < 0) throw new Error();
+              i++; break;
+            }
+            else if (!quote && c === '=') attributes++;
             // xmldom treats U+0080 as tag whitespace although XML 1.0 does not.
             else if (!quote && c === '\u0080') throw new Error();
             else if (!quote && /[\x20\t\r\n]/.test(c) && !/[\x20\t\r\n]/.test(xml[i - 1])) {
@@ -90,6 +109,27 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
     const root = document.documentElement;
     if (document.doctype || !root || root.localName !== rootName ||
         (root.namespaceURI && root.namespaceURI !== S3_NAMESPACE)) throw new Error();
+    // xmldom can collapse attributes with different prefixes but the same expanded name.
+    const pending: ListingElement[] = [root];
+    let elementIndex = 0;
+    while (pending.length) {
+      const element = pending.pop()!;
+      if (element.attributes.length !== attributeCounts[elementIndex++]) throw new Error();
+      for (let i = 0; i < element.attributes.length; i++) {
+        const attribute = element.attributes.item(i)!;
+        if (attribute.name === 'xmlns' || attribute.prefix === 'xmlns') {
+          const prefix = attribute.name === 'xmlns' ? '' : attribute.localName;
+          const uri = attribute.value;
+          if (prefix === 'xmlns' || uri === XMLNS_NAMESPACE ||
+              (prefix === 'xml' ? uri !== XML_NAMESPACE : uri === XML_NAMESPACE) ||
+              (prefix && !uri)) throw new Error();
+        }
+      }
+      for (let child = element.lastChild; child; child = child.previousSibling) {
+        if (child.nodeType === 1) pending.push(child as ListingElement);
+      }
+    }
+    if (elementIndex !== attributeCounts.length) throw new Error();
     return root;
   } catch {
     throw new Error('Invalid S3 listing XML');

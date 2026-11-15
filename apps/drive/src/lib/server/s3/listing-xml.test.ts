@@ -58,6 +58,31 @@ test('bounds markup and attribute allocation before DOM parsing', () => {
   assert.equal(listingText(root, 'Key')?.length, 200_000);
 });
 
+test('bounds nesting before parsing and accepts shallow listings', () => {
+  const nested = (count: number) => `<Result>${'<x xmlns="urn:x">'.repeat(count)}${'</x>'.repeat(count)}</Result>`;
+  assert.throws(() => parseListingXml(bytes(nested(64)), 'Result'), /^Error: Invalid S3 listing XML$/);
+  assert.ok(parseListingXml(bytes(nested(63)), 'Result'));
+});
+
+test('accepts only XML 1.0 with UTF-8 declarations', () => {
+  for (const declaration of ['<?xml version="1.1"?>', '<?xml version="1.0" encoding="UTF-16"?>']) {
+    assert.throws(() => parseListingXml(bytes(`${declaration}<Result/>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  assert.ok(parseListingXml(bytes('<?xml version="1.0" encoding="utf-8" standalone="yes"?><Result/>'), 'Result'));
+});
+
+test('rejects collapsed expanded attributes and reserved namespace bindings', () => {
+  for (const input of [
+    '<Result xmlns:a="urn:x" xmlns:b="urn:x" a:id="1" b:id="2"/>',
+    '<Result><x xmlns:xml="urn:wrong"/></Result>',
+    '<Result xmlns:p="http://www.w3.org/XML/1998/namespace"/>',
+    '<Result xmlns="http://www.w3.org/2000/xmlns/"/>',
+    '<Result xmlns:xmlns="urn:x"/>',
+    '<Result xmlns:p=""/>'
+  ]) assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+  assert.ok(parseListingXml(bytes('<Result xmlns:xml="http://www.w3.org/XML/1998/namespace" xmlns:a="urn:a" xmlns:b="urn:b" a:id="1" b:id="2"><x xmlns=""/></Result>'), 'Result'));
+});
+
 test('rejects repeated unterminated markup prefixes', () => {
   for (const prefix of ['<!--', '<![CDATA[', '<?']) {
     const input = bytes(`<Result>${prefix.repeat(100_000)}</Result>`);
