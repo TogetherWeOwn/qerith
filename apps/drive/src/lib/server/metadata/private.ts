@@ -16,7 +16,8 @@ export interface Entry {
 }
 
 export interface Cursor { name: string; id: string }
-export interface Page { entries: Entry[]; nextCursor: Cursor | null }
+export interface ListedEntry extends Entry { item_count: number | null }
+export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
 
 const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
@@ -52,17 +53,27 @@ export class PrivateMetadata {
       throw new TypeError('Invalid cursor');
     }
     const boundary = cursor === null ? '' : 'AND (name, id) > (?, ?)';
-    const query = this.db.prepare(`SELECT ${columns} FROM drive_entries
+    const query = this.db.prepare(`SELECT ${columns},
+      (SELECT item_count FROM drive_folder_counts WHERE folder_id = drive_entries.id) AS item_count FROM drive_entries
       WHERE owner_id = ? AND COALESCE(parent_id, '') = COALESCE(?, '') AND ${active}
         AND (? IS NULL OR EXISTS (SELECT 1 FROM drive_entries AS parent
           WHERE parent.id = ? AND parent.owner_id = ? AND parent.kind = 'folder'))
         ${boundary} ORDER BY name, id LIMIT 101`);
     const values = [principalId, parentId, principalId, parentId, parentId, principalId];
     if (cursor !== null) values.push(cursor.name, cursor.id);
-    const rows = (await query.bind(...values).all<Entry>()).results;
+    const rows = (await query.bind(...values).all<ListedEntry>()).results;
     const entries = rows.slice(0, 100);
     const last = entries[entries.length - 1];
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
+  }
+
+  // Decimal text preserves precision beyond JavaScript's safe integer range.
+  async usage(principalId: string): Promise<{ bytes: string } | null> {
+    const result = await this.db.prepare(`SELECT CAST(COALESCE(high, 0) AS TEXT) ||
+      printf('%09d', COALESCE(low, 0)) AS bytes
+      FROM (SELECT 1) LEFT JOIN drive_owner_usage ON owner_id = ?
+      WHERE ${active}`).bind(principalId, principalId).first<{ bytes: string }>();
+    return result === null ? null : { bytes: result.bytes.replace(/^0+(?=\d)/, '') };
   }
 
   async move(principalId: string, id: string, parentId: string | null, name: string): Promise<Entry | null> {

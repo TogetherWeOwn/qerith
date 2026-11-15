@@ -19,8 +19,16 @@ WCAG 2/2.1 A/AA and 2.2 AA JSON reports, and keyboard JSON for 1280x800 and
 390x844. Missing files, head mismatch, axe violations and scenario failures fail
 the job. Axe `incomplete` items need human review; a passing automated scan is
 not a complete accessibility audit. Evidence is uploaded only after success.
-Only the clean Actions checkout provides exact-head evidence; local runs can
-include uncommitted changes and must not be treated as commit provenance.
+The artifact's `provenance.json` records the requested head, actual tested
+checkout, base, integration snapshot, run and mode. For a pull request whose
+head predates the fixture introduction and contains no browser fixture, CI
+verifies both snapshot parents and runs the synthetic fixture from that separate
+integration checkout. `head.txt` always identifies the actual tested checkout;
+in legacy mode it is not fixture-from-head evidence. A head that includes the
+introduction but deletes the fixture fails, as does a mismatched snapshot.
+Local runs can include uncommitted changes and must not be treated as commit
+provenance. After a CI change merges, a substantive pull request body edit starts
+a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended

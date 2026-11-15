@@ -7,7 +7,7 @@ name: ci
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   # Merge queue validation: every required check must report on the queue's
   # temporary merge commit. merge_group runs are never cancelled.
   merge_group:
@@ -298,6 +298,17 @@ jobs:
         working-directory: apps/drive-test
         run: npm test
 
+  sealed-output-reader:
+    name: sealed output reader
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_sealed_output.py' -v
+
   drive-lock-verifier:
     name: drive lock verifier
     runs-on: ubuntu-latest
@@ -308,6 +319,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+      - name: Test offline bundle lock input validation
+        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p test_bundle_inputs.py -v
 
   drive-bootstrap:
     name: drive dependency bootstrap
@@ -377,22 +390,50 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      DRIVE_BROWSER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SNAPSHOT_SHA: ${{ github.sha }}
+    defaults:
+      run:
+        working-directory: tested
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the immutable integration snapshot for selection
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+          path: integration
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
+      - name: Test provenance selection and evidence validation
+        working-directory: integration
+        run: node --test scripts/browser-ci.test.mjs
+      - name: Select the browser checkout
+        id: browser-source
+        working-directory: integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node scripts/select-browser-checkout.mjs >> "$GITHUB_OUTPUT"
+      - name: Check out the selected browser source separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.browser-source.outputs.tested }}
+          path: tested
+          persist-credentials: false
+      - name: Assert the actual tested checkout
+        env:
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
       - name: Verify Drive lock release ages and integrity
-        working-directory: apps/drive
+        working-directory: tested/apps/drive
         run: |
           bash scripts/reject-shrinkwrap.sh .
           node scripts/verify-lock-age.mjs
       - name: Verify browser lock release ages and integrity
-        working-directory: apps/drive/browser
+        working-directory: tested/apps/drive/browser
         run: |
           bash ../scripts/reject-shrinkwrap.sh .
           node --input-type=module <<'JS'
@@ -411,12 +452,29 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund --prefix apps/drive
           npm ci --ignore-scripts --no-audit --no-fund --prefix apps/drive/browser
       - name: Install pinned Chromium on the runner
-        working-directory: apps/drive/browser
+        working-directory: tested/apps/drive/browser
         run: npx --no-install playwright install --with-deps chromium
       - name: Exercise fixture and require complete evidence
         env:
+          DRIVE_BROWSER_HEAD: ${{ steps.browser-source.outputs.tested }}
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
-        run: npm test --prefix apps/drive/browser
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          npm test --prefix apps/drive/browser
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Verify evidence and record both provenance identities
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+          COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
+          SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          git -C ../integration show "$SNAPSHOT_SHA:scripts/browser-evidence.mjs" > "$RUNNER_TEMP/browser-evidence.mjs"
+          node "$RUNNER_TEMP/browser-evidence.mjs"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: drive-browser-${{ github.event.pull_request.head.sha || github.sha }}
@@ -426,7 +484,7 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, drive-lock-verifier, drive-bootstrap, drive-browser]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, drive-bootstrap, drive-browser]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
