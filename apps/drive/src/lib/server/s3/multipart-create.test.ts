@@ -1,0 +1,112 @@
+import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+import { createMultipartCreate } from './multipart-create';
+
+const config = { endpoint: 'https://storage.example', bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'access', secretAccessKey: 'secret' };
+
+test('creates one signed upload and preserves opaque identifiers', async () => {
+  let sent: Request | undefined;
+  let calls = 0;
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async (input) => {
+    calls++; sent = input as Request;
+    return new Response('<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>key</Key><UploadId>id+/=%&amp;é</UploadId></InitiateMultipartUploadResult>');
+  } });
+  assert.deepEqual(await create('folder/a +%/é'), { uploadId: 'id+/=%&é' });
+  const url = new URL(sent!.url);
+  assert.equal(url.pathname, '/test-bucket/folder/a%20%2B%25/%C3%A9');
+  assert.equal(url.search, '?uploads=');
+  assert.equal(sent!.method, 'POST');
+  assert.match(sent!.headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
+  assert.equal(await sent!.text(), '');
+  assert.equal(calls, 1);
+});
+
+test('accepts XML declaration, namespace spacing and opaque CDATA', async () => {
+  for (const declaration of ['<?xml version="1.0" standalone="yes"?>', "<?xml version='1.0' encoding='UTF-8' standalone='no'?>"]) {
+    const xml = `${declaration}<InitiateMultipartUploadResult xmlns = "http://s3.amazonaws.com/doc/2006-03-01/"><UploadId>before<![CDATA[&unknown; <tag> &#0;]]>after&amp;</UploadId></InitiateMultipartUploadResult>`;
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+    assert.deepEqual(await create('key'), { uploadId: 'before&unknown; <tag> &#0;after&' });
+  }
+});
+
+test('accepts namespace prefixes and comments without changing the upload ID', async () => {
+  for (const prefix of ['s', 'é', '名', 'á', ' ', '﻿', '�']) {
+    const xml = `<!--before--><${prefix}:InitiateMultipartUploadResult xmlns:${prefix}="http://s3.amazonaws.com/doc/2006-03-01/"><!--child--><${prefix}:UploadId>one<!-- comment &unknown; -->two<![CDATA[<!--literal-->]]></${prefix}:UploadId></${prefix}:InitiateMultipartUploadResult><!--after-->`;
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+    assert.deepEqual(await create('key'), { uploadId: 'onetwo<!--literal-->' });
+  }
+});
+
+test('accepts delimiters in opaque text and quoted namespace values', async () => {
+  const xml = `<InitiateMultipartUploadResult xmlns:x="urn:greater>than"><UploadId>${'x'.repeat(8192)}&lt;tag&gt;</UploadId></InitiateMultipartUploadResult>`;
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+  assert.deepEqual(await create('key'), { uploadId: `${'x'.repeat(8192)}<tag>` });
+});
+
+test('preserves literal replacement characters but rejects invalid UTF-8', async () => {
+  const valid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response('<InitiateMultipartUploadResult><UploadId>a�\u0085  b</UploadId></InitiateMultipartUploadResult>') });
+  assert.deepEqual(await valid('key'), { uploadId: 'a�\u0085  b' });
+  const invalid = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(new Uint8Array([0xff])) });
+  await assert.rejects(invalid('key'), { message: 'S3 multipart create allocation uncertain' });
+});
+
+test('reports uncertain allocations without exposing provider details or retrying', async () => {
+  let calls = 0;
+  let response: () => Promise<Response> = async () => { throw new Error('secret'); };
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => { calls++; return response(); } });
+  await assert.rejects(create('key'), { message: 'S3 multipart create allocation uncertain' });
+  for (const status of [200, 201, 408, 500]) {
+    response = async () => new Response('secret', { status });
+    await assert.rejects(create('key'), { message: 'S3 multipart create allocation uncertain' });
+  }
+  response = async () => new Response('secret', { status: 403 });
+  await assert.rejects(create('key'), { message: 'S3 request failed with status 403' });
+  assert.equal(calls, 6);
+});
+
+test('rejects malformed, oversized and ambiguous response bodies', async () => {
+  for (const xml of [
+    '<InitiateMultipartUploadResult><UploadId/></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>a</UploadId><UploadId>b</UploadId></InitiateMultipartUploadResult>',
+    '<!DOCTYPE x><InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>',
+    '<![CDATA[x]]><InitiateMultipartUploadResult><UploadId>id</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId><![CDATA[unfinished</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>&#0;<![CDATA[ok]]></UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>&unknown;</UploadId></InitiateMultipartUploadResult>',
+    '<s:InitiateMultipartUploadResult><s:UploadId>id</s:UploadId></s:InitiateMultipartUploadResult>',
+    '<s:InitiateMultipartUploadResult xmlns:s="urn:wrong"><s:UploadId>id</s:UploadId></s:InitiateMultipartUploadResult>',
+    '<é:InitiateMultipartUploadResult xmlns:é="urn:wrong"><é:UploadId>id</é:UploadId></é:InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId >id</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId\u0080>id�</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult xmlns:x="urn:<bad"><UploadId>id�</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>a<!--bad--comment-->b</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>' + '<![CDATA['.repeat(5000) + '</UploadId></InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>trailing',
+    '<'.repeat(65536),
+    '<InitiateMultipartUploadResult><UploadId>id</UploadId><'.repeat(500),
+    '<InitiateMultipartUploadResult><UploadId>id</UploadId',
+    'x'.repeat(65537)
+  ]) {
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+    await assert.rejects(create('key'), { message: 'S3 multipart create allocation uncertain' });
+  }
+});
+
+test('validates inputs and cancellation before sending', async () => {
+  let calls = 0;
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => { calls++; return new Response(); } });
+  await assert.rejects(create('a/../b'), /Invalid S3 object key/);
+  await assert.rejects(create('\ud800'), /Invalid S3 object key/);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(create('key', controller.signal), /cancelled/);
+  assert.equal(calls, 0);
+});
+
+test('cancellation during a request leaves allocation uncertain', async () => {
+  const controller = new AbortController();
+  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => {
+    controller.abort();
+    throw new Error('private');
+  } });
+  await assert.rejects(create('key', controller.signal), { message: 'S3 multipart create allocation uncertain' });
+});
