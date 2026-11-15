@@ -34,6 +34,24 @@ test('reports the sent size if the caller detaches the input during upload', asy
   assert.equal(body.byteLength, 0);
 });
 
+test('snapshots the measured length when shared input grows', async () => {
+  const buffer = new SharedArrayBuffer(3, { maxByteLength: 6 });
+  class GrowingBytes extends Uint8Array {
+    override get byteLength() {
+      const length = super.byteLength;
+      buffer.grow(6);
+      return length;
+    }
+  }
+  const body = new GrowingBytes(buffer as unknown as ArrayBuffer);
+  body.set([1, 2, 3]);
+  const upload = createMultipartUpload(config, { timeoutMs: 1000, fetch: async (input) => {
+    assert.deepEqual(new Uint8Array(await (input as Request).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    return new Response(null, { status: 200, headers: { etag: '"part"' } });
+  } });
+  assert.deepEqual(await upload('key', 'id', 1, body), { partNumber: 1, etag: '"part"', size: 3 });
+});
+
 test('rejects invalid input before sending and reports uncertain results without retries', async () => {
   let calls = 0;
   let response: () => Promise<Response> = async () => new Response(null, { status: 200 });

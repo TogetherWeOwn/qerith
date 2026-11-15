@@ -10,9 +10,10 @@ export function createMultipartUpload(...args: Parameters<typeof createS3Transpo
     const size = body.byteLength;
     if (size > 16 * 1024 * 1024) throw new Error('S3 request body exceeds part limit');
     if (signal?.aborted) throw new Error('S3 request cancelled');
+    const snapshot = new Uint8Array(new Uint8Array(body.buffer, body.byteOffset, size));
     let response: Awaited<ReturnType<typeof request>>;
     try {
-      response = await request({ method: 'PUT', key, query: { partNumber: String(partNumber), uploadId }, body, signal, maxResponseBytes: 8192 });
+      response = await request({ method: 'PUT', key, query: { partNumber: String(partNumber), uploadId }, body: snapshot, signal, maxResponseBytes: 8192 });
     } catch {
       throw new Error('S3 part upload outcome uncertain');
     }
