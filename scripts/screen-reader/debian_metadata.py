@@ -1,0 +1,84 @@
+"""Strict parsers for already-authenticated Debian archive metadata.
+
+These functions do not authenticate their input. Callers must verify the
+InRelease signature before parsing and the index digest before decompressing.
+"""
+
+import hashlib
+import lzma
+import re
+
+
+class InvalidMetadata(ValueError):
+    pass
+
+
+def verify_bytes(data, expected_size, expected_sha256):
+    if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise InvalidMetadata("size or SHA-256 mismatch")
+
+
+def index_entry(release, path):
+    """Find exactly one SHA256 entry in authenticated Release content."""
+    lines = release.decode("utf-8", "strict").splitlines()
+    sections = [i for i, line in enumerate(lines) if line == "SHA256:"]
+    if len(sections) != 1:
+        raise InvalidMetadata("expected one SHA256 section")
+    matches = []
+    for line in lines[sections[0] + 1 :]:
+        if not line.startswith(" "):
+            break
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            raise InvalidMetadata("invalid SHA256 entry")
+        if not parts[1].isascii() or not parts[1].isdigit():
+            raise InvalidMetadata("invalid index size")
+        if parts[2] == path:
+            matches.append((int(parts[1]), parts[0]))
+    if len(matches) != 1:
+        raise InvalidMetadata("expected one index entry")
+    return matches[0]
+
+
+def decompress_index(data, limit):
+    """Reject oversized, truncated, concatenated or trailing xz streams."""
+    decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=128 * 1024 * 1024)
+    try:
+        output = decoder.decompress(data, max_length=limit + 1)
+    except lzma.LZMAError as exc:
+        raise InvalidMetadata("invalid xz index") from exc
+    if len(output) > limit or not decoder.eof or decoder.unused_data:
+        raise InvalidMetadata("oversized or incomplete xz index")
+    return output
+
+
+def package_entry(index, package, version, architecture):
+    """Return the unique exact package record; reject ambiguous fields."""
+    text = index.decode("utf-8", "strict")
+    matches = []
+    for paragraph in re.split(r"\n[ \t]*\n", text):
+        fields = {}
+        for line in paragraph.splitlines():
+            if not line or line[0] in " \t":
+                continue
+            if ": " not in line:
+                raise InvalidMetadata("invalid package field")
+            key, value = line.split(": ", 1)
+            if key in fields:
+                raise InvalidMetadata("duplicate package field")
+            fields[key] = value
+        if (fields.get("Package"), fields.get("Version"), fields.get("Architecture")) == (
+            package,
+            version,
+            architecture,
+        ):
+            matches.append(fields)
+    if len(matches) != 1:
+        raise InvalidMetadata("expected one package record")
+    fields = matches[0]
+    size, digest, filename = (fields.get(key, "") for key in ("Size", "SHA256", "Filename"))
+    if not size.isascii() or not size.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise InvalidMetadata("invalid package size or digest")
+    if not filename.startswith("pool/main/b/busybox/") or "/../" in filename:
+        raise InvalidMetadata("unexpected package path")
+    return filename, int(size), digest

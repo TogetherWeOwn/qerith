@@ -308,6 +308,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_sealed_output.py' -v
+      - name: Test Debian metadata primitives
+        run: |
+          timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_metadata.py"); assert suite.countTestCases() >= 4; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
 
   drive-lock-verifier:
     name: drive lock verifier
