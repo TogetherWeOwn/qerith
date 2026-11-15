@@ -31,6 +31,27 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
   return {
     put(key: string, body: Uint8Array, signal?: AbortSignal) { return mutate('PUT', key, body, signal); },
     delete(key: string, signal?: AbortSignal) { return mutate('DELETE', key, undefined, signal); },
+    async get(key: string, options: { maxResponseBytes: number; signal?: AbortSignal; range?: string; ifMatch?: string; ifNoneMatch?: string; ifRange?: string }) {
+      validateKey(key);
+      let response: Awaited<ReturnType<typeof request.stream>>;
+      try {
+        const headers = new Headers();
+        if (options.range !== undefined) headers.set('range', options.range);
+        if (options.ifMatch !== undefined) headers.set('if-match', options.ifMatch);
+        if (options.ifNoneMatch !== undefined) headers.set('if-none-match', options.ifNoneMatch);
+        if (options.ifRange !== undefined) headers.set('if-range', options.ifRange);
+        response = await request.stream({ method: 'GET', key, headers, signal: options.signal, maxResponseBytes: options.maxResponseBytes });
+      } catch {
+        throw new Error(options.signal?.aborted ? 'S3 request cancelled' : 'S3 request failed');
+      }
+      const metadata = { etag: response.headers.get('etag'), contentLength: response.headers.get('content-length'), contentRange: response.headers.get('content-range') };
+      if (response.status === 200 || response.status === 206) return { status: response.status, ...metadata, body: response.body };
+      void response.body.cancel().catch(() => {});
+      if (response.status === 304 || response.status === 404 || response.status === 412 || response.status === 416) {
+        return { status: response.status, ...metadata };
+      }
+      throw new Error(`S3 request failed with status ${response.status}`);
+    },
     async head(key: string, options: { signal?: AbortSignal; ifMatch?: string; ifNoneMatch?: string } = {}) {
       validateKey(key);
       let response: Awaited<ReturnType<typeof request>>;
