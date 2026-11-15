@@ -40,10 +40,43 @@ class EvidenceTest(unittest.TestCase):
     def test_complete_evidence(self):
         verify.validate(self.path)
 
+    def test_dispatcher_speech_is_evidence(self):
+        (self.path / "orca.log").write_text(
+            "debug SPEECH DISPATCHER: Speaking Announce test message\n"
+            "debug SPEECH DISPATCHER: Speaking Synthetic announcement received\n"
+        )
+        verify.validate(self.path)
+
     def test_non_speech_log_is_not_evidence(self):
         (self.path / "orca.log").write_text("Announce test message Synthetic announcement received")
         with self.assertRaises(ValueError):
             verify.validate(self.path)
+
+    def test_speech_phrases_before_marker_are_not_evidence(self):
+        (self.path / "orca.log").write_text(
+            "Announce test message SPEECH OUTPUT: unrelated\n"
+            "Synthetic announcement received SPEECH OUTPUT: unrelated\n"
+        )
+        with self.assertRaises(ValueError):
+            verify.validate(self.path)
+
+    def test_speech_utterances_must_be_ordered(self):
+        (self.path / "orca.log").write_text(
+            "SPEECH OUTPUT: Synthetic announcement received\n"
+            "SPEECH OUTPUT: Announce test message\n"
+        )
+        with self.assertRaises(ValueError):
+            verify.validate(self.path)
+
+    def test_invalid_or_unordered_key_timestamps_are_not_evidence(self):
+        for first, second in (
+            ("2026-99-01T00:00:00.000000000Z", "2026-01-01T00:00:01.000000000Z"),
+            ("2026-01-01T00:00:02.000000000Z", "2026-01-01T00:00:01.000000000Z"),
+        ):
+            with self.subTest(first=first, second=second):
+                (self.path / "keystrokes.log").write_text(f"{first} b\n{second} Return\n")
+                with self.assertRaises(ValueError):
+                    verify.validate(self.path)
 
     def test_silence_is_not_evidence(self):
         (self.path / "speech.pcm").write_bytes(b"\0\0" * 20)
