@@ -322,8 +322,23 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
-      - name: Test offline bundle lock input validation
-        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p test_bundle_inputs.py -v
+      - name: Test offline bundle validation
+        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
+
+  bundle-acquisition:
+    name: offline bundle acquisition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Acquire and verify pinned bytes
+        run: |
+          set -euo pipefail
+          python3 -I scripts/screen-reader/bundle_bytes.py acquire apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
+          python3 -I scripts/screen-reader/bundle_bytes.py verify apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
 
   drive-bootstrap:
     name: drive dependency bootstrap
@@ -487,7 +502,7 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, drive-bootstrap, drive-browser]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

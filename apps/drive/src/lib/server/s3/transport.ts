@@ -3,6 +3,11 @@ import { createS3Signer } from './signer';
 
 const MAX_PART_BYTES = 16 * 1024 * 1024;
 const EMPTY_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const viewByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!;
+const viewByteOffset = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteOffset')!.get!;
+const viewBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!;
+const validateView = typedArrayPrototype.values as (this: Uint8Array) => IterableIterator<number>;
 
 type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date };
 type Operation = {
@@ -58,14 +63,25 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
-    if (inputBody && inputBody.byteLength > MAX_PART_BYTES) throw new Error('S3 request body exceeds part limit');
+    // Intrinsic metadata reads alone cannot distinguish an invalid view from an empty one.
+    if (inputBody) validateView.call(inputBody);
+    const bodyLength = inputBody && viewByteLength.call(inputBody) as number | undefined;
+    const bodyOffset = inputBody && viewByteOffset.call(inputBody) as number | undefined;
+    const bodyBuffer = inputBody && viewBuffer.call(inputBody) as ArrayBufferLike | undefined;
+    if (inputBody && (bodyLength === undefined || !Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_PART_BYTES)) {
+      throw new Error('S3 request body exceeds part limit');
+    }
     const path = key.split('/').map(encode).join('/');
     const query = Object.entries(queryParams ?? {}).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
     const url = `${settings.endpoint}/${settings.bucket}/${path}${query ? `?${query}` : ''}`;
     const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
-    // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
-    const body = inputBody && new Uint8Array(inputBody);
+    // Revalidate after processing caller-controlled metadata, then snapshot before hashing.
+    if (inputBody) validateView.call(inputBody);
+    const body = bodyBuffer && new Uint8Array(new Uint8Array(bodyBuffer, bodyOffset, bodyLength));
+    if (body && (body.byteLength !== bodyLength || body.byteLength > MAX_PART_BYTES)) {
+      throw new Error('S3 request body exceeds part limit');
+    }
     const controller = new AbortController();
     const forwardAbort = () => controller.abort(signal?.reason);
     if (signal?.aborted) forwardAbort();
