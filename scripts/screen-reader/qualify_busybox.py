@@ -124,15 +124,18 @@ def binary_from_tar(data):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
         for member in archive:
             name = member.name.removeprefix("./").rstrip("/")
-            if name in ("", ".", "bin", "usr", "usr/share", "usr/share/doc", "usr/share/doc/busybox-static", "usr/share/man", "usr/share/man/man1") and member.isdir():
+            if name in ("", ".", "bin", "usr", "usr/share", "usr/share/doc", "usr/share/doc/busybox-static", "usr/share/doc/busybox-static/examples", "usr/share/doc/busybox-static/examples/udhcp", "usr/share/man", "usr/share/man/man1", "usr/share/initramfs-tools", "usr/share/initramfs-tools/conf-hooks.d", "usr/share/initramfs-tools/hooks", "usr/share/lintian", "usr/share/lintian/overrides") and member.isdir():
                 continue
             if name == "bin/busybox" and member.isfile() and binary is None and 0 < member.size <= 8 * 1024 * 1024:
                 binary = archive.extractfile(member).read(member.size + 1)
                 if len(binary) != member.size:
                     raise ValueError("truncated binary")
                 continue
-            # Documentation is not extracted or interpreted; reject links and special files.
-            if name.startswith(("usr/share/doc/busybox-static/", "usr/share/man/man1/")) and member.isfile() and member.size <= 2 * 1024 * 1024 and "/../" not in name:
+            # Other authenticated package files are never extracted or interpreted.
+            package_files = ("usr/share/initramfs-tools/conf-hooks.d/busybox",
+                             "usr/share/initramfs-tools/hooks/zz-busybox",
+                             "usr/share/lintian/overrides/busybox-static")
+            if (name in package_files or name.startswith(("usr/share/doc/busybox-static/", "usr/share/man/man1/"))) and member.isfile() and member.size <= 2 * 1024 * 1024 and "/../" not in name:
                 continue
             unexpected.append((member.name, repr(member.type), member.linkname, member.size))
     if unexpected:

@@ -75,6 +75,29 @@ class MetadataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             data_archive(b"!<arch>\ntruncated")
 
+    def test_only_observed_packaging_entries_are_ignored(self):
+        def make_tar(name, kind):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as archive:
+                binary = tarfile.TarInfo("./bin/busybox")
+                binary.size = 3
+                archive.addfile(binary, io.BytesIO(b"abc"))
+                entry = tarfile.TarInfo(name)
+                entry.type = kind
+                archive.addfile(entry)
+            return stream.getvalue()
+
+        for name, kind in (("./usr/share/doc/busybox-static/examples/udhcp", tarfile.DIRTYPE),
+                           ("./usr/share/initramfs-tools/hooks/zz-busybox", tarfile.REGTYPE),
+                           ("./usr/share/initramfs-tools/conf-hooks.d/busybox", tarfile.REGTYPE),
+                           ("./usr/share/lintian/overrides/busybox-static", tarfile.REGTYPE)):
+            with self.subTest(name=name):
+                self.assertEqual(binary_from_tar(make_tar(name, kind)), b"abc")
+                with self.assertRaises(ValueError):
+                    binary_from_tar(make_tar(name, tarfile.SYMTYPE))
+        with self.assertRaises(ValueError):
+            binary_from_tar(make_tar("./usr/share/initramfs-tools/hooks/other", tarfile.REGTYPE))
+
     def test_elf_rejects_dynamic_interpreter_and_wrong_architecture(self):
         data = bytearray(120)
         data[:7] = b"\x7fELF\x02\x01\x01"
