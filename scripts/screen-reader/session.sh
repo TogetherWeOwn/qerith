@@ -13,8 +13,20 @@ export PULSE_CLIENTCONFIG="$XDG_CONFIG_HOME/pulse/client.conf"
 pulseaudio --dump-conf >"$EVIDENCE_DIR/pulseaudio-config.log"
 grep -Eq '^enable-shm = no$' "$EVIDENCE_DIR/pulseaudio-config.log"
 python3 -I -c 'import resource; assert resource.getrlimit(resource.RLIMIT_FSIZE) == (20971520, 20971520)'
-cleanup() { jobs -pr | xargs -r kill 2>/dev/null || true; }
+cleanup() {
+  if [ -n "${ORCA_PID:-}" ] && kill -0 "$ORCA_PID" 2>/dev/null; then
+    kill "$ORCA_PID" 2>/dev/null || true
+    if ! timeout 5s tail --pid="$ORCA_PID" -f /dev/null; then
+      printf 'Orca did not exit within the teardown limit\n' >&2
+      kill -KILL "$ORCA_PID" 2>/dev/null || true
+    fi
+    wait "$ORCA_PID" 2>/dev/null || true
+  fi
+  jobs -pr | xargs -r kill 2>/dev/null || true
+}
 trap cleanup EXIT
+mkdir -p "$HOME/.local/share/orca"
+install -m 600 "$(dirname "$0")/orca-diagnostic.py" "$HOME/.local/share/orca/orca-customizations.py"
 openbox >"$EVIDENCE_DIR/window-manager.log" 2>&1 &
 pulseaudio --daemonize=no --exit-idle-time=-1 --log-level=info --log-target=stderr >"$EVIDENCE_DIR/pulseaudio.log" 2>&1 &
 PULSE_PID=$!
