@@ -15,6 +15,21 @@ function xmlCharacter(value: number): boolean {
     (value >= 0x10000 && value <= 0x10ffff);
 }
 
+// XML 1.0 Fifth Edition NameStartChar and NameChar, excluding the QName separator.
+const nameStart = /[:A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\u{10000}-\u{effff}]/u;
+const nameContinuation = /[-.0-9·̀-ͯ‿-⁀]/u;
+
+function validName(name: string, qualified: boolean): boolean {
+  const parts = qualified ? name.split(':') : [name];
+  if (parts.length > 2) return false;
+  return parts.every((part) => {
+    const characters = [...part];
+    return characters.length > 0 && characters.every((character, index) =>
+      (!qualified || character !== ':') &&
+      (nameStart.test(character) || (index > 0 && nameContinuation.test(character))));
+  });
+}
+
 function validateCharactersAndReferences(xml: string): void {
   for (const character of xml) {
     if (!xmlCharacter(character.codePointAt(0)!)) throw new Error();
@@ -113,27 +128,31 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
     if (document.doctype || !root || root.localName !== rootName ||
         (root.namespaceURI && root.namespaceURI !== S3_NAMESPACE)) throw new Error();
     // xmldom can collapse attributes with different prefixes but the same expanded name.
-    const pending: ListingElement[] = [root];
+    const pending: NonNullable<typeof document.firstChild>[] = [document];
     let elementIndex = 0;
     while (pending.length) {
-      const element = pending.pop()!;
-      // XML 1.0 names end at U+EFFFF even though higher scalars are valid text.
-      if (/[\u{f0000}-\u{10ffff}]/u.test(element.nodeName) ||
-          element.attributes.length !== attributeCounts[elementIndex++]) throw new Error();
-      for (let i = 0; i < element.attributes.length; i++) {
-        const attribute = element.attributes.item(i)!;
-        if (/[\u{f0000}-\u{10ffff}]/u.test(attribute.name)) throw new Error();
-        if (attribute.name === 'xmlns' || attribute.prefix === 'xmlns') {
-          const prefix = attribute.name === 'xmlns' ? '' : attribute.localName;
-          const uri = attribute.value;
-          if (prefix === 'xmlns' || uri === XMLNS_NAMESPACE ||
-              (prefix === 'xml' ? uri !== XML_NAMESPACE : uri === XML_NAMESPACE) ||
-              (prefix && !uri)) throw new Error();
+      const node = pending.pop()!;
+      if (node.nodeType === 7) {
+        const declaration = node === document.firstChild && node.nodeName === 'xml' &&
+          /^<\?xml[\x20\t\r\n]/.test(xml);
+        if (!declaration && (!validName(node.nodeName, false) || node.nodeName.toLowerCase() === 'xml')) throw new Error();
+      } else if (node.nodeType === 1) {
+        const element = node as ListingElement;
+        if (!validName(element.nodeName, true) ||
+            element.attributes.length !== attributeCounts[elementIndex++]) throw new Error();
+        for (let i = 0; i < element.attributes.length; i++) {
+          const attribute = element.attributes.item(i)!;
+          if (!validName(attribute.name, true)) throw new Error();
+          if (attribute.name === 'xmlns' || attribute.prefix === 'xmlns') {
+            const prefix = attribute.name === 'xmlns' ? '' : attribute.localName;
+            const uri = attribute.value;
+            if (prefix === 'xmlns' || uri === XMLNS_NAMESPACE ||
+                (prefix === 'xml' ? uri !== XML_NAMESPACE : uri === XML_NAMESPACE) ||
+                (prefix && !uri)) throw new Error();
+          }
         }
       }
-      for (let child = element.lastChild; child; child = child.previousSibling) {
-        if (child.nodeType === 1) pending.push(child as ListingElement);
-      }
+      for (let child = node.lastChild; child; child = child.previousSibling) pending.push(child);
     }
     if (elementIndex !== attributeCounts.length) throw new Error();
     return root;

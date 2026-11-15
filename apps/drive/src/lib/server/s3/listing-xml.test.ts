@@ -102,6 +102,35 @@ test('limits supplementary name characters without rejecting valid content', () 
   assert.equal(listingText(root, 'Key'), invalid);
 });
 
+test('validates complete XML names at every document position', () => {
+  for (const invalid of [';', '\u{f0000}']) {
+    for (const name of [invalid, `a${invalid}`]) {
+      for (const input of [
+        `<Result><${name}/></Result>`, `<Result ${name}="v"/>`,
+        `<?${name} data?><Result/>`, `<Result><?${name} data?></Result>`, `<Result/><?${name} data?>`
+      ]) assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+    }
+  }
+  for (const name of ['ͽ', 'Ϳ', '\u{10000}', '\u{effff}', 'à', 'a·']) {
+    const input = `<?${name} data?><Result ${name}="v"><${name}/><?${name} data?></Result><?${name} data?>`;
+    assert.ok(parseListingXml(bytes(input), 'Result'));
+  }
+  for (const name of ['̀a', '·a', ':a', 'a:', 'a:b:c']) {
+    for (const input of [`<Result><${name}/></Result>`, `<Result ${name}="v"/>`]) {
+      assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+    }
+  }
+  for (const target of ['̀a', '·a']) {
+    assert.throws(() => parseListingXml(bytes(`<?${target} data?><Result/>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  assert.ok(parseListingXml(bytes('<?a:b:c data?><Result xmlns:p="urn:p" p:a="v"><p:a/><?p:q data?></Result><?: data?>'), 'Result'));
+  for (const target of ['xml', 'XML', 'Xml']) {
+    assert.throws(() => parseListingXml(bytes(`<Result><?${target} data?></Result>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  const root = parseListingXml(bytes('<?probe ;\u{f0000}?><Result><Key>;\u{f0000}</Key><?probe ;\u{f0000}?></Result><?probe ;\u{f0000}?>'), 'Result');
+  assert.equal(listingText(root, 'Key'), ';\u{f0000}');
+});
+
 test('rejects repeated unterminated markup prefixes', () => {
   for (const prefix of ['<!--', '<![CDATA[', '<?']) {
     const input = bytes(`<Result>${prefix.repeat(100_000)}</Result>`);
