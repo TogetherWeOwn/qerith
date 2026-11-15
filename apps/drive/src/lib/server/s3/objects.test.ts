@@ -25,20 +25,52 @@ test('GET streams a range with signed validators and preserves response metadata
 
 test('GET rejects encoded success bodies before handoff and cancels them', async () => {
   for (const status of [200, 206]) {
-    for (const encoding of ['gzip', 'identity', '']) {
+    for (const encoding of ['gzip', 'br', 'deflate', 'unknown', 'gzip, br', 'identity', '']) {
       let cancelled = false;
+      let pulls = 0;
       let calls = 0;
       const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => {
         calls++;
-        return new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+        return new Response(new ReadableStream({
+          pull(controller) { pulls++; controller.enqueue(new Uint8Array([0, 128, 255])); },
+          cancel() { cancelled = true; }
+        }, { highWaterMark: 0 }), {
           status, headers: { 'content-encoding': encoding, 'content-length': '3', 'content-range': 'bytes 0-2/3' }
         });
       } });
-      await assert.rejects(objects.get('key', { maxResponseBytes: 3 }), { message: 'S3 encoded response unsupported' });
+      await assert.rejects(objects.get('key', { maxResponseBytes: 3 }), { message: 'S3 request failed' });
+      assert.equal(pulls, 0);
       assert.equal(cancelled, true);
       assert.equal(calls, 1);
     }
   }
+});
+
+test('GET preserves unencoded binary full and range bodies', async () => {
+  const bytes = new Uint8Array([0, 128, 255, 10]);
+  for (const status of [200, 206]) {
+    const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response(bytes, { status }) });
+    const result = await objects.get('key', { maxResponseBytes: bytes.length, ...(status === 206 ? { range: 'bytes=0-3' } : {}) });
+    if (result.status !== 200 && result.status !== 206) throw new Error('Expected streamed response');
+    assert.equal(result.status, status);
+    assert.deepEqual(new Uint8Array(await new Response(result.body).arrayBuffer()), bytes);
+  }
+});
+
+test('GET forwards If-Range on a 400 without retrying', async () => {
+  let calls = 0;
+  let sent: Request | undefined;
+  let cancelled = false;
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    calls++;
+    sent = input as Request;
+    return new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 400 });
+  } });
+  await assert.rejects(objects.get('key', { maxResponseBytes: 4, range: 'bytes=0-3', ifRange: '"v1"' }), { message: 'S3 request failed with status 400' });
+  assert.equal(sent?.headers.get('if-range'), '"v1"');
+  assert.equal(sent?.headers.get('range'), 'bytes=0-3');
+  assert.equal(calls, 1);
+  assert.equal(cancelled, true);
 });
 
 test('GET preserves encoded 304 metadata', async () => {

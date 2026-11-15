@@ -48,7 +48,7 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
       if (response.status === 200 || response.status === 206) {
         if (response.headers.has('content-encoding')) {
           void response.body.cancel().catch(() => {});
-          throw new Error('S3 encoded response unsupported');
+          throw new Error(options.signal?.aborted ? 'S3 request cancelled' : 'S3 request failed');
         }
         return { status: response.status as 200 | 206, ...metadata, body: response.body };
       }
