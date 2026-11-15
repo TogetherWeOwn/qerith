@@ -50,6 +50,11 @@ test('enforces XML character data and structural whitespace', () => {
   }
 });
 
+test('rejects a bounded unterminated run of CDATA openers', () => {
+  const xml = `<Error><Code>${'<![CDATA['.repeat(7000)}</Code></Error>`;
+  assert.throws(() => parse(bytes(xml)), /Invalid S3 multipart completion response/);
+});
+
 test('rejects malformed, ambiguous, and unsupported documents', () => {
   for (const xml of [
     '', '<CompleteMultipartUploadResult/>', '<Error/>', '<Error><Code> </Code></Error>',

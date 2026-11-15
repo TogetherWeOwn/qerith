@@ -22,7 +22,16 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   // xmldom can discard non-XML whitespace after the document element.
   if (!/<\/(?:CompleteMultipartUploadResult|Error)[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(source)) return invalid();
   // Preserve boundaries when excluding CDATA: a terminator spanning nodes is valid.
-  const ordinary = source.split(/<!\[CDATA\[[\s\S]*?\]\]>/);
+  const ordinary: string[] = [];
+  let offset = 0;
+  while (true) {
+    const start = source.indexOf('<![CDATA[', offset);
+    if (start < 0) { ordinary.push(source.slice(offset)); break; }
+    ordinary.push(source.slice(offset, start));
+    const end = source.indexOf(']]>', start + 9);
+    if (end < 0) return invalid();
+    offset = end + 3;
+  }
   if (ordinary.some((part) => part.includes(']]>'))) return invalid();
   // Do not let the XML parser accept non-XML whitespace within tag markup.
   for (const part of ordinary) {
