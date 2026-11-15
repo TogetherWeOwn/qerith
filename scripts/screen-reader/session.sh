@@ -32,7 +32,7 @@ pactl set-default-sink orca_capture
 parec --device=orca_capture.monitor --format=s16le --rate=16000 --channels=1 >"$EVIDENCE_DIR/speech.pcm" 2>"$EVIDENCE_DIR/audio.log" &
 orca --disable braille --debug-file="$EVIDENCE_DIR/orca.log" >"$EVIDENCE_DIR/orca-process.log" 2>&1 &
 ORCA_PID=$!
-google-chrome --no-first-run --disable-background-networking --disable-sync \
+google-chrome --no-first-run --disable-background-networking --disable-sync --enable-logging=stderr --log-level=0 \
   --force-renderer-accessibility --user-data-dir="$HOME/chrome" \
   "file://$FIXTURE" >"$EVIDENCE_DIR/browser.log" 2>&1 &
 BROWSER_PID=$!
@@ -45,10 +45,28 @@ for _ in $(seq 1 60); do
 done
 [ -n "$window" ]
 xdotool windowactivate --sync ${window%% *}
+telemetry="$(dirname "$0")/telemetry.py"
+wait_ready() {
+  for _ in $(seq 1 60); do
+    kill -0 "$ORCA_PID"; kill -0 "$BROWSER_PID"
+    if python3 -I "$telemetry" "$EVIDENCE_DIR/browser.log" "$1"; then
+      if [ "$1" != button ] || grep -E 'SPEECH OUTPUT:.*Announce test message|SPEECH DISPATCHER: Speaking.*Announce test message' "$EVIDENCE_DIR/orca.log" >/dev/null; then
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  printf 'Timed out waiting for %s readiness\n' "$1" >&2
+  return 1
+}
+send_key() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$1" >>"$EVIDENCE_DIR/keystrokes.log"
+  xdotool key --clearmodifiers "$1"
+}
+wait_ready document
+send_key b
+wait_ready button
+# The verifier also requires a focused trusted Return and a subsequent mutation.
+send_key Return
 sleep 3
-for key in Tab Return; do
-  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$key" >>"$EVIDENCE_DIR/keystrokes.log"
-  xdotool key --clearmodifiers "$key"
-  sleep 3
-done
 kill -0 "$ORCA_PID"; kill -0 "$BROWSER_PID"

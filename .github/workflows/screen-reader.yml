@@ -40,7 +40,7 @@ jobs:
             date -u +%Y-%m-%dT%H:%M:%SZ
             google-chrome --version
             dpkg-query -W orca speech-dispatcher speech-dispatcher-espeak-ng at-spi2-core dbus-x11 xvfb xauth openbox xdotool pulseaudio pulseaudio-utils
-            sha256sum scripts/screen-reader/fixture.html scripts/screen-reader/session.sh
+            sha256sum scripts/screen-reader/fixture.html scripts/screen-reader/session.sh scripts/screen-reader/telemetry.py scripts/screen-reader/verify.py
           } > "$RUNNER_TEMP/sr-evidence/provenance.txt"
       - name: Run synthetic fixture in loopback-only namespace
         env:

@@ -11,6 +11,31 @@
     document.querySelector('#announce').addEventListener('click', () => {
       document.querySelector('#status').textContent = 'Synthetic announcement received';
     });
+    (() => {
+      const status = document.querySelector('#status');
+      let seq = 0;
+      const record = (kind, event) => {
+        const row = {
+          seq: ++seq, utc: new Date().toISOString(), monoMs: performance.now(), kind,
+          target: event?.target?.id || event?.target?.tagName || null,
+          active: document.activeElement?.id || document.activeElement?.tagName || null,
+          documentFocused: document.hasFocus(), trusted: event?.isTrusted ?? null,
+          key: event?.key ?? null, detail: event?.detail ?? null, status: status.textContent
+        };
+        console.error('SR_DOM_V1=' + btoa(JSON.stringify(row)));
+      };
+      for (const kind of ['focusin', 'focusout', 'keydown', 'keyup', 'click']) {
+        document.addEventListener(kind, event => record(kind, event), true);
+      }
+      new MutationObserver(() => record('status-mutation'))
+        .observe(status, { childList: true, subtree: true, characterData: true });
+      record('ready');
+      let remaining = 150;
+      const timer = setInterval(() => {
+        record('snapshot');
+        if (--remaining === 0) clearInterval(timer);
+      }, 100);
+    })();
   </script>
 </body>
 </html>

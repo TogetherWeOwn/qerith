@@ -4,6 +4,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import telemetry
+
 MAX_FILE = 20 * 1024 * 1024
 
 
@@ -20,9 +23,10 @@ def validate(directory):
         raise ValueError("missing exact tested SHA")
     keys = bounded_read(directory, "keystrokes.log").decode("utf-8").splitlines()
     if len(keys) != 2 or not all(re.fullmatch(
-        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (Tab|Return)", line
-    ) for line in keys) or [line.split()[-1] for line in keys] != ["Tab", "Return"]:
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (b|Return)", line
+    ) for line in keys) or [line.split()[-1] for line in keys] != ["b", "Return"]:
         raise ValueError("missing timestamped self-test keys")
+    telemetry.validate(telemetry.read_rows(directory / "browser.log"))
     log = bounded_read(directory, "orca.log").decode("utf-8", errors="replace")
     speech = "\n".join(line for line in log.splitlines()
                        if "SPEECH OUTPUT:" in line or "SPEECH DISPATCHER: Speaking" in line)
