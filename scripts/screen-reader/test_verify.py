@@ -122,6 +122,17 @@ class EvidenceTest(unittest.TestCase):
         path.write_text("\n".join("browser: " + line for line in path.read_text().splitlines()))
         verify.validate(self.path)
 
+    def test_chrome_console_envelope_is_evidence(self):
+        path = self.path / "browser.log"
+        rows = path.read_text().splitlines()
+        prefix = '[4895:4895:1115/122828.867194:INFO:CONSOLE:25] "'
+        suffix = '", source: file:///fixture.html (25)'
+        path.write_text("\n".join(prefix + row + suffix for row in rows))
+        verify.validate(self.path)
+        path.write_text("\n".join(prefix + row + "!!!" + suffix for row in rows))
+        with self.assertRaises(ValueError):
+            verify.validate(self.path)
+
     def test_missing_provenance_is_not_evidence(self):
         (self.path / "provenance.txt").write_text("tested_sha=unknown\n")
         with self.assertRaises(ValueError):

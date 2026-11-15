@@ -13,8 +13,13 @@ def read_rows(path):
     if not path.is_file() or not 0 < path.stat().st_size <= MAX_FILE:
         raise ValueError("missing or oversized browser log")
     rows = []
-    for encoded in re.findall(rb"SR_DOM_V1=(\S*)", path.read_bytes()):
-        rows.append(json.loads(base64.b64decode(encoded, validate=True)))
+    for line in path.read_bytes().splitlines():
+        if b"SR_DOM_V1=" not in line:
+            continue
+        marker = line.split(b"SR_DOM_V1=", 1)[1]
+        if re.match(rb'^\[\d+:\d+:\d+/\d+\.\d+:INFO:CONSOLE:\d+\] "SR_DOM_V1=', line):
+            marker = marker.split(b'", source: ', 1)[0] if b'", source: ' in marker else marker
+        rows.append(json.loads(base64.b64decode(marker, validate=True)))
     if not rows or rows[0].get("kind") != "ready":
         raise ValueError("missing DOM ready marker")
     if [row.get("seq") for row in rows] != list(range(1, len(rows) + 1)):
