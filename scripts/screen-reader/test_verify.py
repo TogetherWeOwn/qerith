@@ -98,6 +98,20 @@ class EvidenceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify.validate(self.path)
 
+    def test_malformed_marked_telemetry_is_not_evidence(self):
+        path = self.path / "browser.log"
+        valid = path.read_text().splitlines()
+        for payload in ("", "!!!", "e30", "e30=!!!"):
+            with self.subTest(payload=payload):
+                path.write_text("\n".join(valid[:2] + ["browser: SR_DOM_V1=" + payload] + valid[2:]))
+                with self.assertRaises(ValueError):
+                    verify.validate(self.path)
+
+    def test_prefixed_telemetry_is_evidence(self):
+        path = self.path / "browser.log"
+        path.write_text("\n".join("browser: " + line for line in path.read_text().splitlines()))
+        verify.validate(self.path)
+
     def test_missing_provenance_is_not_evidence(self):
         (self.path / "provenance.txt").write_text("tested_sha=unknown\n")
         with self.assertRaises(ValueError):
