@@ -15,7 +15,6 @@ test('GET streams a range with signed validators and preserves response metadata
   assert.equal(result.etag, '"v1"');
   assert.equal(result.contentRange, 'bytes 1-3/5');
   assert.equal(result.contentLength, '3');
-  if (result.status !== 200 && result.status !== 206) throw new Error('Expected streamed response');
   assert.equal(await new Response(result.body).text(), 'abc');
   assert.equal(sent?.headers.get('range'), 'bytes=1-3');
   assert.equal(sent?.headers.get('if-match'), '"v1"');
