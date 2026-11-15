@@ -39,6 +39,17 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(len(manifest["files"]), len(extract_source.SOURCE_FILES))
         self.assertEqual(manifest["files"][0]["path"], name)
 
+    def test_ignores_git_replacement_commits(self):
+        name = extract_source.SOURCE_FILES[0]
+        (self.repo / name).write_text("replacement content")
+        self.git("add", ".")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "replacement")
+        replacement = self.git("rev-parse", "HEAD").strip()
+        self.git("replace", self.sha, replacement)
+        extract_source.extract(self.repo, self.sha, self.out)
+        self.assertEqual((self.out / name).read_text(), name)
+        self.assertEqual(json.loads((self.out / "source-manifest.json").read_text())["source_commit"], self.sha)
+
     def test_target_fixture_stays_separate_from_extracted_source(self):
         fixture = pathlib.Path(__file__).parent / "target-fixture"
         before = {name: (fixture / name).read_bytes() for name in ("Fixture.svelte", "main.js", "index.html")}

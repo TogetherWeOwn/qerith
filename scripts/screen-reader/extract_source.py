@@ -2,6 +2,7 @@
 """Copy a bounded set of pinned Git blobs without executing source checkout code."""
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -18,7 +19,8 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 def git(repo, *args):
-    return subprocess.check_output(["git", "-C", str(repo), *args], timeout=30)
+    env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}
+    return subprocess.check_output(["git", "-C", str(repo), *args], timeout=30, env=env)
 
 
 def extract(repo, sha, destination):
