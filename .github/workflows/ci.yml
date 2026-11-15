@@ -311,6 +311,9 @@ jobs:
       - name: Test Debian metadata primitives
         run: |
           timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_metadata.py"); assert suite.countTestCases() >= 4; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
+      - name: Test pinned Debian signature status validation
+        run: |
+          timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_signatures.py"); assert suite.countTestCases() >= 2; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
 
   drive-lock-verifier:
     name: drive lock verifier
