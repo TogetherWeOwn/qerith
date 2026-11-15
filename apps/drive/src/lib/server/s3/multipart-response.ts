@@ -15,8 +15,16 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
   if (!XML_CHARS.test(xml)) return invalid();
-  // CDATA content is literal, not a declaration or an XML reference.
-  const references = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+  // Only XML 1.0 is supported; S3 may send XML whitespace before the declaration.
+  const source = xml.replace(/^[\x20\x09\x0a\x0d]+/, '');
+  if (/^<\?xml(?=[\x20\x09\x0a\x0d?])/.test(source) &&
+      !/^<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1/.test(source)) return invalid();
+  // xmldom can discard non-XML whitespace after the document element.
+  if (!/<\/(?:CompleteMultipartUploadResult|Error)[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(source)) return invalid();
+  // Preserve boundaries when excluding CDATA: a terminator spanning nodes is valid.
+  const ordinary = source.split(/<!\[CDATA\[[\s\S]*?\]\]>/);
+  if (ordinary.some((part) => part.includes(']]>'))) return invalid();
+  const references = ordinary.join(' ');
   if (/<!DOCTYPE/i.test(references)) return invalid();
   if (/&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(references)) return invalid();
   for (const match of references.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
@@ -25,17 +33,17 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   }
   let document: Document;
   try {
-    document = new DOMParser({ onError: (level, message) => {
+    document = new DOMParser({ normalizeLineEndings: (input) => input.replace(/\r\n?/g, '\n'), onError: (level, message) => {
       if (level === 'warning' && message === 'Unicode replacement character detected, source encoding issues?') return;
       throw new Error('Invalid XML');
-    } }).parseFromString(xml.replace(/^[\x20\x09\x0a\x0d]+/, ''), 'application/xml') as unknown as Document;
+    } }).parseFromString(source, 'application/xml') as unknown as Document;
   } catch { return invalid(); }
   const root = document.documentElement;
   if (!root || document.doctype || !['CompleteMultipartUploadResult', 'Error'].includes(root.tagName) ||
       !['', S3_NAMESPACE].includes(root.namespaceURI ?? '')) return invalid();
   for (const node of Array.from(document.childNodes)) {
     if (node !== root && !(node.nodeType === 7 && node.nodeName === 'xml') &&
-        !(node.nodeType === 3 && !node.nodeValue?.trim())) return invalid();
+        !(node.nodeType === 3 && /^[\x20\x09\x0a\x0d]*$/.test(node.nodeValue ?? ''))) return invalid();
   }
   for (const attr of Array.from(root.attributes)) {
     if (attr.name !== 'xmlns' || attr.value !== S3_NAMESPACE) return invalid();
@@ -46,7 +54,7 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
     : ['ETag', 'Bucket', 'Key', 'Location', ...checksumFields];
   const values = new Map<string, string>();
   for (const node of Array.from(root.childNodes)) {
-    if (node.nodeType === 3 && !node.nodeValue?.trim()) continue;
+    if (node.nodeType === 3 && /^[\x20\x09\x0a\x0d]*$/.test(node.nodeValue ?? '')) continue;
     if (node.nodeType !== 1) return invalid();
     const element = node as Element;
     if (!allowed.includes(element.tagName) || values.has(element.tagName) || element.attributes.length ||
