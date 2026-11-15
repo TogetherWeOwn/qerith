@@ -19,6 +19,8 @@ class MetadataTests(unittest.TestCase):
         line = " " + "a" * 64 + " 123 main/binary-amd64/Packages.xz\n"
         self.assertEqual(index_entry(("SHA256:\n" + line).encode(), "main/binary-amd64/Packages.xz"), (123, "a" * 64))
         self.assertEqual(index_entry(("SHA256: \t\n\t" + line.lstrip()).encode(), "main/binary-amd64/Packages.xz"), (123, "a" * 64))
+        release = "Description: first SHA256:\nSHA256:\n" + line
+        self.assertEqual(index_entry(release.replace("\n", "\r\n").encode(), "main/binary-amd64/Packages.xz"), (123, "a" * 64))
         for data in ("SHA256:\n", "SHA256:\n" + line + line, "SHA256:\n" + line + "SHA256:\n"):
             with self.subTest(data=data), self.assertRaises(InvalidMetadata):
                 index_entry(data.encode(), "main/binary-amd64/Packages.xz")
@@ -37,7 +39,10 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(package_entry(record.encode(), *args), ("pool/main/b/busybox/example.deb", 5, "b" * 64))
         padded = record.replace(": ", ":\t").replace("busybox-static\n", "busybox-static \t\n").replace("Size:\t5", "Size:5  ")
         self.assertEqual(package_entry(padded.encode(), *args), ("pool/main/b/busybox/example.deb", 5, "b" * 64))
+        description = "Description: first second\n"
+        self.assertEqual(package_entry((record + description).encode(), *args), ("pool/main/b/busybox/example.deb", 5, "b" * 64))
         other = record.replace("busybox-static", "other")
+        self.assertEqual(package_entry((other + description + "\n" + record).encode(), *args), ("pool/main/b/busybox/example.deb", 5, "b" * 64))
         self.assertEqual(package_entry((other + "\n" + record).replace("\n", "\r\n").encode(), *args),
                          ("pool/main/b/busybox/example.deb", 5, "b" * 64))
         bad_records = (record + "\n" + record, record + "Size: 6\n", record + "size: 6\n",

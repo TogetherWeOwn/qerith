@@ -20,7 +20,7 @@ def verify_bytes(data, expected_size, expected_sha256):
 
 def index_entry(release, path):
     """Find exactly one SHA256 entry in authenticated Release content."""
-    lines = release.decode("utf-8", "strict").splitlines()
+    lines = release.decode("utf-8", "strict").replace("\r\n", "\n").split("\n")
     sections = [i for i, line in enumerate(lines) if line.rstrip(" \t") == "SHA256:"]
     if len(sections) != 1:
         raise InvalidMetadata("expected one SHA256 section")
@@ -60,7 +60,7 @@ def package_entry(index, package, version, architecture):
     for paragraph in re.split(r"\n[ \t]*\n", text):
         fields = {}
         key = None
-        for line in paragraph.splitlines():
+        for line in paragraph.split("\n"):
             if not line:
                 continue
             if line[0] in " \t":
