@@ -48,6 +48,19 @@ test('snapshots and hashes a 16 MiB body, and rejects larger bodies', async () =
   await assert.rejects(request({ ...operation, method: 'PUT', body: new Uint8Array(16 * 1024 * 1024 + 1) }), /part limit/);
 });
 
+test('snapshots bounded subarray bodies before signing', async () => {
+  let sent: Request | undefined;
+  const request = createS3Transport(config, { timeoutMs: 1000, now: fixedTime, fetch: async (input) => {
+    sent = input as Request;
+    return new Response();
+  } });
+  const backing = new Uint8Array([1, 2, 3, 4]);
+  const pending = request({ ...operation, method: 'PUT', body: backing.subarray(1, 3) });
+  backing[1] = 9;
+  await pending;
+  assert.deepEqual(new Uint8Array(await sent!.arrayBuffer()), new Uint8Array([2, 3]));
+});
+
 test('snapshots Buffer bodies before asynchronous signing', async () => {
   let sent: Request | undefined;
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (input) => {

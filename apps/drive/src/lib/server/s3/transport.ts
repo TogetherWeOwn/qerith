@@ -58,14 +58,20 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
-    if (inputBody && inputBody.byteLength > MAX_PART_BYTES) throw new Error('S3 request body exceeds part limit');
+    const bodyLength = inputBody?.byteLength;
+    if (inputBody && (bodyLength === undefined || !Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_PART_BYTES)) {
+      throw new Error('S3 request body exceeds part limit');
+    }
     const path = key.split('/').map(encode).join('/');
     const query = Object.entries(queryParams ?? {}).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
     const url = `${settings.endpoint}/${settings.bucket}/${path}${query ? `?${query}` : ''}`;
     const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
     // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
-    const body = inputBody && new Uint8Array(inputBody);
+    const body = inputBody && new Uint8Array(new Uint8Array(inputBody.buffer, inputBody.byteOffset, bodyLength));
+    if (body && (body.byteLength !== bodyLength || body.byteLength > MAX_PART_BYTES)) {
+      throw new Error('S3 request body exceeds part limit');
+    }
     const controller = new AbortController();
     const forwardAbort = () => controller.abort(signal?.reason);
     if (signal?.aborted) forwardAbort();
