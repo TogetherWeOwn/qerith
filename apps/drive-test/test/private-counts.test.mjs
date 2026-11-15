@@ -19,12 +19,12 @@ beforeEach(async () => {
     DROP TRIGGER IF EXISTS drive_counts_delete;
     DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
+    DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
-    DROP TABLE IF EXISTS test_members;
-    CREATE TABLE test_members (id TEXT PRIMARY KEY, active INTEGER NOT NULL);
-    CREATE VIEW drive_active_members AS SELECT id FROM test_members WHERE active = 1;
-    INSERT INTO test_members VALUES ('alice', 1), ('bob', 1);`);
+    DROP TABLE IF EXISTS drive_principals;`);
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active')");
 });
 
 it('upgrades seeded entries and maintains direct counts through mutations', async () => {
@@ -34,7 +34,7 @@ it('upgrades seeded entries and maintains direct counts through mutations', asyn
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0002_private_metadata.sql', '0003_private_folder_counts.sql']);
+    .toEqual(['0001_identity.sql', '0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
   const metadata = new PrivateMetadata(env.DB);
   const root = () => metadata.list('alice', null);
   expect((await root()).entries.map(({ id, item_count }) => [id, item_count])).toEqual([['a', 1], ['b', 0]]);
@@ -50,7 +50,7 @@ it('upgrades seeded entries and maintains direct counts through mutations', asyn
   expect(await rows("SELECT folder_id FROM drive_folder_counts WHERE folder_id = 'empty'")).toEqual([]);
   await metadata.move('alice', 'nested', null, 'nested');
   expect((await root()).entries.map(({ id, item_count }) => [id, item_count])).toEqual([['a', 0], ['b', 0], ['nested', 1]]);
-  await run('UPDATE test_members SET active = 0 WHERE id = ?', 'alice');
+  await run("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", 'alice');
   expect((await root()).entries).toEqual([]);
 });
 
@@ -62,7 +62,7 @@ it('rolls back a failed migration and can retry without changing seeded entries'
   await expect(applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS)).rejects.toThrow();
   expect(await rows('SELECT * FROM drive_entries ORDER BY id')).toEqual(before);
   expect(await rows("SELECT name FROM sqlite_master WHERE name IN ('drive_folder_counts', 'drive_counts_insert')")).toEqual([]);
-  expect((await rows('SELECT name FROM d1_migrations')).map(({ name }) => name)).toEqual(['0002_private_metadata.sql']);
+  expect((await rows('SELECT name FROM d1_migrations')).map(({ name }) => name)).toEqual(['0001_identity.sql', '0002_private_metadata.sql']);
   await env.DB.exec('DROP TRIGGER drive_counts_move');
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect(await rows('SELECT * FROM drive_folder_counts ORDER BY folder_id'))

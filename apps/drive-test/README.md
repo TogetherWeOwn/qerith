@@ -10,8 +10,11 @@ in the same D1 migration transaction. Deploy the migration successfully before
 using code that lists `item_count`; the previous application can run with the
 new schema, but the new listing query cannot run against the old schema. On
 failure, retain the previous application and repair forward; removing the count
-schema while new code is running is not supported. Do not delete entries to
-roll back a migration. Local D1 results are not deployed-binding evidence.
+schema while new code is running is not supported. The owner-usage migration
+likewise backfills and installs its triggers in one transaction; apply it before
+serving the usage query. Keep the previous application on migration failure and
+repair forward. Do not delete entries to roll back a migration. Local D1 results
+are not deployed-binding evidence.
 
 CI uses Node 24.21.0 and npm 11.19.0. Before running this fixture, prepare the
 sibling Drive project: shared metadata imports use its generated `$app/tsconfig`.
