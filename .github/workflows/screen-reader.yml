@@ -51,6 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$PRIVATE_HOME"
+          install -d -m 700 "$PRIVATE_HOME/runtime"
           sudo timeout --signal=TERM --kill-after=10s 180s unshare --net bash -c '
             set -euo pipefail
             ip link set lo up
