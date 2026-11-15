@@ -9,6 +9,7 @@
     "test": "node --import tsx --test \"tests/*.test.ts\" \"src/**/*.test.ts\""
   },
   "dependencies": {
+    "@simplewebauthn/server": "14.1.0",
     "@xmldom/xmldom": "0.9.12",
     "aws4fetch": "1.0.20"
   },
@@ -22,6 +23,6 @@
     "tsx": "4.20.6",
     "typescript": "6.0.3",
     "vite": "8.3.8",
-    "wrangler": "4.118.0"
+    "wrangler": "4.160.1"
   }
 }

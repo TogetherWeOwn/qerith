@@ -58,6 +58,79 @@ test('bounds markup and attribute allocation before DOM parsing', () => {
   assert.equal(listingText(root, 'Key')?.length, 200_000);
 });
 
+test('bounds nesting before parsing and accepts shallow listings', () => {
+  const nested = (count: number) => `<Result>${'<x xmlns="urn:x">'.repeat(count)}${'</x>'.repeat(count)}</Result>`;
+  assert.throws(() => parseListingXml(bytes(nested(64)), 'Result'), /^Error: Invalid S3 listing XML$/);
+  assert.ok(parseListingXml(bytes(nested(63)), 'Result'));
+});
+
+test('accepts only XML 1.0 with UTF-8 declarations', () => {
+  for (const declaration of ['<?xml version="1.1"?>', '<?xml version="1.0" encoding="UTF-16"?>']) {
+    assert.throws(() => parseListingXml(bytes(`${declaration}<Result/>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  assert.ok(parseListingXml(bytes('<?xml version="1.0" encoding="utf-8" standalone="yes"?><Result/>'), 'Result'));
+});
+
+test('rejects collapsed expanded attributes and reserved namespace bindings', () => {
+  for (const input of [
+    '<Result xmlns:a="urn:x" xmlns:b="urn:x" a:id="1" b:id="2"/>',
+    '<Result><x xmlns:xml="urn:wrong"/></Result>',
+    '<Result xmlns:p="http://www.w3.org/XML/1998/namespace"/>',
+    '<Result xmlns="http://www.w3.org/2000/xmlns/"/>',
+    '<Result xmlns:xmlns="urn:x"/>',
+    '<Result xmlns:p=""/>'
+  ]) assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+  assert.ok(parseListingXml(bytes('<Result xmlns:xml="http://www.w3.org/XML/1998/namespace" xmlns:a="urn:a" xmlns:b="urn:b" a:id="1" b:id="2"><x xmlns=""/></Result>'), 'Result'));
+});
+
+test('rejects malformed empty-element delimiters without rejecting quoted slashes', () => {
+  for (const input of ['<Result//>', '<Result/ >', '<Result><x//></Result>', '<Result><x/ ></Result>']) {
+    assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  for (const input of ['<Result/>', '<Result />', '<Result a="/"><!-- / --><![CDATA[/]]><?p /?></Result>']) {
+    assert.ok(parseListingXml(bytes(input), 'Result'));
+  }
+});
+
+test('limits supplementary name characters without rejecting valid content', () => {
+  const invalid = '\u{f0000}';
+  for (const input of [`<Result><${invalid}/></Result>`, `<Result ${invalid}="v"/>`]) {
+    assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  const boundary = '\u{effff}';
+  const root = parseListingXml(bytes(`<Result ${boundary}="${invalid}"><${boundary}/><Key>${invalid}</Key></Result>`), 'Result');
+  assert.equal(listingText(root, 'Key'), invalid);
+});
+
+test('validates complete XML names at every document position', () => {
+  for (const invalid of [';', '\u{f0000}']) {
+    for (const name of [invalid, `a${invalid}`]) {
+      for (const input of [
+        `<Result><${name}/></Result>`, `<Result ${name}="v"/>`,
+        `<?${name} data?><Result/>`, `<Result><?${name} data?></Result>`, `<Result/><?${name} data?>`
+      ]) assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+    }
+  }
+  for (const name of ['ͽ', 'Ϳ', '\u{10000}', '\u{effff}', 'à', 'a·']) {
+    const input = `<?${name} data?><Result ${name}="v"><${name}/><?${name} data?></Result><?${name} data?>`;
+    assert.ok(parseListingXml(bytes(input), 'Result'));
+  }
+  for (const name of ['̀a', '·a', ':a', 'a:', 'a:b:c']) {
+    for (const input of [`<Result><${name}/></Result>`, `<Result ${name}="v"/>`]) {
+      assert.throws(() => parseListingXml(bytes(input), 'Result'), /^Error: Invalid S3 listing XML$/);
+    }
+  }
+  for (const target of ['̀a', '·a']) {
+    assert.throws(() => parseListingXml(bytes(`<?${target} data?><Result/>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  assert.ok(parseListingXml(bytes('<?a:b:c data?><Result xmlns:p="urn:p" p:a="v"><p:a/><?p:q data?></Result><?: data?>'), 'Result'));
+  for (const target of ['xml', 'XML', 'Xml']) {
+    assert.throws(() => parseListingXml(bytes(`<Result><?${target} data?></Result>`), 'Result'), /^Error: Invalid S3 listing XML$/);
+  }
+  const root = parseListingXml(bytes('<?probe ;\u{f0000}?><Result><Key>;\u{f0000}</Key><?probe ;\u{f0000}?></Result><?probe ;\u{f0000}?>'), 'Result');
+  assert.equal(listingText(root, 'Key'), ';\u{f0000}');
+});
+
 test('rejects repeated unterminated markup prefixes', () => {
   for (const prefix of ['<!--', '<![CDATA[', '<?']) {
     const input = bytes(`<Result>${prefix.repeat(100_000)}</Result>`);
