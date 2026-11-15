@@ -51,8 +51,10 @@ def verified_release(root):
     release = root / "Release"
     result = subprocess.run(
         ["gpgv", "--keyring", str(keydir / "pubring.kbx"), "--status-fd", "1",
-         "--output", str(release), str(signed)], check=True, capture_output=True, text=True, timeout=30,
+         "--output", str(release), str(signed)], check=False, capture_output=True, text=True, timeout=30,
     )
+    if result.returncode:
+        raise ValueError("gpgv rejected release: " + repr(result.stdout + result.stderr))
     signatures = [line.split() for line in result.stdout.splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
     if len(signatures) != 1 or signatures[0][2] != SIGNER or signatures[0][-1] != PRIMARY:
         raise ValueError("unexpected release signer")
