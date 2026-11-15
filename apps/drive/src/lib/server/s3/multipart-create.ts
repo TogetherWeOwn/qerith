@@ -8,7 +8,22 @@ function uploadIdFromResponse(body: Uint8Array): string {
   const invalid = (): never => { throw new Error('Invalid multipart create response'); };
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
-  const markup = xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, 'CDATA');
+  // Mask CDATA and comments in one pass so malformed openers cannot cause rescans.
+  let markup = '';
+  let position = 0;
+  while (position < xml.length) {
+    const start = xml.indexOf('<!', position);
+    if (start < 0) { markup += xml.slice(position); break; }
+    markup += xml.slice(position, start);
+    const cdata = xml.startsWith('<![CDATA[', start);
+    const comment = xml.startsWith('<!--', start);
+    if (!cdata && !comment) return invalid();
+    const content = start + (cdata ? 9 : 4);
+    const end = xml.indexOf(cdata ? ']]>' : '-->', content);
+    if (end < 0 || (comment && (xml.slice(content, end).includes('--') || xml[end - 1] === '-'))) return invalid();
+    markup += cdata ? 'CDATA' : ' ';
+    position = end + 3;
+  }
   if (!xmlChars.test(xml) || markup.includes(']]>') || /<!|<\?(?!xml\s)/i.test(markup) || /&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(markup)) return invalid();
   // Only XML whitespace is valid between tag names and delimiters.
   for (const tag of markup.match(/<[^>]*>/g) ?? []) {
@@ -18,25 +33,29 @@ function uploadIdFromResponse(body: Uint8Array): string {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
     if (!Number.isSafeInteger(code) || code > 0x10ffff || !xmlChars.test(String.fromCodePoint(code))) return invalid();
   }
-  if (!/^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>[\x20\x09\x0a\x0d]*)?<InitiateMultipartUploadResult(?:[\x20\x09\x0a\x0d]+xmlns[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/\4)?[\x20\x09\x0a\x0d]*>[\s\S]*<\/InitiateMultipartUploadResult[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(markup)) return invalid();
+  const declaration = /^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>)?/;
+  const content = markup.replace(declaration, '');
+  if (!/^[\x20\x09\x0a\x0d]*<((?:[A-Za-z_][\w.-]*:)?InitiateMultipartUploadResult)(?:[\x20\x09\x0a\x0d]+xmlns(?::[A-Za-z_][\w.-]*)?[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"[^"]*"|'[^']*'))*[\x20\x09\x0a\x0d]*>[\s\S]*<\/\1[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(content)) return invalid();
   let document: Document;
   try {
     document = new DOMParser({ onError: () => { throw new Error('Invalid XML'); } }).parseFromString(xml.trimStart(), 'application/xml') as unknown as Document;
   } catch { return invalid(); }
   const root = document.documentElement;
-  if (!root || !['', namespace].includes(root.namespaceURI ?? '')) return invalid();
+  if (!root || root.localName !== 'InitiateMultipartUploadResult' || !['', namespace].includes(root.namespaceURI ?? '') || (root.prefix && !root.namespaceURI)) return invalid();
+  const onlyNamespaces = (element: Element) => Array.from(element.attributes).every((attribute) => attribute.namespaceURI === 'http://www.w3.org/2000/xmlns/');
   const values = new Map<string, string>();
   for (const node of Array.from(root.childNodes)) {
-    if (node.nodeType === 3 && /^[\x20\x09\x0a\x0d]*$/.test(node.nodeValue ?? '')) continue;
+    if (node.nodeType === 8 || (node.nodeType === 3 && /^[\x20\x09\x0a\x0d]*$/.test(node.nodeValue ?? ''))) continue;
     if (node.nodeType !== 1) return invalid();
     const element = node as Element;
-    if (!['Bucket', 'Key', 'UploadId'].includes(element.tagName) || values.has(element.tagName) || element.attributes.length || (element.namespaceURI ?? '') !== (root.namespaceURI ?? '')) return invalid();
+    if (!['Bucket', 'Key', 'UploadId'].includes(element.localName) || values.has(element.localName) || !onlyNamespaces(element) || (element.namespaceURI ?? '') !== (root.namespaceURI ?? '') || (element.prefix && !element.namespaceURI)) return invalid();
     let value = '';
     for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType === 8) continue;
       if (child.nodeType !== 3 && child.nodeType !== 4) return invalid();
       value += child.nodeValue ?? '';
     }
-    values.set(element.tagName, value);
+    values.set(element.localName, value);
   }
   const id = values.get('UploadId');
   if (!id || !xmlChars.test(id)) return invalid();
