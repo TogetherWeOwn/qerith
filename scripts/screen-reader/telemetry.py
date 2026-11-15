@@ -13,7 +13,7 @@ def read_rows(path):
     if not path.is_file() or not 0 < path.stat().st_size <= MAX_FILE:
         raise ValueError("missing or oversized browser log")
     rows = []
-    for encoded in re.findall(rb"SR_DOM_V1=([A-Za-z0-9+/=]+)", path.read_bytes()):
+    for encoded in re.findall(rb"SR_DOM_V1=(\S*)", path.read_bytes()):
         rows.append(json.loads(base64.b64decode(encoded, validate=True)))
     if not rows or rows[0].get("kind") != "ready":
         raise ValueError("missing DOM ready marker")

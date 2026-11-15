@@ -1,5 +1,6 @@
 """Fail closed when the synthetic desktop did not produce speech evidence."""
 import array
+import datetime
 import pathlib
 import re
 import sys
@@ -23,15 +24,23 @@ def validate(directory):
         raise ValueError("missing exact tested SHA")
     keys = bounded_read(directory, "keystrokes.log").decode("utf-8").splitlines()
     if len(keys) != 2 or not all(re.fullmatch(
-        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (b|Return)", line
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (b|Return)", line, flags=re.ASCII
     ) for line in keys) or [line.split()[-1] for line in keys] != ["b", "Return"]:
         raise ValueError("missing timestamped self-test keys")
+    timestamps = [line.split()[0] for line in keys]
+    for timestamp in timestamps:
+        datetime.datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S")
+    if timestamps[0] > timestamps[1]:
+        raise ValueError("self-test keys are out of order")
     telemetry.validate(telemetry.read_rows(directory / "browser.log"))
     log = bounded_read(directory, "orca.log").decode("utf-8", errors="replace")
-    speech = "\n".join(line for line in log.splitlines()
-                       if "SPEECH OUTPUT:" in line or "SPEECH DISPATCHER: Speaking" in line)
-    if "Announce test message" not in speech or "Synthetic announcement received" not in speech:
-        raise ValueError("Orca did not submit the required fixture utterances")
+    speech = [match.group(1) for line in log.splitlines()
+              if (match := re.search(r"(?:SPEECH OUTPUT:|SPEECH DISPATCHER: Speaking)(.*)", line))]
+    first = next((i for i, utterance in enumerate(speech)
+                  if "Announce test message" in utterance), -1)
+    if first < 0 or not any("Synthetic announcement received" in utterance
+                            for utterance in speech[first + 1:]):
+        raise ValueError("Orca did not submit the required fixture utterances in order")
     audio = bounded_read(directory, "speech.pcm")
     if len(audio) % 2:
         raise ValueError("incomplete PCM sample")
