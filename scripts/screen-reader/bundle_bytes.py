@@ -3,9 +3,11 @@ import argparse
 import base64
 import hashlib
 import pathlib
+import sys
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from bundle_inputs import locked_artifacts
 
 NODE_ARCHIVE = "node-v24.21.0-linux-x64.tar.xz"

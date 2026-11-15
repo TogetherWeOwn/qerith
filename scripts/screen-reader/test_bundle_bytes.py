@@ -2,6 +2,8 @@ import base64
 import hashlib
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -67,6 +69,12 @@ class BundleBytesTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bundle_bytes.download(bundle_bytes.NODE_URL, path, "sha256", bytes(32))
         self.assertFalse(path.exists())
+
+    def test_isolated_cli_loads_validator(self):
+        script = pathlib.Path(bundle_bytes.__file__).resolve()
+        result = subprocess.run([sys.executable, "-I", str(script), "--help"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_redirect_rejects_cross_origin(self):
         handler = bundle_bytes.SameOriginRedirects()
