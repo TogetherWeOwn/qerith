@@ -7,6 +7,7 @@ const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const viewByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!;
 const viewByteOffset = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteOffset')!.get!;
 const viewBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!;
+const validateView = typedArrayPrototype.values as (this: Uint8Array) => IterableIterator<number>;
 
 type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date };
 type Operation = {
@@ -62,6 +63,8 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
+    // Intrinsic metadata reads alone cannot distinguish an invalid view from an empty one.
+    if (inputBody) validateView.call(inputBody);
     const bodyLength = inputBody && viewByteLength.call(inputBody) as number | undefined;
     const bodyOffset = inputBody && viewByteOffset.call(inputBody) as number | undefined;
     const bodyBuffer = inputBody && viewBuffer.call(inputBody) as ArrayBufferLike | undefined;
@@ -73,7 +76,8 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     const url = `${settings.endpoint}/${settings.bucket}/${path}${query ? `?${query}` : ''}`;
     const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
-    // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
+    // Revalidate after processing caller-controlled metadata, then snapshot before hashing.
+    if (inputBody) validateView.call(inputBody);
     const body = bodyBuffer && new Uint8Array(new Uint8Array(bodyBuffer, bodyOffset, bodyLength));
     if (body && (body.byteLength !== bodyLength || body.byteLength > MAX_PART_BYTES)) {
       throw new Error('S3 request body exceeds part limit');

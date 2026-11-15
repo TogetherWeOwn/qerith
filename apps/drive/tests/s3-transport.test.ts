@@ -61,6 +61,22 @@ test('snapshots bounded subarray bodies before signing', async () => {
   assert.deepEqual(new Uint8Array(await sent!.arrayBuffer()), new Uint8Array([2, 3]));
 });
 
+test('accepts empty bodies and rejects detached views before sending', async () => {
+  let count = 0;
+  let sent: Request | undefined;
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (input) => {
+    count++;
+    sent = input as Request;
+    return new Response();
+  } });
+  await request({ ...operation, method: 'PUT', body: new Uint8Array(0) });
+  assert.equal((await sent!.arrayBuffer()).byteLength, 0);
+  const invalid = new Uint8Array(1);
+  structuredClone(invalid.buffer, { transfer: [invalid.buffer] });
+  await assert.rejects(request({ ...operation, method: 'PUT', body: invalid }), TypeError);
+  assert.equal(count, 1);
+});
+
 test('snapshots Buffer bodies before asynchronous signing', async () => {
   let sent: Request | undefined;
   const request = createS3Transport(config, { timeoutMs: 1000, fetch: async (input) => {
