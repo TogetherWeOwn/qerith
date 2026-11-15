@@ -24,7 +24,7 @@ def validate(directory):
         raise ValueError("missing exact tested SHA")
     keys = bounded_read(directory, "keystrokes.log").decode("utf-8").splitlines()
     if len(keys) != 2 or not all(re.fullmatch(
-        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (b|Return)", line
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z (b|Return)", line, flags=re.ASCII
     ) for line in keys) or [line.split()[-1] for line in keys] != ["b", "Return"]:
         raise ValueError("missing timestamped self-test keys")
     timestamps = [line.split()[0] for line in keys]

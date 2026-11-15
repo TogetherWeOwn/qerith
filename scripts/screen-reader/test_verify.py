@@ -78,6 +78,16 @@ class EvidenceTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     verify.validate(self.path)
 
+    def test_fractional_timestamp_digits_must_be_ascii(self):
+        path = self.path / "keystrokes.log"
+        path.write_text("2026-01-01T00:00:00.900000000Z b\n"
+                        "2026-01-01T00:00:00.٠00000000Z Return\n")
+        with self.assertRaises(ValueError):
+            verify.validate(self.path)
+        path.write_text("2026-01-01T00:00:00.900000000Z b\n"
+                        "2026-01-01T00:00:00.999999999Z Return\n")
+        verify.validate(self.path)
+
     def test_silence_is_not_evidence(self):
         (self.path / "speech.pcm").write_bytes(b"\0\0" * 20)
         with self.assertRaises(ValueError):
