@@ -61,8 +61,10 @@ test('mutations distinguish rejected and uncertain outcomes without leaking deta
     calls++; throw new Error('secret signed request');
   } });
   await assert.rejects(uncertain.put('key', new Uint8Array()), { message: 'S3 mutation outcome uncertain' });
-  const serverError = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response('error', { status: 500 }) });
-  await assert.rejects(serverError.delete('key'), { message: 'S3 mutation outcome uncertain' });
+  for (const status of [408, 500]) {
+    const serverError = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response('error', { status }) });
+    await assert.rejects(serverError.delete('key'), { message: 'S3 mutation outcome uncertain' });
+  }
   await assert.rejects(uncertain.put('key', new Uint8Array(16 * 1024 * 1024 + 1)), /part limit/);
   assert.equal(calls, 2);
 });
@@ -88,7 +90,8 @@ test('HEAD cancels without exposing abort reasons and rejects unsafe dot segment
   const controller = new AbortController();
   controller.abort(new Error('secret reason'));
   await assert.rejects(objects.head('key', { signal: controller.signal }), { message: 'S3 request cancelled' });
-  for (const key of ['', 'a/../b', 'a/./b']) {
+  await assert.rejects(objects.head('key', { ifMatch: 'secret\nvalue' }), { message: 'S3 request failed' });
+  for (const key of ['', 'a/../b', 'a/./b', '\ud800']) {
     await assert.rejects(objects.head(key), { message: 'Invalid S3 object key' });
     await assert.rejects(objects.delete(key), { message: 'Invalid S3 object key' });
     await assert.rejects(objects.put(key, new Uint8Array()), { message: 'Invalid S3 object key' });
