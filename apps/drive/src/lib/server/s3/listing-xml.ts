@@ -2,7 +2,7 @@ import { DOMParser } from '@xmldom/xmldom';
 
 type ListingElement = NonNullable<ReturnType<DOMParser['parseFromString']>['documentElement']>;
 
-const MAX_XML_BYTES = 1024 * 1024;
+const MAX_XML_BYTES = 8 * 1024 * 1024;
 const S3_NAMESPACE = 'http://s3.amazonaws.com/doc/2006-03-01/';
 
 /** Parse a bounded S3 listing response without exposing provider input in errors. */
@@ -10,7 +10,10 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
   if (bytes.byteLength > MAX_XML_BYTES) throw new Error('Invalid S3 listing XML');
   try {
     const xml = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    if (/<!DOCTYPE/i.test(xml)) throw new Error();
+    const markup = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<!DOCTYPE/gi;
+    for (const match of xml.matchAll(markup)) {
+      if (/^<!DOCTYPE/i.test(match[0])) throw new Error();
+    }
     const document = new DOMParser({ onError: () => { throw new Error(); } })
       .parseFromString(xml, 'application/xml');
     const root = document.documentElement;

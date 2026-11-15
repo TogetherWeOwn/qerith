@@ -9,6 +9,14 @@ test('reads direct listing fields with their text preserved', () => {
   assert.equal(listingText(listingChildren(root, 'Contents')[0], 'Key'), ' a/&雪 ');
   assert.equal(listingText(root, 'IsTruncated'), 'false');
   assert.equal(listingText(root, 'NextContinuationToken', false), undefined);
+  const cdata = parseListingXml(bytes('<Result><!-- <!DOCTYPE ignored> --><Key><![CDATA[<!DOCTYPE notes]]></Key></Result>'), 'Result');
+  assert.equal(listingText(cdata, 'Key'), '<!DOCTYPE notes');
+});
+
+test('accepts a large valid page of maximum-length keys', () => {
+  const contents = `<Contents><Key>${'a'.repeat(1024)}</Key></Contents>`.repeat(1000);
+  const root = parseListingXml(bytes(`<ListBucketResult>${contents}</ListBucketResult>`), 'ListBucketResult');
+  assert.equal(listingChildren(root, 'Contents').length, 1000);
 });
 
 test('rejects malformed, oversized, non-UTF-8, foreign-root and DTD documents', () => {
@@ -19,7 +27,7 @@ test('rejects malformed, oversized, non-UTF-8, foreign-root and DTD documents', 
     bytes('<Wrong/>'),
     bytes('<ListBucketResult xmlns="urn:other"/>'),
     new Uint8Array([0xff]),
-    new Uint8Array(1024 * 1024 + 1)
+    new Uint8Array(8 * 1024 * 1024 + 1)
   ]) assert.throws(() => parseListingXml(input, 'ListBucketResult'), /^Error: Invalid S3 listing XML$/);
 });
 
