@@ -21,16 +21,25 @@ function encode(value: string): string {
   );
 }
 
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+function abortable<T>(promise: Promise<T>, signal: AbortSignal, discard?: (value: T) => void): Promise<T> {
   return new Promise((resolve, reject) => {
-    const abort = () => reject(signal.reason);
+    let aborted = false;
+    const abort = () => { aborted = true; reject(signal.reason); };
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
     promise.then(
-      (value) => { signal.removeEventListener('abort', abort); resolve(value); },
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        if (aborted) discard?.(value);
+        else resolve(value);
+      },
       (error) => { signal.removeEventListener('abort', abort); reject(error); }
     );
   });
+}
+
+function cancelResponse(response: Response): void {
+  void response.body?.cancel().catch(() => {});
 }
 
 /** Fixed-authority, single-attempt transport. HTTP fixtures are not supported by the signer. */
@@ -68,6 +77,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       if (controller.signal.aborted) throw controller.signal.reason;
     };
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let response: Response | undefined;
     try {
       const hash = body ? await abortable(crypto.subtle.digest('SHA-256', body), controller.signal) : undefined;
       headers.set('x-amz-content-sha256', hash ? Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('') : EMPTY_HASH);
@@ -77,10 +87,9 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       }), controller.signal);
       checkAbort();
       const transport = options.fetch;
-      const response = await abortable(transport(signed), controller.signal);
+      response = await abortable(transport(signed), controller.signal, cancelResponse);
       checkAbort();
       if (response.status >= 300 && response.status < 400 && response.status !== 304) {
-        void response.body?.cancel().catch(() => {});
         throw new Error('S3 redirects are not allowed');
       }
       const result = new Uint8Array(maxResponseBytes);
@@ -113,6 +122,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     } catch (error) {
       controller.abort(error);
       if (reader) void reader.cancel(error).catch(() => {});
+      else if (response) cancelResponse(response);
       throw error;
     } finally {
       clearTimeout(timer);
