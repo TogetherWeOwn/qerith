@@ -120,6 +120,7 @@ def data_archive(deb):
 
 def binary_from_tar(data):
     binary = None
+    unexpected = []
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
         for member in archive:
             name = member.name.removeprefix("./").rstrip("/")
@@ -133,7 +134,9 @@ def binary_from_tar(data):
             # Documentation is not extracted or interpreted; reject links and special files.
             if name.startswith(("usr/share/doc/busybox-static/", "usr/share/man/man1/")) and member.isfile() and member.size <= 2 * 1024 * 1024 and "/../" not in name:
                 continue
-            raise ValueError("unexpected tar entry: " + repr(member.name))
+            unexpected.append((member.name, repr(member.type), member.linkname, member.size))
+    if unexpected:
+        raise ValueError("unexpected tar entries: " + repr(unexpected))
     if binary is None:
         raise ValueError("missing BusyBox binary")
     return binary
