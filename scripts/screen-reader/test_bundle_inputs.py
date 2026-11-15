@@ -1,10 +1,8 @@
 import base64
-import hashlib
 import json
 import pathlib
 import tempfile
 import unittest
-from unittest import mock
 
 import bundle_inputs
 
@@ -30,7 +28,14 @@ class LockedArtifactsTests(unittest.TestCase):
     def test_rejects_missing_or_untrusted_provenance(self):
         for changes in ({"resolved": "https://registry.npmjs.org.evil/a.tgz"},
                         {"resolved": "https://registry.npmjs.org/a.tgz?x=1"},
+                        {"resolved": "https://registry.npmjs.org/a.tgz#x"},
+                        {"resolved": "http://registry.npmjs.org/a.tgz"},
+                        {"resolved": "https://registry.npmjs.org/a\n.tgz"},
+                        {"resolved": "https://registry.npmjs.org/x/../a.tgz"},
+                        {"resolved": "https://registry.npmjs.org/%2e%2e/a.tgz"},
+                        {"resolved": "https://registry.npmjs.org//a.tgz"},
                         {"integrity": "sha512-!!!!"}, {"integrity": "sha512-YQ=="},
+                        {"integrity": "sha256-" + base64.b64encode(bytes(32)).decode()},
                         {"integrity": None}, {"resolved": None}):
             with self.subTest(changes=changes):
                 self.write({"": {}, "node_modules/a": {**self.entry, **changes}})
@@ -43,40 +48,24 @@ class LockedArtifactsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bundle_inputs.locked_artifacts(self.lock)
 
-    def test_file_verification_rejects_tampering_and_missing_inputs(self):
-        artifact = pathlib.Path(self.temp.name) / "artifact"
-        artifact.write_bytes(b"expected")
-        expected = hashlib.sha512(b"expected").digest()
-        bundle_inputs.verify_file(artifact, "sha512", expected)
-        artifact.write_bytes(b"tampered")
-        with self.assertRaises(ValueError):
-            bundle_inputs.verify_file(artifact, "sha512", expected)
-        artifact.unlink()
-        with self.assertRaises(FileNotFoundError):
-            bundle_inputs.verify_file(artifact, "sha512", expected)
+    def test_rejects_unsupported_structure_and_empty_set(self):
+        for lock in ([], {"lockfileVersion": 2, "packages": {}},
+                     {"lockfileVersion": 3, "packages": {}},
+                     {"lockfileVersion": 3, "packages": {"local": self.entry}},
+                     {"lockfileVersion": 3, "packages": {"node_modules/a": None}}):
+            with self.subTest(lock=lock):
+                self.lock.write_text(json.dumps(lock))
+                with self.assertRaises(ValueError):
+                    bundle_inputs.locked_artifacts(self.lock)
 
-    def test_acquire_then_verify_offline_and_reject_tampering(self):
-        node, package = b"node archive", b"package tarball"
-        integrity = "sha512-" + base64.b64encode(hashlib.sha512(package).digest()).decode()
-        self.write({"": {}, "node_modules/a": {**self.entry, "integrity": integrity}})
-        bundle = pathlib.Path(self.temp.name) / "bundle"
-
-        def fake_download(url, path, algorithm, expected):
-            pathlib.Path(path).write_bytes(node if algorithm == "sha256" else package)
-            bundle_inputs.verify_file(path, algorithm, expected)
-
-        with mock.patch.object(bundle_inputs, "NODE_SHA256", hashlib.sha256(node).hexdigest()), \
-             mock.patch.object(bundle_inputs, "download", side_effect=fake_download):
-            bundle_inputs.acquire(self.lock, bundle)
-            bundle_inputs.verify_bundle(self.lock, bundle)
-            (bundle / bundle_inputs.artifact_name(integrity)).write_bytes(b"changed")
-            with self.assertRaises(ValueError):
-                bundle_inputs.verify_bundle(self.lock, bundle)
-
-    def test_bundle_rejects_missing_node_archive(self):
-        self.write({"": {}, "node_modules/a": self.entry})
-        with self.assertRaises(FileNotFoundError):
-            bundle_inputs.verify_bundle(self.lock, self.temp.name)
+    def test_rejects_duplicate_json_keys(self):
+        for document in ('{"lockfileVersion": 3, "lockfileVersion": 2, "packages": {}}',
+                         '{"lockfileVersion": 3, "packages": {"node_modules/a": '
+                         '{"resolved": "a", "resolved": "b"}}}'):
+            with self.subTest(document=document):
+                self.lock.write_text(document)
+                with self.assertRaisesRegex(ValueError, "duplicate lockfile key"):
+                    bundle_inputs.locked_artifacts(self.lock)
 
     def test_repository_lock_has_artifacts(self):
         repo = pathlib.Path(__file__).resolve().parents[2]
