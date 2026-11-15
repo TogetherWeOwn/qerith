@@ -70,6 +70,7 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
         } else {
           if (xml.slice(i, i + 9).toUpperCase() === '<!DOCTYPE') throw new Error();
           const closing = xml[i + 1] === '/';
+          const tagStart = i;
           let attributes = 0;
           let quote = '';
           for (i++; i < xml.length; i++) {
@@ -86,6 +87,8 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
               if (depth < 0) throw new Error();
               i++; break;
             }
+            else if (!quote && c === '/' && !(closing && i === tagStart + 1) &&
+                     (closing || xml[i + 1] !== '>')) throw new Error();
             else if (!quote && c === '=') attributes++;
             // xmldom treats U+0080 as tag whitespace although XML 1.0 does not.
             else if (!quote && c === '\u0080') throw new Error();
@@ -114,9 +117,12 @@ export function parseListingXml(bytes: Uint8Array, rootName: string): ListingEle
     let elementIndex = 0;
     while (pending.length) {
       const element = pending.pop()!;
-      if (element.attributes.length !== attributeCounts[elementIndex++]) throw new Error();
+      // XML 1.0 names end at U+EFFFF even though higher scalars are valid text.
+      if (/[\u{f0000}-\u{10ffff}]/u.test(element.nodeName) ||
+          element.attributes.length !== attributeCounts[elementIndex++]) throw new Error();
       for (let i = 0; i < element.attributes.length; i++) {
         const attribute = element.attributes.item(i)!;
+        if (/[\u{f0000}-\u{10ffff}]/u.test(attribute.name)) throw new Error();
         if (attribute.name === 'xmlns' || attribute.prefix === 'xmlns') {
           const prefix = attribute.name === 'xmlns' ? '' : attribute.localName;
           const uri = attribute.value;
