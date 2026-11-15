@@ -8,6 +8,11 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # Shared-memory segments can exceed the per-file evidence limit.
 printf 'enable-shm = no\n' >"$XDG_CONFIG_HOME/pulse/daemon.conf"
 printf 'enable-shm = no\n' >"$XDG_CONFIG_HOME/pulse/client.conf"
+export PULSE_CONFIG="$XDG_CONFIG_HOME/pulse/daemon.conf"
+export PULSE_CLIENTCONFIG="$XDG_CONFIG_HOME/pulse/client.conf"
+pulseaudio --dump-conf >"$EVIDENCE_DIR/pulseaudio-config.log"
+grep -Eq '^enable-shm = no$' "$EVIDENCE_DIR/pulseaudio-config.log"
+python3 -I -c 'import resource; assert resource.getrlimit(resource.RLIMIT_FSIZE) == (20971520, 20971520)'
 cleanup() { jobs -pr | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
 openbox >"$EVIDENCE_DIR/window-manager.log" 2>&1 &
