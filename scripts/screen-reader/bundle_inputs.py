@@ -10,9 +10,18 @@ import pathlib
 import urllib.parse
 
 
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate lockfile key: {key}")
+        result[key] = value
+    return result
+
+
 def locked_artifacts(lock_path):
     """Return each registry tarball and its SHA-512 SRI, rejecting ambiguity."""
-    lock = json.loads(pathlib.Path(lock_path).read_text(encoding="utf-8"))
+    lock = json.loads(pathlib.Path(lock_path).read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     if not isinstance(lock, dict) or lock.get("lockfileVersion") != 3 or not isinstance(lock.get("packages"), dict):
         raise ValueError("expected npm lockfile v3 with packages")
     artifacts = {}
@@ -26,7 +35,11 @@ def locked_artifacts(lock_path):
             raise ValueError(f"missing artifact provenance: {name}")
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme != "https" or parsed.netloc != "registry.npmjs.org"
-                or not parsed.path.endswith(".tgz") or parsed.query or parsed.fragment):
+                or not parsed.path.endswith(".tgz") or parsed.query or parsed.fragment
+                or url != "https://registry.npmjs.org" + parsed.path
+                or any(ord(char) <= 32 or ord(char) >= 127 for char in url)
+                or "%" in parsed.path or "\\" in parsed.path
+                or any(part in ("", ".", "..") for part in parsed.path[1:].split("/"))):
             raise ValueError(f"unsupported artifact URL: {name}")
         if not integrity.startswith("sha512-"):
             raise ValueError(f"unsupported artifact integrity: {name}")

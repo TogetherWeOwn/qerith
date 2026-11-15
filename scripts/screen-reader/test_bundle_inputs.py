@@ -30,6 +30,10 @@ class LockedArtifactsTests(unittest.TestCase):
                         {"resolved": "https://registry.npmjs.org/a.tgz?x=1"},
                         {"resolved": "https://registry.npmjs.org/a.tgz#x"},
                         {"resolved": "http://registry.npmjs.org/a.tgz"},
+                        {"resolved": "https://registry.npmjs.org/a\n.tgz"},
+                        {"resolved": "https://registry.npmjs.org/x/../a.tgz"},
+                        {"resolved": "https://registry.npmjs.org/%2e%2e/a.tgz"},
+                        {"resolved": "https://registry.npmjs.org//a.tgz"},
                         {"integrity": "sha512-!!!!"}, {"integrity": "sha512-YQ=="},
                         {"integrity": "sha256-" + base64.b64encode(bytes(32)).decode()},
                         {"integrity": None}, {"resolved": None}):
@@ -52,6 +56,15 @@ class LockedArtifactsTests(unittest.TestCase):
             with self.subTest(lock=lock):
                 self.lock.write_text(json.dumps(lock))
                 with self.assertRaises(ValueError):
+                    bundle_inputs.locked_artifacts(self.lock)
+
+    def test_rejects_duplicate_json_keys(self):
+        for document in ('{"lockfileVersion": 3, "lockfileVersion": 2, "packages": {}}',
+                         '{"lockfileVersion": 3, "packages": {"node_modules/a": '
+                         '{"resolved": "a", "resolved": "b"}}}'):
+            with self.subTest(document=document):
+                self.lock.write_text(document)
+                with self.assertRaisesRegex(ValueError, "duplicate lockfile key"):
                     bundle_inputs.locked_artifacts(self.lock)
 
     def test_repository_lock_has_artifacts(self):
