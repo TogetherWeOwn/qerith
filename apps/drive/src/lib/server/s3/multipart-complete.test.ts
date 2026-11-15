@@ -38,6 +38,30 @@ test('distinguishes embedded errors from uncertain outcomes without leaking prov
   assert.equal(calls, 5);
 });
 
+for (const code of ['InternalError', 'ServiceUnavailable', 'SlowDown', 'RequestTimeout', 'OperationAborted', 'UnknownProviderError']) {
+  test(`embedded ${code} preserves uncertainty without retrying or leaking details`, async () => {
+    let calls = 0;
+    const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => {
+      calls++;
+      return new Response(`<Error><Code>${code}</Code><Message>secret</Message><RequestId>private</RequestId></Error>`);
+    } });
+    await assert.rejects(complete('key', 'id', parts), { message: 'S3 multipart completion outcome uncertain' });
+    assert.equal(calls, 1);
+  });
+}
+
+for (const code of ['EntityTooSmall', 'InvalidPart', 'InvalidPartOrder', 'NoSuchUpload']) {
+  test(`embedded ${code} is an explicit rejection without retrying or leaking details`, async () => {
+    let calls = 0;
+    const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => {
+      calls++;
+      return new Response(`<Error><Code>${code}</Code><Message>secret</Message></Error>`);
+    } });
+    await assert.rejects(complete('key', 'id', parts), { message: 'S3 multipart completion failed' });
+    assert.equal(calls, 1);
+  });
+}
+
 test('rejects invalid inputs and pre-cancellation without sending', async () => {
   let calls = 0;
   const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => { calls++; return new Response(); } });

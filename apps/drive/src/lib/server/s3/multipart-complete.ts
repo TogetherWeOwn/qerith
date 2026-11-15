@@ -20,7 +20,11 @@ export function createMultipartComplete(...args: Parameters<typeof createS3Trans
     if (response.status === 200) {
       let result: ReturnType<typeof parseMultipartCompletionResponse>;
       try { result = parseMultipartCompletionResponse(response.body); } catch { throw new Error('S3 multipart completion outcome uncertain'); }
-      if (result.kind === 'error') throw new Error('S3 multipart completion failed');
+      if (result.kind === 'error') {
+        // Only known request rejections prove failure; internal and unknown errors need reconciliation.
+        if (['EntityTooSmall', 'InvalidPart', 'InvalidPartOrder', 'NoSuchUpload'].includes(result.code)) throw new Error('S3 multipart completion failed');
+        throw new Error('S3 multipart completion outcome uncertain');
+      }
       return result;
     }
     if (response.status === 408 || response.status >= 500 || (response.status >= 200 && response.status < 300)) throw new Error('S3 multipart completion outcome uncertain');
