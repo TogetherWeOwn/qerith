@@ -456,6 +456,7 @@ jobs:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
+          SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TESTED_SHA"
