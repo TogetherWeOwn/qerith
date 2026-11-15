@@ -87,12 +87,12 @@ test('captures operation metadata and cancellation binding before signing', asyn
 test('ready empty chunks yield to cancellation and respect the deadline', async () => {
   let pulls = 0;
   const stream = () => new ReadableStream<Uint8Array>({ pull(controller) {
-    if (++pulls > 100000) controller.close();
-    else controller.enqueue(new Uint8Array());
+    pulls++;
+    controller.enqueue(new Uint8Array());
   } });
-  const request = createS3Transport(config, { timeoutMs: 10, fetch: async () => new Response(stream()) });
+  const request = createS3Transport(config, { timeoutMs: 200, fetch: async () => new Response(stream()) });
   await assert.rejects(request(operation), /timed out/);
-  assert.ok(pulls <= 100000);
+  assert.ok(pulls > 0);
   pulls = 0;
   const controller = new AbortController();
   const cancelRequest = createS3Transport(config, { timeoutMs: 1000, fetch: async () => {
@@ -100,7 +100,20 @@ test('ready empty chunks yield to cancellation and respect the deadline', async 
     return new Response(stream());
   } });
   await assert.rejects(cancelRequest({ ...operation, signal: controller.signal }), /cancelled ready stream/);
-  assert.ok(pulls <= 100000);
+  assert.ok(pulls > 0);
+});
+
+test('reads a highly fragmented bounded response', async () => {
+  let remaining = 16384;
+  const request = createS3Transport(config, { timeoutMs: 1000, fetch: async () =>
+    new Response(new ReadableStream<Uint8Array>({ pull(controller) {
+      if (remaining-- > 0) controller.enqueue(new Uint8Array([1]));
+      else controller.close();
+    } }))
+  });
+  const result = await request({ ...operation, maxResponseBytes: 16384 });
+  assert.equal(result.body.length, 16384);
+  assert.ok(result.body.every((byte) => byte === 1));
 });
 
 test('cancellation at the fetch boundary does not leak unhandled rejections', () => {

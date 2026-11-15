@@ -85,7 +85,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       }
       const result = new Uint8Array(maxResponseBytes);
       let length = 0;
-      let chunks = 0;
+      let yieldAt = performance.now() + 4;
       reader = response.body?.getReader();
       if (reader) {
         for (;;) {
@@ -96,8 +96,11 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
           if (part.value.byteLength > maxResponseBytes - length) throw new Error('S3 response exceeds limit');
           result.set(part.value, length);
           length += part.value.byteLength;
-          // Ready streams can otherwise starve timers and external cancellation.
-          if (++chunks % 64 === 0) await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
+          // Bound timer starvation without imposing a timer delay on every small batch.
+          if (performance.now() >= yieldAt) {
+            await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
+            yieldAt = performance.now() + 4;
+          }
         }
       }
       checkAbort();
