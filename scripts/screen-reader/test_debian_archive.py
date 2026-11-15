@@ -31,9 +31,10 @@ def elf():
     data = bytearray(120)
     data[:7] = b"\x7fELF\x02\x01\x01"
     struct.pack_into("<HHI", data, 16, 2, 62, 1)
-    struct.pack_into("<Q", data, 32, 64)
+    struct.pack_into("<QQ", data, 24, 0x400000, 64)
     struct.pack_into("<HHH", data, 52, 64, 56, 1)
-    struct.pack_into("<I", data, 64, 1)
+    struct.pack_into("<IIQQ", data, 64, 1, 5, 0, 0x400000)
+    struct.pack_into("<QQ", data, 96, len(data), len(data))
     return bytes(data)
 
 
@@ -73,7 +74,8 @@ class ArchiveTests(unittest.TestCase):
         for offset, fmt, value in ((18, "<H", 183), (16, "<H", 3), (20, "<I", 0),
                                    (52, "<H", 0), (54, "<H", 0), (56, "<H", 0),
                                    (32, "<Q", 999), (64, "<I", 2), (64, "<I", 3),
-                                   (64, "<I", 0), (72, "<Q", 999), (96, "<Q", 1)):
+                                   (64, "<I", 0), (68, "<I", 4), (24, "<Q", 0),
+                                   (72, "<Q", 999), (96, "<Q", 0), (96, "<Q", 121)):
             altered = bytearray(elf())
             struct.pack_into(fmt, altered, offset, value)
             with self.subTest(offset=offset, value=value), self.assertRaises(ValueError):

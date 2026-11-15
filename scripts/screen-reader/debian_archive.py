@@ -100,22 +100,23 @@ def verify_static_amd64(data):
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("not little-endian ELF64")
     kind, machine, version = struct.unpack_from("<HHI", data, 16)
-    phoff = struct.unpack_from("<Q", data, 32)[0]
+    entry, phoff = struct.unpack_from("<QQ", data, 24)
     ehsize, phentsize, phnum = struct.unpack_from("<HHH", data, 52)
     if (kind != 2 or machine != 62 or version != 1 or ehsize != 64 or phentsize != 56
             or not 0 < phnum <= 128 or phoff < 64 or phoff + phentsize * phnum > len(data)):
         raise ValueError("unexpected ELF header")
-    load = False
+    executable_entry = False
     for index in range(phnum):
         pos = phoff + index * phentsize
-        segment_type = struct.unpack_from("<I", data, pos)[0]
+        segment_type, flags = struct.unpack_from("<II", data, pos)
         if segment_type in (2, 3):
             raise ValueError("ELF has dynamic segment or interpreter")
         if segment_type == 1:
-            offset = struct.unpack_from("<Q", data, pos + 8)[0]
+            offset, vaddr = struct.unpack_from("<QQ", data, pos + 8)
             filesz, memsz = struct.unpack_from("<QQ", data, pos + 32)
-            if filesz > memsz or offset + filesz > len(data):
+            if filesz > memsz or offset + filesz > len(data) or vaddr + memsz > 2**64:
                 raise ValueError("invalid ELF load segment")
-            load = True
-    if not load:
-        raise ValueError("ELF has no load segment")
+            if flags & 1 and vaddr <= entry < vaddr + filesz:
+                executable_entry = True
+    if not executable_entry:
+        raise ValueError("ELF entry is not in an executable file-backed segment")
