@@ -25,6 +25,13 @@ test('lists an encoded page with opaque keys and continuation token', async () =
   assert.equal(calls, 1);
 });
 
+test('decodes spaces and literal pluses in listed keys without changing cursors', async () => {
+  const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(page(
+    '<Contents><Key>a+b%2Bc%20d</Key></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>next+%2B</NextContinuationToken>'
+  )) });
+  assert.deepEqual(await listing.objects(), { keys: ['a b+c d'], nextContinuationToken: 'next+%2B' });
+});
+
 test('rejects ambiguous, invalid or non-advancing pages', async () => {
   for (const body of [
     page('<IsTruncated>true</IsTruncated>'),
