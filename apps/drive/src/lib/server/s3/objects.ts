@@ -4,7 +4,14 @@ import { createS3Transport } from './transport';
 export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
   const request = createS3Transport(...args);
 
+  function validateKey(key: string) {
+    if (!key || key.split('/').some((segment) => segment === '.' || segment === '..')) {
+      throw new Error('Invalid S3 object key');
+    }
+  }
+
   async function mutate(method: 'PUT' | 'DELETE', key: string, body?: Uint8Array, signal?: AbortSignal) {
+    validateKey(key);
     if (body && body.byteLength > 16 * 1024 * 1024) throw new Error('S3 request body exceeds part limit');
     if (signal?.aborted) throw new Error('S3 request cancelled');
     let response: Awaited<ReturnType<typeof request>>;
@@ -24,6 +31,7 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
     put(key: string, body: Uint8Array, signal?: AbortSignal) { return mutate('PUT', key, body, signal); },
     delete(key: string, signal?: AbortSignal) { return mutate('DELETE', key, undefined, signal); },
     async head(key: string, options: { signal?: AbortSignal; ifMatch?: string; ifNoneMatch?: string } = {}) {
+      validateKey(key);
       const headers = new Headers();
       if (options.ifMatch !== undefined) headers.set('if-match', options.ifMatch);
       if (options.ifNoneMatch !== undefined) headers.set('if-none-match', options.ifNoneMatch);

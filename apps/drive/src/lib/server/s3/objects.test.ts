@@ -88,6 +88,10 @@ test('HEAD cancels without exposing abort reasons and rejects unsafe dot segment
   const controller = new AbortController();
   controller.abort(new Error('secret reason'));
   await assert.rejects(objects.head('key', { signal: controller.signal }), { message: 'S3 request cancelled' });
-  await assert.rejects(objects.head('a/../b'), { message: 'S3 request failed' });
+  for (const key of ['', 'a/../b', 'a/./b']) {
+    await assert.rejects(objects.head(key), { message: 'Invalid S3 object key' });
+    await assert.rejects(objects.delete(key), { message: 'Invalid S3 object key' });
+    await assert.rejects(objects.put(key, new Uint8Array()), { message: 'Invalid S3 object key' });
+  }
   assert.equal(calls, 0);
 });
