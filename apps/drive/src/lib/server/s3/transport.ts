@@ -3,6 +3,10 @@ import { createS3Signer } from './signer';
 
 const MAX_PART_BYTES = 16 * 1024 * 1024;
 const EMPTY_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const viewByteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!;
+const viewByteOffset = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteOffset')!.get!;
+const viewBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!;
 
 type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date };
 type Operation = {
@@ -58,7 +62,9 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
       throw new Error('Unsupported S3 object key');
     }
-    const bodyLength = inputBody?.byteLength;
+    const bodyLength = inputBody && viewByteLength.call(inputBody) as number | undefined;
+    const bodyOffset = inputBody && viewByteOffset.call(inputBody) as number | undefined;
+    const bodyBuffer = inputBody && viewBuffer.call(inputBody) as ArrayBufferLike | undefined;
     if (inputBody && (bodyLength === undefined || !Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_PART_BYTES)) {
       throw new Error('S3 request body exceeds part limit');
     }
@@ -68,7 +74,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
     // Snapshot once before hashing: the signer takes its own snapshot for the signed Request.
-    const body = inputBody && new Uint8Array(new Uint8Array(inputBody.buffer, inputBody.byteOffset, bodyLength));
+    const body = bodyBuffer && new Uint8Array(new Uint8Array(bodyBuffer, bodyOffset, bodyLength));
     if (body && (body.byteLength !== bodyLength || body.byteLength > MAX_PART_BYTES)) {
       throw new Error('S3 request body exceeds part limit');
     }
