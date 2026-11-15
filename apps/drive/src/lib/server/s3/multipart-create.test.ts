@@ -30,9 +30,11 @@ test('accepts XML declaration, namespace spacing and opaque CDATA', async () => 
 });
 
 test('accepts namespace prefixes and comments without changing the upload ID', async () => {
-  const xml = '<!--before--><s:InitiateMultipartUploadResult xmlns:s="http://s3.amazonaws.com/doc/2006-03-01/"><!--child--><s:UploadId>one<!-- comment &unknown; -->two<![CDATA[<!--literal-->]]></s:UploadId></s:InitiateMultipartUploadResult><!--after-->';
-  const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
-  assert.deepEqual(await create('key'), { uploadId: 'onetwo<!--literal-->' });
+  for (const prefix of ['s', 'é', '名', 'á']) {
+    const xml = `<!--before--><${prefix}:InitiateMultipartUploadResult xmlns:${prefix}="http://s3.amazonaws.com/doc/2006-03-01/"><!--child--><${prefix}:UploadId>one<!-- comment &unknown; -->two<![CDATA[<!--literal-->]]></${prefix}:UploadId></${prefix}:InitiateMultipartUploadResult><!--after-->`;
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () => new Response(xml) });
+    assert.deepEqual(await create('key'), { uploadId: 'onetwo<!--literal-->' });
+  }
 });
 
 test('reports uncertain allocations without exposing provider details or retrying', async () => {
@@ -60,6 +62,8 @@ test('rejects malformed, oversized and ambiguous response bodies', async () => {
     '<InitiateMultipartUploadResult><UploadId>&unknown;</UploadId></InitiateMultipartUploadResult>',
     '<s:InitiateMultipartUploadResult><s:UploadId>id</s:UploadId></s:InitiateMultipartUploadResult>',
     '<s:InitiateMultipartUploadResult xmlns:s="urn:wrong"><s:UploadId>id</s:UploadId></s:InitiateMultipartUploadResult>',
+    '<é:InitiateMultipartUploadResult xmlns:é="urn:wrong"><é:UploadId>id</é:UploadId></é:InitiateMultipartUploadResult>',
+    '<InitiateMultipartUploadResult><UploadId >id</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>a<!--bad--comment-->b</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>' + '<![CDATA['.repeat(5000) + '</UploadId></InitiateMultipartUploadResult>',
     '<InitiateMultipartUploadResult><UploadId>secret</UploadId></InitiateMultipartUploadResult>trailing',

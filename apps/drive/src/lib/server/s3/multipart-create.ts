@@ -27,7 +27,7 @@ function uploadIdFromResponse(body: Uint8Array): string {
   if (!xmlChars.test(xml) || markup.includes(']]>') || /<!|<\?(?!xml\s)/i.test(markup) || /&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(markup)) return invalid();
   // Only XML whitespace is valid between tag names and delimiters.
   for (const tag of markup.match(/<[^>]*>/g) ?? []) {
-    if (/[^\x00-\x7f]/.test(tag)) return invalid();
+    if (/[^\S\x20\x09\x0a\x0d]/u.test(tag.replace(/"[^"]*"|'[^']*'/g, ''))) return invalid();
   }
   for (const match of markup.matchAll(/&#(x[0-9a-fA-F]+|[0-9]+);/g)) {
     const code = match[1].startsWith('x') ? parseInt(match[1].slice(1), 16) : Number(match[1]);
@@ -35,7 +35,10 @@ function uploadIdFromResponse(body: Uint8Array): string {
   }
   const declaration = /^[\x20\x09\x0a\x0d]*(?:<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>)?/;
   const content = markup.replace(declaration, '');
-  if (!/^[\x20\x09\x0a\x0d]*<((?:[A-Za-z_][\w.-]*:)?InitiateMultipartUploadResult)(?:[\x20\x09\x0a\x0d]+xmlns(?::[A-Za-z_][\w.-]*)?[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"[^"]*"|'[^']*'))*[\x20\x09\x0a\x0d]*>[\s\S]*<\/\1[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(content)) return invalid();
+  const nameStart = String.raw`A-Z_a-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\u{10000}-\u{effff}`;
+  const prefix = `[${nameStart}][${nameStart}0-9.\\-\\u00b7\\u0300-\\u036f\\u203f-\\u2040]*`;
+  const envelope = new RegExp(String.raw`^[\x20\x09\x0a\x0d]*<((?:${prefix}:)?InitiateMultipartUploadResult)(?:[\x20\x09\x0a\x0d]+xmlns(?::${prefix})?[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"[^"]*"|'[^']*'))*[\x20\x09\x0a\x0d]*>[\s\S]*<\/\1[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$`, 'u');
+  if (!envelope.test(content)) return invalid();
   let document: Document;
   try {
     document = new DOMParser({ onError: () => { throw new Error('Invalid XML'); } }).parseFromString(xml.trimStart(), 'application/xml') as unknown as Document;
