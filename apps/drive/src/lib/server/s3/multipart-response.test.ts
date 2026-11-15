@@ -55,6 +55,11 @@ test('rejects a bounded unterminated run of CDATA openers', () => {
   assert.throws(() => parse(bytes(xml)), /Invalid S3 multipart completion response/);
 });
 
+test('rejects bounded unterminated ordinary markup before a complete CDATA section', () => {
+  const xml = `<Error><Code>${'<'.repeat(64000)}<![CDATA[x]]></Code></Error>`;
+  assert.throws(() => parse(bytes(xml)), /Invalid S3 multipart completion response/);
+});
+
 test('rejects malformed, ambiguous, and unsupported documents', () => {
   for (const xml of [
     '', '<CompleteMultipartUploadResult/>', '<Error/>', '<Error><Code> </Code></Error>',

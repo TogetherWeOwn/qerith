@@ -35,7 +35,14 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   if (ordinary.some((part) => part.includes(']]>'))) return invalid();
   // Do not let the XML parser accept non-XML whitespace within tag markup.
   for (const part of ordinary) {
-    for (const [tag] of part.matchAll(/<[^>]*>/g)) {
+    let position = 0;
+    while (true) {
+      const start = part.indexOf('<', position);
+      if (start < 0) break;
+      const end = part.indexOf('>', start + 1);
+      if (end < 0) return invalid();
+      const tag = part.slice(start, end + 1);
+      position = end + 1;
       if (tag.startsWith('<?xml') && source.startsWith(tag)) continue;
       if (!/^<\/?[A-Za-z][A-Za-z0-9]*(?:[\x20\x09\x0a\x0d]+xmlns[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/"|'http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/'))?[\x20\x09\x0a\x0d]*\/?>$/.test(tag)) return invalid();
     }
