@@ -62,6 +62,10 @@ wait_ready() {
   for _ in $(seq 1 60); do
     kill -0 "$ORCA_PID"; kill -0 "$BROWSER_PID"
     if python3 -I "$telemetry" "$EVIDENCE_DIR/browser.log" "$1"; then
+      if [ "$1" = document ] && ! grep -F 'WEB: Updating loading state and resetting live regions' "$EVIDENCE_DIR/orca.log" >/dev/null; then
+        sleep 0.2
+        continue
+      fi
       if [ "$1" != button ] || grep -E 'SPEECH OUTPUT:.*Announce test message|SPEECH DISPATCHER: Speaking.*Announce test message' "$EVIDENCE_DIR/orca.log" >/dev/null; then
         return 0
       fi
