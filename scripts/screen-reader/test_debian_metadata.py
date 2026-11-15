@@ -34,7 +34,13 @@ class MetadataTests(unittest.TestCase):
                   "Filename: pool/main/b/busybox/example.deb\nSize: 5\nSHA256: " + "b" * 64 + "\n")
         args = ("busybox-static", "1:1.35.0-4+deb12u1+b1", "amd64")
         self.assertEqual(package_entry(record.encode(), *args), ("pool/main/b/busybox/example.deb", 5, "b" * 64))
-        for bad in (record + "\n" + record, record + "Size: 6\n", record.replace("amd64", "arm64"), record.replace("/example", "/../example")):
+        other = record.replace("busybox-static", "other")
+        self.assertEqual(package_entry((other + "\n" + record).replace("\n", "\r\n").encode(), *args),
+                         ("pool/main/b/busybox/example.deb", 5, "b" * 64))
+        bad_records = (record + "\n" + record, record + "Size: 6\n", record + "size: 6\n",
+                       record.replace("Size: 5\n", "Size: 5\n 6\n"), record.replace("amd64", "arm64"),
+                       record.replace("/example", "/../example"), record.replace("/example", "/%2e%2e/example"))
+        for bad in bad_records:
             with self.subTest(bad=bad), self.assertRaises(InvalidMetadata):
                 package_entry(bad.encode(), *args)
 

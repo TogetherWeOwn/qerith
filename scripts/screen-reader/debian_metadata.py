@@ -54,20 +54,27 @@ def decompress_index(data, limit):
 
 def package_entry(index, package, version, architecture):
     """Return the unique exact package record; reject ambiguous fields."""
-    text = index.decode("utf-8", "strict")
+    text = index.decode("utf-8", "strict").replace("\r\n", "\n")
     matches = []
+    critical = {"package", "version", "architecture", "size", "sha256", "filename"}
     for paragraph in re.split(r"\n[ \t]*\n", text):
         fields = {}
+        key = None
         for line in paragraph.splitlines():
-            if not line or line[0] in " \t":
+            if not line:
+                continue
+            if line[0] in " \t":
+                if key is None or key in critical:
+                    raise InvalidMetadata("invalid field continuation")
                 continue
             if ": " not in line:
                 raise InvalidMetadata("invalid package field")
             key, value = line.split(": ", 1)
+            key = key.lower()
             if key in fields:
                 raise InvalidMetadata("duplicate package field")
             fields[key] = value
-        if (fields.get("Package"), fields.get("Version"), fields.get("Architecture")) == (
+        if (fields.get("package"), fields.get("version"), fields.get("architecture")) == (
             package,
             version,
             architecture,
@@ -76,9 +83,9 @@ def package_entry(index, package, version, architecture):
     if len(matches) != 1:
         raise InvalidMetadata("expected one package record")
     fields = matches[0]
-    size, digest, filename = (fields.get(key, "") for key in ("Size", "SHA256", "Filename"))
+    size, digest, filename = (fields.get(key, "") for key in ("size", "sha256", "filename"))
     if not size.isascii() or not size.isdigit() or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise InvalidMetadata("invalid package size or digest")
-    if not filename.startswith("pool/main/b/busybox/") or "/../" in filename:
+    if not re.fullmatch(r"pool/main/b/busybox/[A-Za-z0-9.+_~-]+\.deb", filename):
         raise InvalidMetadata("unexpected package path")
     return filename, int(size), digest
