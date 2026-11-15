@@ -18,12 +18,19 @@ export function parseMultipartCompletionResponse(body: Uint8Array): MultipartCom
   // Only XML 1.0 is supported; S3 may send XML whitespace before the declaration.
   const source = xml.replace(/^[\x20\x09\x0a\x0d]+/, '');
   if (/^<\?xml(?=[\x20\x09\x0a\x0d?])/.test(source) &&
-      !/^<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1/.test(source)) return invalid();
+      !/^<\?xml[\x20\x09\x0a\x0d]+version[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])1\.0\1(?:[\x20\x09\x0a\x0d]+encoding[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])[Uu][Tt][Ff]-8\2)?(?:[\x20\x09\x0a\x0d]+standalone[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(['"])(?:yes|no)\3)?[\x20\x09\x0a\x0d]*\?>/.test(source)) return invalid();
   // xmldom can discard non-XML whitespace after the document element.
   if (!/<\/(?:CompleteMultipartUploadResult|Error)[\x20\x09\x0a\x0d]*>[\x20\x09\x0a\x0d]*$/.test(source)) return invalid();
   // Preserve boundaries when excluding CDATA: a terminator spanning nodes is valid.
   const ordinary = source.split(/<!\[CDATA\[[\s\S]*?\]\]>/);
   if (ordinary.some((part) => part.includes(']]>'))) return invalid();
+  // Do not let the XML parser accept non-XML whitespace within tag markup.
+  for (const part of ordinary) {
+    for (const [tag] of part.matchAll(/<[^>]*>/g)) {
+      if (tag.startsWith('<?xml') && source.startsWith(tag)) continue;
+      if (!/^<\/?[A-Za-z][A-Za-z0-9]*(?:[\x20\x09\x0a\x0d]+xmlns[\x20\x09\x0a\x0d]*=[\x20\x09\x0a\x0d]*(?:"http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/"|'http:\/\/s3\.amazonaws\.com\/doc\/2006-03-01\/'))?[\x20\x09\x0a\x0d]*\/?>$/.test(tag)) return invalid();
+    }
+  }
   const references = ordinary.join(' ');
   if (/<!DOCTYPE/i.test(references)) return invalid();
   if (/&(?!(?:amp|lt|gt|quot|apos|#(?:[0-9]+|x[0-9a-fA-F]+));)/.test(references)) return invalid();

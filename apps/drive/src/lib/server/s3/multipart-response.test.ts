@@ -22,6 +22,7 @@ test('accepts keepalive whitespace, checksums, literal CDATA, and replacement ch
     checksums: { ChecksumCRC32: ' 123 ', ChecksumType: 'COMPOSITE' }
   });
   assert.equal(parse(bytes('<Error><Code>&#65533;</Code></Error>')).kind, 'error');
+  assert.equal(parse(bytes('<?xml version="1.0" encoding="uTf-8" standalone="yes"?><Error><Code>x</Code></Error>')).kind, 'error');
 });
 
 test('preserves XML 1.0 line characters in opaque values', () => {
@@ -40,7 +41,9 @@ test('enforces XML character data and structural whitespace', () => {
     '<CompleteMultipartUploadResult><ETag>"e"</ETag><Key>a]]>b</Key></CompleteMultipartUploadResult>',
     '<CompleteMultipartUploadResult><ETag>"e"</ETag>&#160;</CompleteMultipartUploadResult>',
     '<CompleteMultipartUploadResult><ETag>"e"</ETag></CompleteMultipartUploadResult> ',
-    '<?xml version="1.1"?><Error><Code>x</Code></Error>'
+    '<?xml version="1.1"?><Error><Code>x</Code></Error>',
+    '<?xml version="1.0" encoding="ISO-8859-1"?><Error><Code>é</Code></Error>',
+    '<CompleteMultipartUploadResult><ETag\u0080>"e"</ETag></CompleteMultipartUploadResult>'
   ]) assert.throws(() => parse(bytes(xml)), /Invalid S3 multipart completion response/, xml);
   for (const value of [']]&gt;', ']]<![CDATA[>]]>', '<![CDATA[]]]]>&gt;']) {
     assert.equal((parse(bytes(`<CompleteMultipartUploadResult> \n<ETag>"e"</ETag><Key>${value}</Key>\t</CompleteMultipartUploadResult>\r\n`)) as { key: string }).key, ']]>');
