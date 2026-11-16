@@ -55,7 +55,7 @@
     {/each}
   </tbody>
 </table>
-<ul class="mobile" bind:this={mobile} aria-label="Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.">
+<ul class="mobile" role="list" bind:this={mobile} aria-label="Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.">
   {#each items as item (item.id)}
     <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} data-item-id={item.id}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if} · <time datetime={item.modifiedAt}>{item.modified}</time></div></li>
   {/each}

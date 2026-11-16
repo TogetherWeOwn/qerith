@@ -162,6 +162,8 @@ try {
     if (width > 820) {
       assert.equal(await container.getByText('PDF', { exact: true }).count(), 1);
     } else {
+      assert.equal(await container.getAttribute('role'), 'list');
+      assert.equal(await container.getByRole('listitem').count(), 3);
       const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
       assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
     }
@@ -183,6 +185,29 @@ try {
       assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
     }
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    if (width !== 320) {
+      const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+      await page.screenshot({ path: resolve(output, `${size}-greyscale.png`) });
+      await greyscale.evaluate(el => el.remove());
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      const motion = await page.evaluate(() => ({
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length,
+        animatedElements: [...document.querySelectorAll('*')].filter(el => {
+          const style = getComputedStyle(el);
+          return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0);
+        }).length
+      }));
+      assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+      await page.screenshot({ path: resolve(output, `${size}-reduced-motion.png`) });
+      await page.emulateMedia({ forcedColors: 'active' });
+      assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+      const link = container.getByRole('link', { name: 'Archive' });
+      await link.focus();
+      assert.equal(await link.evaluate(el => el === document.activeElement), true);
+      await page.screenshot({ path: resolve(output, `${size}-forced-colours-focus.png`) });
+      await writeFile(resolve(output, `${size}-modes.json`), JSON.stringify({ motion, forcedColours: true, focused: 'Archive' }, null, 2));
+    }
     await context.close();
   }
   {
