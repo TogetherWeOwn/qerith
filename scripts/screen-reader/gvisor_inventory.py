@@ -129,19 +129,11 @@ def safe_path(name):
     return name
 
 
-def safe_symlink(path, target):
-    if not target or target.startswith("/"):
+def safe_symlink(target):
+    # Parent components can escape through another archive symlink even when
+    # lexical normalization alone would keep the target inside the root.
+    if not target or target.startswith("/") or ".." in target.split("/"):
         raise ValueError("unsafe symlink")
-    parts = [] if path == "." else path.split("/")[:-1]
-    for part in target.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not parts:
-                raise ValueError("symlink escapes archive")
-            parts.pop()
-        else:
-            parts.append(part)
     return target
 
 
@@ -189,7 +181,7 @@ def inventory_tar(f, member):
                 raise ValueError("unexpected tar member type")
             link = None
             if entry.type == tarfile.SYMTYPE:
-                link = safe_symlink(path, entry.linkname)
+                link = safe_symlink(entry.linkname)
             elif entry.type == tarfile.LNKTYPE:
                 link = safe_path(entry.linkname)
             print(json.dumps({"archive": name, "path": path, "type": types[entry.type],

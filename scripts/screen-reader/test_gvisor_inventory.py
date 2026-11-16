@@ -69,10 +69,14 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 inventory.inventory_tar(io.BytesIO(data + b"garbage"), ("data.tar.xz", 0, len(data) + 7))
 
-    def test_safe_relative_symlink(self):
-        data = archive("usr/bin/tool", tarfile.SYMTYPE, "../lib/tool")
+    def test_symlink_targets_reject_parent_components(self):
+        data = archive("usr/bin/tool", tarfile.SYMTYPE, "lib/tool")
         with patch("builtins.print"):
             inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
+        for target in ("../lib/tool", "a/../outside"):
+            data = archive("d/b", tarfile.SYMTYPE, target)
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
 
     def test_ar_builder_signature_is_opaque_and_ordered(self):
         def ar(entries):
