@@ -74,6 +74,43 @@ test('lists parts and validates pagination and part metadata', async () => {
   }
 });
 
+test('lists multipart uploads with opaque paired cursors', async () => {
+  let sent: Request | undefined;
+  const wrap = (content: string) => `<ListMultipartUploadsResult><EncodingType>url</EncodingType>${content}</ListMultipartUploadsResult>`;
+  const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
+    sent = input as Request;
+    return new Response(wrap('<IsTruncated>true</IsTruncated><NextKeyMarker>a+b%2B%2F%25</NextKeyMarker><NextUploadIdMarker>next+/=</NextUploadIdMarker><Upload><Key>a+b%2B%2F%25</Key><UploadId>next+/=</UploadId></Upload>'));
+  } });
+  assert.deepEqual(await listing.uploads({ keyMarker: 'old +', uploadIdMarker: 'old/id' }), {
+    uploads: [{ key: 'a b+/%', uploadId: 'next+/=' }], nextKeyMarker: 'a b+/%', nextUploadIdMarker: 'next+/='
+  });
+  const url = new URL(sent!.url);
+  assert.equal(url.searchParams.get('key-marker'), 'old +');
+  assert.equal(url.searchParams.get('upload-id-marker'), 'old/id');
+  for (const content of [
+    '<IsTruncated>true</IsTruncated><NextKeyMarker>old%20%2B</NextKeyMarker><NextUploadIdMarker>old/id</NextUploadIdMarker>',
+    '<IsTruncated>true</IsTruncated><NextKeyMarker>next</NextKeyMarker>',
+    '<IsTruncated>false</IsTruncated><Upload><Key>%FF</Key><UploadId>x</UploadId></Upload>'
+  ]) {
+    const bad = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(wrap(content)) });
+    await assert.rejects(bad.uploads({ keyMarker: 'old +', uploadIdMarker: 'old/id' }), { message: 'Invalid S3 listing response' });
+  }
+  await listing.uploads({ keyMarker: 'only' });
+  assert.equal(new URL(sent!.url).searchParams.get('key-marker'), 'only');
+  await assert.rejects(listing.uploads({ uploadIdMarker: 'only' }), { message: 'Invalid S3 listing cursor' });
+  const final = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
+    sent = input as Request;
+    return new Response(wrap('<IsTruncated>false</IsTruncated><NextKeyMarker/><NextUploadIdMarker/><Upload><Key>a%2F..%2Fb</Key><UploadId>../%2F</UploadId></Upload>'));
+  } });
+  assert.deepEqual(await final.uploads({ prefix: '../%2F', keyMarker: '../%2E', uploadIdMarker: '../%2F' }), {
+    uploads: [{ key: 'a/../b', uploadId: '../%2F' }], nextKeyMarker: undefined, nextUploadIdMarker: undefined
+  });
+  const finalUrl = new URL(sent!.url);
+  assert.equal(finalUrl.searchParams.get('prefix'), '../%2F');
+  assert.equal(finalUrl.searchParams.get('key-marker'), '../%2E');
+  assert.equal(finalUrl.searchParams.get('upload-id-marker'), '../%2F');
+});
+
 test('rejects unsupported addressed keys before transport', async () => {
   let calls = 0;
   const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async () => { calls++; return new Response(); } });
