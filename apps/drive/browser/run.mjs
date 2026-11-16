@@ -193,11 +193,9 @@ try {
     await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
     await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole('list').getByRole('link', { name: 'Résumé 2025.pdf' }).waitFor();
-    assert.equal(await page.getByRole('list').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el === document.activeElement), true);
+    await page.waitForFunction(() => document.activeElement?.matches('ul.mobile a') && document.activeElement.textContent === 'Résumé 2025.pdf');
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).waitFor();
-    assert.equal(await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el === document.activeElement), true);
+    await page.waitForFunction(() => document.activeElement?.matches('table.desktop a') && document.activeElement.textContent === 'Résumé 2025.pdf');
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
