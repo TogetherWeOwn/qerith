@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
-import { exerciseKeyboard, waitForFixture } from './scenario.mjs';
+import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
@@ -20,6 +20,8 @@ const axe = await readFile(createRequire(import.meta.url).resolve('axe-core/axe.
 const server = await createServer({
   configFile: false,
   root: resolve(here, 'fixture'),
+  tsconfig: resolve(here, 'fixture/tsconfig.json'),
+  optimizeDeps: { rolldownOptions: { tsconfig: resolve(here, 'fixture/tsconfig.json') } },
   plugins: [svelte()],
   server: { host: '127.0.0.1', port: 0, strictPort: false },
   logLevel: 'error'
@@ -30,32 +32,44 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
-  for (const [width, height] of [[1280, 800], [390, 844]]) {
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const state of states) {
+    const size = `${state}-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
-    await page.goto(origin, { waitUntil: 'networkidle' });
-    await waitForFixture(page);
-    await page.screenshot({ path: resolve(output, `${width}x${height}.png`) });
+    page.on('pageerror', error => console.error('Browser page error:', error));
+    page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
+    page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
+    await page.goto(`${origin}/?state=${state}`, { waitUntil: 'networkidle' });
+    await waitForFixture(page, state);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, {
       runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
     }));
-    await writeFile(resolve(output, `axe-${width}x${height}.json`), JSON.stringify(results, null, 2));
-    assert.equal(results.violations.length, 0, `axe violations at ${width}x${height}`);
-    const keyboard = await exerciseKeyboard(page);
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}`);
+    const keyboard = await exerciseKeyboard(page, state);
     const keyboardJson = JSON.stringify(keyboard, null, 2);
     const recordedKeyboard = keyboardJson && JSON.parse(keyboardJson);
     assert(recordedKeyboard && typeof recordedKeyboard === 'object' && Object.keys(recordedKeyboard).length, 'Keyboard evidence is required');
-    await writeFile(resolve(output, `keyboard-${width}x${height}.json`), keyboardJson);
+    await writeFile(resolve(output, `keyboard-${size}.json`), keyboardJson);
+    if (state === 'sign-in') {
+      const viewport = `${width}x${height}`;
+      await writeFile(resolve(output, `wait-tree-${viewport}.txt`), await exerciseWaitAnnouncement(page));
+      for (const prefix of ['', 'axe-', 'keyboard-']) {
+        const extension = prefix ? 'json' : 'png';
+        await copyFile(resolve(output, `${prefix}${size}.${extension}`), resolve(output, `${prefix}${viewport}.${extension}`));
+      }
+    }
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...[1280, 390].flatMap((width, i) => {
-    const size = `${width}x${[800, 844][i]}`;
+  for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+    const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
-  })]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
+  }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
 } finally {
   await browser?.close();
   await server.close();
