@@ -158,12 +158,19 @@ try {
     assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
-    assert.equal(await container.getByText('Shared', { exact: true }).count(), 1);
+    const tag = container.getByText('Shared', { exact: true });
+    assert.equal(await tag.count(), 1);
+    const tagStyle = await tag.evaluate(el => ({ transform: getComputedStyle(el).textTransform, shadow: getComputedStyle(el).boxShadow }));
+    assert.equal(tagStyle.transform, 'uppercase');
+    assert.notEqual(tagStyle.shadow, 'none');
+    assert.equal(await container.getByRole('link', { name: 'Archive' }).evaluate(el => getComputedStyle(el).fontWeight), '500');
     if (width > 820) {
       assert.equal(await container.getByText('PDF', { exact: true }).count(), 1);
     } else {
       assert.equal(await container.getAttribute('role'), 'list');
       assert.equal(await container.getByRole('listitem').count(), 3);
+      const folder = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Archive' }) });
+      assert.equal((await folder.locator('.details').textContent()).trim(), 'Folder · 14 Nov');
       const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
       assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
     }
