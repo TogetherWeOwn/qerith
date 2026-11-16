@@ -25,7 +25,15 @@ for (const kind of ['registration', 'authentication'] as const) {
 test('authentication rejects a credential ID mismatch', async () => {
   const data = await fixture('authentication');
   const verifier = createCeremonyVerifier(rpID, origin);
-  assert.throws(() => verifier.authentication(data.authentication, challenge, { ...data.credential, id: 'different' }), /Credential ID mismatch/);
+  await assert.rejects(verifier.authentication(data.authentication, challenge, { ...data.credential, id: 'different' }), /Credential ID mismatch/);
+});
+
+test('invalid client data rejects the returned promises', async () => {
+  const verifier = createCeremonyVerifier(rpID, origin);
+  const registration = await fixture('registration', { crossOrigin: true });
+  const authentication = await fixture('authentication', { crossOrigin: true });
+  await assert.rejects(verifier.registration(registration.registration, challenge), /Cross-origin/);
+  await assert.rejects(verifier.authentication(authentication.authentication, challenge, authentication.credential), /Cross-origin/);
 });
 
 test('relying party configuration cannot be request-shaped or insecure', () => {

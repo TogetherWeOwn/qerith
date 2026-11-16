@@ -25,14 +25,14 @@ export function createCeremonyVerifier(rpID: string, origin: string) {
   }
 
   return Object.freeze({
-    registration(response: RegistrationResponseJSON, expectedChallenge: string) {
+    async registration(response: RegistrationResponseJSON, expectedChallenge: string) {
       requireSameOrigin(response.response.clientDataJSON);
       return verifyRegistrationResponse({
         response, expectedChallenge, expectedOrigin: origin, expectedRPID: rpID,
         requireUserVerification: true,
       });
     },
-    authentication(response: AuthenticationResponseJSON, expectedChallenge: string, credential: WebAuthnCredential) {
+    async authentication(response: AuthenticationResponseJSON, expectedChallenge: string, credential: WebAuthnCredential) {
       requireSameOrigin(response.response.clientDataJSON);
       if (response.id !== credential.id) throw new Error('Credential ID mismatch');
       return verifyAuthenticationResponse({
