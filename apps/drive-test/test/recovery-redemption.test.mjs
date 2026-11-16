@@ -51,6 +51,42 @@ it('replaces credentials and sessions, fences login, and consumes competing toke
   await expect(redemption.redeem(issued.token, challenge, signed.registration)).rejects.toThrow();
 });
 
+it('invalidates links for every principal when the owner recovers', async () => {
+  const member = await prepared();
+  const issued = await recovery.issue(owner, 'owner');
+  const challenge = await challenges.issue(issued.token);
+  const signed = await fixture('registration', { challenge });
+  const db = {
+    prepare: sql => env.DB.prepare(sql),
+    async batch(statements) { return env.DB.batch(statements); },
+  };
+  const result = await new RecoveryRedemption(db, rpID, origin).redeem(issued.token, challenge, signed.registration);
+  expect(await sessions.lookup(result.token)).toEqual({ id: 'owner', role: 'owner' });
+  expect(await sessions.lookup(owner)).toBeNull();
+  expect((await env.DB.prepare('SELECT cancelled_at FROM drive_recovery_tokens WHERE id = ?').bind(member.issued.id).first()).cancelled_at).toBeGreaterThan(0);
+  expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(member.challenge).first()).toBeNull();
+  await expect(redemption.redeem(member.issued.token, member.challenge, member.signed.registration)).rejects.toThrow();
+});
+
+it('returns the session expiry from the transaction without a later read', async () => {
+  const { issued, challenge, signed } = await prepared();
+  let committed = false;
+  const db = {
+    prepare(sql) {
+      if (committed) throw new Error('post-commit read unavailable');
+      return env.DB.prepare(sql);
+    },
+    async batch(statements) {
+      const result = await env.DB.batch(statements);
+      committed = true;
+      return result;
+    },
+  };
+  const session = await new RecoveryRedemption(db, rpID, origin).redeem(issued.token, challenge, signed.registration);
+  expect(session.expiresAt).toBeGreaterThan(Date.now());
+  expect(await sessions.lookup(session.token)).toEqual({ id: 'member', role: 'member' });
+});
+
 it('fails closed if the token or challenge changes before commit', async () => {
   for (const state of ['cancelled', 'token-expired', 'challenge-expired', 'replaced', 'revoked', 'reactivated']) {
     const { issued, challenge, signed } = await prepared();

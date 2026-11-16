@@ -7,7 +7,7 @@ interface Statement {
 }
 interface Database {
   prepare(sql: string): Statement;
-  batch(statements: Statement[]): Promise<{ meta: { changes: number } }[]>;
+  batch(statements: Statement[]): Promise<{ meta: { changes: number }; results?: { expires_at: number }[] }[]>;
 }
 
 // Recovery replaces every existing credential, invalidates all old sessions and
@@ -53,7 +53,7 @@ export class RecoveryRedemption {
     const marker = [context, challenge, sessionHash, recoveryHash] as const;
     const batch = await this.db.batch([
       this.db.prepare(`INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
-        SELECT ?, principal_id, CAST(unixepoch('subsec') * 1000 AS INTEGER) + 43200000 FROM (${eligible})`)
+        SELECT ?, principal_id, CAST(unixepoch('subsec') * 1000 AS INTEGER) + 43200000 FROM (${eligible}) RETURNING expires_at`)
         .bind(sessionHash, ...bound),
       this.db.prepare(`DELETE FROM drive_credentials WHERE principal_id IN (${target})`).bind(...marker),
       this.db.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports)
@@ -66,8 +66,10 @@ export class RecoveryRedemption {
       this.db.prepare(`DELETE FROM drive_bound_ceremonies WHERE purpose = 'authentication' AND EXISTS (${target})`)
         .bind(...marker),
       this.db.prepare(`UPDATE drive_recovery_tokens SET cancelled_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-        WHERE token_hash != ? AND cancelled_at IS NULL AND redeemed_at IS NULL AND principal_id IN (${target})`)
-        .bind(recoveryHash, ...marker),
+        WHERE token_hash != ? AND cancelled_at IS NULL AND redeemed_at IS NULL
+          AND (principal_id IN (${target}) OR EXISTS (SELECT 1 FROM drive_principals
+            WHERE role = 'owner' AND id IN (${target})))`)
+        .bind(recoveryHash, ...marker, ...marker),
       this.db.prepare(`UPDATE drive_recovery_tokens SET redeemed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
         WHERE token_hash = ? AND principal_id IN (${target})`).bind(recoveryHash, ...marker),
     ]);
@@ -75,8 +77,7 @@ export class RecoveryRedemption {
     if (batch[0].meta.changes !== 1 || batch[2].meta.changes !== 1 || batch[4].meta.changes !== 1 || batch[7].meta.changes < 1) {
       throw new Error('Recovery unavailable');
     }
-    const session = await this.db.prepare('SELECT expires_at FROM drive_sessions WHERE token_hash = ?')
-      .bind(sessionHash).first<{ expires_at: number }>();
+    const session = batch[0].results?.[0];
     if (!session) throw new Error('Recovery unavailable');
     return { token: sessionToken, expiresAt: session.expires_at };
   }
