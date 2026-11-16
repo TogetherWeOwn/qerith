@@ -47,7 +47,7 @@ export class OwnerBootstrap {
         AND EXISTS (SELECT 1 FROM drive_principals WHERE id = ?)`)
         .bind(context, challenge, principal),
     ]);
-    if (batch[0].meta.changes !== 1) throw new Error('Owner or challenge unavailable');
+    if (batch[1].meta.changes !== 1) throw new Error('Owner or challenge unavailable');
     return principal;
   }
 }
