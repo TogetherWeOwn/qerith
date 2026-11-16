@@ -92,6 +92,32 @@ class LimitedReader:
         return data
 
 
+class XzReader:
+    def __init__(self, source):
+        self.source = source
+        self.decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=256 * 1024 * 1024)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def read(self, size):
+        parts = []
+        remaining = size
+        while remaining and not self.decoder.eof:
+            data = self.source.read(65536) if self.decoder.needs_input else b""
+            if not data and self.decoder.needs_input:
+                raise ValueError("truncated xz stream")
+            chunk = self.decoder.decompress(data, max_length=remaining)
+            parts.append(chunk)
+            remaining -= len(chunk)
+        if self.decoder.eof and (self.decoder.unused_data or self.source.remaining):
+            raise ValueError("unexpected xz trailing data")
+        return b"".join(parts)
+
+
 def safe_path(name):
     if name == "." or name == "./":
         return "."
@@ -101,12 +127,28 @@ def safe_path(name):
     return name
 
 
+def safe_symlink(path, target):
+    if not target or target.startswith("/"):
+        raise ValueError("unsafe symlink")
+    parts = [] if path == "." else path.split("/")[:-1]
+    for part in target.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError("symlink escapes archive")
+            parts.pop()
+        else:
+            parts.append(part)
+    return target
+
+
 def inventory_tar(f, member):
     name, start, size = member
     f.seek(start)
     source = LimitedReader(f, size)
     stream = (gzip.GzipFile(fileobj=source, mode="rb") if name.endswith(".gz")
-              else lzma.LZMAFile(source, "rb"))
+              else XzReader(source))
     seen, count, total, zero = set(), 0, 0, 0
     with stream:
         def read_exact(length):
@@ -143,7 +185,11 @@ def inventory_tar(f, member):
                      tarfile.SYMTYPE: "symlink", tarfile.LNKTYPE: "hardlink"}
             if entry.type not in types or (entry.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) and entry.size):
                 raise ValueError("unexpected tar member type")
-            link = safe_path(entry.linkname) if entry.type in (tarfile.SYMTYPE, tarfile.LNKTYPE) else None
+            link = None
+            if entry.type == tarfile.SYMTYPE:
+                link = safe_symlink(path, entry.linkname)
+            elif entry.type == tarfile.LNKTYPE:
+                link = safe_path(entry.linkname)
             print(json.dumps({"archive": name, "path": path, "type": types[entry.type],
                               "size": entry.size, "link": link}, ensure_ascii=True, sort_keys=True))
             remaining = (entry.size + 511) // 512 * 512

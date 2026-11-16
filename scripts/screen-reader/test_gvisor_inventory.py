@@ -1,5 +1,6 @@
 import gzip
 import io
+import lzma
 import tarfile
 import unittest
 from pathlib import Path
@@ -59,6 +60,18 @@ class InventoryTests(unittest.TestCase):
             inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
             self.assertEqual(log.call_count, 1)
         with patch.object(inventory, "MAX_TAR", 1024), self.assertRaises(ValueError):
+            inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
+
+    def test_xz_rejects_trailing_data(self):
+        data = lzma.compress(gzip.decompress(archive()))
+        with patch("builtins.print"):
+            inventory.inventory_tar(io.BytesIO(data), ("data.tar.xz", 0, len(data)))
+            with self.assertRaises(ValueError):
+                inventory.inventory_tar(io.BytesIO(data + b"garbage"), ("data.tar.xz", 0, len(data) + 7))
+
+    def test_safe_relative_symlink(self):
+        data = archive("usr/bin/tool", tarfile.SYMTYPE, "../lib/tool")
+        with patch("builtins.print"):
             inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
 
     def test_invalid_ar_rejected(self):
