@@ -1,9 +1,12 @@
 <script>
-  let activated = $state(false);
+  import SignInPage from '../../src/lib/SignInPage.svelte';
+
+  let requests = $state(0);
+  let cancellations = $state(0);
+  let signInState = $state(new URLSearchParams(window.location.search).get('state') || 'sign-in');
+  window.addEventListener('fixture-wait', () => { signInState = 'waiting'; });
+  window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-<main>
-  <h1>Browser evidence fixture</h1>
-  <button onclick={() => activated = true}>Activate fixture</button>
-  <p role="status">{activated ? 'Activated' : 'Not activated'}</p>
-</main>
+<SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
+<output hidden data-requests={requests} data-cancellations={cancellations}></output>

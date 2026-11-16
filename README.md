@@ -1,6 +1,32 @@
 # qerith
 
-Rust workspace for Qerith, built on the shared
+## Direction: a private drive
+
+Qerith's intended direction is a private drive for an owner and invited users,
+using standard outbound S3-compatible object storage. The intended experience
+includes invite-gated access, resumable large uploads and downloads, folders,
+and read-only sharing with invited users.
+
+This is direction, not a release commitment or schedule. It does not claim
+that these capabilities have shipped or passed staging qualification. Public
+signup, public links, billing, inbound S3 emulation, NNTP and archive capability
+are not goals of the private drive's initial scope.
+
+Last reviewed: 2026-11-16. Questions and feedback: [GitHub issues](https://github.com/TogetherWeOwn/qerith/issues).
+
+## Legacy and reference material
+
+The sections below document existing Rust workspace and protocol work. They are
+preserved as legacy/reference material, not the private drive's runtime or
+roadmap. The [archive adapter](docs/s3-archive-adapter.md),
+[adapter parity](docs/archive-adapter-parity.md), and
+[synthetic client qualification](docs/archive-client-qualification.md)
+describe historical archive work and its limits, not private drive features.
+The [D1 test fixture](apps/drive-test/README.md) and
+[browser evidence fixture](apps/drive/browser/README.md) have their own
+narrow test-only scopes; neither establishes deployed drive qualification.
+
+The Rust workspace was built on the shared
 [velmora](https://github.com/TogetherWeOwn/velmora) Usenet engine.
 
 | Crate | Library | What |
@@ -25,9 +51,9 @@ forward to the same velmora features. The dev-dependency
 pinned to the same rev, and `Cargo.lock` records that exact commit for
 both. `deny.toml` allows exactly this one git source.
 
-Qerith does not build on `velmora::decrypt` (rclone-crypt). Its replacement
-STREAM format lands in velmora first, and Qerith moves to that pin once it
-merges.
+This workspace does not build on `velmora::decrypt` (rclone-crypt). Earlier
+engine planning described a replacement STREAM format; that history is not
+a commitment for the private drive.
 
 ### Bumping the pin
 

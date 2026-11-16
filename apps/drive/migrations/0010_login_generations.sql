@@ -1,5 +1,5 @@
--- Invalidates in-flight verified logins when membership is disabled, including
--- when the member is re-enabled before the login commits.
+-- A future login boundary must compare this generation when committing a login.
+-- Status changes rotate it even if a member is subsequently re-enabled.
 CREATE TABLE drive_login_generations (
   principal_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_principals(id) ON DELETE CASCADE,
   generation TEXT NOT NULL CHECK (length(generation) = 64)
