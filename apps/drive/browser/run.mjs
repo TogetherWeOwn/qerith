@@ -163,8 +163,8 @@ try {
     if (width === 390) {
       const triggerSize = await trigger.evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight, icon: el.querySelector('svg').getBoundingClientRect().width }));
       assert.deepEqual(triggerSize, { width: 44, height: 44, icon: 20 });
-      const sheet = await menu.evaluate(el => ({ maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el, '::backdrop').backgroundColor, blur: getComputedStyle(el, '::backdrop').backdropFilter }));
-      assert.deepEqual(sheet, { maxHeight: `${height * 0.9}px`, backdrop: 'rgba(28, 22, 20, 0.94)', blur: 'blur(14px)' });
+      const sheet = await menu.evaluate(el => ({ width: el.getBoundingClientRect().width, maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el, '::backdrop').backgroundColor, blur: getComputedStyle(el, '::backdrop').backdropFilter }));
+      assert.deepEqual(sheet, { width, maxHeight: `${height * 0.9}px`, backdrop: 'rgba(28, 22, 20, 0.94)', blur: 'blur(14px)' });
     }
     assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
