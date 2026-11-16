@@ -26,8 +26,11 @@ it('verifies and atomically persists exactly one competing redemption', async ()
   const principal = attempts.find(({ status }) => status === 'fulfilled').value;
   expect(await env.DB.prepare('SELECT role, status FROM drive_principals WHERE id = ?').bind(principal).first())
     .toEqual({ role: 'member', status: 'active' });
-  expect(await env.DB.prepare('SELECT principal_id, counter FROM drive_credentials WHERE id = ?').bind(signed.registration.id).first())
-    .toEqual({ principal_id: principal, counter: 1 });
+  const credential = await env.DB.prepare('SELECT principal_id, public_key, counter, transports FROM drive_credentials WHERE id = ?').bind(signed.registration.id).first();
+  expect(credential.principal_id).toBe(principal);
+  expect(Array.from(credential.public_key)).toEqual(Array.from(signed.credential.publicKey));
+  expect(credential.counter).toBe(1);
+  expect(JSON.parse(credential.transports)).toEqual([]);
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(invite.id).first()).redeemed_at).toBeGreaterThan(0);
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(0);
   await expect(enrollment.issueChallenge(invite.token)).rejects.toThrow();
