@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gvisor_inventory as inventory
+from test_gvisor_extract import ExtractionTests
 
 
 def archive(name="./file", kind=tarfile.REGTYPE, link=""):
