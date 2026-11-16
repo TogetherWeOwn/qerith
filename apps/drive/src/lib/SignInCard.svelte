@@ -31,7 +31,7 @@
       on:click={() => requestSignIn(state, onSignIn)}
     >{#if state !== 'waiting' && state !== 'rate-limited'}<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 1 1-2 2-1-1-3 3"/></svg>{/if}{copy.action}</button>
   {/if}
-  <p class:notice={state === 'waiting' || state === 'unsupported' || state === 'rate-limited'} class:warn={state === 'unsupported'} role="status" aria-live="polite">{state === 'waiting' || state === 'unsupported' || state === 'rate-limited' ? copy.notice : ''}</p>
+  <p class:notice={state === 'waiting' || state === 'unsupported' || state === 'rate-limited'} class:warn={state === 'unsupported'} class:sr-only={state === 'revoked'} role="status" aria-live="polite">{state === 'revoked' ? `${copy.title}. ${copy.body}` : state === 'waiting' || state === 'unsupported' || state === 'rate-limited' ? copy.notice : ''}</p>
   {#if copy.notice && (state === 'cancelled' || state === 'no-passkey')}
     <p class="notice" role="alert">{copy.notice}</p>
   {/if}
@@ -61,6 +61,7 @@
   button.quiet { background: var(--drive-color-bg-raised); color: var(--drive-color-text-tertiary); }
   button.cancel { width: auto; background: transparent; color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-small); text-decoration: underline; }
   p[role='status']:empty { margin: 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   .notice { padding: var(--drive-space-4); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); color: var(--drive-color-text-primary); font-size: var(--drive-font-size-ui); }
   .notice.warn { background: var(--drive-color-state-warn-bg); }
   svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }

@@ -70,6 +70,13 @@ export async function exerciseWaitAnnouncement(page) {
   await session.detach();
   const result = nodes.find(node => node.role?.value === 'heading' && node.name?.value === 'Your access is turned off');
   assert.match(result?.description?.value || '', /The owner turned off your access to Drive/);
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture-wait')));
+  await page.locator('body').click({ position: { x: 1, y: 1 } });
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'BODY');
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('fixture-state', { detail: 'revoked' })));
+  assert.equal(await status.textContent(), 'Your access is turned off. The owner turned off your access to Drive. Your files are kept. Ask them if you think this is a mistake.');
+  assert.match(await status.ariaSnapshot(), /Your access is turned off/);
+  assert.match(await status.ariaSnapshot(), /The owner turned off your access to Drive/);
   return tree;
 }
 
