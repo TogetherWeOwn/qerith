@@ -93,6 +93,8 @@ def inspect(data):
             raise ValueError("invalid or oversized tar trailing data")
         if not chunk:
             break
+    if total % 512:
+        raise ValueError("partial tar trailing block")
     return records, total
 
 

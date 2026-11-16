@@ -51,6 +51,14 @@ class FramingTests(unittest.TestCase):
             with self.subTest(length=len(data)), self.assertRaises(ValueError):
                 framing.inspect(gzip.compress(data, mtime=0))
 
+    def test_tar_trailing_zero_blocks_must_be_complete(self):
+        valid = archive()
+        with self.assertRaisesRegex(ValueError, "partial tar trailing block"):
+            framing.inspect(gzip.compress(valid + b"\0", mtime=0))
+        records, size = framing.inspect(gzip.compress(valid + bytes(512), mtime=0))
+        self.assertEqual(records[0]["path"], "usr/bin/runsc")
+        self.assertEqual(size, len(valid) + 512)
+
     def test_caps_and_duplicate_paths(self):
         output = io.BytesIO()
         with tarfile.open(fileobj=output, mode="w") as tar:
