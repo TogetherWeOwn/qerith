@@ -140,6 +140,59 @@ try {
     }
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const variant of ['file', 'folder', 'shared']) {
+    const size = `menu-${variant}-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    page.on('pageerror', error => console.error('Browser page error:', error));
+    page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
+    page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
+    await page.goto(`${origin}/?menu=${variant}`, { waitUntil: 'networkidle' });
+    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    await menu.waitFor();
+    const items = menu.getByRole('menuitem');
+    const expected = variant === 'shared' ? ['Download', 'Details'] : variant === 'folder' ? ['Share', 'Rename', 'Move', 'Details', 'Delete'] : ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete'];
+    assert.deepEqual(await items.allTextContents().then(values => values.map(value => value.trim())), expected);
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
+    await page.keyboard.press('End');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Home');
+    await page.keyboard.press('d');
+    assert.equal(await page.getByRole('menuitem', { name: 'Details' }).evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Tab');
+    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    await trigger.click();
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.getByRole('button', { name: 'Sample file', exact: true }).evaluate(el => el === document.activeElement), true);
+    await page.getByRole('button', { name: 'Sample file', exact: true }).click({ button: 'right' });
+    await menu.waitFor();
+    await page.getByRole('menuitem', { name: 'Details' }).focus();
+    await page.keyboard.press('Space');
+    assert.equal(await page.getByText('Details', { exact: true }).count(), 1);
+    assert.equal(await menu.count(), 0);
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details' }, null, 2));
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
