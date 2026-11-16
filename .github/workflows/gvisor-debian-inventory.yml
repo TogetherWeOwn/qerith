@@ -6,6 +6,8 @@ on:
       - '.github/workflows/gvisor-debian-inventory.yml'
       - 'scripts/screen-reader/gvisor_inventory.py'
       - 'scripts/screen-reader/test_gvisor_inventory.py'
+      - 'scripts/screen-reader/gvisor_extract.py'
+      - 'scripts/screen-reader/test_gvisor_extract.py'
       - 'scripts/screen-reader/gvisor_companions.py'
       - 'scripts/screen-reader/test_gvisor_companions.py'
       - 'scripts/screen-reader/gvisor_metadata.py'
