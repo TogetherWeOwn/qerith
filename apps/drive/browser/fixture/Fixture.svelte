@@ -18,3 +18,7 @@
   <SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
 {/if}
 <output hidden data-requests={requests} data-cancellations={cancellations} data-uploads={uploads}></output>
+
+<style>
+  main { min-height: 100vh; background: var(--drive-color-bg-canvas); }
+</style>

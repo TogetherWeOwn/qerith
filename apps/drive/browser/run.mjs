@@ -49,7 +49,7 @@ try {
       runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
     }));
     await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
-    assert.equal(results.violations.length, 0, `axe violations for ${size}`);
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
     const keyboard = await exerciseKeyboard(page, state);
     const keyboardJson = JSON.stringify(keyboard, null, 2);
     const recordedKeyboard = keyboardJson && JSON.parse(keyboardJson);
@@ -83,7 +83,7 @@ try {
       runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
     }));
     await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
-    assert.equal(results.violations.length, 0, `axe violations for ${size}`);
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
     await page.keyboard.press('Tab');
     const button = page.getByRole('button', { name: 'Upload files' });
     assert.equal(await button.evaluate(el => el === document.activeElement), true);
