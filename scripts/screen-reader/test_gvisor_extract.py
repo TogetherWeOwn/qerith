@@ -130,5 +130,98 @@ class ExtractionTests(unittest.TestCase):
             run(data[:-4])
 
 
+def compatible_archive(extra=(), omitted=(), trailing=b"", name=b"debian-data.tar"):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path in sorted(extract.COMPAT_DIRECTORIES - set(omitted)):
+            entry = tarfile.TarInfo(path)
+            entry.type = tarfile.DIRTYPE
+            tar.addfile(entry)
+        for path in sorted(set(extract.COMPAT_FILES) - set(omitted)):
+            entry = tarfile.TarInfo(path)
+            entry.size = 4
+            tar.addfile(entry, io.BytesIO(b"data"))
+        for path, kind in extra:
+            entry = tarfile.TarInfo(path)
+            entry.type = kind
+            entry.linkname = "elsewhere"
+            tar.addfile(entry)
+    data = gzip.compress(out.getvalue() + trailing)
+    return data[:3] + b"\x08" + data[4:10] + name + b"\0" + data[10:]
+
+
+def run_compatible(data):
+    sizes = dict.fromkeys(extract.COMPAT_FILES, 4)
+    with patch.object(extract, "COMPAT_FILES", sizes):
+        return extract.extract_compatible_synthetic(data, len(data), hashlib.sha256(data).hexdigest())
+
+
+class CompatibilityTests(unittest.TestCase):
+    def test_complete_synthetic_inventory_is_inert(self):
+        with run_compatible(compatible_archive()) as directory:
+            paths = list(Path(directory).iterdir())
+            self.assertEqual({p.name for p in paths}, {p.rsplit("/", 1)[-1] for p in extract.FILES})
+            self.assertTrue(all(p.read_bytes() == b"data" and p.stat().st_mode & 0o777 == 0o600 for p in paths))
+
+    def test_unlisted_duplicate_missing_and_wrong_types(self):
+        for extra, omitted in (([("../escape", tarfile.REGTYPE)], ()),
+                               ([("/absolute", tarfile.REGTYPE)], ()),
+                               ([("etc/other", tarfile.REGTYPE)], ()),
+                               ([(extract.RUNSC, tarfile.REGTYPE)], ()),
+                               ([(extract.RUNSC, tarfile.SYMTYPE)], (extract.RUNSC,)),
+                               ([(extract.RUNSC, tarfile.LNKTYPE)], (extract.RUNSC,)),
+                               ([(extract.RUNSC, tarfile.DIRTYPE)], (extract.RUNSC,)),
+                               ([], ("etc",)), ([], (extract.RUNSC,))):
+            with self.subTest(extra=extra, omitted=omitted), self.assertRaises(ValueError):
+                run_compatible(compatible_archive(extra, omitted))
+
+    def test_padding_sizes_and_cleanup(self):
+        data = compatible_archive()
+        raw = bytearray(gzip.decompress(data))
+        padding = raw.index(b"data") + 4
+        raw[padding] = 1
+        compressed = gzip.compress(raw)
+        malformed_padding = compressed[:3] + b"\x08" + compressed[4:10] + extract.COMPAT_NAME + b"\0" + compressed[10:]
+        original = extract.tempfile.TemporaryDirectory
+        for label, invalid in (("padding", malformed_padding),
+                               ("partial tar block", compatible_archive(trailing=b"\0")),
+                               ("late entry", compatible_archive(extra=[("unexpected", tarfile.REGTYPE)]))):
+            paths = []
+
+            def tracked(*args, **kwargs):
+                result = original(*args, **kwargs)
+                paths.append(Path(result.name))
+                return result
+
+            with self.subTest(case=label), patch.object(extract.tempfile, "TemporaryDirectory", side_effect=tracked):
+                with self.assertRaises(ValueError):
+                    run_compatible(invalid)
+                self.assertEqual(len(paths), 1)
+                self.assertFalse(paths[0].exists())
+        sizes = dict.fromkeys(extract.COMPAT_FILES, 4)
+        sizes[extract.RUNSC] = 5
+        with patch.object(extract, "COMPAT_FILES", sizes), self.assertRaises(ValueError):
+            extract.extract_compatible_synthetic(data, len(data), hashlib.sha256(data).hexdigest())
+
+    def test_framing_and_resource_limits(self):
+        data = compatible_archive()
+        invalid = [compatible_archive(name=b"wrong"), compatible_archive(name=b"x" * 4097),
+                   data[:10] + extract.COMPAT_NAME, data[:9],
+                   *(data[:3] + bytes([flag]) + data[4:] for flag in (0, 9, 10, 12, 24, 40, 0xe8)),
+                   data + b"x", data + gzip.compress(b""), data + data,
+                   data[:-1], compatible_archive(trailing=b"\0")]
+        for value in invalid:
+            with self.subTest(length=len(value)), self.assertRaises(ValueError):
+                run_compatible(value)
+        for limit, value in (("MAX_COMPRESSED", len(data) - 1), ("MAX_FILE", 3),
+                             ("MAX_CONTENT", 5), ("MAX_TAR", 1024)):
+            with self.subTest(limit=limit), patch.object(extract, limit, value), self.assertRaises(ValueError):
+                run_compatible(data)
+        with self.assertRaises(ValueError):
+            run(data)
+        with self.assertRaises(ValueError):
+            extract.extract_compatible_synthetic(data, len(data), hashlib.sha256(data).hexdigest())
+
+
 if __name__ == "__main__":
     unittest.main()
