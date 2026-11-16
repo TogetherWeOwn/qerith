@@ -386,6 +386,140 @@ try {
     await writeFile(resolve(output, `${prefix}.json`), JSON.stringify({ reflow, motion, forcedColours: true, focused: await focused.innerText(), focus }, null, 2));
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
+    const size = `listing-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    assert.equal(await container.count(), 1);
+    assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, sorted by name, A to Z. Times in America/New_York.');
+    if (width > 820) assert.equal(await container.getByRole('columnheader', { name: 'Name' }).getAttribute('aria-sort'), 'ascending');
+    assert.equal(await container.getByRole('link').count(), 3);
+    assert.equal(await container.getByRole('link', { name: 'Archive' }).getAttribute('href'), '#archive');
+    assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
+    assert.equal(await container.locator('time').count(), 3);
+    assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
+    assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
+    assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
+    const tag = container.getByText('Shared', { exact: true });
+    assert.equal(await tag.count(), 1);
+    const tagStyle = await tag.evaluate(el => ({ transform: getComputedStyle(el).textTransform, shadow: getComputedStyle(el).boxShadow }));
+    assert.equal(tagStyle.transform, 'uppercase');
+    assert.notEqual(tagStyle.shadow, 'none');
+    assert.equal(await container.getByRole('link', { name: 'Archive' }).evaluate(el => getComputedStyle(el).fontWeight), '500');
+    if (width > 820) {
+      assert.equal(await container.getByText('PDF', { exact: true }).count(), 1);
+    } else {
+      assert.equal(await container.getAttribute('role'), 'list');
+      assert.equal(await container.getByRole('listitem').count(), 3);
+      const folder = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Archive' }) });
+      assert.equal((await folder.locator('.details').textContent()).trim(), 'Folder · 14 Nov');
+      const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
+      assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
+    }
+    assert.equal(await container.locator('data').count(), 2);
+    assert.equal(await container.locator('data[value="1000"]').textContent(), '1.0 KB');
+    assert.equal(await container.locator('data[value="5400000"]').textContent(), '5.4 MB');
+    assert.equal(await container.locator('time[datetime="2026-11-13T09:00:00Z"]').textContent(), '13 Nov');
+    assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => getComputedStyle(el).unicodeBidi), 'plaintext');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
+    for (const name of ['Archive', 'a-very-long-file-name-without-breaks-to-check-reflow.txt', 'Résumé 2025.pdf']) {
+      await page.keyboard.press('Tab');
+      assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
+    }
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    if (width !== 320) {
+      const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+      await page.screenshot({ path: resolve(output, `${size}-greyscale.png`) });
+      await greyscale.evaluate(el => el.remove());
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      const motion = await page.evaluate(() => ({
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+        runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length,
+        animatedElements: [...document.querySelectorAll('*')].filter(el => {
+          const style = getComputedStyle(el);
+          return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0);
+        }).length
+      }));
+      assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+      await page.screenshot({ path: resolve(output, `${size}-reduced-motion.png`) });
+      await page.emulateMedia({ forcedColors: 'active' });
+      assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+      const link = container.getByRole('link', { name: 'Archive' });
+      await link.focus();
+      assert.equal(await link.evaluate(el => el === document.activeElement), true);
+      await page.screenshot({ path: resolve(output, `${size}-forced-colours-focus.png`) });
+      await writeFile(resolve(output, `${size}-modes.json`), JSON.stringify({ motion, forcedColours: true, focused: 'Archive' }, null, 2));
+    }
+    await context.close();
+  }
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    const spaces = container.locator('a[data-item-id="spaces"]');
+    const tab = container.locator('a[data-item-id="tab"]');
+    assert.equal(await spaces.textContent(), 'report  final.txt');
+    assert.equal(await spaces.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
+    assert.equal(await tab.textContent(), '\t(Whitespace-only name)');
+    assert.equal(await container.getByRole('link', { name: '(Whitespace-only name)', exact: true }).count(), 1);
+    const hit = await spaces.evaluate(el => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      return { top: parseFloat(style.paddingTop), bottom: parseFloat(style.paddingBottom),
+        above: el.contains(document.elementFromPoint(x, rect.top + 4)),
+        below: el.contains(document.elementFromPoint(x, rect.bottom - 4)) };
+    });
+    assert.deepEqual(hit, { top: 8, bottom: 8, above: true, below: true });
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => document.activeElement?.matches('ul.mobile a') && document.activeElement.textContent === 'Résumé 2025.pdf');
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForFunction(() => document.activeElement?.matches('table.desktop a') && document.activeElement.textContent === 'Résumé 2025.pdf');
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el.blur());
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await page.setViewportSize({ width: 1280, height: 80 });
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
+    await page.setViewportSize({ width: 390, height: 80 });
+    await page.waitForFunction(() => {
+      const el = document.activeElement;
+      if (!el?.matches('ul.mobile a') || el.textContent !== 'Résumé 2025.pdf') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= innerHeight;
+    });
+    await page.setViewportSize({ width: 1280, height: 80 });
+    await page.waitForFunction(() => {
+      const el = document.activeElement;
+      if (!el?.matches('table.desktop a') || el.textContent !== 'Résumé 2025.pdf') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= innerHeight;
+    });
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
