@@ -1,5 +1,9 @@
 <script>
   import SignInPage from '../../src/lib/SignInPage.svelte';
+  import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
+
+  const empty = new URLSearchParams(window.location.search).get('empty');
+  let uploads = $state(0);
 
   let requests = $state(0);
   let cancellations = $state(0);
@@ -8,5 +12,9 @@
   window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-<SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
-<output hidden data-requests={requests} data-cancellations={cancellations}></output>
+{#if empty}
+  <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
+{:else}
+  <SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
+{/if}
+<output hidden data-requests={requests} data-cancellations={cancellations} data-uploads={uploads}></output>

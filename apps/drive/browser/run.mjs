@@ -65,6 +65,33 @@ try {
     }
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const empty of ['root', 'folder']) {
+    const size = `empty-${empty}-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?empty=${empty}`, { waitUntil: 'networkidle' });
+    const heading = empty === 'root' ? 'Your drive is empty.' : 'This folder is empty.';
+    const description = empty === 'root' ? 'Upload a file or make a folder to start.' : 'Drop files here or use Upload.';
+    await page.getByRole('heading', { name: heading, level: 2 }).waitFor();
+    assert.equal(await page.getByText(description, { exact: true }).count(), 1);
+    await page.evaluate(() => document.fonts.ready);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}`);
+    await page.keyboard.press('Tab');
+    const button = page.getByRole('button', { name: 'Upload files' });
+    assert.equal(await button.evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('output').getAttribute('data-uploads'), '1');
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focused: 'Upload files', activations: 1 }));
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
