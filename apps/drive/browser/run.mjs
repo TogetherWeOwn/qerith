@@ -165,7 +165,10 @@ try {
       const background = page.locator('main > button');
       await background.evaluate(el => el.focus());
       assert.equal(await background.evaluate(el => el === document.activeElement), false, 'Modal must exclude background focus');
-      assert.equal(await page.getByRole('button', { name: 'Next file' }).count(), 0, 'Modal must exclude background from accessibility tree');
+      const ax = await context.newCDPSession(page);
+      const { nodes } = await ax.send('Accessibility.getFullAXTree');
+      await ax.detach();
+      assert.equal(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), false, 'Modal must exclude background from accessibility tree');
       const triggerSize = await trigger.evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight, icon: el.querySelector('svg').getBoundingClientRect().width }));
       assert.deepEqual(triggerSize, { width: 44, height: 44, icon: 20 });
       const sheet = await menu.evaluate(el => ({ width: el.getBoundingClientRect().width, maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el.parentElement).backgroundColor, blur: getComputedStyle(el.parentElement).backdropFilter }));
@@ -189,6 +192,12 @@ try {
     await page.keyboard.press('Escape');
     assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    if (width === 390) {
+      const ax = await context.newCDPSession(page);
+      const { nodes } = await ax.send('Accessibility.getFullAXTree');
+      await ax.detach();
+      assert(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), 'Closing the modal must restore background to the accessibility tree');
+    }
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('Tab');
