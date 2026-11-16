@@ -15,8 +15,10 @@
 
   let trigger: HTMLButtonElement;
   let menu: HTMLDivElement;
-  let layer: HTMLDivElement;
+  let layer: HTMLDialogElement;
   let open = false;
+  let compact = false;
+  let opening = 0;
   let menuId = '';
   onMount(() => {
     menuId = `row-actions-menu-${++nextMenuId}`;
@@ -29,7 +31,7 @@
       }
     };
     window.addEventListener('scroll', onScroll, true);
-    return () => window.removeEventListener('scroll', onScroll, true);
+    return () => { close(); window.removeEventListener('scroll', onScroll, true); };
   });
   let menuLeft = 0;
   let menuTop = 0;
@@ -38,10 +40,13 @@
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
 
   async function show(last = false) {
+    const request = ++opening;
+    compact = window.matchMedia('(max-width: 820px)').matches;
     open = true;
     await tick();
-    if (!open || !menu) return;
-    layer.showPopover();
+    if (!open || !menu || request !== opening) return;
+    if (compact) layer.showModal();
+    else layer.showPopover();
     const rect = menu.getBoundingClientRect();
     const anchor = trigger.getBoundingClientRect();
     menuLeft = Math.max(0, Math.min(anchor.left, window.innerWidth - rect.width));
@@ -49,11 +54,15 @@
     const above = anchor.top;
     menuTop = Math.max(0, Math.min(below >= rect.height || below >= above ? anchor.bottom : anchor.top - rect.height, window.innerHeight - rect.height));
     await tick();
+    if (!open || request !== opening) return;
     const items = menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
     items[last ? items.length - 1 : 0]?.focus();
   }
 
   function close(restore = false) {
+    ++opening;
+    if (layer?.open) layer.close();
+    else if (layer?.matches(':popover-open')) layer.hidePopover();
     open = false;
     if (restore) trigger.focus();
   }
@@ -96,7 +105,7 @@
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>
   </button>
   {#if open}
-    <div class="layer" bind:this={layer} popover="manual" style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} role="presentation" onclick={backdropClick}>
+    <dialog class="layer" bind:this={layer} popover={compact ? undefined : 'manual'} aria-label={`Actions for ${name}`} style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} oncancel={(event) => { event.preventDefault(); close(true); }} onclick={backdropClick}>
     <div class="menu" id={menuId} role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} onkeydown={keydown}>
       <div class="sheet-title" aria-hidden="true">{name}</div>
       {#each actions as action}
@@ -107,7 +116,7 @@
         </button>
       {/each}
     </div>
-    </div>
+    </dialog>
   {/if}
 </div>
 
@@ -119,6 +128,7 @@
   svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); flex: none; }
   .trigger svg { fill: currentColor; }
   .layer { position: fixed; top: var(--menu-top); right: auto; bottom: auto; left: var(--menu-left); margin: 0; padding: 0; border: 0; overflow: visible; background: transparent; }
+  .layer::backdrop { background: transparent; }
   .menu { box-sizing: border-box; max-height: 100dvh; max-width: 100vw; overflow-y: auto; min-width: var(--drive-size-menu-min); padding: var(--drive-space-1); border: 1px solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); background: var(--drive-color-bg-overlay); font-family: var(--drive-font-ui); }
   .menu button { display: flex; align-items: center; gap: var(--drive-space-3); width: 100%; min-height: var(--drive-size-control-nav); padding: 0 var(--drive-space-3); border: 0; border-radius: var(--drive-radius-s); text-align: left; background: transparent; }
   .menu button:hover, .menu button:focus-visible { background: var(--drive-color-bg-raised); }

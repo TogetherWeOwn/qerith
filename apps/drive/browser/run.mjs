@@ -150,7 +150,7 @@ try {
     page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
     page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
     await page.goto(`${origin}/?menu=${variant}`, { waitUntil: 'networkidle' });
-    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
     await trigger.focus();
     await page.keyboard.press('Enter');
     const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
@@ -160,7 +160,12 @@ try {
     assert.deepEqual(await items.allTextContents().then(values => values.map(value => value.trim())), expected);
     assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
     assert.equal(await trigger.getAttribute('aria-controls'), await menu.getAttribute('id'));
+    assert.equal(await menu.evaluate(el => el.closest('dialog').matches(':modal')), width === 390);
     if (width === 390) {
+      const background = page.locator('main > button');
+      await background.evaluate(el => el.focus());
+      assert.equal(await background.evaluate(el => el === document.activeElement), false, 'Modal must exclude background focus');
+      assert.equal(await page.getByRole('button', { name: 'Next file' }).count(), 0, 'Modal must exclude background from accessibility tree');
       const triggerSize = await trigger.evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight, icon: el.querySelector('svg').getBoundingClientRect().width }));
       assert.deepEqual(triggerSize, { width: 44, height: 44, icon: 20 });
       const sheet = await menu.evaluate(el => ({ width: el.getBoundingClientRect().width, maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el.parentElement).backgroundColor, blur: getComputedStyle(el.parentElement).backdropFilter }));
@@ -187,14 +192,17 @@ try {
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
     assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
     await trigger.click();
     await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
     assert.equal(await page.getByRole('button', { name: 'Sample file', exact: true }).evaluate(el => el === document.activeElement), true);
     await page.getByRole('button', { name: 'Sample file', exact: true }).click({ button: 'right' });
     await menu.waitFor();
     await page.getByRole('menuitem', { name: 'Details' }).focus();
     await page.keyboard.press('Space');
+    assert.equal(await page.evaluate(() => document.body.dataset.actionModal), 'false');
     assert.equal(await page.getByText('Details', { exact: true }).count(), 1);
     assert.equal(await menu.count(), 0);
     assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
@@ -244,7 +252,7 @@ try {
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
     await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
-    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
     await trigger.evaluate(el => { el.parentElement.parentElement.style.marginTop = '600px'; });
     await trigger.click();
     assert.equal(await page.getByRole('menu').count(), 1);
@@ -255,13 +263,31 @@ try {
     await writeFile(resolve(output, 'menu-resize.json'), JSON.stringify({ initial: '1280x800', resized: '1280x300', result: 'closed, focus restored' }));
     await context.close();
   }
+  for (const width of [390, 1280]) {
+    const context = await browser.newContext({ viewport: { width, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    await trigger.click();
+    await page.setViewportSize({ width: width === 390 ? 1280 : 390, height: 800 });
+    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    assert.equal(await page.locator('dialog:modal').count(), 0, 'Resize must release modal');
+    await trigger.click();
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu'))); await page.waitForFunction(() => !document.querySelector('[aria-haspopup=menu]'));
+    assert.equal(await page.locator('dialog:modal').count(), 0, 'Unmount must release modal');
+    await page.getByRole('button', { name: 'Next file' }).focus();
+    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    await context.close();
+  }
   for (const source of ['document', 'ancestor', 'menu']) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 180 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
     await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
-    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
     await trigger.evaluate((el, source) => {
       if (source === 'document') document.body.style.minHeight = '1000px';
       if (source === 'ancestor') {
@@ -329,8 +355,8 @@ try {
     const reflow = await menu.evaluate(el => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth, menu: el.clientWidth, content: el.scrollWidth }));
     assert(reflow.page <= reflow.viewport && reflow.content <= reflow.menu, `Horizontal overflow: ${JSON.stringify(reflow)}`);
     await page.screenshot({ path: resolve(output, `${prefix}.png`) });
-    const greyscale = await page.addStyleTag({ content: 'html, [popover] { filter: grayscale(1); }' });
-    assert.equal(await page.locator('[popover]').evaluate(el => getComputedStyle(el).filter), 'grayscale(1)');
+    const greyscale = await page.addStyleTag({ content: 'html, dialog.layer { filter: grayscale(1); }' });
+    assert.equal(await page.locator('dialog.layer').evaluate(el => getComputedStyle(el).filter), 'grayscale(1)');
     await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
     await greyscale.evaluate(el => el.remove());
     await page.emulateMedia({ reducedMotion: 'reduce' });

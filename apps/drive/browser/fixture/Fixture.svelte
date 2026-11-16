@@ -9,6 +9,8 @@
   let nextName;
   let menu;
   let selected = $state('');
+  let mounted = $state(true); window.addEventListener('fixture-unmount-menu', () => { mounted = false; });
+  const recordBoundary = callback => { document.body.dataset[callback] = String(!!document.querySelector('dialog:modal')); };
 
   const empty = new URLSearchParams(window.location.search).get('empty');
   let uploads = $state(0);
@@ -24,7 +26,9 @@
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>
-      <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => selected = action} onTab={(direction) => (direction === 'next' ? nextName : firstName).focus()} />
+      {#if mounted}
+        <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => { recordBoundary('actionModal'); selected = action; }} onTab={(direction) => { recordBoundary('tabModal'); (direction === 'next' ? nextName : firstName).focus(); }} />
+      {/if}
     </div>
     <button bind:this={nextName}>Next file</button>
     <p aria-live="polite">{selected}</p>
