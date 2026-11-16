@@ -14,7 +14,8 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
 
 beforeEach(async () => {
   // D1 state is shared between tests in this file; reset the migration ledger too.
-  await env.DB.exec(`DROP TRIGGER IF EXISTS drive_counts_insert;
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_sessions;
+    DROP TRIGGER IF EXISTS drive_counts_insert;
     DROP TRIGGER IF EXISTS drive_counts_move;
     DROP TRIGGER IF EXISTS drive_counts_delete;
     DROP TABLE IF EXISTS drive_folder_counts;
