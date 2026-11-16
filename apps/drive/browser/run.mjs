@@ -196,6 +196,10 @@ try {
     await page.waitForFunction(() => document.activeElement?.matches('ul.mobile a') && document.activeElement.textContent === 'Résumé 2025.pdf');
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.waitForFunction(() => document.activeElement?.matches('table.desktop a') && document.activeElement.textContent === 'Résumé 2025.pdf');
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el.blur());
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);

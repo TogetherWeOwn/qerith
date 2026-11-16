@@ -8,16 +8,33 @@
 
   onMount(() => {
     const compact = window.matchMedia('(max-width: 820px)');
+    let lastFocused: HTMLAnchorElement | null = null;
+    const rememberFocus = (event: FocusEvent) => {
+      const target = event.target;
+      lastFocused = target instanceof HTMLAnchorElement && (desktop.contains(target) || mobile.contains(target)) ? target : null;
+    };
+    const forgetFocus = (event: FocusEvent) => {
+      if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
+    };
     const transferFocus = () => {
       const from = compact.matches ? desktop : mobile;
       const to = compact.matches ? mobile : desktop;
       const active = document.activeElement;
-      if (!(active instanceof HTMLAnchorElement) || !from.contains(active)) return;
-      const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === active.dataset.itemId);
+      const source = active instanceof HTMLAnchorElement && from.contains(active) ? active :
+        active === document.body && lastFocused && from.contains(lastFocused) ? lastFocused : null;
+      if (!source) return;
+      const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
+      lastFocused = null;
       target?.focus({ preventScroll: true });
     };
+    document.addEventListener('focusin', rememberFocus);
+    document.addEventListener('focusout', forgetFocus);
     compact.addEventListener('change', transferFocus);
-    return () => compact.removeEventListener('change', transferFocus);
+    return () => {
+      document.removeEventListener('focusin', rememberFocus);
+      document.removeEventListener('focusout', forgetFocus);
+      compact.removeEventListener('change', transferFocus);
+    };
   });
 
   // The caller supplies authorized URLs and already-sorted display values.
