@@ -42,6 +42,17 @@ it('issues bounded hashed tokens only for an active owner session and target', a
   await expect(recovery.cancel(owner, redeemed.id)).rejects.toThrow();
 });
 
+it('cancels tokens when an owner is deleted and permits target deletion', async () => {
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  const owner = (await new Sessions(env.DB).issue('owner')).token;
+  const recovery = new RecoveryTokens(env.DB);
+  const token = await recovery.issue(owner, 'member');
+  await env.DB.exec("DELETE FROM drive_principals WHERE id = 'owner'");
+  expect((await env.DB.prepare('SELECT cancelled_at FROM drive_recovery_tokens WHERE id = ?').bind(token.id).first()).cancelled_at).toBeGreaterThan(0);
+  await env.DB.exec("DELETE FROM drive_principals WHERE id = 'member'");
+  expect(await env.DB.prepare('SELECT id FROM drive_recovery_tokens WHERE id = ?').bind(token.id).first()).toBeNull();
+});
+
 it('rejects a revoked or expired owner session at mutation time', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
