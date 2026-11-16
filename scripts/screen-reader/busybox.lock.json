@@ -1,0 +1,15 @@
+{
+  "snapshot": "https://snapshot.debian.org/archive/debian/20260712T000000Z/",
+  "inrelease_sha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+  "primary_fingerprint": "B8B80B5B623EAB6AD8775C45B7C5D7D6350947F8",
+  "signer_fingerprint": "4CB50190207B4758A3F73A796ED0E7B82643E131",
+  "index_path": "main/binary-amd64/Packages.xz",
+  "index_sha256": "9e0b5aabb2465b3d2e7a7fe27f9913846277833f7a2826e7767acccff5b588c5",
+  "package_path": "pool/main/b/busybox/busybox-static_1.35.0-4+deb12u1+b1_amd64.deb",
+  "package_size": 928188,
+  "package_sha256": "3d3fdbe91d4660c873e14b092c213fe81c1da6362daa236eb25d0171eb108744",
+  "binary_size": 1982256,
+  "binary_sha256": "3d9f2889d6782537624a4e1a10e68a2ddd53e0ee8bac02676f27308f42ec6bf6",
+  "elf": "ELF64 little-endian x86-64 ET_EXEC; no PT_INTERP or PT_DYNAMIC",
+  "historical_snapshot": true
+}
