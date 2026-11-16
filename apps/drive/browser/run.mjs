@@ -98,6 +98,48 @@ try {
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focused: 'Upload files', activations: 1 }));
     await context.close();
   }
+  for (const empty of ['root', 'folder']) {
+    const context = await browser.newContext({ viewport: { width: 320, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?empty=${empty}`, { waitUntil: 'networkidle' });
+    await page.getByRole('heading', { name: empty === 'root' ? 'Your drive is empty.' : 'This folder is empty.', level: 2 }).waitFor();
+    await page.evaluate(() => document.fonts.ready);
+    const prefix = `empty-${empty}-320x844`;
+    const reflow = await page.evaluate(() => ({
+      viewport: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }));
+    assert.equal(reflow.viewport, 320);
+    assert(reflow.scrollWidth <= reflow.viewport, `Horizontal page overflow: ${JSON.stringify(reflow)}`);
+    await page.screenshot({ path: resolve(output, `${prefix}.png`) });
+    const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+    await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
+    await greyscale.evaluate(el => el.remove());
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const motion = await page.evaluate(() => ({
+      reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+      runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length,
+      animatedElements: [...document.querySelectorAll('*')].filter(el => {
+        const style = getComputedStyle(el);
+        return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0);
+      }).length
+    }));
+    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+    await page.screenshot({ path: resolve(output, `${prefix}-reduced-motion.png`) });
+    await page.emulateMedia({ forcedColors: 'active' });
+    assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+    await page.keyboard.press('Tab');
+    const button = page.getByRole('button', { name: 'Upload files' });
+    assert.equal(await button.evaluate(el => el === document.activeElement), true);
+    await page.screenshot({ path: resolve(output, `${prefix}-forced-colours-focus.png`) });
+    await writeFile(resolve(output, `${prefix}-modes.json`), JSON.stringify({ reflow, motion, forcedColours: true, focused: 'Upload files' }, null, 2));
+    for (const suffix of ['.png', '-greyscale.png', '-reduced-motion.png', '-forced-colours-focus.png', '-modes.json']) {
+      assert((await stat(resolve(output, `${prefix}${suffix}`))).size > 0, `Missing evidence: ${prefix}${suffix}`);
+    }
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
