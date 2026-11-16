@@ -5,10 +5,12 @@ import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 
 async function setup() {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec(`DELETE FROM drive_sessions; DELETE FROM drive_credentials;
-    DELETE FROM drive_principals;
-    INSERT INTO drive_principals (id, role, status) VALUES
-      ('owner', 'owner', 'active'), ('member', 'member', 'active'), ('disabled', 'member', 'revoked');`);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM drive_sessions'),
+    env.DB.prepare('DELETE FROM drive_credentials'),
+    env.DB.prepare('DELETE FROM drive_principals'),
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active'), ('disabled', 'member', 'revoked')"),
+  ]);
   return new Sessions(env.DB);
 }
 
