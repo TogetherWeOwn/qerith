@@ -157,6 +157,24 @@ def run_compatible(data):
 
 
 class CompatibilityTests(unittest.TestCase):
+    def test_observed_inventory_policy_and_limits(self):
+        expected_files = {
+            "usr/bin/containerd-shim-runsc-v1": 43626680,
+            "usr/bin/runsc": 109966750,
+            "usr/bin/gvisor-bin/checkpointgofer": 69128994,
+            "usr/bin/gvisor-bin/gvisor-sentry-prewarmer": 1416,
+            "usr/bin/gvisor-bin/gvisor_sentry": 52149808,
+            "usr/bin/gvisor-bin/runsc-fd-parking": 1320,
+            "usr/bin/gvisor-bin/runsc-metric-server": 53222722,
+            "etc/containerd/runsc.toml": 302,
+        }
+        self.assertEqual(extract.COMPAT_FILES, expected_files)
+        self.assertEqual(extract.COMPAT_DIRECTORIES,
+                         {"usr", "usr/bin", "usr/bin/gvisor-bin", "etc", "etc/containerd"})
+        self.assertLessEqual(max(expected_files.values()), extract.MAX_FILE)
+        self.assertLessEqual(sum(expected_files.values()), extract.MAX_CONTENT)
+        self.assertLessEqual(328110080, extract.MAX_TAR)
+
     def test_complete_synthetic_inventory_is_inert(self):
         with run_compatible(compatible_archive()) as directory:
             paths = list(Path(directory).iterdir())
