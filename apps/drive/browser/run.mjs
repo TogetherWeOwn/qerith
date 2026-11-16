@@ -199,6 +199,19 @@ try {
     assert.equal(await menu.count(), 0);
     assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     assert.equal(await trigger.getAttribute('aria-controls'), null);
+    if (width === 390) {
+      await page.evaluate(() => {
+        const button = document.createElement('button');
+        button.style.cssText = 'position:fixed;top:0;left:0;width:80px;height:40px';
+        button.onclick = () => { document.body.dataset.underlayActivated = 'true'; };
+        document.body.append(button);
+      });
+      await trigger.click();
+      await page.mouse.click(20, 20);
+      assert.equal(await menu.count(), 0);
+      assert.equal(await page.evaluate(() => document.body.dataset.underlayActivated), undefined);
+      assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    }
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
     await context.close();
   }
