@@ -13,8 +13,10 @@ BEGIN
   INSERT INTO drive_login_generations VALUES (NEW.id, lower(hex(randomblob(32))));
 END;
 
-CREATE TRIGGER drive_login_generation_disable AFTER UPDATE OF status ON drive_principals
-WHEN OLD.status = 'active' AND NEW.status != 'active'
+CREATE TRIGGER drive_login_generation_status AFTER UPDATE OF status ON drive_principals
+WHEN OLD.status != NEW.status
 BEGIN
   UPDATE drive_login_generations SET generation = lower(hex(randomblob(32))) WHERE principal_id = NEW.id;
+  -- Discoverable challenges are not bound to a principal; invalidate them all.
+  DELETE FROM drive_bound_ceremonies WHERE purpose = 'authentication';
 END;

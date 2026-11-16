@@ -33,12 +33,13 @@ export class PasskeyLogin {
   }
 
   async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON): Promise<{ token: string; expiresAt: number }> {
-    // Consume first: even an invalid assertion or an ambiguous write needs a new challenge.
-    await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
+    // Snapshot membership before consuming so revocation during login cannot be missed.
     const row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation
       FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
       JOIN drive_login_generations g ON g.principal_id = p.id
       WHERE c.id = ? AND p.status = 'active'`).bind(response.id).first<CredentialRow>();
+    // Even an invalid assertion or an ambiguous write needs a new challenge.
+    await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
     if (!row) throw new Error('Authentication unavailable');
     const result = await this.#verifier.authentication(response, challenge, {
       id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter,

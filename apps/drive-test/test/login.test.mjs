@@ -60,6 +60,31 @@ it('rechecks membership and counter when committing a verified assertion', async
   }
 });
 
+it('invalidates outstanding challenges across revocation and reactivation', async () => {
+  for (const timing of ['before-login', 'after-lookup']) {
+    const { challenge, signed } = await setup();
+    const changeMembership = async () => {
+      await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
+      await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'member'").run();
+    };
+    if (timing === 'before-login') await changeMembership();
+    const db = {
+      prepare(sql) {
+        const statement = env.DB.prepare(sql);
+        if (timing !== 'after-lookup' || !sql.includes('SELECT c.id, c.principal_id')) return statement;
+        return { bind(...values) { return { async first() {
+          const row = await statement.bind(...values).first();
+          await changeMembership();
+          return row;
+        } }; } };
+      },
+      batch: statements => env.DB.batch(statements),
+    };
+    await expect(new PasskeyLogin(db, rpID, origin).authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
+  }
+});
+
 it('rolls back session insertion when the counter update fails', async () => {
   const { login, challenge, signed } = await setup();
   await env.DB.prepare(`CREATE TRIGGER fail_login_counter BEFORE UPDATE OF counter ON drive_credentials
