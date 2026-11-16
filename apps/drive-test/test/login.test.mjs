@@ -42,18 +42,35 @@ it('rejects invalid signatures, relying parties, origins and user verification',
 });
 
 it('rechecks membership and counter when committing a verified assertion', async () => {
-  for (const state of ['revoked', 'counter']) {
+  for (const state of ['revoked', 'reactivated', 'counter']) {
     const { challenge, signed } = await setup();
     const db = {
       prepare: sql => env.DB.prepare(sql),
       async batch(statements) {
-        if (state === 'revoked') await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
-        else await env.DB.prepare('UPDATE drive_credentials SET counter = 2').run();
+        if (state === 'counter') await env.DB.prepare('UPDATE drive_credentials SET counter = 2').run();
+        else {
+          await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
+          if (state === 'reactivated') await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'member'").run();
+        }
         return env.DB.batch(statements);
       },
     };
     await expect(new PasskeyLogin(db, rpID, origin).authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
     expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
+  }
+});
+
+it('rolls back session insertion when the counter update fails', async () => {
+  const { login, challenge, signed } = await setup();
+  await env.DB.exec(`CREATE TRIGGER fail_login_counter BEFORE UPDATE OF counter ON drive_credentials
+    BEGIN SELECT RAISE(ABORT, 'counter write failed'); END`);
+  try {
+    await expect(login.authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
+    expect((await env.DB.prepare('SELECT counter FROM drive_credentials').first()).counter).toBe(0);
+    await expect(login.authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
+  } finally {
+    await env.DB.exec('DROP TRIGGER fail_login_counter');
   }
 });
 

@@ -17,6 +17,7 @@ interface CredentialRow {
   public_key: ArrayBuffer;
   counter: number;
   transports: string;
+  generation: string;
 }
 
 // Context is a trusted server-side pre-authentication transaction, not an identity
@@ -34,8 +35,9 @@ export class PasskeyLogin {
   async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON): Promise<{ token: string; expiresAt: number }> {
     // Consume first: even an invalid assertion or an ambiguous write needs a new challenge.
     await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
-    const row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports
+    const row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation
       FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
+      JOIN drive_login_generations g ON g.principal_id = p.id
       WHERE c.id = ? AND p.status = 'active'`).bind(response.id).first<CredentialRow>();
     if (!row) throw new Error('Authentication unavailable');
     const result = await this.#verifier.authentication(response, challenge, {
@@ -52,8 +54,10 @@ export class PasskeyLogin {
       this.db.prepare(`INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
         SELECT ?, c.principal_id, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?
         FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
-        WHERE c.id = ? AND c.principal_id = ? AND c.public_key = ? AND c.counter = ? AND p.status = 'active'`)
-        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter),
+        JOIN drive_login_generations g ON g.principal_id = p.id
+        WHERE c.id = ? AND c.principal_id = ? AND c.public_key = ? AND c.counter = ?
+          AND p.status = 'active' AND g.generation = ?`)
+        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter, row.generation),
       this.db.prepare(`UPDATE drive_credentials SET counter = ? WHERE id = ?
         AND EXISTS (SELECT 1 FROM drive_sessions WHERE token_hash = ?)`)
         .bind(result.authenticationInfo.newCounter, row.id, hash),
