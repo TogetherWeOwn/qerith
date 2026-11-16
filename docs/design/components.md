@@ -190,7 +190,7 @@ Components for the file screens. They follow every rule above.
 
 **Anatomy:** a J13 table (`<table>` with a visually hidden caption "Contents of {folder}, sorted by name, A to Z. Times in Europe/London."). Columns at 1280: **Name** (fills; K3 name cell) · **Size** (`size.column.size`, right, tabular; "—" for folders) · **Modified** (`size.column.modified`) · **Kind** (`size.column.kind`, words: "Folder", "PDF", "MP4 video", "JPEG image", "File") · **Actions** (`size.column.actions`, the K5 menu button). Folders first, then files, in every sort. Rows `size.row.admin`, hairlines between, hover `bg.surface`, the row whose menu is open `bg.raised`.
 
-**At ≤ 820 px:** the table becomes a `role="list"` of two-line rows, `size.row.dense` minimum: line 1 the name cell; line 2 mono `text.tertiary` "5.4 GB · 14 Nov" (folders: "Folder · 14 Nov"); the K5 button on the right. Sorting moves to the "Sort" select in the K4 action row.
+**At ≤ 820 px:** the table becomes a `role="list"` of two-line rows, `size.row.dense` minimum: line 1 the name cell; line 2 mono `text.tertiary` kind, size and time: "PDF · 5.4 GB · 14 Nov" (folders: "Folder · 14 Nov"); the K5 button on the right. Sorting moves to the "Sort" select in the K4 action row.
 
 **Sort:** each sortable column header is a `<button>` inside the `<th>`, with `aria-sort` on the `<th>` and an up or down icon beside the label for the active one. Default: Name, A to Z. Clicking the active header reverses it. Name sorts by locale with numbers in order ("file 2" before "file 10"). Sort is a URL query (`?sort=size&dir=desc`) and is done on the server over the whole folder, never only over the rows on screen. The status region announces "Sorted by size, largest first".
 
