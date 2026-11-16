@@ -288,8 +288,31 @@ try {
     } else {
       await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
       assert.equal(await menu.count(), 0, `${source} scrolling must dismiss the menu`);
+      assert.equal(await trigger.evaluate(el => el === document.activeElement), true, `${source} must restore focus`);
+      const after = await scroll.evaluate((el, source) => source === 'document' ? window.scrollY : el.scrollTop, source);
+      assert.equal(after, moved, `${source} focus restoration must not undo scrolling`);
     }
-    await writeFile(resolve(output, `menu-scroll-${source}.json`), JSON.stringify({ source, moved, open: source === 'menu' }));
+    await writeFile(resolve(output, `menu-scroll-${source}.json`), JSON.stringify({ source, moved, open: source === 'menu', focusRestoredWithoutScrolling: source !== 'menu' }));
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 180 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
+    await page.evaluate(() => { document.body.style.minHeight = '1000px'; });
+    await page.getByRole('button', { name: 'Actions for Sample file' }).click();
+    await page.evaluate(() => {
+      const other = document.createElement('button');
+      other.id = 'other-focus';
+      document.body.append(other);
+      other.focus({ preventScroll: true });
+      window.scrollTo(0, 50);
+    });
+    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    assert.equal(await page.locator('#other-focus').evaluate(el => el === document.activeElement), true, 'Scroll dismissal must not steal focus');
+    assert.equal(await page.evaluate(() => window.scrollY), 50);
     await context.close();
   }
   for (const width of [320, 390, 1280]) {
@@ -306,7 +329,8 @@ try {
     const reflow = await menu.evaluate(el => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth, menu: el.clientWidth, content: el.scrollWidth }));
     assert(reflow.page <= reflow.viewport && reflow.content <= reflow.menu, `Horizontal overflow: ${JSON.stringify(reflow)}`);
     await page.screenshot({ path: resolve(output, `${prefix}.png`) });
-    const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+    const greyscale = await page.addStyleTag({ content: 'html, [popover] { filter: grayscale(1); }' });
+    assert.equal(await page.locator('[popover]').evaluate(el => getComputedStyle(el).filter), 'grayscale(1)');
     await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
     await greyscale.evaluate(el => el.remove());
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -315,10 +339,16 @@ try {
     await page.screenshot({ path: resolve(output, `${prefix}-reduced-motion.png`) });
     await page.emulateMedia({ forcedColors: 'active' });
     assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Enter');
     const focused = menu.getByRole('menuitem').first();
-    assert.equal(await focused.evaluate(el => el === document.activeElement), true);
+    const focus = await focused.evaluate(el => {
+      const style = getComputedStyle(el);
+      return { active: el === document.activeElement, visible: el.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+    });
+    assert(focus.active && focus.visible && focus.outlineStyle !== 'none' && parseFloat(focus.outlineWidth) > 0, `Missing keyboard focus outline: ${JSON.stringify(focus)}`);
     await page.screenshot({ path: resolve(output, `${prefix}-forced-colours-focus.png`) });
-    await writeFile(resolve(output, `${prefix}.json`), JSON.stringify({ reflow, motion, forcedColours: true, focused: await focused.innerText() }, null, 2));
+    await writeFile(resolve(output, `${prefix}.json`), JSON.stringify({ reflow, motion, forcedColours: true, focused: await focused.innerText(), focus }, null, 2));
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);

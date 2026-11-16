@@ -22,7 +22,11 @@
     menuId = `row-actions-menu-${++nextMenuId}`;
     const onScroll = (event: Event) => {
       const target = event.target;
-      if (open && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) close();
+      if (open && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
+        const restore = menu.contains(document.activeElement);
+        close();
+        if (restore) trigger.focus({ preventScroll: true });
+      }
     };
     window.addEventListener('scroll', onScroll, true);
     return () => window.removeEventListener('scroll', onScroll, true);
