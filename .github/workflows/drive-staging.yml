@@ -38,4 +38,5 @@ jobs:
         run: |
           set -euo pipefail
           npm run build
-          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-staging-dry-run"
+          test -s .svelte-kit/cloudflare/_worker.js
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-staging-dry-run"
