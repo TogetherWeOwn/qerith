@@ -70,7 +70,7 @@ def qualify(root):
     filename, size, package_digest = package_entry(index, "busybox-static", "1:1.35.0-4+deb12u1+b1", "amd64")
     if filename != PACKAGE or not 0 < size <= 4 * 1024 * 1024:
         raise ValueError("unexpected package path or size")
-    deb = fetch("https://deb.debian.org/debian/" + filename, root / "package-download" / "package.deb", size)
+    deb = fetch(SNAPSHOT + filename, root / "package-download" / "package.deb", size)
     verify_bytes(deb, size, package_digest)
     binary = binary_from_tar(data_archive(deb))
     verify_static_amd64(binary)

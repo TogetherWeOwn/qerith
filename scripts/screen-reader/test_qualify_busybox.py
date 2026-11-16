@@ -13,6 +13,7 @@ class QualificationTests(unittest.TestCase):
 
         def fetch(url, path, maximum):
             calls.append("fetch")
+            self.assertTrue(url.startswith(q.SNAPSHOT))
             return b"index" if "Packages.xz" in url else b"package"
 
         def verify(data, size, sha):
