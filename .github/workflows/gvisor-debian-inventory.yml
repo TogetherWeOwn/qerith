@@ -6,6 +6,8 @@ on:
       - '.github/workflows/gvisor-debian-inventory.yml'
       - 'scripts/screen-reader/gvisor_inventory.py'
       - 'scripts/screen-reader/test_gvisor_inventory.py'
+      - 'scripts/screen-reader/gvisor_companions.py'
+      - 'scripts/screen-reader/test_gvisor_companions.py'
       - 'scripts/screen-reader/gvisor_metadata.py'
       - 'scripts/screen-reader/debian_metadata.py'
   workflow_dispatch:
@@ -24,6 +26,8 @@ jobs:
           persist-credentials: false
       - name: Test ordering and archive safety
         run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_inventory.py", run_name="__main__")'
+      - name: Test companion evidence collection
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_companions.py", run_name="__main__")'
       - name: Authenticate and inventory candidate without execution
         run: |
           ulimit -f 180000
