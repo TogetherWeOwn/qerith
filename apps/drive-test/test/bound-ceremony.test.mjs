@@ -33,8 +33,9 @@ it('fails closed for races, expiration, replacement and verifier failure', async
   const good = await fixture('authentication', { challenge: badChallenge });
   await expect(ceremonies.authentication('bad', badChallenge, good.authentication, good.credential)).rejects.toThrow();
   const expired = await ceremonies.issue('expired', 'authentication');
+  const expiredResponse = await fixture('authentication', { challenge: expired });
   await env.DB.prepare('UPDATE drive_bound_ceremonies SET expires_at = 1 WHERE context = ?').bind('expired').run();
-  await expect(ceremonies.authentication('expired', expired, signed.authentication, signed.credential)).rejects.toThrow();
+  await expect(ceremonies.authentication('expired', expired, expiredResponse.authentication, expiredResponse.credential)).rejects.toThrow();
   const old = await ceremonies.issue('replace', 'authentication');
   const fresh = await ceremonies.issue('replace', 'authentication');
   expect(fresh).not.toBe(old);
