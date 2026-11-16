@@ -91,6 +91,7 @@ def run(root):
     name, start, size = members[2]
     if name != "data.tar.gz" or size > MAX_COMPRESSED:
         raise ValueError("unsupported data member")
+    print(json.dumps({"data_gzip_header_hex": data[start:start + min(size, 10)].hex()}))
     records, expanded = inspect(data[start:start + size])
     for record in records:
         print(json.dumps(record, ensure_ascii=True, sort_keys=True))
