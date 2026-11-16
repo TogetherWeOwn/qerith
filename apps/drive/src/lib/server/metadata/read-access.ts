@@ -62,14 +62,16 @@ export class ReadAccess {
     if (!hash) return null;
     // A sentinel distinguishes an accessible empty folder from an inaccessible ID
     // without an authorization query separate from the listing.
+    const boundary = cursor ? 'AND (e.name, e.id) > (?, ?)' : '';
     const rows = (await this.db.prepare(`${access}, folder AS (
       SELECT e.id, e.owner_id FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
-      SELECT e.id, e.name, e.kind FROM drive_entries e JOIN folder f ON e.parent_id = f.id AND e.owner_id = f.owner_id
-      WHERE (? IS NULL OR (e.name, e.id) > (?, ?)) ORDER BY e.name, e.id LIMIT 101
+      SELECT e.id, e.name, e.kind FROM drive_entries e INDEXED BY drive_entries_sibling_name
+        JOIN folder f ON e.owner_id = f.owner_id
+      WHERE COALESCE(e.parent_id, '') = ? ${boundary} ORDER BY e.name, e.id LIMIT 101
     ) SELECT id, name, kind FROM children UNION ALL
       SELECT NULL, NULL, NULL FROM folder ORDER BY name, id`)
-      .bind(folderId, hash, folderId, cursor?.name ?? null, cursor?.name ?? null, cursor?.id ?? null)
+      .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []))
       .all<ReadEntry | { id: null; name: null; kind: null }>()).results;
     if (!rows.some((row) => row.id === null)) return null;
     const items = rows.filter((row): row is ReadEntry => row.id !== null);
