@@ -31,6 +31,39 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         if (keys.some((key) => !key)) throw new Error();
         return { keys, nextContinuationToken: next };
       } catch { throw new Error('Invalid S3 listing response'); }
+    },
+    async parts(key: string, uploadId: string, options: { partNumberMarker?: number; signal?: AbortSignal } = {}) {
+      try {
+        if (!key || key.split('/').some((segment) => segment === '.' || segment === '..')) throw new Error();
+        encodeURIComponent(key);
+      } catch { throw new Error('Invalid or unsupported S3 key'); }
+      const marker = options.partNumberMarker;
+      if (!uploadId || (marker !== undefined && (!Number.isInteger(marker) || marker < 0 || marker > 10000))) throw new Error('Invalid S3 listing cursor');
+      const query: Record<string, string> = { uploadId };
+      if (marker !== undefined) query['part-number-marker'] = String(marker);
+      const body = await page(key, query, options.signal);
+      try {
+        const root = parseListingXml(body, 'ListPartsResult');
+        const truncated = listingText(root, 'IsTruncated');
+        if (truncated !== 'true' && truncated !== 'false') throw new Error();
+        const rawNext = listingText(root, 'NextPartNumberMarker', false);
+        const next = rawNext === undefined ? undefined : Number(rawNext);
+        if (rawNext !== undefined && (!/^[0-9]+$/.test(rawNext) || !Number.isInteger(next) || next! < 0 || next! > 10000)) throw new Error();
+        if (truncated === 'true' && (next === undefined || next <= (marker ?? 0))) throw new Error();
+        let previous = marker ?? 0;
+        const parts = listingChildren(root, 'Part').map((part) => {
+          const rawNumber = listingText(part, 'PartNumber')!;
+          const rawSize = listingText(part, 'Size')!;
+          const partNumber = Number(rawNumber), size = Number(rawSize);
+          const etag = listingText(part, 'ETag')!;
+          if (!/^[0-9]+$/.test(rawNumber) || !Number.isInteger(partNumber) || partNumber <= previous || partNumber > 10000 ||
+              !/^[0-9]+$/.test(rawSize) || !Number.isSafeInteger(size) || !etag) throw new Error();
+          previous = partNumber;
+          return { partNumber, size, etag };
+        });
+        if (truncated === 'true' && (!parts.length || next !== previous)) throw new Error();
+        return { parts, nextPartNumberMarker: truncated === 'true' ? next : undefined };
+      } catch { throw new Error('Invalid S3 listing response'); }
     }
   };
 }
