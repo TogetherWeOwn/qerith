@@ -5,9 +5,9 @@
 
   const listing = new URLSearchParams(window.location.search).has('listing');
   const items = [
-    { id: '1', name: 'Archive', href: '#archive', kind: 'Folder', size: '—', modified: '14 Nov', shared: true },
-    { id: '3', name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt', href: '#long', kind: 'File', size: '1 KB', modified: '12 Nov', shared: false },
-    { id: '2', name: 'Résumé 2025.pdf', href: '#resume', kind: 'PDF', size: '5.4 MB', modified: '13 Nov', shared: false }
+    { id: '1', name: 'Archive', href: '#archive', kind: 'Folder', glyph: 'folder-shared', size: '—', bytes: null, modified: '14 Nov', modifiedAt: '2026-11-14T09:00:00Z', shared: true },
+    { id: '3', name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt', href: '#long', kind: 'File', glyph: 'file', size: '1.0 KB', bytes: 1000, modified: '12 Nov', modifiedAt: '2026-11-12T09:00:00Z', shared: false },
+    { id: '2', name: 'Résumé 2025.pdf', href: '#resume', kind: 'PDF', glyph: 'document', size: '5.4 MB', bytes: 5400000, modified: '13 Nov', modifiedAt: '2026-11-13T09:00:00Z', shared: false }
   ];
   const empty = new URLSearchParams(window.location.search).get('empty');
   let uploads = $state(0);
@@ -20,7 +20,7 @@
 </script>
 
 {#if listing}
-  <main><FileList folder="My Drive" {items} /></main>
+  <main><FileList folder="My Drive" timeZone="America/New_York" {items} /></main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}

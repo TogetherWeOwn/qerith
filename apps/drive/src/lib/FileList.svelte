@@ -1,26 +1,28 @@
 <script lang="ts">
   import './tokens.css';
+  import KindGlyph from './KindGlyph.svelte';
 
   // The caller supplies authorized URLs and already-sorted display values.
   export let folder: string;
-  export let items: { id: string; name: string; href: string; kind: string; size: string; modified: string; shared: boolean }[];
+  export let timeZone: string;
+  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean }[];
 </script>
 
 <table class="desktop">
-  <caption>Contents of {folder}, sorted by name, A to Z. Times in Europe/London.</caption>
-  <thead><tr><th scope="col">Name</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
+  <caption>Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.</caption>
+  <thead><tr><th scope="col" aria-sort="ascending">Name</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr>
-        <td><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</td>
-        <td class="size">{item.size}</td><td>{item.modified}</td><td>{item.kind}</td>
+        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
+        <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
       </tr>
     {/each}
   </tbody>
 </table>
-<ul class="mobile" aria-label="Contents of {folder}, sorted by name, A to Z. Times in Europe/London.">
+<ul class="mobile" aria-label="Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.">
   {#each items as item (item.id)}
-    <li><div><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</div><div class="details">{item.kind === 'Folder' ? 'Folder' : item.size} · {item.modified}</div></li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{#if item.bytes === null}Folder{:else}<data value={item.bytes}>{item.size}</data>{/if} · <time datetime={item.modifiedAt}>{item.modified}</time></div></li>
   {/each}
 </ul>
 
@@ -32,8 +34,10 @@
   th { color: var(--drive-color-text-secondary); font-weight: var(--drive-font-weight-medium); }
   th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
-  a { color: inherit; text-decoration: none; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
-  .tag { display: inline-block; margin-left: var(--drive-space-2); color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-meta); }
+  a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  .name { display: inline-flex; align-items: center; gap: var(--drive-space-2); max-width: 100%; }
+  .name a { min-width: 0; }
+  .tag { color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-meta); }
   .mobile { display: none; margin: 0; padding: 0; list-style: none; }
   li { min-height: var(--drive-size-row-dense); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
