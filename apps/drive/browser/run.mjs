@@ -140,6 +140,32 @@ try {
     }
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
+    const size = `listing-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    assert.equal(await container.count(), 1);
+    assert.equal(await container.getByRole('link').count(), 3);
+    assert.equal(await container.getByText('Shared', { exact: true }).count(), 1);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
+    for (const name of ['Archive', 'a-very-long-file-name-without-breaks-to-check-reflow.txt', 'Résumé 2025.pdf']) {
+      await page.keyboard.press('Tab');
+      assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
+    }
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
