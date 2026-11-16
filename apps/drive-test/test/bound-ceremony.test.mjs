@@ -29,7 +29,7 @@ it('fails closed for races, expiration, replacement and verifier failure', async
   expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
   const badChallenge = await ceremonies.issue('bad', 'authentication');
   const bad = await fixture('authentication', { challenge: badChallenge, badSignature: true });
-  await expect(ceremonies.authentication('bad', badChallenge, bad.authentication, bad.credential)).rejects.toThrow();
+  expect((await ceremonies.authentication('bad', badChallenge, bad.authentication, bad.credential)).verified).toBe(false);
   const good = await fixture('authentication', { challenge: badChallenge });
   await expect(ceremonies.authentication('bad', badChallenge, good.authentication, good.credential)).rejects.toThrow();
   const expired = await ceremonies.issue('expired', 'authentication');
@@ -53,8 +53,8 @@ it('bounds context, lifetime, and total retained rows', async () => {
   expect(row.remaining).toBeGreaterThan(0);
   expect(row.remaining).toBeLessThanOrEqual(300000);
   await env.DB.exec("DELETE FROM drive_bound_ceremonies");
-  await env.DB.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1024)
-    INSERT INTO drive_bound_ceremonies SELECT printf('ctx%d', x), 'registration', printf('challenge%d', x), 9999999999999 FROM n`);
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1024)
+    INSERT INTO drive_bound_ceremonies SELECT printf('ctx%d', x), 'registration', printf('challenge%d', x), 9999999999999 FROM n`).run();
   await expect(ceremonies.issue('overflow', 'registration')).rejects.toThrow('capacity');
   await expect(ceremonies.issue('ctx1', 'registration')).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(1024);
