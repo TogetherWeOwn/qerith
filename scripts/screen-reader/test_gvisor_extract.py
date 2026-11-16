@@ -74,6 +74,52 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertFalse(paths[0].exists())
 
+    def test_gzip_framing_rejections_clean_up(self):
+        data = archive()
+        corrupt_crc = data[:-8] + bytes([data[-8] ^ 1]) + data[-7:]
+        corrupt_size = data[:-1] + bytes([data[-1] ^ 1])
+        cases = {
+            "reserved flags": data[:3] + b"\xe0" + data[4:],
+            "extra": data[:3] + b"\x04" + data[4:10] + b"\x00\x00" + data[10:],
+            "name": data[:3] + b"\x08" + data[4:10] + b"name\0" + data[10:],
+            "comment": data[:3] + b"\x10" + data[4:10] + b"comment\0" + data[10:],
+            "header crc": data[:3] + b"\x02" + data[4:10] + b"\x00\x00" + data[10:],
+            "truncated header": data[:9],
+            "truncated trailer": data[:-1],
+            "bad crc": corrupt_crc,
+            "bad size": corrupt_size,
+            "zero padding": data + b"\0",
+            "garbage": data + b"garbage",
+            "empty member": data + gzip.compress(b""),
+            "many empty members": data + gzip.compress(b"") * 1000,
+            "leading empty member": gzip.compress(b"") + data,
+            "split stream": gzip.compress(gzip.decompress(data)[:512]) + gzip.compress(gzip.decompress(data)[512:]),
+            "second archive": data + data,
+        }
+        original = extract.tempfile.TemporaryDirectory
+        for label, invalid in cases.items():
+            paths = []
+
+            def tracked(*args, **kwargs):
+                result = original(*args, **kwargs)
+                paths.append(Path(result.name))
+                return result
+
+            with self.subTest(case=label), patch.object(extract.tempfile, "TemporaryDirectory", side_effect=tracked):
+                with self.assertRaises(ValueError):
+                    run(invalid)
+                self.assertEqual(len(paths), 1)
+                self.assertFalse(paths[0].exists())
+
+    def test_stream_spans_compressed_chunks(self):
+        data = gzip.compress(gzip.decompress(archive()) + bytes(131072), compresslevel=0)
+        with run(data) as directory:
+            self.assertEqual(len(list(Path(directory).iterdir())), len(extract.FILES))
+        with self.assertRaises(ValueError):
+            run(data + gzip.compress(b""))
+        with patch.object(extract, "MAX_TAR", 65536), self.assertRaises(ValueError):
+            run(data)
+
     def test_limits_and_invalid_stream(self):
         data = archive()
         for name, value in (("MAX_COMPRESSED", len(data) - 1), ("MAX_FILE", 3),
