@@ -217,6 +217,30 @@ try {
     }
     await context.close();
   }
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    const spaces = container.locator('a[data-item-id="spaces"]');
+    const tab = container.locator('a[data-item-id="tab"]');
+    assert.equal(await spaces.textContent(), 'report  final.txt');
+    assert.equal(await spaces.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
+    assert.equal(await tab.textContent(), '\t (Whitespace-only name)');
+    assert.equal(await container.getByRole('link', { name: '(Whitespace-only name)', exact: true }).count(), 1);
+    const hit = await spaces.evaluate(el => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      return { top: parseFloat(style.paddingTop), bottom: parseFloat(style.paddingBottom),
+        above: el.contains(document.elementFromPoint(x, rect.top + 4)),
+        below: el.contains(document.elementFromPoint(x, rect.bottom - 4)) };
+    });
+    assert.deepEqual(hit, { top: 8, bottom: 8, above: true, below: true });
+    await context.close();
+  }
   {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());

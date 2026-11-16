@@ -9,6 +9,10 @@
     { id: '3', name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt', href: '#long', kind: 'File', glyph: 'file', size: '1.0 KB', bytes: 1000, modified: '12 Nov', modifiedAt: '2026-11-12T09:00:00Z', shared: false },
     { id: '2', name: 'Résumé 2025.pdf', href: '#resume', kind: 'PDF', glyph: 'document', size: '5.4 MB', bytes: 5400000, modified: '13 Nov', modifiedAt: '2026-11-13T09:00:00Z', shared: false }
   ];
+  const whitespaceItems = [
+    { ...items[1], id: 'spaces', name: 'report  final.txt', href: '#spaces' },
+    { ...items[1], id: 'tab', name: '\t', href: '#tab' }
+  ];
   const empty = new URLSearchParams(window.location.search).get('empty');
   let uploads = $state(0);
 
@@ -20,7 +24,7 @@
 </script>
 
 {#if listing}
-  <main><FileList folder="My Drive" timeZone="America/New_York" {items} /></main>
+  <main><FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} /></main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}
