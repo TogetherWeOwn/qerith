@@ -7,19 +7,26 @@ import { rpID, origin, challenge, fixture } from './ceremony-fixture';
 for (const kind of ['registration', 'authentication'] as const) {
   test(`${kind} verifies real signatures and rejects invalid ceremonies`, async () => {
     const verifier = createCeremonyVerifier(rpID, origin);
-    const verify = async (options: Parameters<typeof fixture>[1] = {}, expected = challenge) => {
-      const f = await fixture(kind, options);
-      return kind === 'registration'
-        ? verifier.registration(f.registration, expected)
-        : verifier.authentication(f.authentication, expected, f.credential);
-    };
-    assert.equal((await verify()).verified, true);
-    for (const options of [{ origin: 'https://wrong.test' }, { rpID: 'wrong.test' }, { uv: false }, { badSignature: true }]) {
-      await assert.rejects(async () => { assert.equal((await verify(options)).verified, true); });
+    const verify = async (f: Awaited<ReturnType<typeof fixture>>, expected = challenge) => kind === 'registration'
+      ? verifier.registration(f.registration, expected)
+      : verifier.authentication(f.authentication, expected, f.credential);
+    assert.equal((await verify(await fixture(kind))).verified, true);
+    for (const options of [{ origin: 'https://wrong.test' }, { rpID: 'wrong.test' }, { uv: false }, { badSignature: true }, { crossOrigin: true }, { topOrigin: 'https://wrong.test' }]) {
+      const data = await fixture(kind, options);
+      const result = await verify(data).catch(() => ({ verified: false }));
+      assert.equal(result.verified, false);
     }
-    await assert.rejects(async () => { assert.equal((await verify({}, 'wrong')).verified, true); });
+    const data = await fixture(kind);
+    const result = await verify(data, 'wrong').catch(() => ({ verified: false }));
+    assert.equal(result.verified, false);
   });
 }
+
+test('authentication rejects a credential ID mismatch', async () => {
+  const data = await fixture('authentication');
+  const verifier = createCeremonyVerifier(rpID, origin);
+  assert.throws(() => verifier.authentication(data.authentication, challenge, { ...data.credential, id: 'different' }), /Credential ID mismatch/);
+});
 
 test('relying party configuration cannot be request-shaped or insecure', () => {
   for (const [id, value] of [['example.test', 'http://example.test'], ['example.test', 'https://wrong.test'], ['example.test', 'https://example.test/path']]) {
