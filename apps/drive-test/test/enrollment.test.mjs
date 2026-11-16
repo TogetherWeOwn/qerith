@@ -7,7 +7,12 @@ import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
 
 async function setup() {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active')");
+  // D1 state is shared between tests in this file.
+  await env.DB.exec(`DELETE FROM drive_bound_ceremonies;
+    DELETE FROM drive_credentials;
+    DELETE FROM drive_invitations;
+    DELETE FROM drive_principals;
+    INSERT INTO drive_principals VALUES ('owner', 'owner', 'active');`);
   return { invitations: new Invitations(env.DB), enrollment: new InvitationEnrollment(env.DB, rpID, origin) };
 }
 
