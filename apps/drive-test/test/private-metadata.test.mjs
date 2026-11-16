@@ -9,6 +9,7 @@ beforeEach(async () => {
   await env.DB.exec(`DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
     DROP TABLE IF EXISTS drive_owner_usage;
+    DROP TABLE IF EXISTS drive_webauthn_challenges;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);

@@ -27,7 +27,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         if (truncated !== 'true' && truncated !== 'false') throw new Error();
         const next = listingText(root, 'NextContinuationToken', false);
         if (truncated === 'true' ? !next || next === continuationToken : next !== undefined) throw new Error();
-        const keys = listingChildren(root, 'Contents').map((item) => decodeURIComponent(listingText(item, 'Key')!));
+        const keys = listingChildren(root, 'Contents').map((item) => decodeURIComponent(listingText(item, 'Key')!.replace(/\+/g, '%20')));
         if (keys.some((key) => !key)) throw new Error();
         return { keys, nextContinuationToken: next };
       } catch { throw new Error('Invalid S3 listing response'); }
