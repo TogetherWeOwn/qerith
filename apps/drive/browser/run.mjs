@@ -228,7 +228,7 @@ try {
     const tab = container.locator('a[data-item-id="tab"]');
     assert.equal(await spaces.textContent(), 'report  final.txt');
     assert.equal(await spaces.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
-    assert.equal(await tab.textContent(), '\t (Whitespace-only name)');
+    assert.equal(await tab.textContent(), '\t(Whitespace-only name)');
     assert.equal(await container.getByRole('link', { name: '(Whitespace-only name)', exact: true }).count(), 1);
     const hit = await spaces.evaluate(el => {
       const style = getComputedStyle(el);
