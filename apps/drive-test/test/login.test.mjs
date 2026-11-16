@@ -62,8 +62,8 @@ it('rechecks membership and counter when committing a verified assertion', async
 
 it('rolls back session insertion when the counter update fails', async () => {
   const { login, challenge, signed } = await setup();
-  await env.DB.exec(`CREATE TRIGGER fail_login_counter BEFORE UPDATE OF counter ON drive_credentials
-    BEGIN SELECT RAISE(ABORT, 'counter write failed'); END`);
+  await env.DB.prepare(`CREATE TRIGGER fail_login_counter BEFORE UPDATE OF counter ON drive_credentials
+    BEGIN SELECT RAISE(ABORT, 'counter write failed'); END`).run();
   try {
     await expect(login.authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
     expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
