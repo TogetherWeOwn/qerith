@@ -34,9 +34,9 @@ jobs:
           printf '%s  %s\n' '0a8a9058b9f11791a2097f03190c2ddc5b963c3dbee5bb9fd8497f4801c42f92' "$archive" | sha256sum --check --status
           # GNU tar lists only; never extract archive members or invoke their scripts.
           # Resource limits also bound parser memory, listing disk usage and wall time.
-          if ! timeout --signal=TERM --kill-after=10s 180s tar --zstd --list --verbose \
-            --numeric-owner --quoting-style=escape --file "$archive" \
-            > "$root/listing/members" 2> "$root/listing/errors"; then
+          if ! (ulimit -f 1024; timeout --signal=TERM --kill-after=10s 180s \
+            tar --zstd --list --verbose --numeric-owner --quoting-style=escape \
+            --file "$archive") > "$root/listing/members" 2> "$root/listing/errors"; then
             printf '%s\n' 'Archive listing failed or exceeded a limit.' >&2
             exit 1
           fi
@@ -45,7 +45,8 @@ jobs:
           import json
           import pathlib
           import sys
-          data = pathlib.Path(sys.argv[1]).read_bytes()
+          with pathlib.Path(sys.argv[1]).open('rb') as listing:
+              data = listing.read(1024 * 1024 + 1)
           if len(data) > 1024 * 1024:
               raise SystemExit('Inventory exceeds 1 MiB')
           for line in data.decode('utf-8', 'backslashreplace').splitlines():
