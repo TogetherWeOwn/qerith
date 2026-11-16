@@ -1,11 +1,16 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import { Invitations } from '../../drive/src/lib/server/identity/invitations.ts';
 
-it('issues hashed tokens only for a live owner and persists cancellation', async () => {
+beforeEach(async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.exec('DELETE FROM drive_invitations');
+  await env.DB.exec('DELETE FROM drive_principals');
   await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+});
+
+it('issues hashed tokens only for a live owner and persists cancellation', async () => {
   const service = new Invitations(env.DB);
   for (const actor of ['missing', 'member']) await expect(service.issue(actor)).rejects.toThrow();
   const before = Date.now();
@@ -33,8 +38,6 @@ it('issues hashed tokens only for a live owner and persists cancellation', async
 });
 
 it('limits presentation to valid tokens and listing to active owners', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
   const service = new Invitations(env.DB);
   expect(await service.list('owner')).toEqual([]);
   for (const actor of ['member', 'missing']) await expect(service.list(actor)).rejects.toThrow('Invitation unavailable');
