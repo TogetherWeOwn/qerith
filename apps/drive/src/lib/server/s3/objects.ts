@@ -1,3 +1,4 @@
+import { validateRange } from './range';
 import { createS3Transport } from './transport';
 
 /** Object operations use one signed request and never expose transport errors. */
@@ -36,7 +37,7 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
       let response: Awaited<ReturnType<typeof request.stream>>;
       try {
         const headers = new Headers();
-        if (options.range !== undefined) headers.set('range', options.range);
+        if (options.range !== undefined) headers.set('range', validateRange(options.range));
         if (options.ifMatch !== undefined) headers.set('if-match', options.ifMatch);
         if (options.ifNoneMatch !== undefined) headers.set('if-none-match', options.ifNoneMatch);
         if (options.ifRange !== undefined) headers.set('if-range', options.ifRange);
