@@ -22,6 +22,7 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS drive_webauthn_challenges;
     DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);
