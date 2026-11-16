@@ -1,11 +1,15 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it } from 'vitest';
 import { RecoveryTokens } from '../../drive/src/lib/server/identity/recovery.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 
-it('issues bounded hashed tokens only for an active owner session and target', async () => {
+beforeEach(async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.exec('DELETE FROM drive_recovery_tokens; DELETE FROM drive_sessions; DELETE FROM drive_principals;');
+});
+
+it('issues bounded hashed tokens only for an active owner session and target', async () => {
   await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active'), ('revoked', 'member', 'revoked')");
   const sessions = new Sessions(env.DB);
   const owner = (await sessions.issue('owner')).token;
