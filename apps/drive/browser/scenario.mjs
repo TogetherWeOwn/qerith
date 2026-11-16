@@ -58,6 +58,18 @@ export async function exerciseWaitAnnouncement(page) {
       assert.match(await page.locator('section').ariaSnapshot(), /status/);
     }
   }
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture-wait')));
+  await page.getByRole('button', { name: 'Waiting for your device…' }).focus();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('fixture-state', { detail: 'revoked' })));
+  const heading = page.getByRole('heading', { name: 'Your access is turned off' });
+  await heading.waitFor();
+  assert.equal(await heading.evaluate(el => el === document.activeElement), true);
+  assert.equal(await heading.getAttribute('aria-describedby'), 'sign-in-description');
+  const session = await page.context().newCDPSession(page);
+  const { nodes } = await session.send('Accessibility.getFullAXTree');
+  await session.detach();
+  const result = nodes.find(node => node.role?.value === 'heading' && node.name?.value === 'Your access is turned off');
+  assert.match(result?.description?.value || '', /The owner turned off your access to Drive/);
   return tree;
 }
 
@@ -70,6 +82,12 @@ export async function exerciseKeyboard(page, state) {
   await page.keyboard.press('Tab');
   const focused = await page.evaluate(() => document.activeElement?.textContent?.trim());
   const primary = buttons.first();
+  await page.emulateMedia({ forcedColors: 'active' });
+  const border = await primary.evaluate(el => { const css = getComputedStyle(el); return [css.borderTopWidth, css.borderTopStyle, css.borderTopColor]; });
+  assert.notEqual(border[0], '0px');
+  assert.equal(border[1], 'solid');
+  assert.notEqual(border[2], 'rgba(0, 0, 0, 0)');
+  await page.emulateMedia({ forcedColors: 'none' });
   assert.equal(focused, (await primary.textContent()).trim());
   const inactive = ['waiting', 'unsupported', 'rate-limited'].includes(state);
   assert.equal(await primary.getAttribute('aria-disabled'), String(inactive));

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import './tokens.css';
   import SignInCard from './SignInCard.svelte';
   import type { SignInState } from './sign-in-state';
   import qerithSans from './fonts/QerithSans-latin.woff2?url';
@@ -40,14 +41,6 @@
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD;
   }
   main {
-    --drive-color-bg-canvas: #15100f;
-    --drive-color-text-primary: #f6f1ea;
-    --drive-space-2: 8px;
-    --drive-space-4: 16px;
-    --drive-space-6: 24px;
-    --drive-layout-rail-max: 420px;
-    --drive-font-ui: 'Qerith Sans', system-ui, sans-serif;
-    --drive-font-size-ui: 15px;
     min-height: 100vh;
     box-sizing: border-box;
     padding: var(--drive-space-6) var(--drive-space-4);
@@ -56,5 +49,5 @@
     font-family: var(--drive-font-ui);
   }
   .rail { max-width: var(--drive-layout-rail-max); margin: 0 auto; }
-  header { display: flex; align-items: center; gap: var(--drive-space-2); margin-bottom: var(--drive-space-6); font-size: var(--drive-font-size-ui); font-weight: 600; }
+  header { display: flex; align-items: center; gap: var(--drive-space-2); margin-bottom: var(--drive-space-6); font-size: var(--drive-font-size-ui); font-weight: var(--drive-font-weight-semibold); }
 </style>
