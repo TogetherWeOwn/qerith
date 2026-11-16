@@ -50,6 +50,35 @@ it('rejects expiry and revocation without affecting another member', async () =>
   expect(await sessions.lookup(unaffected.token)).toEqual({ id: 'member', role: 'member' });
 });
 
+it('cleans bounded batches of expired sessions without removing live sessions', async () => {
+  const sessions = await setup();
+  const live = await sessions.issue('member');
+  // Includes an expiry at the database clock boundary and a clearly expired backlog.
+  await env.DB.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 205)
+    INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
+    SELECT printf('%064x', x), 'owner', CASE WHEN x = 205
+      THEN CAST(unixepoch('subsec') * 1000 AS INTEGER) ELSE 1 END FROM n`);
+  expect(await sessions.cleanupExpired()).toBe(100);
+  expect(await sessions.cleanupExpired()).toBe(100);
+  expect(await sessions.cleanupExpired()).toBe(5);
+  expect(await sessions.cleanupExpired()).toBe(0);
+  expect(await sessions.lookup(live.token)).toEqual({ id: 'member', role: 'member' });
+});
+
+it('keeps concurrent cleanup calls bounded and preserves live membership checks', async () => {
+  const sessions = await setup();
+  const live = await sessions.issue('member');
+  await env.DB.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 150)
+    INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
+    SELECT printf('%064x', x), 'owner', 1 FROM n`);
+  const counts = await Promise.all([sessions.cleanupExpired(), sessions.cleanupExpired()]);
+  expect(counts.every((count) => count <= 100)).toBe(true);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(150);
+  expect(await sessions.lookup(live.token)).toEqual({ id: 'member', role: 'member' });
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
+  expect(await sessions.lookup(live.token)).toBeNull();
+});
+
 it('permanently invalidates sessions when a member is disabled and later re-enabled', async () => {
   const sessions = await setup();
   const old = await sessions.issue('member');
