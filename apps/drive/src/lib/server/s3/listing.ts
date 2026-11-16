@@ -64,6 +64,32 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         if (truncated === 'true' && (!parts.length || next !== previous)) throw new Error();
         return { parts, nextPartNumberMarker: truncated === 'true' ? next : undefined };
       } catch { throw new Error('Invalid S3 listing response'); }
+    },
+    async uploads(options: { prefix?: string; keyMarker?: string; uploadIdMarker?: string; signal?: AbortSignal } = {}) {
+      const { prefix, keyMarker, uploadIdMarker, signal } = options;
+      if ((uploadIdMarker !== undefined && keyMarker === undefined) || keyMarker === '' || uploadIdMarker === '') throw new Error('Invalid S3 listing cursor');
+      const query: Record<string, string> = { uploads: '', 'encoding-type': 'url' };
+      if (prefix !== undefined) query.prefix = prefix;
+      if (keyMarker !== undefined) query['key-marker'] = keyMarker;
+      if (uploadIdMarker !== undefined) query['upload-id-marker'] = uploadIdMarker;
+      const body = await page('', query, signal);
+      try {
+        const root = parseListingXml(body, 'ListMultipartUploadsResult');
+        if (listingText(root, 'EncodingType') !== 'url') throw new Error();
+        const truncated = listingText(root, 'IsTruncated');
+        if (truncated !== 'true' && truncated !== 'false') throw new Error();
+        const rawKey = listingText(root, 'NextKeyMarker', false);
+        const nextKeyMarker = rawKey === undefined ? undefined : decodeURIComponent(rawKey.replace(/\+/g, '%20'));
+        const nextUploadIdMarker = listingText(root, 'NextUploadIdMarker', false);
+        if (truncated === 'true' && (!nextKeyMarker || !nextUploadIdMarker || (nextKeyMarker === keyMarker && nextUploadIdMarker === uploadIdMarker))) throw new Error();
+        const uploads = listingChildren(root, 'Upload').map((item) => {
+          const key = decodeURIComponent(listingText(item, 'Key')!.replace(/\+/g, '%20'));
+          const uploadId = listingText(item, 'UploadId')!;
+          if (!key || !uploadId) throw new Error();
+          return { key, uploadId };
+        });
+        return { uploads, nextKeyMarker: truncated === 'true' ? nextKeyMarker : undefined, nextUploadIdMarker: truncated === 'true' ? nextUploadIdMarker : undefined };
+      } catch { throw new Error('Invalid S3 listing response'); }
     }
   };
 }
