@@ -1,5 +1,13 @@
 <script lang="ts">
+  import { beforeUpdate, afterUpdate } from 'svelte';
   import { canSignIn, requestSignIn, signInCopy, type SignInState } from './sign-in-state';
+
+  let cancel: HTMLButtonElement;
+  let primary: HTMLButtonElement;
+  let title: HTMLHeadingElement;
+  let restoreFocus = false;
+  beforeUpdate(() => { restoreFocus = typeof document !== 'undefined' && state !== 'waiting' && document.activeElement === cancel; });
+  afterUpdate(() => { if (restoreFocus) (primary || title).focus(); });
 
   export let state: SignInState = 'sign-in';
   export let onSignIn: () => void;
@@ -10,10 +18,11 @@
 </script>
 
 <section aria-labelledby="sign-in-title">
-  <h1 id="sign-in-title">{copy.title}</h1>
+  <h1 id="sign-in-title" tabindex="-1" bind:this={title}>{copy.title}</h1>
   <p>{copy.body}</p>
   {#if copy.action}
     <button
+      bind:this={primary}
       class:quiet={state === 'rate-limited' || state === 'unsupported'}
       type="button"
       aria-disabled={unavailable}
@@ -21,12 +30,12 @@
       on:click={() => requestSignIn(state, onSignIn)}
     >{#if state !== 'waiting' && state !== 'rate-limited'}<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 1 1-2 2-1-1-3 3"/></svg>{/if}{copy.action}</button>
   {/if}
-  <p class:notice={state === 'waiting'} role="status" aria-live="polite">{state === 'waiting' ? copy.notice : ''}</p>
-  {#if copy.notice && state !== 'waiting'}
-    <p class="notice" class:warn={state === 'unsupported'} role={state === 'cancelled' || state === 'no-passkey' ? 'alert' : undefined}>{copy.notice}</p>
+  <p class:notice={state === 'waiting' || state === 'unsupported' || state === 'rate-limited'} class:warn={state === 'unsupported'} role="status" aria-live="polite">{state === 'waiting' || state === 'unsupported' || state === 'rate-limited' ? copy.notice : ''}</p>
+  {#if copy.notice && (state === 'cancelled' || state === 'no-passkey')}
+    <p class="notice" role="alert">{copy.notice}</p>
   {/if}
   {#if state === 'waiting'}
-    <button class="cancel" type="button" on:click={onCancel}>Cancel</button>
+    <button bind:this={cancel} class="cancel" type="button" on:click={onCancel}>Cancel</button>
   {/if}
   {#if state !== 'revoked'}
     <p class="explanation"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>No passwords. Your passkey stays on your device or password manager.</p>
@@ -66,7 +75,7 @@
   h1 { font-size: var(--drive-font-size-h3); line-height: 1.1; font-weight: 560; letter-spacing: -0.025em; text-wrap: balance; }
   p { font-size: var(--drive-font-size-body); line-height: 1.55; color: var(--drive-color-text-secondary); }
   button { width: 100%; min-height: var(--drive-size-control-md); border: 0; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-size: var(--drive-font-size-ui); font-weight: 600; cursor: pointer; }
-  button:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
+  button:not(.cancel):not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
   button:focus-visible { outline: 2px solid var(--drive-color-accent-default); outline-offset: 3px; }
   button.quiet { background: var(--drive-color-bg-raised); color: var(--drive-color-text-tertiary); }
   button.cancel { width: auto; background: transparent; color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-small); text-decoration: underline; }

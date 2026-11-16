@@ -37,6 +37,27 @@ export async function exerciseWaitAnnouncement(page) {
   assert.match(tree, /Follow your browser's prompt\./);
   assert.match(tree, /button "Waiting for your device…".*\[disabled\]/);
   await assertBusy(page);
+  const cancel = page.getByRole('button', { name: 'Cancel' });
+  await cancel.hover();
+  const colors = await cancel.evaluate(el => [getComputedStyle(el).color, getComputedStyle(el).backgroundColor, getComputedStyle(el.closest('section')).backgroundColor]);
+  assert.equal(colors[1], 'rgba(0, 0, 0, 0)', 'Cancel hover must keep the card background');
+  const luminance = color => {
+    const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const values = [luminance(colors[0]), luminance(colors[2])].sort((a, b) => b - a);
+  assert((values[0] + 0.05) / (values[1] + 0.05) >= 4.5, 'Cancel hover contrast must be at least 4.5:1');
+  for (const [state, notice] of [['rate-limited', 'Too many tries. Wait a minute, then try again.'], ['unsupported', "This browser can't use passkeys. Try an up-to-date Chrome, Edge, Firefox or Safari."], ['cancelled', null], ['revoked', null]]) {
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-wait')));
+    await cancel.focus();
+    await page.evaluate(value => window.dispatchEvent(new CustomEvent('fixture-state', { detail: value })), state);
+    await waitForFixture(page, state);
+    assert.equal(await page.evaluate(() => document.activeElement?.tagName), state === 'revoked' ? 'H1' : 'BUTTON');
+    if (notice) {
+      assert.equal(await status.textContent(), notice);
+      assert.match(await page.locator('section').ariaSnapshot(), /status/);
+    }
+  }
   return tree;
 }
 
