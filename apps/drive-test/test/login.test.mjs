@@ -41,6 +41,25 @@ it('rejects invalid signatures, relying parties, origins and user verification',
   }
 });
 
+it('consumes the challenge when assertion parsing or credential lookup fails', async () => {
+  for (const failure of ['malformed', 'lookup']) {
+    const { login, challenge, signed } = await setup();
+    const db = {
+      prepare(sql) {
+        if (sql.includes('SELECT c.id, c.principal_id')) throw new Error('lookup failed');
+        return env.DB.prepare(sql);
+      },
+      batch: statements => env.DB.batch(statements),
+    };
+    const attempt = failure === 'malformed'
+      ? login.authenticate('transaction', challenge, null)
+      : new PasskeyLogin(db, rpID, origin).authenticate('transaction', challenge, signed.authentication);
+    await expect(attempt).rejects.toThrow();
+    await expect(login.authenticate('transaction', challenge, signed.authentication)).rejects.toThrow();
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
+  }
+});
+
 it('rechecks membership and counter when committing a verified assertion', async () => {
   for (const state of ['revoked', 'reactivated', 'counter']) {
     const { challenge, signed } = await setup();
