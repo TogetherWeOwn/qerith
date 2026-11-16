@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 
 import gvisor_metadata as metadata
+from gvisor_companions import CompanionEvidence
 
 SIZE = 171393970
 GENERATION = "1791482698896843"
@@ -137,7 +138,7 @@ def safe_symlink(target):
     return target
 
 
-def inventory_tar(f, member):
+def inventory_tar(f, member, inspect=None):
     name, start, size = member
     f.seek(start)
     source = LimitedReader(f, size)
@@ -186,7 +187,11 @@ def inventory_tar(f, member):
                 link = safe_path(entry.linkname)
             print(json.dumps({"archive": name, "path": path, "type": types[entry.type],
                               "size": entry.size, "link": link}, ensure_ascii=True, sort_keys=True))
-            remaining = (entry.size + 511) // 512 * 512
+            prefix_size = min(entry.size, 4096) if inspect and inspect.wants(path) else 0
+            prefix = read_exact(prefix_size) if prefix_size else b""
+            if inspect and inspect.wants(path):
+                inspect.accept(path, entry, prefix)
+            remaining = (entry.size + 511) // 512 * 512 - prefix_size
             while remaining:
                 chunk = min(remaining, 1024 * 1024)
                 read_exact(chunk)
@@ -209,8 +214,10 @@ def run(root):
     authenticate(path, pins)
     with path.open("rb") as f:
         members = ar_members(f)
-        for member in members[1:3]:
-            inventory_tar(f, member)
+        inventory_tar(f, members[1])
+        evidence = CompanionEvidence()
+        inventory_tar(f, members[2], evidence)
+        evidence.finish()
         if len(members) == 4:
             print(json.dumps({"ar_member": members[3][0], "type": "opaque signature (not verified)"}))
 
