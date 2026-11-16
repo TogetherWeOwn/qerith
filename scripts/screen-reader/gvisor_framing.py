@@ -1,4 +1,4 @@
-""Qualify authenticated package framing without extracting package contents."""
+"""Qualify authenticated package framing without extracting package contents."""
 
 import hashlib
 import io
