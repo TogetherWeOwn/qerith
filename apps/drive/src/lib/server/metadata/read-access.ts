@@ -63,9 +63,9 @@ export class ReadAccess {
     // A sentinel distinguishes an accessible empty folder from an inaccessible ID
     // without an authorization query separate from the listing.
     const rows = (await this.db.prepare(`${access}, folder AS (
-      SELECT e.id FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
+      SELECT e.id, e.owner_id FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
-      SELECT e.id, e.name, e.kind FROM drive_entries e JOIN folder f ON e.parent_id = f.id
+      SELECT e.id, e.name, e.kind FROM drive_entries e JOIN folder f ON e.parent_id = f.id AND e.owner_id = f.owner_id
       WHERE (? IS NULL OR (e.name, e.id) > (?, ?)) ORDER BY e.name, e.id LIMIT 101
     ) SELECT id, name, kind FROM children UNION ALL
       SELECT NULL, NULL, NULL FROM folder ORDER BY name, id`)
