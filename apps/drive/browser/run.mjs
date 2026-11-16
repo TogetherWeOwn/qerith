@@ -162,7 +162,7 @@ try {
     if (width > 820) {
       assert.equal(await container.getByText('PDF', { exact: true }).count(), 1);
     } else {
-      const row = container.getByRole('listitem').filter({ has: container.getByRole('link', { name: 'Résumé 2025.pdf' }) });
+      const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
       assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
     }
     assert.equal(await container.locator('data').count(), 2);
