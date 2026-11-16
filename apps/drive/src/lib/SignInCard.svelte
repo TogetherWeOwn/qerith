@@ -31,9 +31,9 @@
       on:click={() => requestSignIn(state, onSignIn)}
     >{#if state !== 'waiting' && state !== 'rate-limited'}<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 1 1-2 2-1-1-3 3"/></svg>{/if}{copy.action}</button>
   {/if}
-  <p class:notice={state === 'waiting' || state === 'unsupported' || state === 'rate-limited'} class:warn={state === 'unsupported'} class:sr-only={state === 'revoked'} role="status" aria-live="polite">{state === 'revoked' ? `${copy.title}. ${copy.body}` : state === 'waiting' || state === 'unsupported' || state === 'rate-limited' ? copy.notice : ''}</p>
+  <p class:notice={state === 'unsupported'} class:warn={state === 'unsupported'} class:sr-only={state === 'revoked'} role="status" aria-live="polite">{state === 'revoked' ? `${copy.title}. ${copy.body}` : state === 'waiting' || state === 'unsupported' || state === 'rate-limited' ? copy.notice : ''}</p>
   {#if copy.notice && (state === 'cancelled' || state === 'no-passkey')}
-    <p class="notice" role="alert">{copy.notice}</p>
+    <p class="notice info" role="alert"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>{copy.notice}</p>
   {/if}
   {#if state === 'waiting'}
     <button bind:this={cancel} class="cancel" type="button" on:click={onCancel}>Cancel</button>
@@ -53,18 +53,20 @@
     border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong);
     border-radius: var(--drive-radius-l);
   }
-  h1 { font-size: var(--drive-font-size-h3); line-height: var(--drive-line-height-heading); font-weight: var(--drive-font-weight-display); letter-spacing: var(--drive-tracking-h3); text-wrap: balance; }
+  h1 { font-size: var(--drive-font-size-h3); line-height: var(--drive-line-height-heading); font-weight: var(--drive-font-weight-display); font-stretch: var(--drive-font-width-display); letter-spacing: var(--drive-tracking-h3); text-wrap: balance; }
   p { font-size: var(--drive-font-size-body); line-height: var(--drive-line-height-body); color: var(--drive-color-text-secondary); }
-  button { width: 100%; min-height: var(--drive-size-control-md); border: var(--drive-size-line) solid transparent; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-size: var(--drive-font-size-ui); font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
+  button { width: 100%; min-height: var(--drive-size-control-md); border: var(--drive-size-line) solid transparent; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-size: var(--drive-font-size-ui); font-weight: var(--drive-font-weight-semibold); font-stretch: var(--drive-font-width-button); cursor: pointer; }
   button:not(.cancel):not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
-  button.quiet { background: var(--drive-color-bg-raised); color: var(--drive-color-text-tertiary); }
+  button.quiet { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
   button.cancel { width: auto; background: transparent; color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-small); text-decoration: underline; }
   p[role='status']:empty { margin: 0; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
   .notice { padding: var(--drive-space-4); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); color: var(--drive-color-text-primary); font-size: var(--drive-font-size-ui); }
   .notice.warn { background: var(--drive-color-state-warn-bg); }
+  .notice.info { display: flex; gap: var(--drive-space-2); }
   svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .info svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); }
   button svg { vertical-align: middle; margin-right: var(--drive-space-2); }
   .explanation { display: flex; gap: var(--drive-space-2); font-size: var(--drive-font-size-small); }
 </style>

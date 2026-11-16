@@ -8,10 +8,26 @@ export async function waitForFixture(page, state) {
   await page.evaluate(() => document.fonts.ready);
   const tree = await page.locator('section').ariaSnapshot();
   assert.match(tree, new RegExp(`heading "${title}" \\[level=1\\]`));
+  assert.equal(await page.locator('h1').evaluate(el => getComputedStyle(el).fontStretch), '108%');
+  const status = page.getByRole('status');
+  assert.equal(await status.count(), 1);
+  if (['waiting', 'rate-limited', 'unsupported'].includes(state)) {
+    assert.equal(await status.evaluate(el => el.classList.contains('notice')), state === 'unsupported');
+  }
+  if (['cancelled', 'no-passkey'].includes(state)) {
+    const icon = page.getByRole('alert').locator('svg');
+    assert.equal(await icon.getAttribute('aria-hidden'), 'true');
+    assert.deepEqual(await icon.evaluate(el => { const css = getComputedStyle(el); return [css.width, css.height, css.strokeWidth]; }), ['16px', '16px', '1.75px']);
+  }
   if (state !== 'revoked') {
     const name = state === 'waiting' ? 'Waiting for your device…' : state === 'rate-limited' ? 'Try again in 1 min' : 'Sign in with a passkey';
     const inactive = ['waiting', 'unsupported', 'rate-limited'].includes(state);
-    assert.equal(await page.getByRole('button', { name, exact: true, disabled: inactive }).count(), 1);
+    const button = page.getByRole('button', { name, exact: true, disabled: inactive });
+    assert.equal(await button.count(), 1);
+    assert.equal(await button.evaluate(el => getComputedStyle(el).fontStretch), '105%');
+    if (['unsupported', 'rate-limited'].includes(state)) {
+      assert.equal(await button.evaluate(el => getComputedStyle(el).color), await page.locator('h1').evaluate(el => getComputedStyle(el).color));
+    }
     assert.match(tree, new RegExp(`button "${name}"`));
     if (inactive) assert.match(tree, /\[disabled\]/);
     if (state === 'waiting') await assertBusy(page);
