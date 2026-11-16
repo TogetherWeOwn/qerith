@@ -10,11 +10,11 @@ CREATE TABLE drive_recovery_tokens (
 
 -- A revoked and restored principal must not regain an old recovery token.
 CREATE TRIGGER drive_recovery_membership_change
-AFTER UPDATE OF status ON drive_principals
-WHEN OLD.status != NEW.status
+AFTER UPDATE OF status, role ON drive_principals
+WHEN OLD.status != NEW.status OR (OLD.role != NEW.role AND (OLD.role = 'owner' OR NEW.role = 'owner'))
 BEGIN
   UPDATE drive_recovery_tokens
   SET cancelled_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
   WHERE cancelled_at IS NULL AND redeemed_at IS NULL
-    AND (principal_id = OLD.id OR OLD.role = 'owner');
+    AND (principal_id = OLD.id OR OLD.role = 'owner' OR NEW.role = 'owner');
 END;
