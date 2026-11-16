@@ -255,6 +255,43 @@ try {
     await writeFile(resolve(output, 'menu-resize.json'), JSON.stringify({ initial: '1280x800', resized: '1280x300', result: 'closed, focus restored' }));
     await context.close();
   }
+  for (const source of ['document', 'ancestor', 'menu']) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 180 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
+    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    await trigger.evaluate((el, source) => {
+      if (source === 'document') document.body.style.minHeight = '1000px';
+      if (source === 'ancestor') {
+        const container = el.closest('main').firstElementChild;
+        container.style.cssText = 'height: 100px; overflow: auto';
+        const spacer = document.createElement('div');
+        spacer.style.height = '500px';
+        container.append(spacer);
+      }
+    }, source);
+    await trigger.click();
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    await menu.waitFor();
+    const scroll = source === 'document' ? page.locator('html') : source === 'ancestor' ? page.locator('main > div').first() : menu;
+    const moved = await scroll.evaluate((el, source) => {
+      if (source === 'document') { window.scrollTo(0, 50); return window.scrollY; }
+      el.scrollTop = 50;
+      return el.scrollTop;
+    }, source);
+    assert(moved > 0, `${source} did not scroll`);
+    if (source === 'menu') {
+      await page.waitForTimeout(100);
+      assert.equal(await menu.count(), 1, 'Internal scrolling must keep the menu open');
+    } else {
+      await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+      assert.equal(await menu.count(), 0, `${source} scrolling must dismiss the menu`);
+    }
+    await writeFile(resolve(output, `menu-scroll-${source}.json`), JSON.stringify({ source, moved, open: source === 'menu' }));
+    await context.close();
+  }
   for (const width of [320, 390, 1280]) {
     const height = width === 1280 ? 800 : 844;
     const prefix = `menu-modes-${width}x${height}`;
