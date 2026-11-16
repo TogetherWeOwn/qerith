@@ -30,6 +30,44 @@ it('binds and replaces challenges without redeeming or persisting the bearer', a
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_recovery_tokens WHERE id = ?').bind(issued.id).first()).redeemed_at).toBeNull();
 });
 
+it('releases cancelled slots without deleting unrelated or active ceremonies', async () => {
+  const cancelled = await recovery.issue(owner, 'member');
+  const active = await recovery.issue(owner, 'member');
+  const cancelledChallenge = await challenges.issue(cancelled.token);
+  const activeChallenge = await challenges.issue(active.token);
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1022)
+    INSERT INTO drive_bound_ceremonies SELECT printf('other%d', x), 'registration', printf('other%d', x), 9999999999999 FROM n`).run();
+  const next = await recovery.issue(owner, 'member');
+  await expect(challenges.issue(next.token)).rejects.toThrow('Recovery unavailable');
+  await recovery.cancel(owner, cancelled.id);
+  expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(cancelledChallenge).first()).toBeNull();
+  expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(activeChallenge).first()).not.toBeNull();
+  await expect(challenges.issue(next.token)).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(1024);
+});
+
+it('rolls back challenge removal when token cancellation fails in a batch', async () => {
+  const issued = await recovery.issue(owner, 'member');
+  const challenge = await challenges.issue(issued.token);
+  await expect(env.DB.batch([
+    env.DB.prepare('UPDATE drive_recovery_tokens SET cancelled_at = 1 WHERE id = ?').bind(issued.id),
+    env.DB.prepare("INSERT INTO drive_principals VALUES ('member', 'member', 'active')"),
+  ])).rejects.toThrow();
+  expect((await env.DB.prepare('SELECT cancelled_at FROM drive_recovery_tokens WHERE id = ?').bind(issued.id).first()).cancelled_at).toBeNull();
+  expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(challenge).first()).not.toBeNull();
+});
+
+it('removes bound challenges when tokens are redeemed, deleted or revoked', async () => {
+  for (const state of ['redeemed', 'deleted', 'revoked']) {
+    const issued = await recovery.issue(owner, 'member');
+    const challenge = await challenges.issue(issued.token);
+    if (state === 'redeemed') await env.DB.prepare('UPDATE drive_recovery_tokens SET redeemed_at = 1 WHERE id = ?').bind(issued.id).run();
+    if (state === 'deleted') await env.DB.prepare('DELETE FROM drive_recovery_tokens WHERE id = ?').bind(issued.id).run();
+    if (state === 'revoked') await env.DB.exec("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'");
+    expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(challenge).first()).toBeNull();
+  }
+});
+
 it('rejects invalid, cancelled, expired, redeemed and revoked recovery tokens', async () => {
   await expect(challenges.issue('invalid')).rejects.toThrow('Recovery unavailable');
   for (const state of ['cancelled', 'expired', 'redeemed', 'revoked']) {
