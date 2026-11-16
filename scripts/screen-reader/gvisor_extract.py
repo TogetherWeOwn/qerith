@@ -4,13 +4,13 @@ The caller must independently authorize the exact digest and size before any
 real artifact is admitted. This module does not provide such authorization.
 """
 
-import gzip
+from contextlib import nullcontext
 import hashlib
-import io
 import os
 from pathlib import Path
 import tarfile
 import tempfile
+import zlib
 
 from gvisor_companions import MEMBERS, ROOT, RUNSC
 
@@ -43,9 +43,38 @@ def extract_synthetic(data, expected_size, expected_sha256):
         raise
 
 
+class _SingleGzip:
+    """One gzip member with no optional header fields or trailing bytes."""
+
+    def __init__(self, data):
+        if len(data) < 10 or data[:3] != b"\x1f\x8b\x08" or data[3] != 0:
+            raise ValueError("unsupported gzip header")
+        self.data = data
+        self.offset = 0
+        self.pending = b""
+        self.decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def read(self, size):
+        result = bytearray()
+        while len(result) < size and not self.decoder.eof:
+            if not self.pending:
+                self.pending = self.data[self.offset:self.offset + 65536]
+                self.offset += len(self.pending)
+                if not self.pending:
+                    raise ValueError("truncated gzip stream")
+            try:
+                result.extend(self.decoder.decompress(self.pending, size - len(result)))
+            except zlib.error as exc:
+                raise ValueError("invalid gzip stream") from exc
+            self.pending = self.decoder.unconsumed_tail
+            if self.decoder.eof and (self.decoder.unused_data or self.pending or self.offset != len(self.data)):
+                raise ValueError("trailing or concatenated gzip data")
+        return bytes(result)
+
+
 def _extract(data, root):
     seen, files, total, consumed = set(), set(), 0, 0
-    with gzip.GzipFile(fileobj=io.BytesIO(data), mode="rb") as stream:
+    with nullcontext(_SingleGzip(data)) as stream:
         def read_exact(size):
             nonlocal consumed
             consumed += size
