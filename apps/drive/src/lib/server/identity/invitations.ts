@@ -28,7 +28,8 @@ export class Invitations {
   async cancel(ownerId: string, id: string): Promise<void> {
     const row = await this.db.prepare(`UPDATE drive_invitations
       SET cancelled_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-      WHERE id = ? AND cancelled_at IS NULL AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+      WHERE id = ? AND cancelled_at IS NULL AND redeemed_at IS NULL
+        AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
         AND EXISTS (SELECT 1 FROM drive_principals WHERE id = ? AND role = 'owner' AND status = 'active')
       RETURNING id`).bind(id, ownerId).first<{ id: string }>();
     if (!row) throw new Error('Invitation unavailable');
