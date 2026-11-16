@@ -23,6 +23,32 @@ test('GET streams a range with signed validators and preserves response metadata
   assert.match(sent?.headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
 });
 
+test('GET validates single byte ranges before fetching', async () => {
+  let calls = 0;
+  const sent: Request[] = [];
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    calls++;
+    sent.push(input as Request);
+    return new Response('abc', { status: 206 });
+  } });
+  for (const range of ['', 'bytes=-', 'bytes=4-3', 'bytes=-0', 'bytes=0-1,2-3', 'items=0-1', 'bytes=9007199254740992-', 'bytes=0-1\n']) {
+    await assert.rejects(objects.get('key', { maxResponseBytes: 3, range }), { message: 'S3 request failed' });
+  }
+  assert.equal(calls, 0);
+  for (const [range, expected] of [['ByTeS=1-3', 'bytes=1-3'], ['bytes=2-', 'bytes=2-'], ['BYTES=-3', 'bytes=-3']]) {
+    const result = await objects.get('key', { maxResponseBytes: 3, range, ifMatch: '"v1"', ifNoneMatch: '"v0"', ifRange: '"v1"' });
+    assert.equal(result.status, 206);
+    assert.equal(await new Response(result.body).text(), 'abc');
+    const request = sent[sent.length - 1];
+    assert.equal(request.headers.get('range'), expected);
+    assert.equal(request.headers.get('if-match'), '"v1"');
+    assert.equal(request.headers.get('if-none-match'), '"v0"');
+    assert.equal(request.headers.get('if-range'), '"v1"');
+    assert.match(request.headers.get('authorization') ?? '', /signedheaders=.*range/i);
+  }
+  assert.equal(calls, 3);
+});
+
 test('GET rejects encoded success bodies before handoff and cancels them', async () => {
   for (const status of [200, 206]) {
     for (const encoding of ['gzip', 'br', 'deflate', 'unknown', 'gzip, br', 'identity', '']) {
