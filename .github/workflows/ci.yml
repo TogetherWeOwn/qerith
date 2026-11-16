@@ -7,7 +7,7 @@ name: ci
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   # Merge queue validation: every required check must report on the queue's
   # temporary merge commit. merge_group runs are never cancelled.
   merge_group:
@@ -270,9 +270,266 @@ jobs:
             *) exit 1 ;;
           esac
 
+  d1-test:
+    name: workers D1 smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Install locked dependencies without lifecycle scripts
+        working-directory: apps/drive-test
+        run: |
+          test "$(npm --version)" = '11.19.0'
+          npm ci --ignore-scripts
+      - name: Prepare Drive project configuration for shared metadata source
+        working-directory: apps/drive
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+      - name: Run local D1 smoke test
+        working-directory: apps/drive-test
+        run: npm test
+
+  sealed-output-reader:
+    name: sealed output reader
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_sealed_output.py' -v
+      - name: Test Debian metadata primitives
+        run: |
+          timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_metadata.py"); assert suite.countTestCases() >= 4; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
+      - name: Test pinned Debian signature status validation
+        run: |
+          timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_signatures.py"); assert suite.countTestCases() >= 2; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
+      - name: Test authenticated Debian archive and ELF helpers
+        run: |
+          timeout --signal=TERM --kill-after=10s 60s python3 -I -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("scripts/screen-reader", pattern="test_debian_archive.py"); assert suite.countTestCases() >= 4; sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())'
+
+  drive-lock-verifier:
+    name: drive lock verifier
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+      - name: Test offline bundle validation
+        run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
+
+  bundle-acquisition:
+    name: offline bundle acquisition
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Acquire and verify pinned bytes
+        run: |
+          set -euo pipefail
+          python3 -I scripts/screen-reader/bundle_bytes.py acquire apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
+          python3 -I scripts/screen-reader/bundle_bytes.py verify apps/drive/package-lock.json "$RUNNER_TEMP/bundle"
+      - name: Install from verified bytes without lifecycle scripts
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/consume"
+          cd "$RUNNER_TEMP/consume"
+          python3 -I "$GITHUB_WORKSPACE/scripts/screen-reader/bundle_bytes.py" verify "$GITHUB_WORKSPACE/apps/drive/package-lock.json" "$RUNNER_TEMP/bundle"
+          mkdir tool cache project
+          tar -xJf "$RUNNER_TEMP/bundle/node-v24.21.0-linux-x64.tar.xz" -C tool
+          export PATH="$PWD/tool/node-v24.21.0-linux-x64/bin:$PATH"
+          test "$(node --version)" = v24.21.0
+          test "$(npm --version)" = 11.19.0
+          for artifact in "$RUNNER_TEMP/bundle"/*.tgz; do
+            npm cache add "$artifact" --offline --ignore-scripts --cache "$PWD/cache"
+          done
+          cp "$GITHUB_WORKSPACE/apps/drive/package.json" "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/
+          NODE_ENV=production npm_config_omit=optional npm ci --prefix project --offline --ignore-scripts --include=dev --include=optional --no-audit --no-fund --min-release-age=3 --cache "$PWD/cache"
+          test -f project/node_modules/vite/package.json
+          test -f project/node_modules/svelte/package.json
+          test -f project/node_modules/@esbuild/linux-x64/bin/esbuild
+          test -f project/node_modules/@rolldown/binding-linux-x64-gnu/rolldown-binding.linux-x64-gnu.node
+          cmp "$GITHUB_WORKSPACE/apps/drive/package-lock.json" project/package-lock.json
+
+  drive-bootstrap:
+    name: drive dependency bootstrap
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Test alternate lockfile guard
+        run: bash tests/reject-shrinkwrap.test.sh
+      - name: Verify locked release ages and integrity
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+      - name: Install reviewed lock without scripts
+        run: |
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check Drive project types and configuration coverage
+        run: |
+          npm run check
+          node --test tests/typecheck.test.mjs
+      - name: Reject Node globals in application source
+        run: |
+          set -euo pipefail
+          fixture=src/__node_global_check__.ts
+          test ! -e "$fixture"
+          trap 'rm -f "$fixture"' EXIT
+          printf '%s\n' "export const invalid = Buffer.from('browser');" > "$fixture"
+          if npx --no-install svelte-check --tsconfig ./tsconfig.json > "$RUNNER_TEMP/app-global-check.log" 2>&1; then
+            echo 'Application check unexpectedly accepted Buffer'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/app-global-check.log"
+          grep -F "Cannot find name 'Buffer'" "$RUNNER_TEMP/app-global-check.log"
+      - name: Test strict XML parsing
+        run: node --import tsx --test tests/xml-parser.test.ts
+      - name: Test fail-closed Worker entrypoint
+        run: node --import tsx --test tests/worker.test.ts
+      - name: Check types
+        run: npm run check
+      - name: Test
+        run: npm test
+      - name: Build and validate Workers bundle
+        run: |
+          npm run build
+          git diff --exit-code -- src/worker.ts
+          test ! -e .svelte-kit/adapter-wrangler.json
+          test -s .svelte-kit/cloudflare/_worker.js
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
+          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
+      - name: Exercise Workers runtime
+        run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
+
+  drive-browser:
+    name: drive browser fixture evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SNAPSHOT_SHA: ${{ github.sha }}
+    defaults:
+      run:
+        working-directory: tested
+    steps:
+      - name: Check out the immutable integration snapshot for selection
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: integration
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Test provenance selection and evidence validation
+        working-directory: integration
+        run: node --test scripts/browser-ci.test.mjs
+      - name: Select the browser checkout
+        id: browser-source
+        working-directory: integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node scripts/select-browser-checkout.mjs >> "$GITHUB_OUTPUT"
+      - name: Check out the selected browser source separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.browser-source.outputs.tested }}
+          path: tested
+          persist-credentials: false
+      - name: Assert the actual tested checkout
+        env:
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+      - name: Verify Drive lock release ages and integrity
+        working-directory: tested/apps/drive
+        run: |
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+      - name: Verify browser lock release ages and integrity
+        working-directory: tested/apps/drive/browser
+        run: |
+          bash ../scripts/reject-shrinkwrap.sh .
+          node --input-type=module <<'JS'
+          import { readFile } from 'node:fs/promises';
+          import { verifyLock } from '../scripts/verify-lock-age.mjs';
+          const lock = JSON.parse(await readFile('package-lock.json', 'utf8'));
+          await verifyLock(lock, async name => {
+            const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(10000), redirect: 'error' });
+            if (!response.ok) throw new Error(`Registry metadata unavailable: ${name}`);
+            return response.json();
+          });
+          JS
+      - name: Install locked dependencies without lifecycle scripts
+        run: |
+          test "$(npm --version)" = 11.19.0
+          npm ci --ignore-scripts --no-audit --no-fund --prefix apps/drive
+          npm ci --ignore-scripts --no-audit --no-fund --prefix apps/drive/browser
+      - name: Install pinned Chromium on the runner
+        working-directory: tested/apps/drive/browser
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Exercise fixture and require complete evidence
+        env:
+          DRIVE_BROWSER_HEAD: ${{ steps.browser-source.outputs.tested }}
+          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          npm test --prefix apps/drive/browser
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Verify evidence and record both provenance identities
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+          COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
+          SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          git -C ../integration show "$SNAPSHOT_SHA:scripts/browser-evidence.mjs" > "$RUNNER_TEMP/browser-evidence.mjs"
+          node "$RUNNER_TEMP/browser-evidence.mjs"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drive-browser-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/drive-browser-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

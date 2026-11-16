@@ -1,0 +1,21 @@
+# Highest changed-path tier wins, including both sides of a rename.
+# Unmatched and new paths default to sensitive. Content triggers always
+# escalate: endpoints or input parsing; auth, sessions, crypto, secrets,
+# credentials or permissions; tenant or personal data; SQL or migrations;
+# dependencies or locks; CI; and weakened tests or lowered gates.
+# This file records policy; it does not install or enforce a classifier.
+version: 1
+default_tier: sensitive
+tiers:
+  low: [] # No current path is sufficiently inert to allowlist.
+  ordinary: [] # No module has been qualified for this tier.
+  sensitive:
+    - LICENSE
+    - .github/**
+    - Cargo.toml
+    - Cargo.lock
+    - deny.toml
+    - apps/**
+    - crates/**
+    - scripts/**
+    - docs/**

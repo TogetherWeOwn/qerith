@@ -1,0 +1,31 @@
+name: BusyBox historical provenance
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/screen-reader/busybox.lock.json'
+      - 'scripts/screen-reader/qualify_busybox.py'
+      - 'scripts/screen-reader/debian_*.py'
+      - 'scripts/screen-reader/test_qualify_busybox.py'
+      - 'scripts/screen-reader/test_debian_*.py'
+      - '.github/workflows/busybox-provenance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test qualification ordering
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_qualify_busybox.py", run_name="__main__")'
+      - name: Authenticate and inspect without execution
+        run: |
+          ulimit -f 131072
+          python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/qualify_busybox.py", run_name="__main__")'
