@@ -77,6 +77,12 @@ try {
     await page.getByRole('heading', { name: heading, level: 2 }).waitFor();
     assert.equal(await page.getByText(description, { exact: true }).count(), 1);
     await page.evaluate(() => document.fonts.ready);
+    const layout = await page.locator('.empty').evaluate(el => {
+      const style = getComputedStyle(el);
+      return { direction: style.flexDirection, padding: style.paddingTop, radius: style.borderTopLeftRadius, border: style.borderTopWidth };
+    });
+    assert.deepEqual(layout, { direction: width === 390 ? 'column' : 'row', padding: '20px', radius: '10px', border: '1px' });
+    assert.equal(await page.evaluate(() => document.fonts.check('16px "Qerith Sans"')), true);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, {
