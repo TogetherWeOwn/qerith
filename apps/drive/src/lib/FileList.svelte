@@ -25,7 +25,7 @@
       if (!source) return;
       const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
       lastFocused = null;
-      target?.focus({ preventScroll: true });
+      target?.focus();
     };
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);

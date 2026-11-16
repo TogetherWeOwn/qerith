@@ -200,6 +200,22 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await page.setViewportSize({ width: 1280, height: 80 });
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
+    await page.setViewportSize({ width: 390, height: 80 });
+    await page.waitForFunction(() => {
+      const el = document.activeElement;
+      if (!el?.matches('ul.mobile a') || el.textContent !== 'Résumé 2025.pdf') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= innerHeight;
+    });
+    await page.setViewportSize({ width: 1280, height: 80 });
+    await page.waitForFunction(() => {
+      const el = document.activeElement;
+      if (!el?.matches('table.desktop a') || el.textContent !== 'Résumé 2025.pdf') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.top >= 0 && rect.bottom <= innerHeight;
+    });
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
