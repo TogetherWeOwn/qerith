@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/gvisor-debian-inventory.yml'
       - 'scripts/screen-reader/gvisor_inventory.py'
+      - 'scripts/screen-reader/gvisor_framing.py'
+      - 'scripts/screen-reader/test_gvisor_framing.py'
       - 'scripts/screen-reader/test_gvisor_inventory.py'
       - 'scripts/screen-reader/gvisor_extract.py'
       - 'scripts/screen-reader/test_gvisor_extract.py'
@@ -30,6 +32,13 @@ jobs:
         run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_inventory.py", run_name="__main__")'
       - name: Test companion evidence collection
         run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_companions.py", run_name="__main__")'
+      - name: Test diagnostic framing
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_framing.py", run_name="__main__")'
+      - name: Authenticate and inspect diagnostic framing
+        run: |
+          ulimit -f 180000
+          ulimit -v 1048576
+          timeout --signal=TERM --kill-after=10s 420s python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/gvisor_framing.py", run_name="__main__")'
       - name: Authenticate and inventory candidate without execution
         run: |
           ulimit -f 180000
