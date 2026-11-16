@@ -53,11 +53,20 @@ run a deploy or migration until those prerequisites are met.
    retain the pre/post migration ledger and a known-good rollback target.
    Deploy the reviewed built Worker with `wrangler deploy` only after those
    checks and the real application integration are available.
-4. Bind readiness and qualification to the dispatch SHA and actual deployed
-   version. Keep the active window bounded with provider-native controls, and
-   record cleanup/expiry even for failed or cancelled runs. A GitHub Actions
-   `always()` step alone is not proof of provider cleanup after cancellation.
-   If native expiry cannot be verified, deployment remains held.
+4. Bind readiness and qualification to the dispatch SHA, actual deployed
+   version, environment and explicit UTC use window. A reviewed staging-only
+   deadline guard may reject new access after that window, before database or
+   storage work; sessions and upload capabilities must not extend the window.
+   This guard is admission expiry, not physical deletion or provider TTL.
+   Bound in-flight work using supported provider execution limits.
+5. Implement scoped cleanup and an independent trusted `workflow_run: completed`
+   cleanup workflow for the originating run, including cancellation. Validate
+   repository, workflow, main ref, run ID, attempt and deployed SHA before using
+   cleanup credentials. Never execute downloaded artifacts or scripts from the
+   originating run with those credentials. An independent workflow can itself
+   fail or be cancelled; neither it nor `always()` proves provider cleanup.
+   Live fixture admission remains held until the independent physical cleanup
+   and retention controls below are verified.
 
 No repository workflow, environment policy, Worker, database, credential, or
 bucket has been created or changed by this design.
@@ -71,7 +80,11 @@ Durable Objects including alarms and keep-alive, scheduled Workers, Stream
 inputs and any other provisioned compute. An absent component should be recorded
 as absent; a sleeping container alone does not establish that the estate is idle.
 No schedules, alarms, probes or keep-alives may resurrect or sustain staging
-outside its authorized window.
+outside its authorized window. A separately named request-driven Worker and D1
+may remain deployed without inherently consuming idle compute; verify the
+actual estate and account charges rather than assuming zero total cost. Storage,
+existing subscriptions, lifecycle operations and database limits are separate
+from idle compute. Worker Previews do not establish time-based expiry.
 
 The trusted pipeline must establish startup and readiness before qualification,
 with evidence binding the deployed revision, environment and bounded active-use
@@ -90,6 +103,26 @@ attempt. Cleanup must be restricted to that run's objects, outstanding
 multipart uploads and test-identity-owned D1 rows; never empty a bucket or
 remove another run's data. Preserve sanitized evidence of cleanup and report
 failures without exposing credentials, JWTs, object contents or customer data.
+
+Before fixture writes, verify the actual endpoint and its existing prefix-scoped
+lifecycle policies for completed objects and incomplete multipart uploads; do
+not overwrite unrelated bucket rules. R2 lifecycle expiry is asynchronous, not
+proof of deletion at the active-window deadline. Do not assume that the named
+S3 secrets identify an R2 endpoint or establish a policy or permission. Verify
+an independently effective physical cleanup mechanism for test-owned D1 rows
+and other residual state: session expiry, an inaccessible Worker, a queued
+workflow or a later-run sweep does not establish physical deletion. If no such
+mechanism is verified, record the affected retention bound and hold live fixture
+admission; do not invent D1 TTL, a scheduler or a new resource.
+
+Retain a sanitized manifest recoverable without the cancelled runner's final
+artifact upload: SHA, environment, Worker version, run ID and attempt, UTC
+window, fixture prefix and test-identity references, policy identifiers,
+migration ledger and rollback target. Exercise cancellation after fixture
+creation before live enablement. Record the independent cleanup run and its
+scoped results, including verification of object, multipart and D1 row absence.
+Provider expiry eligibility is not observed deletion; unresolved residual state
+blocks further live fixture admission.
 
 The real deployed application must pass bounded, authenticated UI and API
 positive and negative checks, including cross-user isolation and nested read-only
