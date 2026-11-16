@@ -1,6 +1,24 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import './tokens.css';
   import KindGlyph from './KindGlyph.svelte';
+
+  let desktop: HTMLTableElement;
+  let mobile: HTMLUListElement;
+
+  onMount(() => {
+    const compact = window.matchMedia('(max-width: 820px)');
+    const transferFocus = () => {
+      const from = compact.matches ? desktop : mobile;
+      const to = compact.matches ? mobile : desktop;
+      const active = document.activeElement;
+      if (!(active instanceof HTMLAnchorElement) || !from.contains(active)) return;
+      const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === active.dataset.itemId);
+      target?.focus({ preventScroll: true });
+    };
+    compact.addEventListener('change', transferFocus);
+    return () => compact.removeEventListener('change', transferFocus);
+  });
 
   // The caller supplies authorized URLs and already-sorted display values.
   export let folder: string;
@@ -8,21 +26,21 @@
   export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean }[];
 </script>
 
-<table class="desktop">
+<table class="desktop" bind:this={desktop}>
   <caption>Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.</caption>
   <thead><tr><th scope="col" aria-sort="ascending">Name</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr>
-        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
+        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} data-item-id={item.id}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
       </tr>
     {/each}
   </tbody>
 </table>
-<ul class="mobile" aria-label="Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.">
+<ul class="mobile" bind:this={mobile} aria-label="Contents of {folder}, sorted by name, A to Z. Times in {timeZone}.">
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{#if item.bytes === null}Folder{:else}<data value={item.bytes}>{item.size}</data>{/if} · <time datetime={item.modifiedAt}>{item.modified}</time></div></li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} data-item-id={item.id}>{item.name}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if} · <time datetime={item.modifiedAt}>{item.modified}</time></div></li>
   {/each}
 </ul>
 

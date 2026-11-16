@@ -159,6 +159,7 @@ try {
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
     assert.equal(await container.getByText('Shared', { exact: true }).count(), 1);
+    assert.equal(await container.getByText('PDF', { exact: width > 820 }).count(), 1);
     assert.equal(await container.locator('data').count(), 2);
     assert.equal(await container.locator('data[value="1000"]').textContent(), '1.0 KB');
     assert.equal(await container.locator('data[value="5400000"]').textContent(), '5.4 MB');
@@ -177,6 +178,21 @@ try {
       assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
     }
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('list').getByRole('link', { name: 'Résumé 2025.pdf' }).waitFor();
+    assert.equal(await page.getByRole('list').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el === document.activeElement), true);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).waitFor();
+    assert.equal(await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).evaluate(el => el === document.activeElement), true);
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
