@@ -64,6 +64,7 @@ def ar_members(f):
         if start + size + size % 2 > SIZE:
             raise ValueError("truncated ar member")
         members.append((name, start, size))
+        print(json.dumps({"ar_member": name, "size": size}, ensure_ascii=True, sort_keys=True))
         if len(members) > 3:
             raise ValueError("unexpected ar member")
         f.seek(start + size)
@@ -215,8 +216,6 @@ def run(root):
     authenticate(path, pins)
     with path.open("rb") as f:
         members = ar_members(f)
-        for name, _, size in members:
-            print(json.dumps({"ar_member": name, "size": size}, sort_keys=True))
         for member in members[1:]:
             inventory_tar(f, member)
 
