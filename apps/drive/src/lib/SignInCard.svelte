@@ -21,7 +21,8 @@
       on:click={() => requestSignIn(state, onSignIn)}
     >{#if state !== 'waiting' && state !== 'rate-limited'}<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 1 1-2 2-1-1-3 3"/></svg>{/if}{copy.action}</button>
   {/if}
-  {#if copy.notice}
+  <p class:notice={state === 'waiting'} role="status" aria-live="polite">{state === 'waiting' ? copy.notice : ''}</p>
+  {#if copy.notice && state !== 'waiting'}
     <p class="notice" class:warn={state === 'unsupported'} role={state === 'cancelled' || state === 'no-passkey' ? 'alert' : undefined}>{copy.notice}</p>
   {/if}
   {#if state === 'waiting'}
@@ -69,6 +70,7 @@
   button:focus-visible { outline: 2px solid var(--drive-color-accent-default); outline-offset: 3px; }
   button.quiet { background: var(--drive-color-bg-raised); color: var(--drive-color-text-tertiary); }
   button.cancel { width: auto; background: transparent; color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-small); text-decoration: underline; }
+  p[role='status']:empty { margin: 0; }
   .notice { padding: var(--drive-space-4); border: 1px solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); color: var(--drive-color-text-primary); font-size: var(--drive-font-size-ui); }
   .notice.warn { background: #2e2410; }
   svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }

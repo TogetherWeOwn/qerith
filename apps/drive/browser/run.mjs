@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
-import { exerciseKeyboard, states, waitForFixture } from './scenario.mjs';
+import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
@@ -57,6 +57,7 @@ try {
     await writeFile(resolve(output, `keyboard-${size}.json`), keyboardJson);
     if (state === 'sign-in') {
       const viewport = `${width}x${height}`;
+      await writeFile(resolve(output, `wait-tree-${viewport}.txt`), await exerciseWaitAnnouncement(page));
       for (const prefix of ['', 'axe-', 'keyboard-']) {
         const extension = prefix ? 'json' : 'png';
         await copyFile(resolve(output, `${prefix}${size}.${extension}`), resolve(output, `${prefix}${viewport}.${extension}`));

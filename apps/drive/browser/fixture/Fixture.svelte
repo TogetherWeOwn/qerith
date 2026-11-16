@@ -3,7 +3,8 @@
 
   let requests = $state(0);
   let cancellations = $state(0);
-  const signInState = new URLSearchParams(window.location.search).get('state') || 'sign-in';
+  let signInState = $state(new URLSearchParams(window.location.search).get('state') || 'sign-in');
+  window.addEventListener('fixture-wait', () => { signInState = 'waiting'; });
 </script>
 
 <SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
