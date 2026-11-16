@@ -159,7 +159,12 @@ try {
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
     assert.equal(await container.getByText('Shared', { exact: true }).count(), 1);
-    assert.equal(await container.getByText('PDF', { exact: width > 820 }).count(), 1);
+    if (width > 820) {
+      assert.equal(await container.getByText('PDF', { exact: true }).count(), 1);
+    } else {
+      const row = container.getByRole('listitem').filter({ has: container.getByRole('link', { name: 'Résumé 2025.pdf' }) });
+      assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
+    }
     assert.equal(await container.locator('data').count(), 2);
     assert.equal(await container.locator('data[value="1000"]').textContent(), '1.0 KB');
     assert.equal(await container.locator('data[value="5400000"]').textContent(), '5.4 MB');
