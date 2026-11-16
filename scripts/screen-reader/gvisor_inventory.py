@@ -65,15 +65,16 @@ def ar_members(f):
             raise ValueError("truncated ar member")
         members.append((name, start, size))
         print(json.dumps({"ar_member": name, "size": size}, ensure_ascii=True, sort_keys=True))
-        if len(members) > 3:
+        if len(members) > 4:
             raise ValueError("unexpected ar member")
         f.seek(start + size)
         if size % 2 and f.read(1) != b"\n":
             raise ValueError("invalid ar padding")
     names = [m[0] for m in members]
-    if (len(names) != 3 or names[0] != "debian-binary"
+    if (len(names) not in (3, 4) or names[0] != "debian-binary"
             or names[1] not in ("control.tar.gz", "control.tar.xz")
-            or names[2] not in ("data.tar.gz", "data.tar.xz")):
+            or names[2] not in ("data.tar.gz", "data.tar.xz")
+            or (len(names) == 4 and (names[3] != "_gpgbuilder" or not 0 < members[3][2] <= 65536))):
         raise ValueError("unexpected ar structure")
     f.seek(members[0][1])
     if members[0][2] != 4 or f.read(4) != b"2.0\n":
@@ -216,8 +217,10 @@ def run(root):
     authenticate(path, pins)
     with path.open("rb") as f:
         members = ar_members(f)
-        for member in members[1:]:
+        for member in members[1:3]:
             inventory_tar(f, member)
+        if len(members) == 4:
+            print(json.dumps({"ar_member": members[3][0], "type": "opaque signature (not verified)"}))
 
 
 def main():

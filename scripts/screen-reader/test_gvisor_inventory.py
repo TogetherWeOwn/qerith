@@ -74,6 +74,31 @@ class InventoryTests(unittest.TestCase):
         with patch("builtins.print"):
             inventory.inventory_tar(io.BytesIO(data), ("data.tar.gz", 0, len(data)))
 
+    def test_ar_builder_signature_is_opaque_and_ordered(self):
+        def ar(entries):
+            data = b"!<arch>\n"
+            for name, content in entries:
+                header = (f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}"
+                          f"{len(content):<10}`\n").encode("ascii")
+                data += header + content + (b"\n" if len(content) % 2 else b"")
+            return data
+
+        base = [("debian-binary", b"2.0\n"), ("control.tar.gz", b"c"),
+                ("data.tar.gz", b"d")]
+        for entries, valid in ((base, True), (base + [("_gpgbuilder", b"signature")], True),
+                               (base + [("other", b"x")], False),
+                               (base + [("_gpgbuilder", b"x" * 65537)], False),
+                               (base[:2] + [("_gpgbuilder", b"x")] + base[2:], False),
+                               (base + [("_gpgbuilder", b"x"), ("extra", b"x")], False)):
+            data = ar(entries)
+            with self.subTest(entries=[x[0] for x in entries]), \
+                    patch.object(inventory, "SIZE", len(data)), patch("builtins.print"):
+                if valid:
+                    self.assertEqual(len(inventory.ar_members(io.BytesIO(data))), len(entries))
+                else:
+                    with self.assertRaises(ValueError):
+                        inventory.ar_members(io.BytesIO(data))
+
     def test_invalid_ar_rejected(self):
         data = b"!<arch>\n" + b"x" * 60
         with patch.object(inventory, "SIZE", len(data)), self.assertRaises(ValueError):
