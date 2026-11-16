@@ -14,9 +14,14 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
   usage: await rows('SELECT owner_id, CAST(high AS TEXT) AS high, low FROM drive_owner_usage ORDER BY owner_id') });
 
 beforeEach(async () => {
-  await env.DB.exec(`DROP TABLE IF EXISTS drive_folder_counts;
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_sessions;
+    DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
     DROP TABLE IF EXISTS drive_owner_usage;
+    DROP TABLE IF EXISTS drive_webauthn_challenges;
+    DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_credentials;
+    DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);
@@ -25,7 +30,7 @@ beforeEach(async () => {
 });
 
 it('upgrades seeded entries exactly and enforces live owner membership', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name !== '0004_private_owner_usage.sql'));
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0004_private_owner_usage.sql'));
   await run("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('folder', 'alice', 'folder', 'folder')");
   await file('a', 'alice', 9007199254740991, 'folder');
   await file('b', 'alice', 9007199254740991, 'folder');
@@ -39,7 +44,7 @@ it('upgrades seeded entries exactly and enforces live owner membership', async (
   const after = await snapshot();
   expect({ entries: after.entries, counts: after.counts }).toEqual(before);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0001_identity.sql', '0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
+    .toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
   const metadata = new PrivateMetadata(env.DB);
   expect(await metadata.usage('alice')).toEqual({ bytes: (1027n * 9007199254740991n).toString() });
   expect(await metadata.usage('bob')).toEqual({ bytes: '17' });
@@ -54,7 +59,7 @@ it('upgrades seeded entries exactly and enforces live owner membership', async (
 });
 
 it('rolls back a failed upgrade and retries without changing entries or counts', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name !== '0004_private_owner_usage.sql'));
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0004_private_owner_usage.sql'));
   await file('a', 'alice', 19);
   const entries = await rows('SELECT * FROM drive_entries ORDER BY id');
   const counts = await rows('SELECT * FROM drive_folder_counts ORDER BY folder_id');

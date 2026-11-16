@@ -6,9 +6,14 @@ import { findActivePrincipal } from '../../drive/src/lib/server/identity/members
 
 beforeEach(async () => {
   // D1 state is shared between tests in this file; reset the migration ledger too.
-  await env.DB.exec(`DROP TABLE IF EXISTS drive_folder_counts;
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_sessions;
+    DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
     DROP TABLE IF EXISTS drive_owner_usage;
+    DROP TABLE IF EXISTS drive_webauthn_challenges;
+    DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_credentials;
+    DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);

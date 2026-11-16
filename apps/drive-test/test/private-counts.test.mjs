@@ -14,12 +14,17 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
 
 beforeEach(async () => {
   // D1 state is shared between tests in this file; reset the migration ledger too.
-  await env.DB.exec(`DROP TRIGGER IF EXISTS drive_counts_insert;
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_sessions;
+    DROP TRIGGER IF EXISTS drive_counts_insert;
     DROP TRIGGER IF EXISTS drive_counts_move;
     DROP TRIGGER IF EXISTS drive_counts_delete;
     DROP TABLE IF EXISTS drive_folder_counts;
     DROP TABLE IF EXISTS drive_entries;
     DROP TABLE IF EXISTS drive_owner_usage;
+    DROP TABLE IF EXISTS drive_webauthn_challenges;
+    DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_credentials;
+    DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);
@@ -34,7 +39,7 @@ it('upgrades seeded entries and maintains direct counts through mutations', asyn
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   expect((await rows('SELECT name FROM d1_migrations ORDER BY id')).map(({ name }) => name))
-    .toEqual(['0001_identity.sql', '0002_private_metadata.sql', '0003_private_folder_counts.sql', '0004_private_owner_usage.sql']);
+    .toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
   const metadata = new PrivateMetadata(env.DB);
   const root = () => metadata.list('alice', null);
   expect((await root()).entries.map(({ id, item_count }) => [id, item_count])).toEqual([['a', 1], ['b', 0]]);
