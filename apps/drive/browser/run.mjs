@@ -193,6 +193,29 @@ try {
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details' }, null, 2));
     await context.close();
   }
+  for (const [width, height] of [[1280, 180], [390, 240], [1280, 800]]) {
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file&clipped`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Actions for Sample file' }).click();
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    const items = menu.getByRole('menuitem');
+    for (let i = 0; i < await items.count(); i++) {
+      if (i) await page.keyboard.press('ArrowDown');
+      const visible = await items.nth(i).evaluate(el => {
+        const item = el.getBoundingClientRect();
+        const menu = el.closest('[role=menu]').getBoundingClientRect();
+        const x = item.left + item.width / 2;
+        const y = item.top + item.height / 2;
+        return el === document.activeElement && item.top >= menu.top && item.bottom <= menu.bottom && item.top >= 0 && item.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y));
+      });
+      assert(visible, `Menu item ${i} inaccessible at ${width}x${height}`);
+    }
+    await page.screenshot({ path: resolve(output, `menu-clipped-${width}x${height}.png`) });
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;

@@ -15,21 +15,23 @@
   let trigger: HTMLButtonElement;
   let menu: HTMLDivElement;
   let open = false;
-  let flipX = false;
-  let flipY = false;
+  let menuLeft = 0;
+  let menuTop = 0;
   $: actions = (owned
     ? [...(file ? ['Download'] : []), 'Share', 'Rename', 'Move', 'Details', 'Delete']
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
 
   async function show(last = false) {
-    flipX = false;
-    flipY = false;
     open = true;
     await tick();
     if (!open || !menu) return;
+    menu.showPopover();
     const rect = menu.getBoundingClientRect();
-    flipX = rect.right > window.innerWidth;
-    flipY = rect.bottom > window.innerHeight;
+    const anchor = trigger.getBoundingClientRect();
+    menuLeft = Math.max(0, Math.min(anchor.left, window.innerWidth - rect.width));
+    const below = window.innerHeight - anchor.bottom;
+    const above = anchor.top;
+    menuTop = Math.max(0, Math.min(below >= rect.height || below >= above ? anchor.bottom : anchor.top - rect.height, window.innerHeight - rect.height));
     await tick();
     const items = menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
     items[last ? items.length - 1 : 0]?.focus();
@@ -74,7 +76,7 @@
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>
   </button>
   {#if open}
-    <div class:flipX class:flipY class="menu" role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} onkeydown={keydown}>
+    <div class="menu" role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} popover="manual" style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} onkeydown={keydown}>
       <div class="sheet-title" aria-hidden="true">{name}</div>
       {#each actions as action}
         {#if action === 'Delete'}<div class="separator" role="separator"></div>{/if}
@@ -94,12 +96,11 @@
   .trigger { display: grid; place-items: center; width: var(--drive-size-control-sm); height: var(--drive-size-control-sm); border: 1px solid var(--drive-color-line-control); border-radius: var(--drive-radius-pill); background: transparent; }
   svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); flex: none; }
   .trigger svg { fill: currentColor; }
-  .menu { position: absolute; z-index: 10; top: 100%; left: 0; min-width: var(--drive-size-menu-min); padding: var(--drive-space-1); border: 1px solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); background: var(--drive-color-bg-overlay); font-family: var(--drive-font-ui); }
-  .menu.flipX { left: auto; right: 0; } .menu.flipY { top: auto; bottom: 100%; }
+  .menu { position: fixed; z-index: 10; top: var(--menu-top); right: auto; bottom: auto; left: var(--menu-left); margin: 0; box-sizing: border-box; max-height: 100dvh; max-width: 100vw; overflow-y: auto; min-width: var(--drive-size-menu-min); padding: var(--drive-space-1); border: 1px solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); background: var(--drive-color-bg-overlay); font-family: var(--drive-font-ui); }
   .menu button { display: flex; align-items: center; gap: var(--drive-space-3); width: 100%; min-height: var(--drive-size-control-nav); padding: 0 var(--drive-space-3); border: 0; border-radius: var(--drive-radius-s); text-align: left; background: transparent; }
   .menu button:hover, .menu button:focus-visible { background: var(--drive-color-bg-raised); }
   .menu button.danger { color: var(--drive-color-state-danger); }
   .separator { border-top: 1px solid var(--drive-color-line-hairline-strong); margin: var(--drive-space-1) 0; }
   .sheet-title { display: none; }
-  @media (max-width: 820px) { .menu, .menu.flipX, .menu.flipY { position: fixed; top: auto; right: 0; bottom: 0; left: 0; min-width: 0; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
+  @media (max-width: 820px) { .menu { position: fixed; top: auto; right: 0; bottom: 0; left: 0; min-width: 0; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
 </style>

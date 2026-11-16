@@ -21,7 +21,7 @@
 
 {#if menuFixture}
   <main>
-    <div oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
+    <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>
       <RowActions bind:this={menu} name="Sample file" file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => selected = action} onTab={(direction) => (direction === 'next' ? nextName : firstName).focus()} />
     </div>
@@ -37,4 +37,5 @@
 
 <style>
   main { min-height: 100vh; background: var(--drive-color-bg-canvas); }
+  .clipped { height: 48px; overflow: hidden; }
 </style>
