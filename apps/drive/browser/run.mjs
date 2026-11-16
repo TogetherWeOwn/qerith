@@ -159,6 +159,13 @@ try {
     const expected = variant === 'shared' ? ['Download', 'Details'] : variant === 'folder' ? ['Share', 'Rename', 'Move', 'Details', 'Delete'] : ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete'];
     assert.deepEqual(await items.allTextContents().then(values => values.map(value => value.trim())), expected);
     assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(await trigger.getAttribute('aria-controls'), await menu.getAttribute('id'));
+    if (width === 390) {
+      const triggerSize = await trigger.evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight, icon: el.querySelector('svg').getBoundingClientRect().width }));
+      assert.deepEqual(triggerSize, { width: 44, height: 44, icon: 20 });
+      const sheet = await menu.evaluate(el => ({ maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el, '::backdrop').backgroundColor, blur: getComputedStyle(el, '::backdrop').backdropFilter }));
+      assert.deepEqual(sheet, { maxHeight: `${height * 0.9}px`, backdrop: 'rgba(28, 22, 20, 0.94)', blur: 'blur(14px)' });
+    }
     assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
     await page.evaluate(axe);
@@ -190,7 +197,9 @@ try {
     await page.keyboard.press('Space');
     assert.equal(await page.getByText('Details', { exact: true }).count(), 1);
     assert.equal(await menu.count(), 0);
-    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details' }, null, 2));
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    assert.equal(await trigger.getAttribute('aria-controls'), null);
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
     await context.close();
   }
   for (const [width, height] of [[1280, 180], [390, 240], [1280, 800]]) {

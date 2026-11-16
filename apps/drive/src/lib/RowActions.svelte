@@ -1,9 +1,10 @@
 <script lang="ts" module>
   export type RowAction = 'Download' | 'Share' | 'Rename' | 'Move' | 'Details' | 'Delete';
+  let nextMenuId = 0;
 </script>
 
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import './tokens.css';
   export let name: string;
   export let file = true;
@@ -15,6 +16,8 @@
   let trigger: HTMLButtonElement;
   let menu: HTMLDivElement;
   let open = false;
+  let menuId = '';
+  onMount(() => { menuId = `row-actions-menu-${++nextMenuId}`; });
   let menuLeft = 0;
   let menuTop = 0;
   $: actions = (owned
@@ -72,15 +75,15 @@
 
 <svelte:window onpointerdown={outside} />
 <div class="anchor">
-  <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${name}`} aria-haspopup="menu" aria-expanded={open} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
+  <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${name}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>
   </button>
   {#if open}
-    <div class="menu" role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} popover="manual" style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} onkeydown={keydown}>
+    <div class="menu" id={menuId} role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} popover="manual" style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} onkeydown={keydown}>
       <div class="sheet-title" aria-hidden="true">{name}</div>
       {#each actions as action}
         {#if action === 'Delete'}<div class="separator" role="separator"></div>{/if}
-        <button role="menuitem" type="button" class:danger={action === 'Delete'} tabindex="-1" onclick={() => { close(); onAction(action); }}>
+        <button role="menuitem" type="button" class:danger={action === 'Delete'} tabindex="-1" onclick={() => { close(true); onAction(action); }}>
           <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d={action === 'Download' ? 'M8 2v8m-3-3 3 3 3-3M3 12v2h10v-2' : action === 'Share' ? 'M6 5 11 2m-5 9 5 3M5 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm7-5a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm0 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z' : action === 'Rename' ? 'M3 13l3-.5L13 5 11 3 3.5 10.5 3 13Z' : action === 'Move' ? 'M2 4h5l1 2h6v7H2V4Zm5 5h5m-2-2 2 2-2 2' : action === 'Details' ? 'M8 7v4m0-7v1M14 8A6 6 0 1 1 2 8a6 6 0 0 1 12 0Z' : 'M3 4h10M6 4V2h4v2m2 0-.5 10h-7L4 4m2 2v6m4-6v6'}/></svg>
           {action}
         </button>
@@ -102,5 +105,5 @@
   .menu button.danger { color: var(--drive-color-state-danger); }
   .separator { border-top: 1px solid var(--drive-color-line-hairline-strong); margin: var(--drive-space-1) 0; }
   .sheet-title { display: none; }
-  @media (max-width: 820px) { .menu { position: fixed; top: auto; right: 0; bottom: 0; left: 0; min-width: 0; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
+  @media (max-width: 820px) { .trigger { width: var(--drive-size-control-md); height: var(--drive-size-control-md); } .trigger svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); } .menu { position: fixed; top: auto; right: 0; bottom: 0; left: 0; min-width: 0; max-height: 90dvh; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .menu::backdrop { background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); } .sheet-title { display: block; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
 </style>
