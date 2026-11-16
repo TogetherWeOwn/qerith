@@ -78,7 +78,7 @@
   }
 </script>
 
-<svelte:window onpointerdown={outside} />
+<svelte:window onpointerdown={outside} onresize={() => { if (open) close(true); }} />
 <div class="anchor">
   <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${name}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>
@@ -113,5 +113,5 @@
   .menu button.danger { color: var(--drive-color-state-danger); }
   .separator { border-top: 1px solid var(--drive-color-line-hairline-strong); margin: var(--drive-space-1) 0; }
   .sheet-title { display: none; }
-  @media (max-width: 820px) { .trigger { width: var(--drive-size-control-md); height: var(--drive-size-control-md); } .trigger svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); } .layer { inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); } .menu { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; min-width: 0; max-width: none; max-height: 90dvh; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
+  @media (max-width: 820px) { .trigger { width: var(--drive-size-control-md); height: var(--drive-size-control-md); } .trigger svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); } .layer { inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); } .menu { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; min-width: 0; max-width: none; max-height: 90dvh; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; overflow-wrap: anywhere; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
 </style>

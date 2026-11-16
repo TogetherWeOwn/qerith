@@ -238,6 +238,52 @@ try {
     await page.screenshot({ path: resolve(output, `menu-clipped-${width}x${height}.png`) });
     await context.close();
   }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
+    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    await trigger.evaluate(el => { el.parentElement.parentElement.style.marginTop = '600px'; });
+    await trigger.click();
+    assert.equal(await page.getByRole('menu').count(), 1);
+    await page.setViewportSize({ width: 1280, height: 300 });
+    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    assert.equal(await page.getByRole('menu').count(), 0);
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    await writeFile(resolve(output, 'menu-resize.json'), JSON.stringify({ initial: '1280x800', resized: '1280x300', result: 'closed, focus restored' }));
+    await context.close();
+  }
+  for (const width of [320, 390, 1280]) {
+    const height = width === 1280 ? 800 : 844;
+    const prefix = `menu-modes-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file${width === 1280 ? '' : '&longName'}`, { waitUntil: 'networkidle' });
+    const name = width === 1280 ? 'Sample file' : 'a'.repeat(200);
+    await page.getByRole('button', { name: `Actions for ${name}` }).click();
+    const menu = page.getByRole('menu', { name: `Actions for ${name}` });
+    const reflow = await menu.evaluate(el => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth, menu: el.clientWidth, content: el.scrollWidth }));
+    assert(reflow.page <= reflow.viewport && reflow.content <= reflow.menu, `Horizontal overflow: ${JSON.stringify(reflow)}`);
+    await page.screenshot({ path: resolve(output, `${prefix}.png`) });
+    const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+    await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
+    await greyscale.evaluate(el => el.remove());
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const motion = await page.evaluate(() => ({ reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length, animatedElements: [...document.querySelectorAll('*')].filter(el => { const style = getComputedStyle(el); return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0); }).length }));
+    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+    await page.screenshot({ path: resolve(output, `${prefix}-reduced-motion.png`) });
+    await page.emulateMedia({ forcedColors: 'active' });
+    assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+    const focused = menu.getByRole('menuitem').first();
+    assert.equal(await focused.evaluate(el => el === document.activeElement), true);
+    await page.screenshot({ path: resolve(output, `${prefix}-forced-colours-focus.png`) });
+    await writeFile(resolve(output, `${prefix}.json`), JSON.stringify({ reflow, motion, forcedColours: true, focused: await focused.innerText() }, null, 2));
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
   for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;

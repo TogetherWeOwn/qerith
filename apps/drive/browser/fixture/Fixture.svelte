@@ -4,6 +4,7 @@
   import RowActions from '../../src/lib/RowActions.svelte';
 
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
+  const rowName = new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file';
   let firstName;
   let nextName;
   let menu;
@@ -23,7 +24,7 @@
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>
-      <RowActions bind:this={menu} name="Sample file" file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => selected = action} onTab={(direction) => (direction === 'next' ? nextName : firstName).focus()} />
+      <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => selected = action} onTab={(direction) => (direction === 'next' ? nextName : firstName).focus()} />
     </div>
     <button bind:this={nextName}>Next file</button>
     <p aria-live="polite">{selected}</p>
