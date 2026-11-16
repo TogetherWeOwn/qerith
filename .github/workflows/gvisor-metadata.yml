@@ -1,0 +1,31 @@
+name: gVisor Debian metadata
+
+# Metadata discovery only. This does not download or authorize the package.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gvisor-metadata.yml'
+      - 'scripts/screen-reader/gvisor_metadata.py'
+      - 'scripts/screen-reader/test_gvisor_metadata.py'
+      - 'scripts/screen-reader/debian_metadata.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test trust and ordering
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_metadata.py", run_name="__main__")'
+      - name: Authenticate the pinned candidate metadata
+        run: |
+          ulimit -f 4096
+          ulimit -v 524288
+          timeout --signal=TERM --kill-after=10s 180s python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/gvisor_metadata.py", run_name="__main__")'

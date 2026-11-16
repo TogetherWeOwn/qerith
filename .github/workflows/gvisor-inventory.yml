@@ -1,0 +1,54 @@
+name: gVisor candidate inventory
+
+# Discovery only: this does not authorize or prepare a runtime for execution.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gvisor-inventory.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Inspect candidate distribution without extracting or executing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -f 132000
+          ulimit -v 1048576
+          root=$(mktemp -d "$RUNNER_TEMP/gvisor-inventory.XXXXXXXX")
+          trap 'rm -rf -- "$root"' EXIT
+          mkdir -m 700 "$root/download" "$root/listing"
+          archive="$root/download/gvisor.tar.zstd"
+          # Generation-qualified object; this candidate digest is not an approval.
+          url='https://storage.googleapis.com/gvisor/releases/release/20261005.0/x86_64/gvisor.tar.zstd?generation=1791482698675576'
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --max-time 180 --max-filesize 129604888 --output "$archive" "$url"
+          test "$(stat -c %s "$archive")" = 129604888
+          printf '%s  %s\n' '27fed731b432d6a39d908956623fd273979fda66b3ccf4b9c12413ea417c516e18a9dc3cced403fb28efe495d64dce4251f51cf8c4d9f4a72f9833bd96b6bb35' "$archive" | sha512sum --check --status
+          printf '%s  %s\n' '0a8a9058b9f11791a2097f03190c2ddc5b963c3dbee5bb9fd8497f4801c42f92' "$archive" | sha256sum --check --status
+          # GNU tar lists only; never extract archive members or invoke their scripts.
+          # Resource limits also bound parser memory, listing disk usage and wall time.
+          if ! (ulimit -f 1024; timeout --signal=TERM --kill-after=10s 180s \
+            tar --zstd --list --verbose --numeric-owner --quoting-style=escape \
+            --file "$archive") > "$root/listing/members" 2> "$root/listing/errors"; then
+            printf '%s\n' 'Archive listing failed or exceeded a limit.' >&2
+            exit 1
+          fi
+          # Do not echo attacker-controlled lines as GitHub workflow commands.
+          python3 -I - "$root/listing/members" <<'PY'
+          import json
+          import pathlib
+          import sys
+          with pathlib.Path(sys.argv[1]).open('rb') as listing:
+              data = listing.read(1024 * 1024 + 1)
+          if len(data) > 1024 * 1024:
+              raise SystemExit('Inventory exceeds 1 MiB')
+          for line in data.decode('utf-8', 'backslashreplace').splitlines():
+              print('member: ' + json.dumps(line, ensure_ascii=True))
+          PY
