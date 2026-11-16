@@ -105,9 +105,10 @@ def inventory_tar(f, member):
     name, start, size = member
     f.seek(start)
     source = LimitedReader(f, size)
-    opener = gzip.GzipFile if name.endswith(".gz") else lzma.LZMAFile
+    stream = (gzip.GzipFile(fileobj=source, mode="rb") if name.endswith(".gz")
+              else lzma.LZMAFile(source, "rb"))
     seen, count, total, zero = set(), 0, 0, 0
-    with opener(source, "rb") as stream:
+    with stream:
         def read_exact(length):
             nonlocal total
             total += length
