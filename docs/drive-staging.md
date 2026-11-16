@@ -27,6 +27,41 @@ CI and CodeQL checks remain required and are not replaced by Drive checks.
 - No pipeline in this scope deploys or promotes production. A production deploy
   requires the separate release gate.
 
+## Proposed main-only Actions / Wrangler path
+
+This section is a design for review, not an enabled deploy workflow. The
+current Worker deliberately returns 503, and the staging account's database,
+resource bindings and native expiry controls have not been verified. Do not
+run a deploy or migration until those prerequisites are met.
+
+1. A manually dispatched workflow must reject any ref other than
+   `refs/heads/main`. Check out the dispatch SHA without persisting credentials,
+   verify the checkout SHA, and use pinned Actions and the repository's locked
+   Node dependencies. Run the existing release-age and lockfile controls before
+   installation and build. No pull-request code may access the environment.
+2. Only after verifying that the `staging` environment enforces a main-only
+   deployment branch policy may a privileged job use the existing environment.
+   The intended Wrangler credential names are
+   `QERITH_STAGING_CLOUDFLARE_API_TOKEN` and
+   `QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID`. Their availability and permitted
+   scope are unverified; this design does not authorize creating them. Keep
+   secrets out of command output, artifacts and the checkout.
+3. Bind the reviewed staging Worker configuration explicitly to the verified
+   staging D1 database and existing `qerith-drive-staging` bucket. Verify the
+   actual database ID and binding names rather than guessing them. Review the
+   migration set and target before `wrangler d1 migrations apply --remote`;
+   retain the pre/post migration ledger and a known-good rollback target.
+   Deploy the reviewed built Worker with `wrangler deploy` only after those
+   checks and the real application integration are available.
+4. Bind readiness and qualification to the dispatch SHA and actual deployed
+   version. Keep the active window bounded with provider-native controls, and
+   record cleanup/expiry even for failed or cancelled runs. A GitHub Actions
+   `always()` step alone is not proof of provider cleanup after cancellation.
+   If native expiry cannot be verified, deployment remains held.
+
+No repository workflow, environment policy, Worker, database, credential, or
+bucket has been created or changed by this design.
+
 ## Bounded active use and idle inventory
 
 Staging is on demand and must not incur recurring always-on runtime charges.

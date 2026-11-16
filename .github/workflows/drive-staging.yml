@@ -1,0 +1,41 @@
+name: drive staging preparation
+
+# Review-only preparation: this workflow cannot deploy or access staging secrets.
+# Live deployment requires the prerequisites in docs/drive-staging.md.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify immutable source and dependency policy
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(npm --version)" = 11.19.0
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build and validate without deployment
+        run: |
+          set -euo pipefail
+          npm run build
+          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-staging-dry-run"
