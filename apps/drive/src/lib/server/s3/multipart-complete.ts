@@ -4,7 +4,8 @@ import { createS3Transport } from './transport';
 
 /** Complete an upload once; ambiguous responses must be reconciled by the caller. */
 export function createMultipartComplete(...args: Parameters<typeof createS3Transport>) {
-  const request = createS3Transport(...args);
+  const config = { ...args[0] };
+  const request = createS3Transport(config, args[1]);
   return async (key: string, uploadId: string, parts: readonly CompletedPart[], signal?: AbortSignal) => {
     if (!key || key.split('/').some((segment) => segment === '.' || segment === '..')) throw new Error('Invalid S3 object key');
     if (!uploadId) throw new Error('Invalid multipart upload');
@@ -25,7 +26,7 @@ export function createMultipartComplete(...args: Parameters<typeof createS3Trans
         if (['EntityTooSmall', 'InvalidPart', 'InvalidPartOrder', 'NoSuchUpload'].includes(result.code)) throw new Error('S3 multipart completion failed');
         throw new Error('S3 multipart completion outcome uncertain');
       }
-      if ((result.bucket !== undefined && result.bucket !== args[0].bucket) ||
+      if ((result.bucket !== undefined && result.bucket !== config.bucket) ||
           (result.key !== undefined && result.key !== key)) throw new Error('S3 multipart completion outcome uncertain');
       return result;
     }

@@ -39,6 +39,22 @@ test('rejects contradictory completion identity without retrying', async () => {
   assert.equal(calls, 3);
 });
 
+test('binds completion identity to the configured request bucket despite mutation', async () => {
+  const mutableConfig = { ...config };
+  let calls = 0;
+  let bucket = 'test-bucket';
+  const complete = createMultipartComplete(mutableConfig, { timeoutMs: 1000, fetch: async (input) => {
+    calls++;
+    assert.equal(new URL((input as Request).url).pathname, '/test-bucket/key');
+    mutableConfig.bucket = 'other';
+    return new Response(`<CompleteMultipartUploadResult><ETag>"result"</ETag><Bucket>${bucket}</Bucket><Key>key</Key></CompleteMultipartUploadResult>`);
+  } });
+  assert.equal((await complete('key', 'id', parts)).etag, '"result"');
+  bucket = 'other';
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  assert.equal(calls, 2);
+});
+
 test('distinguishes embedded errors from uncertain outcomes without leaking provider details', async () => {
   let calls = 0;
   let response: () => Promise<Response> = async () => new Response('<Error><Code>InvalidPart</Code><Message>secret</Message></Error>');
