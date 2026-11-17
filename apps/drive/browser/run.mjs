@@ -596,7 +596,24 @@ try {
     assert.equal(await page.getByText('200 shown', { exact: true }).count(), 1);
     await page.getByRole('button', { name: 'Show 200 more' }).click();
     assert.equal(await page.getByText('400 shown', { exact: true }).count(), 1);
+    assert.match(await page.getByRole('status').textContent(), /400 shown\./);
     assert.equal(await container.getByRole('link').nth(200).textContent(), 'File 200.txt');
+    await page.goto(`${origin}/?listing&paged&page-pending`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Show 200 more' }).click();
+    const pending = page.getByRole('button', { name: 'Showing more…' });
+    assert.equal(await pending.getAttribute('aria-busy'), 'true');
+    assert.equal(await pending.getAttribute('aria-disabled'), 'true');
+    await pending.evaluate(el => el.click());
+    assert.equal(await page.locator('output').getAttribute('data-page-requests'), '1');
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-page-complete')));
+    assert.equal(await container.getByRole('link').count(), 400);
+    if (width <= 820) {
+      await page.goto(`${origin}/?listing&paged&reject-sort`, { waitUntil: 'networkidle' });
+      const select = page.getByLabel('Sort', { exact: true });
+      await select.selectOption('desc');
+      assert.equal(await select.inputValue(), 'asc');
+      assert.equal(await container.getByRole('link').first().textContent(), 'File 000.txt');
+    }
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
