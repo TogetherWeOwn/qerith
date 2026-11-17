@@ -155,7 +155,7 @@ Where [components.md](components.md) gives a text size in px (15 px, 14 px, 13 p
 
 **Rules:**
 - **12 px floor.** No text is smaller.
-- **Headings** wrap with `text-wrap: balance` and never truncate. File names in rows truncate in the middle (components.md, "Sizes and numbers").
+- **Headings** wrap with `text-wrap: balance` and never truncate. File names in rows wrap in full and never truncate (components.md, "Sizes and numbers").
 - **Mono is data:** sizes, times, counts and labels. Uppercase only for labels of three words or fewer.
 - **Numbers that update or compare are tabular** (`font-variant-numeric: tabular-nums`).
 - **Sentence case** everywhere: headings, buttons, tags.

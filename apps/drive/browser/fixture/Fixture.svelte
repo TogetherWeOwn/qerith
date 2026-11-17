@@ -44,7 +44,13 @@
     { ...items[1], id: 'bidi-suffix', name: 'report.' + 'ב'.repeat(20), href: '#bidi-suffix' },
     { ...items[1], id: 'khmer', name: 'ក'.repeat(10) + 'ក្' + 'ក'.repeat(5) + '.pdf', href: '#khmer' },
     { ...items[1], id: 'kannada', name: 'ಕ'.repeat(10) + 'ಕ್' + 'ಕ'.repeat(5) + '.pdf', href: '#kannada' },
-    { ...items[1], id: 'wide-suffix', name: 'abcdefghijklmnop.' + '界'.repeat(15), href: '#wide-suffix' }
+    { ...items[1], id: 'wide-suffix', name: 'abcdefghijklmnop.' + '界'.repeat(15), href: '#wide-suffix' },
+    { ...items[1], id: 'zwj-modifier', name: 'annual-👩🏽‍💻-final-report.pdf', href: '#zwj-modifier' },
+    { ...items[1], id: 'accent-dot', name: 'resume-café.pdf', href: '#accent-dot' },
+    { ...items[1], id: 'ascii-255', name: 'a'.repeat(251) + '.txt', href: '#ascii-255' },
+    { ...items[1], id: 'cjk', name: '年度予算報告書'.repeat(4) + '.pdf', href: '#cjk' },
+    { ...items[1], id: 'edge-spaces', name: '  leading  and trailing  ', href: '#edge-spaces' },
+    { ...items[1], id: 'only-spaces', name: '   ', href: '#only-spaces' }
   ];
   // Synthetic pages exercise the controlled list without a route or identity.
   const paged = new URLSearchParams(window.location.search).has('paged');

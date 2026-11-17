@@ -171,7 +171,7 @@ Components for the file screens. They follow every rule above.
 **Sizes and numbers in every K component.**
 - **Bytes** are decimal; KB and larger show one decimal place below 100 units (a trailing ".0" included) and none from 100 up: "0 bytes", "1 byte", "980 bytes", "1.2 KB", "4.7 MB", "18.2 GB", "41.0 GB", "214 GB" (1 KB = 1,000 bytes). Wherever a size is shown, its `<data value="5368709120">` carries the exact byte count, and the details line (K3) prints it in full ("5,368,709,120 bytes").
 - **Times** are viewer-local: "09:12" today, "Yesterday 18:40", "14 Nov" this year, "14 Nov 2025" before. The list caption names the zone once ("Times in Europe/London"); each time is a `<time datetime>` with the full instant.
-- **File names are user data.** Render them as text, never HTML; keep every character, including Unicode and emoji, with `unicode-bidi: plaintext` so a right-to-left name can't reorder the row. A long name is truncated in the middle with an ellipsis so the extension stays visible ("Quarterly-report-final…v3.pdf"); the full name is the row's accessible name and is shown in the details line.
+- **File names are user data.** Render them as text, never HTML, as one run exactly as stored: keep every character, including Unicode, emoji and spaces, and never split, shorten or ellipsize a name. Isolate it with `dir="auto"` and `unicode-bidi: plaintext` so a right-to-left name can't reorder the row. A long name wraps onto as many lines as it needs inside its cell (`white-space: break-spaces; overflow-wrap: anywhere`), so the whole name, extension included, is always visible; the row grows to fit, and the other cells align to the name's first line. The full name is the row's accessible name and is shown in the details line.
 
 
 ### K1. Breadcrumb
@@ -336,7 +336,7 @@ K7, title "Share "{name}"". Body in this order:
 
 ### K15. Upload item
 
-**Anatomy:** a row in the tray: kind glyph · name (middle truncation) · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (`size.progress-row`) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
+**Anatomy:** a row in the tray: kind glyph · name (in full, wrapping; see "File names are user data") · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (`size.progress-row`) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
 
 | State | Line | Bar | Actions |
 |---|---|---|---|

@@ -110,7 +110,7 @@ No "Create account", no "Forgot password", no email field anywhere (A2).
 **Must render:**
 - new account, empty root: C3 "Your drive is empty." · "Upload a file or make a folder to start." · ghost "Upload files"
 - empty folder: C3 "This folder is empty." · "Drop files here or use Upload."
-- 1 item, 5,000 items (paged), mixed folders and files, Unicode and emoji names (U7), a name long enough to truncate in the middle
+- 1 item, 5,000 items (paged), mixed folders and files, Unicode and emoji names (U7), a name long enough to wrap onto three lines at 390, including an unbroken 255-byte name, a right-to-left name ending in .pdf and annual-👩🏽‍💻-final-report.pdf
 - each sort, both directions, at 1280 (column headers) and at 390 (Sort select)
 - loading: server-rendered first paint; folder-to-folder navigation keeps old rows with `aria-busy` and "Opening {folder}…" after 1 s. The breadcrumb, H1 and count line keep the previous folder until the new rows arrive, so every visible row belongs to the folder named above it. If the navigation fails, the load-failed state replaces the old rows.
 - load failed: A14 danger "This folder didn't load. Check your connection, then try again." · ghost "Try again"
@@ -213,7 +213,7 @@ At 390: two lists of cards (K19), the primary full width under the H1.
 ## 10. Responsive rules
 
 - Desktop first, one switch at 820 px (`breakpoint.compact-max`). At ≤ 820: J1 compact with the Menu sheet, two-line K2 rows, the Sort select, dialogs become bottom sheets, K5 menus become sheets, the tray becomes the bottom bar, owner tables become cards.
-- No sideways page scroll at 320 px. File names truncate in the middle; nothing else truncates.
+- No sideways page scroll at 320 px. File names wrap in full; nothing truncates.
 - Touch: every control ≥ 36 px; K2 rows at 390 are ≥ 56 px; the ⋯ button is 44 px at 390.
 - Drag and drop is a desktop extra. Upload is always the picker.
 

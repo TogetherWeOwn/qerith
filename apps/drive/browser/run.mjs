@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,53 +10,70 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 
-async function assertTruncatedExtensions(page) {
-  for (const id of ['accented-long', 'emoji-modifier', 'emoji-flag']) {
-    const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
-    await link.locator('..').evaluate(el => { el.style.width = '160px'; });
-    assert.equal(await link.locator('.name-end').textContent(), '.pdf');
-    assert.equal(await link.evaluate(el => {
-      const start = el.querySelector('.name-start');
-      const end = el.querySelector('.name-end');
-      const range = document.createRange();
-      range.selectNodeContents(end);
-      const text = range.getBoundingClientRect();
-      const span = end.getBoundingClientRect();
-      const row = el.closest('li').getBoundingClientRect();
-      return start.scrollWidth > start.clientWidth && end.scrollWidth <= end.clientWidth &&
-        text.left >= span.left - 1 && text.right <= span.right + 1 &&
-        text.left >= row.left && text.right <= row.right;
-    }), true, `${id}: the stem must truncate while the entire extension remains visible`);
-  }
-}
+const filenameCases = [
+  ['unicode', 'áááááááááááá👩‍👩‍👧‍👦.txt'],
+  ['rtl', 'تقرير-الميزانية-السنوية-النهائية.pdf'],
+  ['invoice', 'invoice-february.pdf'],
+  ['accented-long', 'Résumé-budget-annuel-version-finale.pdf'],
+  ['emoji-modifier', 'annual-budget-👍🏽-final-report.pdf'],
+  ['emoji-flag', 'annual-budget-🇺🇸-final-report.pdf'],
+  ['accented-terminal', 'budget-annuel-résumé.pdf'],
+  ['emoji-terminal', 'annual-budget-👍🏽.pdf'],
+  ['decomposed', 'Résumé-café-final-report.pdf'],
+  ['accented-terminal-long', 'budget-annuel-version-finale-résumé.pdf'],
+  ['emoji-terminal-long', 'annual-budget-version-final-report-👍🏽.pdf'],
+  ['decomposed-long', 'Résumé-café-version-finale-annual-report.pdf'],
+  ['tatweel', 'ب'.repeat(10) + 'ـ' + 'ب'.repeat(5) + '.pdf'],
+  ['mixed-bidi', 'تقرير-annual-budget.pdf'],
+  ['bidi-control', 'annual-' + String.fromCodePoint(0x202e) + 'budget-report.pdf'],
+  ['bidi-digits', 'annual-١٢٣٤٥٦٧٨٩-report.pdf'],
+  ['bidi-punctuation', 'annual-־budget-report.pdf'],
+  ['bidi-suffix', 'report.' + 'ב'.repeat(20)],
+  ['khmer', 'ក'.repeat(10) + 'ក្' + 'ក'.repeat(5) + '.pdf'],
+  ['kannada', 'ಕ'.repeat(10) + 'ಕ್' + 'ಕ'.repeat(5) + '.pdf'],
+  ['wide-suffix', 'abcdefghijklmnop.' + '界'.repeat(15)],
+  ['zwj-modifier', 'annual-👩🏽‍💻-final-report.pdf'],
+  ['accent-dot', 'resume-café.pdf'],
+  ['ascii-255', 'a'.repeat(251) + '.txt'],
+  ['cjk', '年度予算報告書'.repeat(4) + '.pdf'],
+  ['edge-spaces', '  leading  and trailing  '],
+  ['only-spaces', '   ']
+];
 
-async function assertSuffixBoundaries(page, selector) {
-  for (const [id, name] of [
-    ['accented-terminal', 'budget-annuel-résumé.pdf'],
-    ['emoji-terminal', 'annual-budget-👍🏽.pdf'],
-    ['decomposed', 'Résumé-café-final-report.pdf'],
-    ['accented-terminal-long', 'budget-annuel-version-finale-résumé.pdf'],
-    ['emoji-terminal-long', 'annual-budget-version-final-report-👍🏽.pdf'],
-    ['decomposed-long', 'Résumé-café-version-finale-annual-report.pdf']
-  ]) {
+async function assertFullFilenames(page, selector) {
+  for (const [id, name] of filenameCases) {
     const link = page.locator(`${selector} a[data-item-id="${id}"]`);
-    assert.equal(await link.getAttribute('aria-label'), name);
+    const displayed = name.trim() ? name : name + ' (Whitespace-only name)';
+    assert.equal(await link.getAttribute('aria-label'), displayed);
     assert.equal(await link.getAttribute('href'), `#${id}`);
-    assert.equal(await link.textContent(), name);
-    assert.equal(await link.locator('.name-end').textContent(), '.pdf');
-    await link.evaluate(el => { el.style.width = '120px'; });
+    assert.equal(await link.textContent(), displayed);
     assert.equal(await link.evaluate(el => {
-      const start = el.querySelector('.name-start');
-      const end = el.querySelector('.name-end');
-      const range = document.createRange();
-      range.selectNodeContents(end);
-      const text = range.getBoundingClientRect();
-      const span = end.getBoundingClientRect();
+      const nameNode = el.firstChild;
+      if (nameNode?.nodeType !== Node.TEXT_NODE) return false;
+      const style = getComputedStyle(el);
+      if (style.whiteSpace !== 'break-spaces' || style.overflowWrap !== 'anywhere' ||
+          style.wordBreak !== 'normal' || style.unicodeBidi !== 'plaintext' ||
+          style.textOverflow !== 'clip' || style.overflowX !== 'visible' || style.overflowY !== 'visible' ||
+          !['none', ''].includes(style.webkitLineClamp)) return false;
       const bounds = el.getBoundingClientRect();
-      return start.scrollWidth > start.clientWidth && end.scrollWidth <= end.clientWidth &&
-        text.left >= span.left - 1 && text.right <= span.right + 1 &&
-        text.left >= bounds.left - 1 && text.right <= bounds.right + 1;
-    }), true, `${selector} ${id}: clipped stem and fully rendered extension required`);
+      const row = el.closest('li, tr').getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rects = [...range.getClientRects()];
+      if (!rects.length) return false;
+      return rects.every(rect => {
+        if (rect.left < bounds.left - 1 || rect.right > bounds.right + 1 || rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1 ||
+            rect.left < row.left - 1 || rect.right > row.right + 1 || rect.top < row.top - 1 || rect.bottom > row.bottom + 1) return false;
+        for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const clip = ancestor.getBoundingClientRect();
+          if (style.clipPath !== 'none' || !['none', ''].includes(style.webkitLineClamp)) return false;
+          if (['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowX) && (rect.left < clip.left - 1 || rect.right > clip.right + 1)) return false;
+          if (['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowY) && (rect.top < clip.top - 1 || rect.bottom > clip.bottom + 1)) return false;
+        }
+        return true;
+      });
+    }), true, `${selector} ${id}: full text must remain visible in one text run`);
   }
 }
 
@@ -479,11 +497,7 @@ try {
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
     const longName = container.getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
     assert.equal(await longName.textContent(), 'a-very-long-file-name-without-breaks-to-check-reflow.txt');
-    assert.equal(await longName.locator('.name-end').textContent(), 'reflow.txt');
-    if (width <= 390) {
-      assert.equal(await longName.locator('.name-start').evaluate(el => el.scrollWidth > el.clientWidth), true);
-      assert.equal(await longName.locator('.name-start').evaluate(el => getComputedStyle(el).textOverflow), 'ellipsis');
-    }
+    assert.equal(await longName.evaluate(el => getComputedStyle(el).textOverflow), 'clip');
     assert.equal(await container.locator('time').count(), 3);
     assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
@@ -547,91 +561,106 @@ try {
     }
     await context.close();
   }
-  for (const width of [390, 1280]) for (const segmenter of [true, false]) {
-    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+  for (const width of [1280, 390, 320]) for (const segmenter of [true, false]) {
+    const height = width === 1280 ? 800 : 844;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     if (!segmenter) await context.addInitScript(() => { Intl.Segmenter = undefined; });
     const page = await context.newPage();
     await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
-    await assertSuffixBoundaries(page, width > 820 ? 'table.desktop' : 'ul.mobile');
-    await context.close();
-  }
-  {
-    const context = await browser.newContext({ viewport: { width: 320, height: 844 }, serviceWorkers: 'block' });
-    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    const page = await context.newPage();
-    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
-    await assertTruncatedExtensions(page);
-    const name = 'áááááááááááá👩‍👩‍👧‍👦.txt';
-    const link = page.getByRole('list').getByRole('link', { name });
-    const parts = await link.locator('.name-start, .name-end').allTextContents();
-    assert.equal(parts.join(''), name);
-    const boundaries = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.index);
-    assert(boundaries.includes(parts[0].length), 'Filename split must occur at a grapheme boundary');
-    assert(parts[1].endsWith('👩‍👩‍👧‍👦.txt'));
-    const rtlName = 'تقرير-الميزانية-السنوية-النهائية.pdf';
-    const rtl = page.getByRole('list').getByRole('link', { name: rtlName });
-    assert.equal(await rtl.textContent(), rtlName);
-    assert.equal(await rtl.locator('.name-end').textContent(), '.pdf');
-    assert((await rtl.locator('.name-start').textContent()).endsWith('النهائية'));
-    assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
-    const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
-    assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
-    const tatweel = page.locator('ul.mobile a[data-item-id="tatweel"]');
-    assert((await tatweel.locator('.name-start, .name-end').allTextContents()).some(part => part.includes('ب'.repeat(10) + 'ـ' + 'ب'.repeat(5))), 'Connected Arabic text must stay in one shaping span');
-    const mixedBidi = page.locator('ul.mobile a[data-item-id="mixed-bidi"]');
-    assert((await mixedBidi.locator('.name-start, .name-end').allTextContents()).some(part => part.includes('annual-budget.pdf')), 'The Latin run must stay in one bidi span');
-    for (const [id, syllable, linker] of [['khmer', 'ក', '្'], ['kannada', 'ಕ', '್']]) {
-      const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
-      const parts = await link.locator('.name-start, .name-end').allTextContents();
-      assert(parts.some(part => part.includes(syllable + linker + syllable)), `${id} conjunct must stay in one shaping span`);
-    }
-    for (const id of ['bidi-control', 'bidi-digits', 'bidi-punctuation', 'bidi-suffix']) {
-      const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
-      assert.equal(await link.locator('.name-end').textContent(), '', `${id} must stay in one bidi span`);
-    }
-    const invoice = page.locator('ul.mobile a[data-item-id="invoice"]');
-    assert.equal(await invoice.textContent(), 'invoice-february.pdf');
-    assert.match(await invoice.locator('.name-end').textContent(), /^.+\.pdf$/, 'LTR filename must retain a tail before the extension');
-    const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
-    assert.equal(await wideSuffix.textContent(), 'abcdefghijklmnop.' + '界'.repeat(15));
-    assert.equal(await wideSuffix.locator('.name-end').textContent(), '.' + '界'.repeat(15));
-    assert.equal(await wideSuffix.locator('.name-end').evaluate(el => {
+    const selector = width > 820 ? 'table.desktop' : 'ul.mobile';
+    await assertFullFilenames(page, selector);
+    assert.equal(await page.locator(`${selector} a[data-item-id="rtl"]`).evaluate(el => getComputedStyle(el).direction), 'rtl');
+    const alignment = await page.locator(`${selector} a[data-item-id="ascii-255"]`).evaluate(el => {
       const range = document.createRange();
       range.selectNodeContents(el);
-      const text = range.getBoundingClientRect();
-      const span = el.getBoundingClientRect();
-      const row = el.closest('li').getBoundingClientRect();
-      return el.scrollWidth <= el.clientWidth && text.left >= span.left - 1 && text.right <= span.right + 1 && text.left >= row.left && text.right <= row.right;
-    }), true, 'The entire wide suffix must be visible within the row');
+      const first = range.getClientRects()[0];
+      const glyph = el.parentElement.querySelector('svg').getBoundingClientRect();
+      const row = el.closest('li, tr');
+      const cells = [...row.querySelectorAll(':scope > td:not(:first-child)')].map(cell => {
+        const text = document.createRange();
+        text.selectNodeContents(cell);
+        return text.getClientRects()[0];
+      });
+      return {
+        glyphDelta: Math.abs((glyph.top + glyph.bottom - first.top - first.bottom) / 2),
+        cellDeltas: cells.map(rect => Math.abs((rect.top + rect.bottom - first.top - first.bottom) / 2)),
+        lines: range.getClientRects().length,
+        rowHeight: row.getBoundingClientRect().height,
+        linkHeight: el.getBoundingClientRect().height
+      };
+    });
+    assert(alignment.lines > 1 && alignment.rowHeight >= alignment.linkHeight, `Long name must expand its row: ${JSON.stringify(alignment)}`);
+    assert(alignment.glyphDelta <= 6 && alignment.cellDeltas.every(delta => delta <= 8), `First-line alignment: ${JSON.stringify(alignment)}`);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
-    assert.equal(await wideSuffix.evaluate(el => el.getBoundingClientRect().right <= el.closest('li').getBoundingClientRect().right), true);
-    await page.screenshot({ path: resolve(output, 'listing-unicode-320.png') });
+    await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${segmenter ? 'segmenter' : 'fallback'}.png`), fullPage: true });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-unicode-${width}-${segmenter ? 'segmenter' : 'fallback'}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for unicode ${width}: ${JSON.stringify(results.violations)}`);
+    if (segmenter) {
+      for (const [mode, css] of [
+        ['css-zoom-200', 'html { zoom: 2; }'],
+        ['css-zoom-400', 'html { zoom: 4; }'],
+        ['text-spacing', '* { line-height: 1.5 !important; letter-spacing: .12em !important; word-spacing: .16em !important; }'],
+        ['font-fallback', '* { font-family: sans-serif !important; }']
+      ]) {
+        const override = await page.addStyleTag({ content: css });
+        await page.evaluate(() => document.fonts.ready);
+        await assertFullFilenames(page, selector);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${mode}: horizontal page overflow`);
+        await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${mode}.png`), fullPage: true });
+        await override.evaluate(el => el.remove());
+      }
+    }
     await context.close();
   }
-  {
-    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
-    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    await context.addInitScript(() => { Intl.Segmenter = undefined; });
-    const page = await context.newPage();
-    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
-    const link = page.getByRole('list').getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
-    assert.equal(await link.locator('.name-end').textContent(), 'reflow.txt');
-    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
-    await assertTruncatedExtensions(page);
-    const rtl = page.locator('ul.mobile a[data-item-id="rtl"]');
-    assert.equal(await rtl.locator('.name-end').textContent(), 'pdf');
-    assert.equal(await rtl.textContent(), 'تقرير-الميزانية-السنوية-النهائية.pdf');
-    assert.equal(await page.locator('ul.mobile a[data-item-id="unicode"] .name-end').textContent(), 'txt');
-    assert.equal(await page.locator('ul.mobile a[data-item-id="wide-suffix"] .name-end').textContent(), '.' + '界'.repeat(15));
-    for (const [id, text] of [['tatweel', 'ب'.repeat(10) + 'ـ' + 'ب'.repeat(5)], ['mixed-bidi', 'annual-budget.pdf'], ['khmer', 'ក្ក'], ['kannada', 'ಕ್ಕ']]) {
-      const parts = await page.locator(`ul.mobile a[data-item-id="${id}"] .name-start, ul.mobile a[data-item-id="${id}"] .name-end`).allTextContents();
-      assert(parts.some(part => part.includes(text)), `${id} must stay in one span without Segmenter`);
+  // Chrome's tabs API changes page zoom, unlike CSS zoom or pinch scaling.
+  const zoomTemp = await mkdtemp(resolve(tmpdir(), 'drive-page-zoom-'));
+  try {
+    const extension = resolve(zoomTemp, 'extension');
+    await mkdir(extension);
+    await writeFile(resolve(extension, 'manifest.json'), JSON.stringify({
+      manifest_version: 3, name: 'Page zoom evidence', version: '1.0',
+      permissions: ['tabs'], background: { service_worker: 'worker.js' }
+    }));
+    await writeFile(resolve(extension, 'worker.js'), 'chrome.runtime.onInstalled.addListener(() => {});');
+    for (const factor of [2, 4]) {
+      const context = await chromium.launchPersistentContext(resolve(zoomTemp, `profile-${factor}`), {
+        channel: 'chromium', headless: true, viewport: null,
+        args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--window-size=1280,800']
+      });
+      try {
+        await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+        await context.routeWebSocket('**/*', socket => socket.close());
+        const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
+        const page = await context.newPage();
+        await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+        const before = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio }));
+        const applied = await worker.evaluate(async ({ url, factor }) => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find(item => item.url === url);
+          if (!tab) throw new Error('Fixture tab not found');
+          await chrome.tabs.setZoom(tab.id, factor);
+          return chrome.tabs.getZoom(tab.id);
+        }, { url: `${origin}/?listing&unicode`, factor });
+        await page.waitForFunction(({ width, factor }) => Math.abs(innerWidth * factor - width) <= factor * 2, { width: before.width, factor });
+        await page.evaluate(() => document.fonts.ready);
+        const after = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio, scrollWidth: document.documentElement.scrollWidth }));
+        assert.equal(applied, factor);
+        assert(Math.abs(after.dpr / before.dpr - factor) < 0.01, `Page zoom DPR: ${JSON.stringify({ before, after })}`);
+        assert(after.scrollWidth <= after.width, `Page zoom horizontal overflow: ${JSON.stringify(after)}`);
+        await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile');
+        await page.screenshot({ path: resolve(output, `listing-unicode-page-zoom-${factor * 100}.png`), fullPage: true });
+        await writeFile(resolve(output, `listing-unicode-page-zoom-${factor * 100}.json`), JSON.stringify({ factor: applied, before, after }, null, 2));
+      } finally {
+        await context.close();
+      }
     }
-    for (const id of ['bidi-control', 'bidi-digits', 'bidi-punctuation', 'bidi-suffix']) {
-      assert.equal(await page.locator(`ul.mobile a[data-item-id="${id}"] .name-end`).textContent(), '', `${id} must stay in one bidi span without Segmenter`);
-    }
-    await context.close();
+  } finally {
+    await rm(zoomTemp, { recursive: true, force: true });
   }
   for (const width of [1280, 390]) {
     const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });

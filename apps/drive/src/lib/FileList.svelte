@@ -46,79 +46,6 @@
     };
   });
 
-  // Keep cursive script letters together across separately shaped spans.
-  function wordBoundary(characters: string[], split: number, suffixStart: number): number {
-    const joiningScript = /[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Nko}\p{Script=Mongolian}\p{Script=Adlam}\p{Script=Mandaic}\p{Script=Hanifi_Rohingya}]/u;
-    const joining = (character: string) => joiningScript.test(character) && /[\p{L}\p{M}]/u.test(character);
-    while (split < suffixStart && joining(characters[split - 1]) && joining(characters[split])) split++;
-    return split;
-  }
-
-  // Keep the end of the name, including its extension, outside the ellipsized span.
-  function nameParts(name: string): [string, string] {
-    // Keep non-Latin letter runs together; mixed-direction stems need one bidi span.
-    const extension = name.lastIndexOf('.');
-    const stem = extension > 0 ? name.slice(0, extension) : name;
-    // For ordinary Latin/emoji stems, keep the entire stem in one shaping and
-    // bidi span. The ASCII dot starts a grapheme after this restricted repertoire
-    // (which excludes controls and prepend characters), even without Segmenter.
-    const ordinaryStem = Array.from(stem).every(char => /^[\x20-\x7e]$/u.test(char) ||
-      (/\p{Script=Latin}/u.test(char) && /\p{L}/u.test(char)) ||
-      /[̀-ͯ\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}️]/u.test(char));
-    if (extension > 0 && /[^\x00-\x7f]/u.test(stem) && ordinaryStem &&
-        /^\.[A-Za-z0-9]{1,15}$/.test(name.slice(extension))) {
-      if (typeof Intl.Segmenter !== 'function' ||
-          Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name)).some(part => part.index === extension)) {
-        return [stem, name.slice(extension)];
-      }
-      return [name, ''];
-    }
-    // Punctuation and numbers can have directional effects without being letters.
-    // Emoji and combining marks remain eligible for grapheme-safe splitting.
-    if (/\p{Bidi_Control}/u.test(name) || Array.from(name).some(char =>
-      /[^\x00-\x7f]/u.test(char) && !/[\p{L}\p{M}\p{Extended_Pictographic}‍]/u.test(char)
-    )) return [name, ''];
-    // A directional or shaping run can also occur after the last dot.
-    const suffix = extension > 0 ? name.slice(extension + 1) : '';
-    if (Array.from(suffix).some(char => /[^\x00-\x7f]/u.test(char) && /\p{L}/u.test(char) && !/\p{Script=Han}/u.test(char))) return [name, ''];
-    if (Array.from(stem).some(char => /[^\x00-\x7f]/u.test(char) && /\p{L}/u.test(char))) {
-      if (/[A-Za-z]/.test(stem) || extension <= 0 || !/^\.[A-Za-z0-9]{1,15}$/.test(name.slice(extension))) return [name, ''];
-      if (typeof Intl.Segmenter === 'function') {
-        const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name);
-        return Array.from(segments).some(part => part.index === extension) ? [stem, name.slice(extension)] : [name, ''];
-      }
-    }
-    // Without segmentation, split only at boundaries known not to divide a grapheme.
-    if (typeof Intl.Segmenter !== 'function') {
-      if (name.length <= 12) return [name, ''];
-      const dot = name.lastIndexOf('.');
-      if (!/^[\x20-\x7e]+$/.test(name)) {
-        // A printable ASCII character before the dot guarantees a boundary
-        // before it, even when the extension starts with a combining mark.
-        if (dot > 0 && name.length - dot <= 16 && /^[\x20-\x7e]$/.test(name[dot - 1])) {
-          return [name.slice(0, dot), name.slice(dot)];
-        }
-        // An ASCII letter or digit after a dot begins a new grapheme; keep the
-        // dot with the original prefix so unusual Unicode sequences stay intact.
-        if (dot > 0 && /^[A-Za-z0-9]{1,15}$/.test(name.slice(dot + 1))) {
-          return [name.slice(0, dot + 1), name.slice(dot + 1)];
-        }
-        return [name, ''];
-      }
-      const suffixStart = dot > 0 && name.length - dot <= 16 ? dot : name.length;
-      const retained = name.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
-      const split = wordBoundary(Array.from(name), suffixStart - retained, suffixStart);
-      return [name.slice(0, split), name.slice(split)];
-    }
-    const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.segment);
-    if (characters.length <= 12) return [name, ''];
-    const dot = characters.lastIndexOf('.');
-    const suffixStart = dot > 0 && characters.length - dot <= 16 ? dot : characters.length;
-    const retained = characters.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
-    const split = wordBoundary(characters, suffixStart - retained, suffixStart);
-    return [characters.slice(0, split).join(''), characters.slice(split).join('')];
-  }
-
   // The caller supplies authorized URLs and already-sorted display values.
   export let folder: string;
   export let timeZone: string;
@@ -147,7 +74,7 @@
   <tbody>
     {#each items as item (item.id)}
       <tr>
-        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}><span class="name-start">{nameParts(item.name)[0]}</span><span class="name-end">{nameParts(item.name)[1]}</span>{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
+        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
       </tr>
     {/each}
@@ -155,7 +82,7 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}><span class="name-start">{nameParts(item.name)[0]}</span><span class="name-end">{nameParts(item.name)[1]}</span>{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data> · {/if}<time datetime={item.modifiedAt}>{item.modified}</time></div></li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data> · {/if}<time datetime={item.modifiedAt}>{item.modified}</time></div></li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}
@@ -173,14 +100,13 @@
   th, td { height: var(--drive-size-row-admin); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
-  td { vertical-align: middle; }
+  td { vertical-align: baseline; }
   th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
   a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
-  .name { display: inline-flex; align-items: center; gap: var(--drive-space-2); max-width: 100%; }
-  .name a { display: inline-flex; min-width: 0; padding-block: var(--drive-space-2); white-space: break-spaces; }
-  .name-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-  .name-end { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+  .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
+  .name :global(svg) { margin-top: var(--drive-space-2); }
+  .name a { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; }
   .folder { font-weight: var(--drive-font-weight-medium); }
   .tag { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; padding: var(--drive-space-inset-tag-y) var(--drive-space-inset-tag-x); border-radius: var(--drive-radius-s); box-shadow: inset 0 0 0 var(--drive-size-line) var(--drive-color-line-hairline-strong); }
   @media (forced-colors: active) { .tag { outline: var(--drive-size-line) solid transparent; outline-offset: calc(-1 * var(--drive-size-line)); } }
