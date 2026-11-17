@@ -27,6 +27,14 @@
     { ...items[1], id: 'unicode', name: 'áááááááááááá👩‍👩‍👧‍👦.txt', href: '#unicode' },
     { ...items[1], id: 'rtl', name: 'تقرير-الميزانية-السنوية-النهائية.pdf', href: '#rtl' },
     { ...items[1], id: 'invoice', name: 'invoice-february.pdf', href: '#invoice' },
+    { ...items[1], id: 'tatweel', name: 'ب'.repeat(10) + 'ـ' + 'ب'.repeat(5) + '.pdf', href: '#tatweel' },
+    { ...items[1], id: 'mixed-bidi', name: 'تقرير-annual-budget.pdf', href: '#mixed-bidi' },
+    { ...items[1], id: 'bidi-control', name: 'annual-' + String.fromCodePoint(0x202e) + 'budget-report.pdf', href: '#bidi-control' },
+    { ...items[1], id: 'bidi-digits', name: 'annual-١٢٣٤٥٦٧٨٩-report.pdf', href: '#bidi-digits' },
+    { ...items[1], id: 'bidi-punctuation', name: 'annual-־budget-report.pdf', href: '#bidi-punctuation' },
+    { ...items[1], id: 'bidi-suffix', name: 'report.' + 'ב'.repeat(20), href: '#bidi-suffix' },
+    { ...items[1], id: 'khmer', name: 'ក'.repeat(10) + 'ក្' + 'ក'.repeat(5) + '.pdf', href: '#khmer' },
+    { ...items[1], id: 'kannada', name: 'ಕ'.repeat(10) + 'ಕ್' + 'ಕ'.repeat(5) + '.pdf', href: '#kannada' },
     { ...items[1], id: 'wide-suffix', name: 'abcdefghijklmnop.' + '界'.repeat(15), href: '#wide-suffix' }
   ];
   // Synthetic pages exercise the controlled list without a route or identity.

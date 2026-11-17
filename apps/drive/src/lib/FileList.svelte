@@ -56,6 +56,24 @@
 
   // Keep the end of the name, including its extension, outside the ellipsized span.
   function nameParts(name: string): [string, string] {
+    // Keep non-Latin letter runs together; mixed-direction stems need one bidi span.
+    const extension = name.lastIndexOf('.');
+    const stem = extension > 0 ? name.slice(0, extension) : name;
+    // Punctuation and numbers can have directional effects without being letters.
+    // Emoji and combining marks remain eligible for grapheme-safe splitting.
+    if (/\p{Bidi_Control}/u.test(name) || Array.from(name).some(char =>
+      /[^\x00-\x7f]/u.test(char) && !/[\p{L}\p{M}\p{Extended_Pictographic}‍]/u.test(char)
+    )) return [name, ''];
+    // A directional or shaping run can also occur after the last dot.
+    const suffix = extension > 0 ? name.slice(extension + 1) : '';
+    if (Array.from(suffix).some(char => /[^\x00-\x7f]/u.test(char) && /\p{L}/u.test(char) && !/\p{Script=Han}/u.test(char))) return [name, ''];
+    if (Array.from(stem).some(char => /[^\x00-\x7f]/u.test(char) && /\p{L}/u.test(char))) {
+      if (/[A-Za-z]/.test(stem) || extension <= 0 || !/^\.[A-Za-z0-9]{1,15}$/.test(name.slice(extension))) return [name, ''];
+      if (typeof Intl.Segmenter === 'function') {
+        const segments = new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name);
+        return Array.from(segments).some(part => part.index === extension) ? [stem, name.slice(extension)] : [name, ''];
+      }
+    }
     // Without segmentation, split only at boundaries known not to divide a grapheme.
     if (typeof Intl.Segmenter !== 'function') {
       if (name.length <= 12) return [name, ''];

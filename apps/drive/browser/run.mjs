@@ -517,6 +517,19 @@ try {
     assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
     const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
+    const tatweel = page.locator('ul.mobile a[data-item-id="tatweel"]');
+    assert((await tatweel.locator('.name-start, .name-end').allTextContents()).some(part => part.includes('ب'.repeat(10) + 'ـ' + 'ب'.repeat(5))), 'Connected Arabic text must stay in one shaping span');
+    const mixedBidi = page.locator('ul.mobile a[data-item-id="mixed-bidi"]');
+    assert((await mixedBidi.locator('.name-start, .name-end').allTextContents()).some(part => part.includes('annual-budget.pdf')), 'The Latin run must stay in one bidi span');
+    for (const [id, syllable, linker] of [['khmer', 'ក', '្'], ['kannada', 'ಕ', '್']]) {
+      const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
+      const parts = await link.locator('.name-start, .name-end').allTextContents();
+      assert(parts.some(part => part.includes(syllable + linker + syllable)), `${id} conjunct must stay in one shaping span`);
+    }
+    for (const id of ['bidi-control', 'bidi-digits', 'bidi-punctuation', 'bidi-suffix']) {
+      const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
+      assert.equal(await link.locator('.name-end').textContent(), '', `${id} must stay in one bidi span`);
+    }
     const invoice = page.locator('ul.mobile a[data-item-id="invoice"]');
     assert.equal(await invoice.textContent(), 'invoice-february.pdf');
     assert.match(await invoice.locator('.name-end').textContent(), /^.+\.pdf$/, 'LTR filename must retain a tail before the extension');
@@ -550,6 +563,13 @@ try {
     assert.equal(await rtl.textContent(), 'تقرير-الميزانية-السنوية-النهائية.pdf');
     assert.equal(await page.locator('ul.mobile a[data-item-id="unicode"] .name-end').textContent(), 'txt');
     assert.equal(await page.locator('ul.mobile a[data-item-id="wide-suffix"] .name-end').textContent(), '.' + '界'.repeat(15));
+    for (const [id, text] of [['tatweel', 'ب'.repeat(10) + 'ـ' + 'ب'.repeat(5)], ['mixed-bidi', 'annual-budget.pdf'], ['khmer', 'ក្ក'], ['kannada', 'ಕ್ಕ']]) {
+      const parts = await page.locator(`ul.mobile a[data-item-id="${id}"] .name-start, ul.mobile a[data-item-id="${id}"] .name-end`).allTextContents();
+      assert(parts.some(part => part.includes(text)), `${id} must stay in one span without Segmenter`);
+    }
+    for (const id of ['bidi-control', 'bidi-digits', 'bidi-punctuation', 'bidi-suffix']) {
+      assert.equal(await page.locator(`ul.mobile a[data-item-id="${id}"] .name-end`).textContent(), '', `${id} must stay in one bidi span without Segmenter`);
+    }
     await context.close();
   }
   for (const width of [1280, 390]) {
