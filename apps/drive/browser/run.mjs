@@ -247,6 +247,7 @@ try {
     await page.getByRole('button', { name: 'Actions for Sample file' }).click();
     const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
     const items = menu.getByRole('menuitem');
+    assert.equal(await items.count(), 6, `Expected all file actions at ${width}x${height}`);
     for (let i = 0; i < await items.count(); i++) {
       if (i) await page.keyboard.press('ArrowDown');
       const visible = await items.nth(i).evaluate(el => {
