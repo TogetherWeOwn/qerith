@@ -18,6 +18,38 @@ it('upgrades existing metadata with a private upload intent journal', async () =
   expect((await env.DB.prepare('SELECT id FROM drive_entries').all()).results).toEqual([{ id: 'folder' }]);
 });
 
+it('scans inactive owners’ provider evidence in bounded pages', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?)')
+    .bind('scan-active', 'member', 'active', 'scan-revoked', 'member', 'revoked').run();
+  const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
+    (id, owner_id, object_key, upload_id, state, completion_acknowledged)
+    VALUES (?, ?, ?, ?, ?, ?)`);
+  for (const row of [
+    ['scan-a', 'scan-revoked', 'scan-key-a', 'upload-a', 'allocated', 0],
+    ['scan-b', 'scan-revoked', 'scan-key-b', 'upload-b', 'acknowledged', 1],
+    ['scan-c', 'scan-active', 'scan-key-c', 'upload-c', 'allocated', 0],
+    ['scan-d', 'scan-revoked', 'scan-key-d', null, 'created', 0],
+    ['scan-e', 'scan-missing', 'scan-key-e', 'upload-e', 'allocated', 0],
+  ]) await insert.bind(...row).run();
+
+  const intents = new UploadIntents(env.DB);
+  for (const limit of [0, -1, 101, 1.5, NaN]) {
+    await expect(intents.listRevokedEvidence('', limit)).rejects.toThrow('Invalid recovery limit');
+  }
+  const page = await intents.listRevokedEvidence('', 2);
+  expect(page.map(({ id }) => id)).toEqual(['scan-a', 'scan-b']);
+  expect(page).toEqual([
+    expect.objectContaining({ owner_id: 'scan-revoked', state: 'allocated', upload_id: 'upload-a' }),
+    expect.objectContaining({ owner_id: 'scan-revoked', state: 'acknowledged', upload_id: 'upload-b', completion_acknowledged: 1 }),
+  ]);
+  const next = await intents.listRevokedEvidence(page[1].id, 2);
+  expect(next.map(({ id }) => id)).toEqual(['scan-e']);
+  expect(await intents.listRevokedEvidence(next[0].id, 100)).toEqual([]);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'scan-active'").run();
+  expect((await intents.listRevokedEvidence('', 100)).map(({ id }) => id)).toEqual(['scan-a', 'scan-b', 'scan-c', 'scan-e']);
+});
+
 it('creates private intents only for active members and isolates owners', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')

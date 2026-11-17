@@ -3,6 +3,7 @@
 interface Statement {
   bind(...values: (string | number | null)[]): Statement;
   first<T>(): Promise<T | null>;
+  all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
 
@@ -33,5 +34,17 @@ export class UploadIntents {
     return this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
       WHERE id = ? AND owner_id = ? AND ${active}`)
       .bind(id, principalId, principalId).first<UploadIntent>();
+  }
+
+  // Trusted reconciliation only; never expose this scan to a principal. Restart
+  // from the beginning because revocation or late evidence may occur behind the
+  // cursor. A scan result alone does not authorize deletion or provider operations.
+  async listRevokedEvidence(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state IN ('allocated', 'acknowledged') AND id > ?
+        AND NOT EXISTS (SELECT 1 FROM drive_active_members WHERE id = owner_id)
+      ORDER BY id LIMIT ?`).bind(afterId, limit).all<UploadIntent>();
+    return page.results;
   }
 }
