@@ -138,10 +138,10 @@
 
 <svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element && document.activeElement.closest('[data-details-id]')?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(window.matchMedia('(max-width: 820px)').matches ? mobile : desktop, detailsId); } }} />
 {#if onSort}
-  <div class="compact-sort"><label for="listing-sort">Sort</label> <select id="listing-sort" bind:this={compactSort} value={direction} on:change={(event) => onSort?.(event.currentTarget.value as 'asc' | 'desc')}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></div>
+  <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
 {/if}
-<p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging && total !== undefined} {items.length.toLocaleString()} of {total.toLocaleString()} shown.{/if}</p>
+<p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
   <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th><th scope="col">Actions</th></tr></thead>
@@ -161,12 +161,12 @@
     <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}><span class="name-start">{nameParts(item.name)[0]}</span><span class="name-end">{nameParts(item.name)[1]}</span>{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
   {/each}
 </ul>
-{#if total !== undefined}
+{#if total !== undefined || onMore}
   <div class="paging">
-    {#if onMore && (total > 200 || hasMore || loadingMore || usedPaging)}<button type="button" aria-busy={loadingMore} aria-disabled={loadingMore || !hasMore} on:click={() => { if (!loadingMore && hasMore) { usedPaging = true; onMore?.(); } }}>{loadingMore ? 'Showing more…' : hasMore ? loadMoreError ? 'Try again' : 'Show 200 more' : 'All items shown'}</button>{/if}
-    <span>{items.length.toLocaleString()} of {total.toLocaleString()} shown</span>
+    {#if onMore && ((total !== undefined && total > 200) || hasMore || loadingMore || usedPaging)}<button type="button" aria-busy={loadingMore} aria-disabled={loadingMore || !hasMore} on:click={() => { if (!loadingMore && hasMore) { usedPaging = true; onMore?.(); } }}>{loadingMore ? 'Showing more…' : hasMore ? loadMoreError ? 'Try again' : 'Show 200 more' : 'All items shown'}</button>{/if}
+    <span>{total === undefined ? `${items.length.toLocaleString()} shown` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown`}</span>
   </div>
-  {#if loadMoreError}<p role="alert">More items didn't load. Check your connection, then try again.</p>{/if}
+  {#if loadMoreError}<p class="paging-error" role="alert">More items didn't load. Check your connection, then try again.</p>{/if}
 {/if}
 
 <style>
@@ -194,9 +194,14 @@
     tbody tr, li { transition: background-color var(--drive-motion-duration-base) var(--drive-motion-ease); }
   }
   .compact-sort { display: none; }
+  .compact-sort label { display: flex; align-items: center; gap: var(--drive-space-2); font-family: var(--drive-font-ui); }
+  .compact-sort select { min-height: var(--drive-size-control-sm); border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-s); background: var(--drive-color-bg-surface); color: var(--drive-color-text-primary); font: inherit; }
   .order-note, .paging { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   .status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .paging { display: flex; align-items: center; gap: var(--drive-space-2); padding: var(--drive-space-2); }
+  .paging button { min-height: var(--drive-size-control-sm); padding: 0 var(--drive-space-4); border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-pill); background: transparent; color: var(--drive-color-text-primary); font: inherit; cursor: pointer; }
+  .paging button[aria-disabled='true'] { color: var(--drive-color-text-tertiary); cursor: default; }
+  .paging-error { margin: 0; padding: 0 var(--drive-space-2); color: var(--drive-color-state-danger); font-family: var(--drive-font-ui); font-size: var(--drive-font-size-meta); }
   .sort-button { color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; background: transparent; border: 0; cursor: pointer; }
   button:focus-visible, select:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .mobile { display: none; margin: 0; padding: 0; list-style: none; }
