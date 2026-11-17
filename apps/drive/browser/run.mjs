@@ -160,6 +160,142 @@ try {
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const variant of ['file', 'folder', 'shared']) {
+    const size = `menu-${variant}-${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    page.on('pageerror', error => console.error('Browser page error:', error));
+    page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
+    page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
+    await page.goto(`${origin}/?menu=${variant}`, { waitUntil: 'networkidle' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    await menu.waitFor();
+    const items = menu.getByRole('menuitem');
+    const expected = variant === 'shared' ? ['Download', 'Details'] : variant === 'folder' ? ['Share', 'Rename', 'Move', 'Details', 'Delete'] : ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete'];
+    assert.deepEqual(await items.allTextContents().then(values => values.map(value => value.trim())), expected);
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(await trigger.getAttribute('aria-controls'), await menu.getAttribute('id'));
+    assert.equal(await menu.evaluate(el => el.closest('dialog').matches(':modal')), width === 390);
+    if (width === 390) {
+      const background = page.locator('main > button');
+      await background.evaluate(el => el.focus());
+      assert.equal(await background.evaluate(el => el === document.activeElement), false, 'Modal must exclude background focus');
+      const ax = await context.newCDPSession(page);
+      const { nodes } = await ax.send('Accessibility.getFullAXTree');
+      await ax.detach();
+      assert.equal(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), false, 'Modal must exclude background from accessibility tree');
+      const triggerSize = await trigger.evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight, icon: el.querySelector('svg').getBoundingClientRect().width }));
+      assert.deepEqual(triggerSize, { width: 44, height: 44, icon: 20 });
+      const sheet = await menu.evaluate(el => ({ width: el.getBoundingClientRect().width, maxHeight: getComputedStyle(el).maxHeight, backdrop: getComputedStyle(el.parentElement).backgroundColor, blur: getComputedStyle(el.parentElement).backdropFilter }));
+      assert.deepEqual(sheet, { width, maxHeight: `${height * 0.9}px`, backdrop: 'rgba(28, 22, 20, 0.94)', blur: 'blur(14px)' });
+    }
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
+    await page.screenshot({ path: resolve(output, `${size}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
+    await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
+    await page.keyboard.press('End');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await menu.focus();
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true, 'ArrowUp from the menu container must select the last item');
+    await menu.focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true, 'ArrowDown from the menu container must select the first item');
+    await page.keyboard.press('Home');
+    await page.keyboard.press('d');
+    assert.equal(await page.getByRole('menuitem', { name: 'Details' }).evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    if (width === 390) {
+      const ax = await context.newCDPSession(page);
+      const { nodes } = await ax.send('Accessibility.getFullAXTree');
+      await ax.detach();
+      assert(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), 'Closing the modal must restore background to the accessibility tree');
+    }
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
+    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    await trigger.click();
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
+    assert.equal(await page.getByRole('button', { name: 'Sample file', exact: true }).evaluate(el => el === document.activeElement), true);
+    await page.getByRole('button', { name: 'Sample file', exact: true }).click({ button: 'right' });
+    await menu.waitFor();
+    await page.getByRole('menuitem', { name: 'Details' }).focus();
+    await page.keyboard.press('Space');
+    assert.equal(await page.evaluate(() => document.body.dataset.actionModal), 'false');
+    assert.equal(await page.getByText('Details', { exact: true }).count(), 1);
+    assert.equal(await menu.count(), 0);
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    assert.equal(await trigger.getAttribute('aria-controls'), null);
+    if (width === 390) {
+      await page.evaluate(() => {
+        const button = document.createElement('button');
+        button.style.cssText = 'position:fixed;top:0;left:0;width:80px;height:40px';
+        button.onclick = () => { document.body.dataset.underlayActivated = 'true'; };
+        document.body.append(button);
+      });
+      await trigger.click();
+      await page.mouse.click(20, 20);
+      assert.equal(await menu.count(), 0);
+      assert.equal(await page.evaluate(() => document.body.dataset.underlayActivated), undefined);
+      assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+    }
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
+    await context.close();
+  }
+  for (const name of ['report  final.txt', '\t']) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file&name=${encodeURIComponent(name)}`, { waitUntil: 'networkidle' });
+    const displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
+    const label = `Actions for ${displayName}`;
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    assert.equal(await trigger.getAttribute('aria-label'), label);
+    await trigger.click();
+    const menu = page.locator('[role="menu"]');
+    assert.equal(await menu.getAttribute('aria-label'), label);
+    assert.equal(await menu.locator('..').getAttribute('aria-label'), label);
+    const title = menu.locator('.sheet-title');
+    assert.equal(await title.textContent(), displayName);
+    assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
+    if (!name.trim()) assert.equal(await page.getByRole('menu', { name: 'Actions for (Whitespace-only name)' }).count(), 1);
+    await context.close();
+  }
+  for (const width of [390, 1280]) {
+    const context = await browser.newContext({ viewport: { width, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    await trigger.click();
+    await page.setViewportSize({ width: width === 390 ? 1280 : 390, height: 800 });
+    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    assert.equal(await page.locator('dialog:modal').count(), 0, 'Resize must release modal');
+    await trigger.click();
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu'))); await page.waitForFunction(() => !document.querySelector('[aria-haspopup=menu]'));
+    assert.equal(await page.locator('dialog:modal').count(), 0, 'Unmount must release modal');
+    await page.getByRole('button', { name: 'Next file' }).focus();
+    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    await context.close();
+  }
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `listing-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });

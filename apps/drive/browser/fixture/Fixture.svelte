@@ -1,7 +1,17 @@
 <script>
   import SignInPage from '../../src/lib/SignInPage.svelte';
   import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
+  import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
+
+  const menuFixture = new URLSearchParams(window.location.search).get('menu');
+  const rowName = new URLSearchParams(window.location.search).get('name') ?? (new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file');
+  let firstName;
+  let nextName;
+  let menu;
+  let selected = $state('');
+  let mounted = $state(true); window.addEventListener('fixture-unmount-menu', () => { mounted = false; });
+  const recordBoundary = callback => { document.body.dataset[callback] = String(!!document.querySelector('dialog:modal')); };
 
   const listing = new URLSearchParams(window.location.search).has('listing');
   const items = [
@@ -43,7 +53,18 @@
   window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-{#if listing}
+{#if menuFixture}
+  <main>
+    <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
+      <button bind:this={firstName}>Sample file</button>
+      {#if mounted}
+        <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => { recordBoundary('actionModal'); selected = action; }} onTab={(direction) => { recordBoundary('tabModal'); (direction === 'next' ? nextName : firstName).focus(); }} />
+      {/if}
+    </div>
+    <button bind:this={nextName}>Next file</button>
+    <p aria-live="polite">{selected}</p>
+  </main>
+{:else if listing}
   <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
@@ -54,4 +75,5 @@
 
 <style>
   main { min-height: 100vh; background: var(--drive-color-bg-canvas); }
+  .clipped { height: 48px; overflow: hidden; }
 </style>
