@@ -28,7 +28,8 @@ it('authorizes status changes with a live owner session and preserves data witho
   expect(await membership.get(alice, 'bob')).toBeNull();
   expect(await membership.get(owner, 'owner')).toBeNull();
   expect(await membership.get(owner, 'missing')).toBeNull();
-  expect(await membership.setStatus(alice, 'bob', state.generation, 'revoked')).toBe(false);
+  const bobState = await membership.get(owner, 'bob');
+  expect(await membership.setStatus(alice, 'bob', bobState.generation, 'revoked')).toBe(false);
   expect(await membership.setStatus('owner', 'alice', state.generation, 'revoked')).toBe(false);
   expect(await membership.setStatus(owner, 'owner', state.generation, 'revoked')).toBe(false);
   expect(await membership.setStatus(owner, 'missing', state.generation, 'revoked')).toBe(false);
