@@ -1,6 +1,15 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
+
+afterEach(async () => {
+  await env.DB.exec(`DELETE FROM drive_upload_intents;
+    DROP TRIGGER IF EXISTS drive_upload_intents_no_reuse;
+    DROP TRIGGER IF EXISTS drive_upload_intents_reserve_key;
+    DROP TRIGGER IF EXISTS drive_upload_intents_identity_immutable;
+    DROP TABLE IF EXISTS drive_upload_key_reservations;
+    DELETE FROM d1_migrations WHERE name = '0017_upload_key_reservations.sql';`);
+});
 
 const migration = '0017_upload_key_reservations.sql';
 const insert = (id, owner, key, policy = '') => env.DB.prepare(`INSERT ${policy} INTO drive_upload_intents
