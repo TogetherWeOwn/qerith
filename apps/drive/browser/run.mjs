@@ -451,7 +451,8 @@ try {
     assert.equal(await more.evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('Enter');
     assert.equal(await container.getByRole('link').count(), 401);
-    assert.equal(await page.getByText('401 of 401 shown').count(), 1);
+    assert.equal(await page.getByText('401 of 401 shown', { exact: true }).count(), 1);
+    assert.match(await page.getByRole('status').textContent(), /401 of 401 shown\./);
     assert.equal(await page.getByRole('button', { name: 'All items shown' }).evaluate(el => el === document.activeElement), true);
     if (width > 820) await page.getByRole('button', { name: 'Name' }).click();
     else await page.getByLabel('Sort', { exact: true }).selectOption('desc');
