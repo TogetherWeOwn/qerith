@@ -258,7 +258,7 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   const sent: Request[] = [];
   let status = 200;
   let etag: string | undefined = '"opaque+tag"';
-  let contentRange: string | undefined = 'bytes 0-0/1';
+  let contentRange: string | undefined;
   const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
     const request = input as Request;
     sent.push(request);
@@ -268,6 +268,7 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   const full = await reader.get(ref, { maxResponseBytes: 1 });
   if (full.status === 200) await full.body.cancel();
   status = 206;
+  contentRange = 'bytes 0-0/1';
   const range = await reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' });
   if (range.status === 206) await range.body.cancel();
   status = 200;
@@ -291,6 +292,32 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   assert.equal(sent.length, 10);
   await assert.rejects(reader.get({ key: 'key', etag: '*' }, { maxResponseBytes: 1 }), /Invalid S3 immutable reference/);
   assert.equal(sent.length, 10);
+});
+
+test('immutable full reads reject contradictory Content-Range evidence', async () => {
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+    new Response('a', { headers: { etag: '"tag"', 'content-range': 'bytes 0-0/10' } })
+  }));
+  await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 10 }), /evidence mismatch/);
+});
+
+test('immutable reads validate the range sent even if options change in flight', async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    assert.equal((input as Request).headers.get('range'), 'bytes=0-0');
+    started();
+    await pending;
+    return new Response('a', { headers: { etag: '"tag"' } });
+  } }));
+  const options: { maxResponseBytes: number; range?: string } = { maxResponseBytes: 10, range: 'bytes=0-0' };
+  const result = reader.get({ key: 'key', etag: '"tag"' }, options);
+  await entered;
+  options.range = undefined;
+  release();
+  await assert.rejects(result, /evidence mismatch/);
 });
 
 test('immutable range evidence accepts suffix and clipped ranges only when they match', async () => {
