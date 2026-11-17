@@ -9,6 +9,26 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 
+async function assertTruncatedExtensions(page) {
+  for (const id of ['accented-long', 'emoji-modifier', 'emoji-flag']) {
+    const link = page.locator(`ul.mobile a[data-item-id="${id}"]`);
+    await link.locator('..').evaluate(el => { el.style.width = '160px'; });
+    assert.equal(await link.locator('.name-end').textContent(), '.pdf');
+    assert.equal(await link.evaluate(el => {
+      const start = el.querySelector('.name-start');
+      const end = el.querySelector('.name-end');
+      const range = document.createRange();
+      range.selectNodeContents(end);
+      const text = range.getBoundingClientRect();
+      const span = end.getBoundingClientRect();
+      const row = el.closest('li').getBoundingClientRect();
+      return start.scrollWidth > start.clientWidth && end.scrollWidth <= end.clientWidth &&
+        text.left >= span.left - 1 && text.right <= span.right + 1 &&
+        text.left >= row.left && text.right <= row.right;
+    }), true, `${id}: the stem must truncate while the entire extension remains visible`);
+  }
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
 const expectedHead = process.env.DRIVE_BROWSER_HEAD;
@@ -502,6 +522,7 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     const page = await context.newPage();
     await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    await assertTruncatedExtensions(page);
     const name = 'áááááááááááá👩‍👩‍👧‍👦.txt';
     const link = page.getByRole('list').getByRole('link', { name });
     const parts = await link.locator('.name-start, .name-end').allTextContents();
@@ -558,6 +579,7 @@ try {
     const link = page.getByRole('list').getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
     assert.equal(await link.locator('.name-end').textContent(), 'reflow.txt');
     await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    await assertTruncatedExtensions(page);
     const rtl = page.locator('ul.mobile a[data-item-id="rtl"]');
     assert.equal(await rtl.locator('.name-end').textContent(), 'pdf');
     assert.equal(await rtl.textContent(), 'تقرير-الميزانية-السنوية-النهائية.pdf');
