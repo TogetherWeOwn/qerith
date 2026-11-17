@@ -301,6 +301,17 @@ test('immutable full reads reject contradictory Content-Range evidence', async (
   await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 10 }), /evidence mismatch/);
 });
 
+test('immutable full reads enforce a declared content length', async () => {
+  for (const body of ['a', 'abcd']) {
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response(body, { headers: { etag: '"tag"', 'content-length': '3' } })
+    }));
+    const result = await reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 4 });
+    if (result.status !== 200) throw new Error('Expected streamed response');
+    await assert.rejects(new Response(result.body).text(), /evidence mismatch/);
+  }
+});
+
 test('immutable reads validate the range sent even if options change in flight', async () => {
   let release!: () => void;
   let started!: () => void;
