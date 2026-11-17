@@ -68,8 +68,16 @@ run a deploy or migration until those prerequisites are met.
    Live fixture admission remains held until the independent physical cleanup
    and retention controls below are verified.
 
-No repository workflow, environment policy, Worker, database, credential, or
-bucket has been created or changed by this design.
+The secret-free preparation workflow writes a short-lived artifact containing only
+the dispatch SHA, staging label, run ID and attempt, a proposed run-scoped
+prefix, and `admission: closed`. It does not create fixtures or establish any
+control. Artifact upload can fail or be cancelled; this preliminary metadata is
+not the cancellation-independent manifest required below. A future live path must
+independently enforce all prerequisites before any remote write, not interpret
+this artifact as approval.
+
+No environment policy, Worker, database, credential, or bucket has been created
+or changed by this design.
 
 ## Bounded active use and idle inventory
 
@@ -115,6 +123,24 @@ workflow or a later-run sweep does not establish physical deletion. If no such
 mechanism is verified, record the affected retention bound and hold live fixture
 admission; do not invent D1 TTL, a scheduler or a new resource.
 
+The D1 retention evidence must identify the actual isolated database and binding,
+all test-owned identities and rows, the explicit maximum retention and its clock
+origin, and a supported worst-case deletion latency within that bound. An existing
+platform control must be armed before the first write and remain effective if both
+the originating run and independent cleanup workflow are lost. Cover late writers
+and retries, and any backups or recovery copies included in the governing retention
+requirement. No numeric physical-retention limit has yet been established; do not
+invent one. Reconcile a missing bound with the governing requirement and Security
+before enabling writes.
+
+Retain exact-SHA, environment, run and attempt evidence for normal, failed and
+cancelled runs, including deletion timestamps and scoped absence queries. A single
+successful run does not establish a provider guarantee, and SQL absence does not
+prove physical erasure of media or backups. Until the enforcement contract and
+actual binding are verified, keep remote migrations, fixture writes, secret-bearing
+deployment and live qualification disabled; the secret-free dry run is not evidence
+that those gates have passed.
+
 Retain a sanitized manifest recoverable without the cancelled runner's final
 artifact upload: SHA, environment, Worker version, run ID and attempt, UTC
 window, fixture prefix and test-identity references, policy identifiers,
@@ -129,6 +155,17 @@ positive and negative checks, including cross-user isolation and nested read-onl
 sharing and revocation. Exercise the configured S3 provider through real multipart
 upload, complete, list, head, get, range, abort and delete; verify sizes and
 checksums, retries and uncertain completion, and persistence after restart.
+
+For immutable generations, qualify absence-tested PUT and multipart completion,
+permanent key non-reuse and If-Match reads against the actual configured endpoint;
+do not assume version IDs. Retain exact-SHA Actions evidence for conflicting
+creates and completions, denied replacement, full and range reads with mismatched
+validators, and cleanup followed by non-reuse. Distinguish deterministic fixture
+results from observed endpoint semantics. Record sanitized existing configuration
+for namespace mutation actors and applicable lifecycle and replication behavior,
+without credential values. If conditional operations are unsupported or ignored,
+or external mutation is unknown, keep the affected publication, read and cleanup
+paths closed and return the concrete capability gap to the engineering owner.
 
 Qualification includes an upload of at least 5 GiB and full download with
 SHA-256 verification; interrupted and resumed upload and download of at least
