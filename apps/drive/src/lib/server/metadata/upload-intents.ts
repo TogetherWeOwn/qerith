@@ -36,6 +36,27 @@ export class UploadIntents {
       .bind(id, principalId, principalId).first<UploadIntent>();
   }
 
+  // Trusted reconciliation only; restart scans from the beginning to find rows
+  // claimed behind the cursor. A scan is not a lease and never permits a retry.
+  async listInFlight(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state IN ('initiating', 'completing') AND id > ? ORDER BY id LIMIT ?`)
+      .bind(afterId, limit).all<UploadIntent>();
+    return page.results;
+  }
+
+  // Include revoked owners. For rows quarantined by the transition protocol,
+  // upload_id distinguishes completion from allocation and the original claim
+  // version is version - 1 (quarantine increments it). Restart after interruption.
+  async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state = 'uncertain' AND id > ? ORDER BY id LIMIT ?`)
+      .bind(afterId, limit).all<UploadIntent>();
+    return page.results;
+  }
+
   // Trusted reconciliation only; never expose this scan to a principal. Restart
   // from the beginning because revocation or late evidence may occur behind the
   // cursor. A scan result alone does not authorize deletion or provider operations.
