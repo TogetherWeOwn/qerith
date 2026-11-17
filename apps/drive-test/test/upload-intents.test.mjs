@@ -83,11 +83,13 @@ it('scans interrupted claims in bounded pages and quarantines without authorizin
   expect(await intents.claim('recovery-owner', page[0].id, 2, 'allocation')).toBeNull();
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'recovery-owner'").run();
   expect(await intents.get('recovery-owner', page[0].id)).toBeNull();
-  expect(await intents.listUncertain('', 1)).toMatchObject([{ id: page[0].id, state: 'uncertain' }]);
-  expect(await intents.listUncertain(page[0].id, 1)).toEqual([]);
+  const [uncertain] = await intents.listUncertain('', 1);
+  expect(uncertain).toMatchObject({ id: page[0].id, state: 'uncertain' });
+  expect(await intents.listUncertain(uncertain.id, 1)).toEqual([]);
   await expect(intents.listUncertain('', 101)).rejects.toThrow();
-  expect(await intents.recordNotDispatched(page[0].owner_id, page[0].id, page[0].version, 'completion')).toBe(false);
-  expect(await intents.recordNotDispatched(page[0].owner_id, page[0].id, page[0].version, 'allocation')).toBe(true);
+  const claimVersion = uncertain.version - 1;
+  expect(await intents.recordNotDispatched(uncertain.owner_id, uncertain.id, claimVersion, 'completion')).toBe(false);
+  expect(await intents.recordNotDispatched(uncertain.owner_id, uncertain.id, claimVersion, 'allocation')).toBe(true);
   expect(await intents.recordSuccess(page[0].owner_id, page[0].id, page[0].version, { kind: 'allocation', uploadId: 'late' })).toBe(false);
   expect(await intents.listUncertain('', 100)).toEqual([]);
   expect(await intents.listInFlight('', 100)).toHaveLength(1);

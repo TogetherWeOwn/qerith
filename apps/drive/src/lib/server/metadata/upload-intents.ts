@@ -71,7 +71,8 @@ export class UploadIntents {
   }
 
   // Reconciliation must also restart this scan after interruption, including for
-  // revoked owners. The upload ID distinguishes completion from allocation.
+  // revoked owners. The upload ID distinguishes completion from allocation. The
+  // original claim version is row.version - 1, because quarantine increments it.
   async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
@@ -81,7 +82,8 @@ export class UploadIntents {
   }
 
   // The following methods are trusted provider-operation code only. Their arguments
-  // must come from the successful claim, never directly from a request. They record
+  // must come from the successful claim or a trusted recovery scan, never directly
+  // from a request. They record
   // outcomes after revocation without returning reconciliation data to the caller.
   async recordUncertain(ownerId: string, id: string, version: number,
     operation: 'allocation' | 'completion'): Promise<boolean> {
