@@ -92,7 +92,9 @@ it('reconciles a late committed receipt after D1 acknowledgement loss without ch
   await expect(reconciler.reconcileReceiptWrite(op, new Uint8Array([0, 255, 129]))).resolves.toBe('conflict');
   const unavailable = new UploadOperationEvidence({ withSession() { throw new Error('primary unavailable'); } });
   await expect(unavailable.reconcileReceiptWrite(op, bytes)).rejects.toThrow('primary unavailable');
-  await expect(reconciler.reconcileReceiptWrite(op, new Uint8Array(65537))).rejects.toThrow('Invalid completion evidence size');
+  const oversized = new Uint8Array(65537);
+  Object.defineProperty(oversized, 'byteLength', { value: 1 });
+  await expect(reconciler.reconcileReceiptWrite(op, oversized)).rejects.toThrow('Invalid completion evidence size');
   await expect(insertIntent(op, 'completing')).rejects.toThrow('upload intent ID already reserved');
   expect(await rows(`${journal} WHERE id = 'intent-late'`)).toEqual([]);
   for (const table of ['drive_active_members', 'drive_entries', 'drive_read_grants'])

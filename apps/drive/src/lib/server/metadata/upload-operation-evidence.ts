@@ -22,8 +22,11 @@ const exactOperation = `o.operation_id = ? AND o.intent_id = ? AND o.owner_id = 
   AND o.storage_epoch = ? AND o.upload_id = ? AND o.intent_version = ?`;
 
 function receiptBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes);
-  if (copy.byteLength < 1 || copy.byteLength > 64 * 1024) throw new TypeError('Invalid completion evidence size');
+  // Use the typed-array getter, not an instance's overridable byteLength.
+  const size: number = Reflect.get(Uint8Array.prototype, 'byteLength', bytes);
+  if (size < 1 || size > 64 * 1024) throw new TypeError('Invalid completion evidence size');
+  const copy = new Uint8Array(size);
+  copy.set(bytes);
   return copy.buffer;
 }
 
