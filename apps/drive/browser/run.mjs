@@ -129,6 +129,7 @@ async function assertFullFilenames(page, selector, context = {}) {
     const link = page.locator(`${selector} a[data-item-id="${id}"]`);
     const label = name.trim() ? name : name + ' (Whitespace-only name)';
     assert.equal(await link.getAttribute('aria-label'), label);
+    assert.equal(await page.getByRole('link', { name: label, exact: true }).count(), 1, `${selector} ${id}: computed accessible name`);
     assert.equal(await link.getAttribute('href'), `#${id}`);
     if (name.trim()) assert.equal(await link.textContent(), name);
     else await assertWhitespaceName(link, name);
@@ -701,7 +702,32 @@ try {
       ]) {
         const override = await page.addStyleTag({ content: css });
         await page.evaluate(() => document.fonts.ready);
-        await assertFullFilenames(page, selector, { width, height, segmenter, mode, fontRequests });
+        const layout = await page.evaluate(() => ({
+          listingWidth: document.querySelector('.listing').getBoundingClientRect().width,
+          table: getComputedStyle(document.querySelector('table.desktop')).display,
+          list: getComputedStyle(document.querySelector('ul.mobile')).display,
+        }));
+        if (width === 1280) {
+          const compact = mode.startsWith('css-zoom-');
+          assert.equal(layout.table === 'none' && layout.list !== 'none', compact, `${mode}: unexpected listing layout ${JSON.stringify(layout)}`);
+          if (!compact) assert(layout.table !== 'none' && layout.list === 'none', `${mode}: desktop table required ${JSON.stringify(layout)}`);
+          if (compact) {
+            const sortedPage = await context.newPage();
+            try {
+              await sortedPage.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
+              await sortedPage.addStyleTag({ content: css });
+              const sortedLayout = await sortedPage.evaluate(() => ({
+                listingWidth: document.querySelector('.listing').getBoundingClientRect().width,
+                table: getComputedStyle(document.querySelector('table.desktop')).display,
+                list: getComputedStyle(document.querySelector('ul.mobile')).display,
+                sort: getComputedStyle(document.querySelector('.compact-sort')).display
+              }));
+              assert(sortedLayout.table === 'none' && sortedLayout.list !== 'none' && sortedLayout.sort !== 'none', `${mode}: compact sort missing ${JSON.stringify(sortedLayout)}`);
+            } finally { await sortedPage.close(); }
+          }
+        }
+        const displayedSelector = layout.table === 'none' ? 'ul.mobile' : 'table.desktop';
+        await assertFullFilenames(page, displayedSelector, { width, height, segmenter, mode, fontRequests, layout });
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${mode}: horizontal page overflow`);
         await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${mode}.png`), fullPage: true });
         await override.evaluate(el => el.remove());
