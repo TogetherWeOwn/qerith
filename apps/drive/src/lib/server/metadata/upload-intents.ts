@@ -1,5 +1,5 @@
 // Server-only reconciliation records. Authenticate the principal before calling;
-// an intent does not publish a file.
+// neither an intent nor a provider acknowledgement publishes a file.
 interface Statement {
   bind(...values: (string | number | null)[]): Statement;
   first<T>(): Promise<T | null>;
@@ -57,8 +57,11 @@ export class UploadIntents {
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
   }
 
-  // Trusted reconciliation only; restart scans from the beginning to find rows
-  // claimed behind the cursor. A scan is not a lease and never permits a retry.
+  // Trusted recovery scans must periodically restart at the beginning; an intent
+  // claimed behind the cursor is picked up on the next pass. This is not a lease:
+  // quarantining a live attempt is safe, but it must never authorize a retry.
+  // Integration must schedule bounded scans and call recordUncertain with each
+  // row's owner, id, version and operation; this module does not run a scheduler.
   async listInFlight(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
@@ -101,5 +104,49 @@ export class UploadIntents {
         AND NOT EXISTS (SELECT 1 FROM drive_active_members WHERE id = owner_id)
       ORDER BY id LIMIT ?`).bind(afterId, limit).all<UploadIntent>();
     return page.results;
+  }
+
+  // Trusted provider-operation code only: arguments come from a successful claim
+  // or trusted recovery scan, never directly from a request. Record outcomes after
+  // revocation without returning reconciliation data to the caller.
+
+  // Retry is safe only if the provider request was definitely never dispatched.
+  // A timeout, error response, crash or unknown outcome must use recordUncertain.
+  async recordNotDispatched(ownerId: string, id: string, version: number,
+    operation: 'allocation' | 'completion'): Promise<boolean> {
+    validateVersion(version);
+    if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
+    const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
+      WHERE id = ? AND owner_id = ?
+        AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${operation === 'allocation' ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
+      RETURNING id`)
+      .bind(operation === 'allocation' ? 'created' : 'allocated', id, ownerId,
+        operation === 'allocation' ? 'initiating' : 'completing', version, version + 1).first<{ id: string }>();
+    return row !== null;
+  }
+
+  async recordSuccess(ownerId: string, id: string, version: number,
+    result: { kind: 'allocation'; uploadId: string } | { kind: 'completion' }): Promise<boolean> {
+    validateVersion(version);
+    if (!result || (result.kind !== 'allocation' && result.kind !== 'completion')
+      || (result.kind === 'allocation' && (typeof result.uploadId !== 'string'
+        || result.uploadId.length === 0 || result.uploadId.length > 65536))) {
+      throw new TypeError('Invalid provider outcome');
+    }
+    const allocation = result.kind === 'allocation';
+    const row = await this.db.prepare(`UPDATE drive_upload_intents
+      SET state = ?,
+        upload_id = COALESCE(?, upload_id),
+        completion_acknowledged = CASE WHEN ? = 'completion' THEN 1 ELSE completion_acknowledged END,
+        version = version + 1
+      WHERE id = ? AND owner_id = ? AND version < 9007199254740991
+        AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${allocation ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
+      RETURNING id`)
+      .bind(allocation ? 'allocated' : 'acknowledged', allocation ? result.uploadId : null,
+        result.kind, id, ownerId, allocation ? 'initiating' : 'completing', version, version + 1)
+      .first<{ id: string }>();
+    return row !== null;
   }
 }
