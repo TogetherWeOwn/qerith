@@ -23,6 +23,7 @@ it('creates private intents only for active members and isolates owners', async 
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
   const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
+  const intentsBefore = (await env.DB.prepare('SELECT id FROM drive_upload_intents').all()).results;
   const intents = new UploadIntents(env.DB);
   expect(await intents.create('revoked')).toBeNull();
   expect(await intents.create('missing')).toBeNull();
@@ -36,6 +37,8 @@ it('creates private intents only for active members and isolates owners', async 
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
   expect(await intents.get('alice', intent.id)).toBeNull();
   expect(await intents.create('alice')).toBeNull();
-  expect((await env.DB.prepare('SELECT * FROM drive_upload_intents').all()).results).toHaveLength(1);
+  const intentsAfter = (await env.DB.prepare('SELECT id FROM drive_upload_intents').all()).results;
+  expect(intentsAfter).toEqual(expect.arrayContaining([...intentsBefore, { id: intent.id }]));
+  expect(intentsAfter).toHaveLength(intentsBefore.length + 1);
   expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(entriesBefore);
 });
