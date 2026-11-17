@@ -186,6 +186,12 @@ try {
     assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await menu.focus();
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true, 'ArrowUp from the menu container must select the last item');
+    await menu.focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true, 'ArrowDown from the menu container must select the first item');
     await page.keyboard.press('Home');
     await page.keyboard.press('d');
     assert.equal(await page.getByRole('menuitem', { name: 'Details' }).evaluate(el => el === document.activeElement), true);
@@ -270,6 +276,26 @@ try {
     assert.equal(await page.getByRole('menu').count(), 0);
     assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     await writeFile(resolve(output, 'menu-resize.json'), JSON.stringify({ initial: '1280x800', resized: '1280x300', result: 'closed, focus restored' }));
+    await context.close();
+  }
+  for (const name of ['report  final.txt', '\t']) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file&name=${encodeURIComponent(name)}`, { waitUntil: 'networkidle' });
+    const displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
+    const label = `Actions for ${displayName}`;
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    assert.equal(await trigger.getAttribute('aria-label'), label);
+    await trigger.click();
+    const menu = page.locator('[role="menu"]');
+    assert.equal(await menu.getAttribute('aria-label'), label);
+    assert.equal(await menu.locator('..').getAttribute('aria-label'), label);
+    const title = menu.locator('.sheet-title');
+    assert.equal(await title.textContent(), displayName);
+    assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
+    if (!name.trim()) assert.equal(await page.getByRole('menu', { name: 'Actions for (Whitespace-only name)' }).count(), 1);
     await context.close();
   }
   for (const width of [390, 1280]) {

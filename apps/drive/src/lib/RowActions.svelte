@@ -35,6 +35,7 @@
   });
   let menuLeft = 0;
   let menuTop = 0;
+  $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
   $: actions = (owned
     ? [...(file ? ['Download'] : []), 'Share', 'Rename', 'Move', 'Details', 'Delete']
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
@@ -74,7 +75,7 @@
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
     if (event.key === 'Tab') { event.preventDefault(); close(); onTab(event.shiftKey ? 'previous' : 'next'); return; }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-    else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
+    else if (event.key === 'ArrowUp') next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
     else if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = items.length - 1;
     else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -101,13 +102,13 @@
 
 <svelte:window onpointerdown={outside} onresize={() => { if (open) close(true); }} />
 <div class="anchor">
-  <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${name}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
+  <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${displayName}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>
   </button>
   {#if open}
-    <dialog class="layer" bind:this={layer} popover={compact ? undefined : 'manual'} aria-label={`Actions for ${name}`} style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} oncancel={(event) => { event.preventDefault(); close(true); }} onclick={backdropClick}>
-    <div class="menu" id={menuId} role="menu" aria-label={`Actions for ${name}`} tabindex="-1" bind:this={menu} onkeydown={keydown}>
-      <div class="sheet-title" aria-hidden="true">{name}</div>
+    <dialog class="layer" bind:this={layer} popover={compact ? undefined : 'manual'} aria-label={`Actions for ${displayName}`} style:--menu-left={`${menuLeft}px`} style:--menu-top={`${menuTop}px`} oncancel={(event) => { event.preventDefault(); close(true); }} onclick={backdropClick}>
+    <div class="menu" id={menuId} role="menu" aria-label={`Actions for ${displayName}`} tabindex="-1" bind:this={menu} onkeydown={keydown}>
+      <div class="sheet-title" aria-hidden="true">{displayName}</div>
       {#each actions as action}
         {#if action === 'Delete'}<div class="separator" role="separator"></div>{/if}
         <button role="menuitem" type="button" class:danger={action === 'Delete'} tabindex="-1" onclick={() => { close(true); onAction(action); }}>
@@ -135,5 +136,5 @@
   .menu button.danger { color: var(--drive-color-state-danger); }
   .separator { border-top: 1px solid var(--drive-color-line-hairline-strong); margin: var(--drive-space-1) 0; }
   .sheet-title { display: none; }
-  @media (max-width: 820px) { .trigger { width: var(--drive-size-control-md); height: var(--drive-size-control-md); } .trigger svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); } .layer { inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); } .menu { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; min-width: 0; max-width: none; max-height: 90dvh; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; overflow-wrap: anywhere; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
+  @media (max-width: 820px) { .trigger { width: var(--drive-size-control-md); height: var(--drive-size-control-md); } .trigger svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); } .layer { inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); } .menu { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; min-width: 0; max-width: none; max-height: 90dvh; padding: var(--drive-space-4) var(--drive-space-4) calc(var(--drive-space-4) + env(safe-area-inset-bottom)); border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; } .sheet-title { display: block; white-space: break-spaces; overflow-wrap: anywhere; color: var(--drive-color-text-primary); padding: var(--drive-space-3); font-weight: var(--drive-font-weight-semibold); } .menu button { min-height: var(--drive-size-sheet-row); } }
 </style>

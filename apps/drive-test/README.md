@@ -14,7 +14,11 @@ schema while new code is running is not supported. The owner-usage migration
 likewise backfills and installs its triggers in one transaction; apply it before
 serving the usage query. Keep the previous application on migration failure and
 repair forward. Do not delete entries to roll back a migration. Local D1 results
-are not deployed-binding evidence.
+are not deployed-binding evidence. Apply the folder-listing index migration
+before deploying code that uses the new ordered listing query: that query names
+its indexes explicitly and fails against the old schema. If migration fails,
+retain the previous application and repair forward; keep the indexes while the
+new query is in use.
 
 CI uses Node 24.21.0 and npm 11.19.0. Before running this fixture, prepare the
 sibling Drive project: shared metadata imports use its generated `$app/tsconfig`.

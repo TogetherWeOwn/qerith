@@ -5,7 +5,7 @@
   import FileList from '../../src/lib/FileList.svelte';
 
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
-  const rowName = new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file';
+  const rowName = new URLSearchParams(window.location.search).get('name') ?? (new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file');
   let firstName;
   let nextName;
   let menu;
