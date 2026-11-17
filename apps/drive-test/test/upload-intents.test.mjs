@@ -18,6 +18,47 @@ it('upgrades existing metadata with a private upload intent journal', async () =
   expect((await env.DB.prepare('SELECT id FROM drive_entries').all()).results).toEqual([{ id: 'folder' }]);
 });
 
+it('scans interrupted and uncertain operations in bounded restartable pages', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?)')
+    .bind('recovery-active', 'member', 'active', 'recovery-revoked', 'member', 'revoked').run();
+  const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
+    (id, owner_id, object_key, upload_id, state, version) VALUES (?, ?, ?, ?, ?, ?)`);
+  for (const row of [
+    ['a', 'recovery-active', 'key-a', null, 'initiating', 1],
+    ['b', 'recovery-revoked', 'key-b', 'upload-b', 'completing', 3],
+    ['c', 'recovery-revoked', 'key-c', null, 'uncertain', 2],
+    ['d', 'recovery-active', 'key-d', 'upload-d', 'uncertain', 4],
+    ['e', 'recovery-active', 'key-e', null, 'created', 0],
+    ['f', 'recovery-revoked', 'key-f', 'upload-f', 'allocated', 2],
+    ['g', 'recovery-active', 'key-g', 'upload-g', 'acknowledged', 4],
+  ]) await insert.bind(...row).run();
+
+  const intents = new UploadIntents(env.DB);
+  for (const scan of [intents.listInFlight.bind(intents), intents.listUncertain.bind(intents)]) {
+    for (const limit of [0, -1, 101, 1.5, NaN, Infinity]) {
+      await expect(scan('', limit)).rejects.toThrow('Invalid recovery limit');
+    }
+  }
+  const first = await intents.listInFlight('', 1);
+  const second = await intents.listInFlight(first[0].id, 1);
+  expect(first.map(({ id }) => id)).toEqual(['a']);
+  expect(second).toEqual([expect.objectContaining({ id: 'b', owner_id: 'recovery-revoked', state: 'completing', version: 3 })]);
+  expect(await intents.listInFlight(second[0].id, 100)).toEqual([]);
+  expect((await intents.listInFlight('', 100)).map(({ id }) => id)).toEqual(['a', 'b']);
+
+  const uncertain = await intents.listUncertain('', 1);
+  const next = await intents.listUncertain(uncertain[0].id, 1);
+  expect(uncertain).toEqual([expect.objectContaining({ id: 'c', owner_id: 'recovery-revoked', upload_id: null, version: 2 })]);
+  expect(next).toEqual([expect.objectContaining({ id: 'd', upload_id: 'upload-d', version: 4 })]);
+  expect(uncertain[0].version - 1).toBe(1); // allocation claim before quarantine
+  expect(next[0].version - 1).toBe(3); // completion claim before quarantine
+  expect(await intents.listUncertain(next[0].id, 100)).toEqual([]);
+  expect((await intents.listUncertain('', 100)).map(({ id }) => id)).toEqual(['c', 'd']);
+  expect(await intents.get('recovery-revoked', 'c')).toBeNull();
+  await env.DB.prepare("DELETE FROM drive_upload_intents WHERE owner_id IN ('recovery-active', 'recovery-revoked')").run();
+});
+
 it('scans inactive owners’ provider evidence in bounded pages', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?)')

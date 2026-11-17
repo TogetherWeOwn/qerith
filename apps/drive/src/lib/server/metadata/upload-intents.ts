@@ -70,9 +70,9 @@ export class UploadIntents {
     return page.results;
   }
 
-  // Reconciliation must also restart this scan after interruption, including for
-  // revoked owners. The upload ID distinguishes completion from allocation. The
-  // original claim version is row.version - 1, because quarantine increments it.
+  // Include revoked owners. For rows quarantined by the transition protocol,
+  // upload_id distinguishes completion from allocation and the original claim
+  // version is version - 1 (quarantine increments it). Restart after interruption.
   async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
