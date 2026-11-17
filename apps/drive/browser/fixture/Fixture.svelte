@@ -23,6 +23,11 @@
     { ...items[1], id: 'spaces', name: 'report  final.txt', href: '#spaces' },
     { ...items[1], id: 'tab', name: '\t', href: '#tab' }
   ];
+  const unicodeItems = [
+    { ...items[1], id: 'unicode', name: 'áááááááááááá👩‍👩‍👧‍👦.txt', href: '#unicode' },
+    { ...items[1], id: 'rtl', name: 'تقرير-الميزانية-السنوية-النهائية.pdf', href: '#rtl' },
+    { ...items[1], id: 'wide-suffix', name: 'abcdefghijklmnop.' + '界'.repeat(15), href: '#wide-suffix' }
+  ];
   // Synthetic pages exercise the controlled list without a route or identity.
   const paged = new URLSearchParams(window.location.search).has('paged');
   const pagedItems = Array.from({ length: 401 }, (_, index) => ({
@@ -66,7 +71,7 @@
     <p aria-live="polite">{selected}</p>
   </main>
 {:else if listing}
-  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
+  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}

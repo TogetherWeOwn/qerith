@@ -427,6 +427,13 @@ try {
     assert.equal(await container.getByRole('link').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).getAttribute('href'), '#archive');
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
+    const longName = container.getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
+    assert.equal(await longName.textContent(), 'a-very-long-file-name-without-breaks-to-check-reflow.txt');
+    assert.equal(await longName.locator('.name-end').textContent(), 'reflow.txt');
+    if (width <= 390) {
+      assert.equal(await longName.locator('.name-start').evaluate(el => el.scrollWidth > el.clientWidth), true);
+      assert.equal(await longName.locator('.name-start').evaluate(el => getComputedStyle(el).textOverflow), 'ellipsis');
+    }
     assert.equal(await container.locator('time').count(), 3);
     assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
@@ -488,6 +495,47 @@ try {
       await page.screenshot({ path: resolve(output, `${size}-forced-colours-focus.png`) });
       await writeFile(resolve(output, `${size}-modes.json`), JSON.stringify({ motion, forcedColours: true, focused: 'Archive' }, null, 2));
     }
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 320, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    const name = 'áááááááááááá👩‍👩‍👧‍👦.txt';
+    const link = page.getByRole('list').getByRole('link', { name });
+    const parts = await link.locator('.name-start, .name-end').allTextContents();
+    assert.equal(parts.join(''), name);
+    const boundaries = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.index);
+    assert(boundaries.includes(parts[0].length), 'Filename split must occur at a grapheme boundary');
+    assert(parts[1].endsWith('👩‍👩‍👧‍👦.txt'));
+    const rtlName = 'تقرير-الميزانية-السنوية-النهائية.pdf';
+    const rtl = page.getByRole('list').getByRole('link', { name: rtlName });
+    assert.equal(await rtl.textContent(), rtlName);
+    assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
+    const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
+    assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
+    const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
+    assert.equal(await wideSuffix.textContent(), 'abcdefghijklmnop.' + '界'.repeat(15));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    assert.equal(await wideSuffix.evaluate(el => el.getBoundingClientRect().right <= el.closest('li').getBoundingClientRect().right), true);
+    await page.screenshot({ path: resolve(output, 'listing-unicode-320.png') });
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.addInitScript(() => { Intl.Segmenter = undefined; });
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    const link = page.getByRole('list').getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
+    assert.equal(await link.locator('.name-end').textContent(), 'reflow.txt');
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    const rtl = page.locator('ul.mobile a[data-item-id="rtl"]');
+    assert.equal(await rtl.locator('.name-end').textContent(), 'pdf');
+    assert.equal(await rtl.textContent(), 'تقرير-الميزانية-السنوية-النهائية.pdf');
+    assert.equal(await page.locator('ul.mobile a[data-item-id="unicode"] .name-end').textContent(), 'txt');
+    assert.equal(await page.locator('ul.mobile a[data-item-id="wide-suffix"] .name-end').textContent(), '.' + '界'.repeat(15));
     await context.close();
   }
   for (const width of [1280, 390]) {
