@@ -219,6 +219,77 @@ it('rejects malformed outcomes and treats acknowledgements as terminal', async (
   expect(await intents.get('terminal-owner', intent.id)).toMatchObject({ state: 'acknowledged', version: 4 });
 });
 
+it('atomically claims only the active owner’s matching version and state', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+    .bind('claim-owner', 'member', 'active', 'claim-other', 'member', 'active', 'atomic-revoked', 'member', 'revoked').run();
+  const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
+    (id, owner_id, object_key, upload_id, state, version) VALUES (?, ?, ?, ?, ?, ?)`);
+  for (const row of [
+    ['claim-a', 'claim-owner', 'claim-key-a', null, 'created', 0],
+    ['claim-b', 'claim-owner', 'claim-key-b', 'provider-id', 'allocated', 4],
+    ['claim-c', 'atomic-revoked', 'claim-key-c', null, 'created', 0],
+    ['claim-d', 'claim-missing', 'claim-key-d', null, 'created', 0],
+  ]) await insert.bind(...row).run();
+  const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
+  const intents = new UploadIntents(env.DB);
+  expect(await intents.claim('claim-other', 'claim-a', 0, 'allocation')).toBeNull();
+  expect(await intents.claim('claim-owner', 'claim-a', 1, 'allocation')).toBeNull();
+  expect(await intents.claim('claim-owner', 'claim-a', 0, 'completion')).toBeNull();
+  expect(await intents.claim('atomic-revoked', 'claim-c', 0, 'allocation')).toBeNull();
+  expect(await intents.claim('claim-missing', 'claim-d', 0, 'allocation')).toBeNull();
+  const claims = await Promise.all([
+    intents.claim('claim-owner', 'claim-a', 0, 'allocation'),
+    intents.claim('claim-owner', 'claim-a', 0, 'allocation'),
+  ]);
+  expect(claims.filter(Boolean)).toEqual([expect.objectContaining({ state: 'initiating', version: 1 })]);
+  expect(await intents.claim('claim-owner', 'claim-a', 1, 'allocation')).toBeNull();
+  expect(await intents.claim('claim-owner', 'claim-b', 4, 'completion'))
+    .toMatchObject({ state: 'completing', version: 5, upload_id: 'provider-id' });
+  expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(entriesBefore);
+});
+
+it('quarantines only the matching in-flight attempt, including after revocation', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('quarantine-owner', 'member', 'active')").run();
+  await env.DB.prepare(`INSERT INTO drive_upload_intents
+    (id, owner_id, object_key, upload_id, state, version) VALUES
+    ('quarantine-a', 'quarantine-owner', 'quarantine-key-a', NULL, 'initiating', 1),
+    ('quarantine-b', 'quarantine-owner', 'quarantine-key-b', 'provider-id', 'completing', 3)`).run();
+  const intents = new UploadIntents(env.DB);
+  expect(await intents.recordUncertain('other', 'quarantine-a', 1, 'allocation')).toBe(false);
+  expect(await intents.recordUncertain('quarantine-owner', 'quarantine-a', 0, 'allocation')).toBe(false);
+  expect(await intents.recordUncertain('quarantine-owner', 'quarantine-a', 1, 'completion')).toBe(false);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'quarantine-owner'").run();
+  expect(await intents.get('quarantine-owner', 'quarantine-a')).toBeNull();
+  expect(await intents.claim('quarantine-owner', 'quarantine-a', 1, 'allocation')).toBeNull();
+  expect(await intents.recordUncertain('quarantine-owner', 'quarantine-a', 1, 'allocation')).toBe(true);
+  expect(await intents.recordUncertain('quarantine-owner', 'quarantine-a', 1, 'allocation')).toBe(false);
+  expect(await intents.recordUncertain('quarantine-owner', 'quarantine-b', 3, 'completion')).toBe(true);
+  expect(await env.DB.prepare('SELECT id, state, version, upload_id FROM drive_upload_intents WHERE owner_id = ? ORDER BY id')
+    .bind('quarantine-owner').all()).toMatchObject({ results: [
+    { id: 'quarantine-a', state: 'uncertain', version: 2, upload_id: null },
+    { id: 'quarantine-b', state: 'uncertain', version: 4, upload_id: 'provider-id' },
+  ] });
+  await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'quarantine-owner'").run();
+  expect(await intents.claim('quarantine-owner', 'quarantine-a', 2, 'allocation')).toBeNull();
+  expect(await intents.claim('quarantine-owner', 'quarantine-b', 4, 'completion')).toBeNull();
+});
+
+it('validates versions and operation before transition queries', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  const intents = new UploadIntents(env.DB);
+  for (const version of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) {
+    await expect(intents.claim('owner', 'id', version, 'allocation')).rejects.toThrow('Invalid upload version');
+    await expect(intents.recordUncertain('owner', 'id', version, 'allocation')).rejects.toThrow('Invalid upload version');
+  }
+  await expect(intents.claim('owner', 'id', Number.MAX_SAFE_INTEGER - 2, 'allocation')).rejects.toThrow('Invalid upload version');
+  expect(await intents.claim('owner', 'id', Number.MAX_SAFE_INTEGER - 3, 'allocation')).toBeNull();
+  expect(await intents.recordUncertain('owner', 'id', Number.MAX_SAFE_INTEGER - 2, 'allocation')).toBe(false);
+  await expect(intents.claim('owner', 'id', 0, 'invalid')).rejects.toThrow('Invalid upload operation');
+  await expect(intents.recordUncertain('owner', 'id', 0, 'invalid')).rejects.toThrow('Invalid upload operation');
+});
+
 it('creates private intents only for active members and isolates owners', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')

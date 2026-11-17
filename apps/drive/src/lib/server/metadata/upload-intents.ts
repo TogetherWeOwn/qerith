@@ -81,6 +81,19 @@ export class UploadIntents {
     return page.results;
   }
 
+  // Trusted provider-operation or recovery code only: arguments must come from a
+  // successful claim or trusted scan, never directly from a request. Recovery can
+  // quarantine after revocation, but it never authorizes a provider retry.
+  async recordUncertain(ownerId: string, id: string, version: number,
+    operation: 'allocation' | 'completion'): Promise<boolean> {
+    validateVersion(version);
+    if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
+    const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = 'uncertain', version = version + 1
+      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? RETURNING id`)
+      .bind(id, ownerId, operation === 'allocation' ? 'initiating' : 'completing', version).first<{ id: string }>();
+    return row !== null;
+  }
+
   // Trusted reconciliation only; never expose this scan to a principal. Restart
   // from the beginning because revocation or late evidence may occur behind the
   // cursor. A scan result alone does not authorize deletion or provider operations.
@@ -93,19 +106,9 @@ export class UploadIntents {
     return page.results;
   }
 
-  // The following methods are trusted provider-operation code only. Their arguments
-  // must come from the successful claim or a trusted recovery scan, never directly
-  // from a request. They record
-  // outcomes after revocation without returning reconciliation data to the caller.
-  async recordUncertain(ownerId: string, id: string, version: number,
-    operation: 'allocation' | 'completion'): Promise<boolean> {
-    validateVersion(version);
-    if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
-    const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = 'uncertain', version = version + 1
-      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? RETURNING id`)
-      .bind(id, ownerId, operation === 'allocation' ? 'initiating' : 'completing', version).first<{ id: string }>();
-    return row !== null;
-  }
+  // Trusted provider-operation code only: arguments come from a successful claim
+  // or trusted recovery scan, never directly from a request. Record outcomes after
+  // revocation without returning reconciliation data to the caller.
 
   // Retry is safe only if the provider request was definitely never dispatched.
   // A timeout, error response, crash or unknown outcome must use recordUncertain.

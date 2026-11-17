@@ -422,8 +422,8 @@ try {
     await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
     const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
     assert.equal(await container.count(), 1);
-    assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, sorted by name, A to Z. Times in America/New_York.');
-    if (width > 820) assert.equal(await container.getByRole('columnheader', { name: 'Name' }).getAttribute('aria-sort'), 'ascending');
+    assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, folders first, then files, each sorted by name, A to Z (binary order). Times in America/New_York.');
+    if (width > 820) assert.equal(await container.getByRole('columnheader', { name: 'Name' }).getAttribute('aria-sort'), 'other');
     assert.equal(await container.getByRole('link').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).getAttribute('href'), '#archive');
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
@@ -547,8 +547,80 @@ try {
     });
     await context.close();
   }
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await page.getByText('200 of 401 shown', { exact: true }).count(), 1);
+    await page.getByRole('button', { name: 'Show 200 more' }).focus();
+    await page.screenshot({ path: resolve(output, `listing-footer-default-${width}.png`) });
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 400);
+    assert.equal(await container.getByRole('link').nth(199).textContent(), 'File 199.txt');
+    assert.equal(await container.getByRole('link').nth(200).textContent(), 'File 200.txt');
+    assert.equal(await container.getByRole('link').last().textContent(), 'File 399.txt');
+    assert.match(await page.getByRole('status').textContent(), /400 of 401 shown\./);
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 401);
+    assert.equal(await page.getByText('401 of 401 shown', { exact: true }).count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'All items shown' }).evaluate(el => el === document.activeElement), true);
+    if (width > 820) await page.getByRole('button', { name: 'Name' }).click();
+    else await page.getByLabel('Sort', { exact: true }).selectOption('desc');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await container.getByRole('link').first().textContent(), 'File 400.txt');
+    assert.match(await page.getByRole('status').textContent(), /Folders first, then files, each sorted by name, Z to A, in binary order\./);
+    const sort = width > 820 ? page.getByRole('button', { name: 'Name' }) : page.getByLabel('Sort', { exact: true });
+    await sort.focus();
+    await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
+    await page.waitForFunction(() => document.activeElement?.matches('.compact-sort select, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForFunction(() => document.activeElement?.matches('.compact-sort select, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.screenshot({ path: resolve(output, `listing-paged-${width}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
+    assert.equal(results.violations.length, 0, `axe violations for paged ${width}: ${JSON.stringify(results.violations)}`);
+    await page.goto(`${origin}/?listing&paged&page-error`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Show 200 more' }).focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await page.getByRole('alert').textContent(), "More items didn't load. Check your connection, then try again.");
+    assert.equal(await page.getByRole('button', { name: 'Try again' }).evaluate(el => el === document.activeElement), true);
+    await page.getByRole('alert').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(output, `listing-footer-error-${width}.png`) });
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 400);
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Show 200 more' }).evaluate(el => el === document.activeElement), true);
+    await page.goto(`${origin}/?listing&paged&unknown-total`, { waitUntil: 'networkidle' });
+    assert.equal(await page.getByText('200 shown', { exact: true }).count(), 1);
+    await page.getByRole('button', { name: 'Show 200 more' }).click();
+    assert.equal(await page.getByText('400 shown', { exact: true }).count(), 1);
+    assert.match(await page.getByRole('status').textContent(), /400 shown\./);
+    assert.equal(await container.getByRole('link').nth(200).textContent(), 'File 200.txt');
+    await page.goto(`${origin}/?listing&paged&page-pending`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Show 200 more' }).click();
+    const pending = page.getByRole('button', { name: 'Showing more…' });
+    assert.equal(await pending.getAttribute('aria-busy'), 'true');
+    assert.equal(await pending.getAttribute('aria-disabled'), 'true');
+    await pending.evaluate(el => el.click());
+    assert.equal(await page.locator('output').getAttribute('data-page-requests'), '1');
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-page-complete')));
+    assert.equal(await container.getByRole('link').count(), 400);
+    if (width <= 820) {
+      await page.goto(`${origin}/?listing&paged&reject-sort`, { waitUntil: 'networkidle' });
+      const select = page.getByLabel('Sort', { exact: true });
+      await select.selectOption('desc');
+      assert.equal(await select.inputValue(), 'asc');
+      assert.equal(await container.getByRole('link').first().textContent(), 'File 000.txt');
+    }
+    await context.close();
+  }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+  for (const name of ['head.txt', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
   }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
