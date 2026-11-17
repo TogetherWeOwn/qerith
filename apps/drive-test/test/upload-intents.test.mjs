@@ -20,6 +20,7 @@ it('upgrades existing metadata with a private upload intent journal', async () =
 
 it('claims attempts atomically, retains late evidence and isolates revoked owners', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
   const intents = new UploadIntents(env.DB);
@@ -56,22 +57,22 @@ it('claims attempts atomically, retains late evidence and isolates revoked owner
   expect(await env.DB.prepare('SELECT state, upload_id, completion_acknowledged FROM drive_upload_intents WHERE id = ?')
     .bind(completion.id).first()).toEqual({ state: 'uncertain', upload_id: 'provider-id', completion_acknowledged: 1 });
   expect(await intents.get('bob', completion.id)).toBeNull();
-  expect((await env.DB.prepare('SELECT id FROM drive_entries').all()).results).toEqual([]);
+  expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(entriesBefore);
 });
 
 it('rejects malformed outcomes and treats acknowledgements as terminal', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('alice', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('terminal-owner', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('alice');
-  await expect(intents.claim('alice', intent.id, Number.MAX_SAFE_INTEGER - 2, 'allocation')).rejects.toThrow();
-  await expect(intents.claim('alice', intent.id, -1, 'allocation')).rejects.toThrow();
-  await intents.claim('alice', intent.id, 0, 'allocation');
-  await expect(intents.recordSuccess('alice', intent.id, 1, { kind: 'allocation', uploadId: '' })).rejects.toThrow();
-  await intents.recordSuccess('alice', intent.id, 1, { kind: 'allocation', uploadId: 'id' });
-  await intents.claim('alice', intent.id, 2, 'completion');
-  expect(await intents.recordSuccess('alice', intent.id, 3, { kind: 'completion' })).toBe(true);
-  expect(await intents.claim('alice', intent.id, 4, 'completion')).toBeNull();
-  expect(await intents.recordUncertain('alice', intent.id, 3, 'completion')).toBe(false);
-  expect(await intents.get('alice', intent.id)).toMatchObject({ state: 'acknowledged', version: 4 });
+  const intent = await intents.create('terminal-owner');
+  await expect(intents.claim('terminal-owner', intent.id, Number.MAX_SAFE_INTEGER - 2, 'allocation')).rejects.toThrow();
+  await expect(intents.claim('terminal-owner', intent.id, -1, 'allocation')).rejects.toThrow();
+  await intents.claim('terminal-owner', intent.id, 0, 'allocation');
+  await expect(intents.recordSuccess('terminal-owner', intent.id, 1, { kind: 'allocation', uploadId: '' })).rejects.toThrow();
+  await intents.recordSuccess('terminal-owner', intent.id, 1, { kind: 'allocation', uploadId: 'id' });
+  await intents.claim('terminal-owner', intent.id, 2, 'completion');
+  expect(await intents.recordSuccess('terminal-owner', intent.id, 3, { kind: 'completion' })).toBe(true);
+  expect(await intents.claim('terminal-owner', intent.id, 4, 'completion')).toBeNull();
+  expect(await intents.recordUncertain('terminal-owner', intent.id, 3, 'completion')).toBe(false);
+  expect(await intents.get('terminal-owner', intent.id)).toMatchObject({ state: 'acknowledged', version: 4 });
 });
