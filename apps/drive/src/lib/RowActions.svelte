@@ -74,7 +74,7 @@
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
     if (event.key === 'Tab') { event.preventDefault(); close(); onTab(event.shiftKey ? 'previous' : 'next'); return; }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
-    else if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length;
+    else if (event.key === 'ArrowUp') next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
     else if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = items.length - 1;
     else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {

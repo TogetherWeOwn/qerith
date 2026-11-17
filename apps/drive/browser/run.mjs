@@ -186,6 +186,12 @@ try {
     assert.equal(await items.first().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
+    await menu.focus();
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await items.last().evaluate(el => el === document.activeElement), true, 'ArrowUp from the menu container must select the last item');
+    await menu.focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await items.first().evaluate(el => el === document.activeElement), true, 'ArrowDown from the menu container must select the first item');
     await page.keyboard.press('Home');
     await page.keyboard.press('d');
     assert.equal(await page.getByRole('menuitem', { name: 'Details' }).evaluate(el => el === document.activeElement), true);
