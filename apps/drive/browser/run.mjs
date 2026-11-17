@@ -559,6 +559,9 @@ try {
     await page.getByRole('button', { name: 'Show 200 more' }).focus();
     await page.keyboard.press('Enter');
     assert.equal(await container.getByRole('link').count(), 400);
+    assert.equal(await container.getByRole('link').nth(199).textContent(), 'File 199.txt');
+    assert.equal(await container.getByRole('link').nth(200).textContent(), 'File 200.txt');
+    assert.equal(await container.getByRole('link').last().textContent(), 'File 399.txt');
     assert.match(await page.getByRole('status').textContent(), /400 of 401 shown\./);
     await page.keyboard.press('Enter');
     assert.equal(await container.getByRole('link').count(), 401);
@@ -572,9 +575,9 @@ try {
     const sort = width > 820 ? page.getByRole('button', { name: 'Name' }) : page.getByLabel('Sort', { exact: true });
     await sort.focus();
     await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
-    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.waitForFunction(() => document.activeElement?.matches('.compact-sort select, button.sort-button') && document.activeElement.getClientRects().length > 0);
     await page.setViewportSize({ width, height: 844 });
-    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.waitForFunction(() => document.activeElement?.matches('.compact-sort select, button.sort-button') && document.activeElement.getClientRects().length > 0);
     await page.screenshot({ path: resolve(output, `listing-paged-${width}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
@@ -589,6 +592,11 @@ try {
     assert.equal(await container.getByRole('link').count(), 400);
     assert.equal(await page.getByRole('alert').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Show 200 more' }).evaluate(el => el === document.activeElement), true);
+    await page.goto(`${origin}/?listing&paged&unknown-total`, { waitUntil: 'networkidle' });
+    assert.equal(await page.getByText('200 shown', { exact: true }).count(), 1);
+    await page.getByRole('button', { name: 'Show 200 more' }).click();
+    assert.equal(await page.getByText('400 shown', { exact: true }).count(), 1);
+    assert.equal(await container.getByRole('link').nth(200).textContent(), 'File 200.txt');
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);

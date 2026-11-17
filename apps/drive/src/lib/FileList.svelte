@@ -64,7 +64,7 @@
 </script>
 
 {#if onSort}
-  <div class="compact-sort"><label for="listing-sort">Sort</label> <select id="listing-sort" bind:this={compactSort} value={direction} on:change={(event) => onSort?.(event.currentTarget.value as 'asc' | 'desc')}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></div>
+  <div class="compact-sort"><label>Sort <select bind:this={compactSort} value={direction} on:change={(event) => onSort?.(event.currentTarget.value as 'asc' | 'desc')}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
 {/if}
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging && total !== undefined} {items.length.toLocaleString()} of {total.toLocaleString()} shown.{/if}</p>
@@ -85,10 +85,10 @@
     <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} data-item-id={item.id} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data> · {/if}<time datetime={item.modifiedAt}>{item.modified}</time></div></li>
   {/each}
 </ul>
-{#if total !== undefined}
+{#if total !== undefined || onMore}
   <div class="paging">
-    {#if onMore && (total > 200 || hasMore || loadingMore || usedPaging)}<button type="button" aria-busy={loadingMore} aria-disabled={loadingMore || !hasMore} on:click={() => { if (!loadingMore && hasMore) { usedPaging = true; onMore?.(); } }}>{loadingMore ? 'Showing more…' : hasMore ? loadMoreError ? 'Try again' : 'Show 200 more' : 'All items shown'}</button>{/if}
-    <span>{items.length.toLocaleString()} of {total.toLocaleString()} shown</span>
+    {#if onMore && ((total !== undefined && total > 200) || hasMore || loadingMore || usedPaging)}<button type="button" aria-busy={loadingMore} aria-disabled={loadingMore || !hasMore} on:click={() => { if (!loadingMore && hasMore) { usedPaging = true; onMore?.(); } }}>{loadingMore ? 'Showing more…' : hasMore ? loadMoreError ? 'Try again' : 'Show 200 more' : 'All items shown'}</button>{/if}
+    <span>{items.length.toLocaleString()}{#if total !== undefined} of {total.toLocaleString()}{/if} shown</span>
   </div>
   {#if loadMoreError}<p role="alert">More items didn't load. Check your connection, then try again.</p>{/if}
 {/if}
