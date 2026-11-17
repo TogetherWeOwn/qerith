@@ -5,13 +5,15 @@
 
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
+  let compactSort: HTMLSelectElement;
+  let desktopSort: HTMLButtonElement;
 
   onMount(() => {
     const compact = window.matchMedia('(max-width: 820px)');
-    let lastFocused: HTMLAnchorElement | null = null;
+    let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLAnchorElement && (desktop.contains(target) || mobile.contains(target)) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || (target instanceof HTMLAnchorElement && (desktop.contains(target) || mobile.contains(target)))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
@@ -20,8 +22,15 @@
       const from = compact.matches ? desktop : mobile;
       const to = compact.matches ? mobile : desktop;
       const active = document.activeElement;
+      const hiddenSort = compact.matches ? desktopSort : compactSort;
+      const visibleSort = compact.matches ? compactSort : desktopSort;
+      if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
+        lastFocused = null;
+        visibleSort?.focus();
+        return;
+      }
       const source = active instanceof HTMLAnchorElement && from.contains(active) ? active :
-        active === document.body && lastFocused && from.contains(lastFocused) ? lastFocused : null;
+        active === document.body && lastFocused instanceof HTMLAnchorElement && from.contains(lastFocused) ? lastFocused : null;
       if (!source) return;
       const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
       lastFocused = null;
@@ -39,8 +48,27 @@
 
   // Keep the end of the name, including its extension, outside the ellipsized span.
   function nameParts(name: string): [string, string] {
-    // Do not split combining sequences or emoji if segmentation is unavailable.
-    if (typeof Intl.Segmenter !== 'function') return [name, ''];
+    // Without segmentation, split only at boundaries known not to divide a grapheme.
+    if (typeof Intl.Segmenter !== 'function') {
+      if (name.length <= 12) return [name, ''];
+      const dot = name.lastIndexOf('.');
+      if (!/^[\x20-\x7e]+$/.test(name)) {
+        // A printable ASCII character before the dot guarantees a boundary
+        // before it, even when the extension starts with a combining mark.
+        if (dot > 0 && name.length - dot <= 16 && /^[\x20-\x7e]$/.test(name[dot - 1])) {
+          return [name.slice(0, dot), name.slice(dot)];
+        }
+        // An ASCII letter or digit after a dot begins a new grapheme; keep the
+        // dot with the original prefix so unusual Unicode sequences stay intact.
+        if (dot > 0 && /^[A-Za-z0-9]{1,15}$/.test(name.slice(dot + 1))) {
+          return [name.slice(0, dot + 1), name.slice(dot + 1)];
+        }
+        return [name, ''];
+      }
+      const suffixStart = dot > 0 && name.length - dot <= 16 ? dot : name.length;
+      const split = suffixStart - Math.min(6, Math.floor(suffixStart / 2));
+      return [name.slice(0, split), name.slice(split)];
+    }
     const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.segment);
     if (characters.length <= 12) return [name, ''];
     const dot = characters.lastIndexOf('.');
@@ -68,13 +96,13 @@
 </script>
 
 {#if onSort}
-  <div class="compact-sort"><label for="listing-sort">Sort</label> <select id="listing-sort" value={direction} on:change={(event) => onSort?.(event.currentTarget.value as 'asc' | 'desc')}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></div>
+  <div class="compact-sort"><label for="listing-sort">Sort</label> <select id="listing-sort" bind:this={compactSort} value={direction} on:change={(event) => onSort?.(event.currentTarget.value as 'asc' | 'desc')}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
   <p class="status" role="status">Folders first, then files, each sorted by name, {orderDescription}, in binary order.</p>
 {/if}
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr>
@@ -111,7 +139,7 @@
   .name { display: inline-flex; align-items: center; gap: var(--drive-space-2); max-width: 100%; }
   .name a { display: inline-flex; min-width: 0; padding-block: var(--drive-space-2); white-space: break-spaces; }
   .name-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-  .name-end { flex: none; white-space: pre; }
+  .name-end { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
   .folder { font-weight: var(--drive-font-weight-medium); }
   .tag { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; padding: var(--drive-space-inset-tag-y) var(--drive-space-inset-tag-x); border-radius: var(--drive-radius-s); box-shadow: inset 0 0 0 var(--drive-size-line) var(--drive-color-line-hairline-strong); }
   @media (forced-colors: active) { .tag { outline: var(--drive-size-line) solid transparent; outline-offset: calc(-1 * var(--drive-size-line)); } }

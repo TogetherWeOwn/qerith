@@ -158,6 +158,10 @@ try {
     assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
     const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
+    const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
+    assert.equal(await wideSuffix.textContent(), 'abcdefghijklmnop.' + '界'.repeat(15));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, 'Wide suffix must not overflow the page');
+    assert.equal(await wideSuffix.evaluate(el => el.getBoundingClientRect().right <= el.closest('li').getBoundingClientRect().right), true);
     await context.close();
   }
   for (const [width, height] of [[1280, 800], [390, 844]]) for (const variant of ['file', 'folder', 'shared']) {
@@ -385,6 +389,24 @@ try {
     }
     await context.close();
   }
+  {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.addInitScript(() => { Intl.Segmenter = undefined; });
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    const link = page.getByRole('list').getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
+    assert.equal(await link.locator('.name-end').textContent(), 'reflow.txt');
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    const rtl = page.locator('ul.mobile a[data-item-id="rtl"]');
+    assert.equal(await rtl.locator('.name-end').textContent(), 'pdf');
+    assert.equal(await rtl.textContent(), 'تقرير-الميزانية-السنوية-النهائية.pdf');
+    const unicode = page.locator('ul.mobile a[data-item-id="unicode"]');
+    assert.equal(await unicode.locator('.name-end').textContent(), 'txt');
+    const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
+    assert.equal(await wideSuffix.locator('.name-end').textContent(), '.' + '界'.repeat(15));
+    await context.close();
+  }
   for (const width of [1280, 390]) {
     const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
@@ -407,6 +429,12 @@ try {
     assert.equal(await container.getByRole('link').count(), 200);
     assert.equal(await container.getByRole('link').first().textContent(), 'File 400.txt');
     assert.equal(await page.getByRole('status').textContent(), 'Folders first, then files, each sorted by name, Z to A, in binary order.');
+    const sort = width > 820 ? page.getByRole('button', { name: 'Name' }) : page.getByLabel('Sort', { exact: true });
+    await sort.focus();
+    await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
+    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
     await page.screenshot({ path: resolve(output, `listing-paged-${width}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
