@@ -238,6 +238,26 @@ try {
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
     await context.close();
   }
+  for (const name of ['report  final.txt', '\t']) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=file&name=${encodeURIComponent(name)}`, { waitUntil: 'networkidle' });
+    const displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
+    const label = `Actions for ${displayName}`;
+    const trigger = page.locator('button[aria-haspopup="menu"]');
+    assert.equal(await trigger.getAttribute('aria-label'), label);
+    await trigger.click();
+    const menu = page.locator('[role="menu"]');
+    assert.equal(await menu.getAttribute('aria-label'), label);
+    assert.equal(await menu.locator('..').getAttribute('aria-label'), label);
+    const title = menu.locator('.sheet-title');
+    assert.equal(await title.textContent(), displayName);
+    assert.equal(await title.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
+    if (!name.trim()) assert.equal(await page.getByRole('menu', { name: 'Actions for (Whitespace-only name)' }).count(), 1);
+    await context.close();
+  }
   for (const width of [390, 1280]) {
     const context = await browser.newContext({ viewport: { width, height: 800 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
