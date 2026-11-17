@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -167,6 +168,69 @@ async function assertFullFilenames(page, selector, context = {}) {
       throw error;
     }
   }
+}
+
+async function assertListingFonts(page, responses, origin) {
+  const faces = await page.evaluate(async () => (await window.fixtureFonts).map(({ url, face }) => ({
+    url: new URL(url, document.baseURI).href,
+    family: face.family,
+    status: face.status,
+    registered: document.fonts.has(face),
+    weight: face.weight,
+    stretch: face.stretch,
+    style: face.style,
+    display: face.display,
+    unicodeRange: face.unicodeRange
+  })));
+  const expected = await page.evaluate(() => {
+    // Let Chromium canonicalize the original CSS descriptors for comparison.
+    const unicodeRange = 'U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2190-2193, U+2212, U+2215, U+FEFF, U+FFFD';
+    return [
+      new FontFace('Qerith Sans', 'local("unused")', { weight: '200 900', stretch: '75% 125%', display: 'swap', unicodeRange }),
+      new FontFace('Fragment Mono', 'local("unused")', { weight: '400', display: 'optional', unicodeRange })
+    ].map(({ family, weight, stretch, style, display, unicodeRange }) => ({
+      family, status: 'loaded', registered: true, weight, stretch, style, display, unicodeRange
+    }));
+  });
+  assert.deepEqual(faces.map(({ url, ...descriptors }) => descriptors), expected);
+
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  const assets = { 'Qerith Sans': 'QerithSans-latin.woff2', 'Fragment Mono': 'FragmentMono-Regular-latin.woff2' };
+  for (const face of faces) {
+    const file = assets[face.family];
+    assert.equal(new URL(face.url).origin, origin, `${file}: font must be same-origin`);
+    const response = responses.find(response => response.url() === face.url && response.status() === 200);
+    assert(response, `${file}: expected a successful browser font response`);
+    face.httpStatus = response.status();
+    face.sha256 = digest(await response.body());
+    assert.equal(face.sha256, digest(await readFile(resolve(here, '../src/lib/fonts', file))), `${file}: response bytes must match the tracked font`);
+  }
+
+  const samples = [];
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    // Chromium can decorate the reported family name with its font backend.
+    for (const [selector, text, postScriptName] of [
+      ['table.desktop a[data-item-id="2"]', 'Résumé 2025.pdf', 'QerithSans-Regular'],
+      ['table.desktop th[aria-sort]', 'Name', 'FragmentMono-Regular']
+    ]) {
+      const sample = page.locator(selector);
+      assert.equal(await sample.isVisible(), true, `${text}: must be visible in the desktop fixture`);
+      assert.equal(await sample.textContent(), text);
+      const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+      assert(nodeId, `${text}: expected a CDP node`);
+      const { fonts } = await session.send('CSS.getPlatformFontsForNode', { nodeId });
+      assert(fonts.length > 0 && fonts.every(font => font.postScriptName === postScriptName && font.isCustomFont && font.glyphCount > 0),
+        `${text}: expected only custom ${postScriptName}, got ${JSON.stringify(fonts)}`);
+      samples.push({ selector, text, fonts });
+    }
+  } finally {
+    await session.detach();
+  }
+  return { faces, samples };
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -579,7 +643,15 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
+    const fontResponses = [];
+    if (width === 1280) page.on('response', response => {
+      if (response.request().resourceType() === 'font') fontResponses.push(response);
+    });
     await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    if (width === 1280) {
+      const fonts = await assertListingFonts(page, fontResponses, origin);
+      await writeFile(resolve(output, `${size}-fonts.json`), JSON.stringify(fonts, null, 2));
+    }
     const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
     assert.equal(await container.count(), 1);
     assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, folders first, then files, each sorted by name, A to Z (binary order). Times in America/New_York.');

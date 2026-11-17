@@ -1,3 +1,4 @@
+import { returnedChecksums } from './checksums';
 import { createS3Transport } from './transport';
 
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
@@ -25,7 +26,8 @@ export function createMultipartUpload(...args: Parameters<typeof createS3Transpo
     if (response.status === 200) {
       const etag = response.headers.get('etag');
       if (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) throw new Error('S3 part upload outcome uncertain');
-      return { partNumber, etag, size };
+      const checksums = returnedChecksums(response.headers);
+      return { partNumber, etag, size, ...(checksums ? { checksums } : {}) };
     }
     if (response.status === 408 || response.status >= 500 || (response.status >= 200 && response.status < 300)) throw new Error('S3 part upload outcome uncertain');
     throw new Error(`S3 request failed with status ${response.status}`);

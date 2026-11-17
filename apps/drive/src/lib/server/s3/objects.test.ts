@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { createS3Objects } from './objects';
+import { createImmutableS3Reader, createS3Objects } from './objects';
 
 const config = { endpoint: 'https://storage.example', bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'access', secretAccessKey: 'secret' };
 
@@ -178,6 +178,9 @@ test('PUT sends zero bytes and DELETE makes one signed request', async () => {
   assert.deepEqual(await objects.put('empty', new Uint8Array()), { etag: '"receipt"' });
   assert.deepEqual(await objects.delete('empty'), { etag: '"receipt"' });
   assert.deepEqual(sent.map((request) => request.method), ['PUT', 'DELETE']);
+  assert.equal(sent[0].headers.get('if-none-match'), '*');
+  assert.match(sent[0].headers.get('authorization') ?? '', /signedheaders=[^,]*if-none-match/i);
+  assert.equal(sent[1].headers.get('if-none-match'), null);
   assert.equal((await sent[0].arrayBuffer()).byteLength, 0);
   assert.match(sent[0].headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
 });
@@ -213,6 +216,170 @@ test('cancelled and oversized mutation responses do not imply rollback', async (
   assert.equal(calls, 1);
   const oversized = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response('x'.repeat(8193), { status: 403 }) });
   await assert.rejects(oversized.delete('key'), { message: 'S3 mutation outcome uncertain' });
+});
+
+test('PUT treats unexpected success statuses as uncertain even with an ETag', async () => {
+  let calls = 0;
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => {
+    calls++;
+    return new Response(null, { status: 202, headers: { etag: '"opaque"' } });
+  } });
+  await assert.rejects(objects.put('key', new Uint8Array()), { message: 'S3 mutation outcome uncertain' });
+  assert.equal(calls, 1);
+});
+
+test('PUT preserves optional provider checksum evidence', async () => {
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response(null, {
+    headers: { etag: '"opaque"', 'x-amz-checksum-crc32c': 'provider-value' }
+  }) });
+  assert.deepEqual(await objects.put('key', new Uint8Array()), {
+    etag: '"opaque"', checksums: { 'x-amz-checksum-crc32c': 'provider-value' }
+  });
+});
+
+test('create-only PUT preserves competing conflicts and rejects missing receipts', async () => {
+  let calls = 0;
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    assert.equal((input as Request).headers.get('if-none-match'), '*');
+    calls++;
+    if (calls === 1) return new Response(null, { headers: { etag: '"winner"' } });
+    if (calls === 2) return new Response(null, { status: 412 });
+    if (calls === 3) return new Response(null, { status: 409 });
+    return new Response();
+  } });
+  assert.equal((await objects.put('key', new Uint8Array())).etag, '"winner"');
+  await assert.rejects(objects.put('key', new Uint8Array()), /status 412/);
+  await assert.rejects(objects.put('key', new Uint8Array()), /status 409/);
+  await assert.rejects(objects.put('key', new Uint8Array()), /outcome uncertain/);
+  assert.equal(calls, 4);
+});
+
+test('immutable reads pin full, range and HEAD, reject missing evidence and never retry 412', async () => {
+  const sent: Request[] = [];
+  let status = 200;
+  let etag: string | undefined = '"opaque+tag"';
+  let contentRange: string | undefined;
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    const request = input as Request;
+    sent.push(request);
+    return new Response(request.method === 'HEAD' || status === 412 ? null : 'a', { status, headers: { ...(etag ? { etag } : {}), ...(contentRange ? { 'content-range': contentRange } : {}), 'content-length': '1' } });
+  } }));
+  const ref = { key: 'key', etag: '"opaque+tag"' };
+  const full = await reader.get(ref, { maxResponseBytes: 1 });
+  if (full.status === 200) await full.body.cancel();
+  status = 206;
+  contentRange = 'bytes 0-0/1';
+  const range = await reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' });
+  if (range.status === 206) await range.body.cancel();
+  status = 200;
+  await reader.head(ref);
+  assert.deepEqual(sent.map((request) => request.headers.get('if-match')), [ref.etag, ref.etag, ref.etag]);
+  assert.equal(sent[1].headers.get('range'), 'bytes=0-0');
+  assert.match(sent[1].headers.get('authorization') ?? '', /signedheaders=[^,]*if-match/i);
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  status = 206;
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1 }), /evidence mismatch/);
+  contentRange = undefined;
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  contentRange = 'bytes 1-1/2';
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  status = 200;
+  etag = undefined;
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1 }), /evidence mismatch/);
+  await assert.rejects(reader.head(ref), /evidence mismatch/);
+  status = 412;
+  assert.equal((await reader.get(ref, { maxResponseBytes: 1 })).status, 412);
+  assert.equal(sent.length, 10);
+  await assert.rejects(reader.get({ key: 'key', etag: '*' }, { maxResponseBytes: 1 }), /Invalid S3 immutable reference/);
+  assert.equal(sent.length, 10);
+});
+
+test('immutable full reads reject contradictory Content-Range evidence', async () => {
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+    new Response('a', { headers: { etag: '"tag"', 'content-range': 'bytes 0-0/10' } })
+  }));
+  await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 10 }), /evidence mismatch/);
+});
+
+test('immutable reads reject missing full length and contradictory range lengths', async () => {
+  const cases: Record<string, string>[] = [
+    { etag: '"tag"' },
+    { etag: '"tag"', 'content-range': 'bytes 0-2/3', 'content-length': '10' },
+    { etag: '"tag"', 'content-range': 'bytes 0-2/3', 'content-length': 'invalid' }
+  ];
+  for (const headers of cases) {
+    const ranged = 'content-range' in headers;
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response('abc', { status: ranged ? 206 : 200, headers })
+    }));
+    await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, {
+      maxResponseBytes: 10, ...(ranged ? { range: 'bytes=0-2' } : {})
+    }), /evidence mismatch/);
+  }
+});
+
+test('immutable full reads enforce a declared content length', async () => {
+  for (const body of ['a', 'abcd']) {
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response(body, { headers: { etag: '"tag"', 'content-length': '3' } })
+    }));
+    const result = await reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 4 });
+    if (result.status !== 200) throw new Error('Expected streamed response');
+    await assert.rejects(new Response(result.body).text(), /evidence mismatch/);
+  }
+});
+
+test('immutable reads validate the range sent even if options change in flight', async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
+    assert.equal((input as Request).headers.get('range'), 'bytes=0-0');
+    started();
+    await pending;
+    return new Response('a', { headers: { etag: '"tag"' } });
+  } }));
+  const options: { maxResponseBytes: number; range?: string } = { maxResponseBytes: 10, range: 'bytes=0-0' };
+  const result = reader.get({ key: 'key', etag: '"tag"' }, options);
+  await entered;
+  options.range = undefined;
+  release();
+  await assert.rejects(result, /evidence mismatch/);
+});
+
+test('immutable range evidence accepts suffix and clipped ranges only when they match', async () => {
+  let contentRange = '';
+  let body = '';
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+    new Response(body, { status: 206, headers: { etag: '"tag"', 'content-range': contentRange } })
+  }));
+  const ref = { key: 'key', etag: '"tag"' };
+  for (const [range, evidence] of [
+    ['bytes=-3', 'bytes 7-9/10'],
+    ['bytes=-20', 'bytes 0-9/10'],
+    ['bytes=7-99', 'bytes 7-9/10'],
+    ['bytes=7-', 'bytes 7-9/10']
+  ]) {
+    contentRange = evidence;
+    body = 'x'.repeat(evidence === 'bytes 0-9/10' ? 10 : 3);
+    const result = await reader.get(ref, { maxResponseBytes: 20, range });
+    if (result.status !== 206) throw new Error('Expected streamed response');
+    assert.equal(await new Response(result.body).text(), body);
+    contentRange = 'bytes 0-0/10';
+    await assert.rejects(reader.get(ref, { maxResponseBytes: 20, range }), /evidence mismatch/);
+  }
+});
+
+test('immutable range stream rejects short and excessive bodies', async () => {
+  for (const body of ['a', 'abcd']) {
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response(body, { status: 206, headers: { etag: '"tag"', 'content-range': 'bytes 0-2/3' } })
+    }));
+    const result = await reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 4, range: 'bytes=0-2' });
+    if (result.status !== 206) throw new Error('Expected streamed response');
+    await assert.rejects(new Response(result.body).text(), /evidence mismatch/);
+  }
 });
 
 test('HEAD cancels without exposing abort reasons and rejects unsafe dot segments', async () => {

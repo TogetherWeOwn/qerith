@@ -15,6 +15,7 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
 
 beforeEach(async () => {
   await env.DB.exec(`DROP TABLE IF EXISTS drive_upload_intents;
+    DROP TABLE IF EXISTS drive_upload_key_reservations;
     DROP TABLE IF EXISTS drive_read_grants;
     DROP TABLE IF EXISTS drive_recovery_tokens;
     DROP TABLE IF EXISTS drive_login_generations;
