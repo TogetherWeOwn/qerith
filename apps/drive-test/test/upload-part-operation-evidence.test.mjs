@@ -7,7 +7,7 @@ import { UploadPartOperationEvidence } from '../../drive/src/lib/server/metadata
 const migration = '0020_upload_part_operation_evidence.sql';
 const migrate = () => applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name <= migration));
 const run = (sql, ...args) => env.DB.prepare(sql).bind(...args).run();
-const rows = async (sql) => (await env.DB.prepare(sql).all()).results;
+const rows = async (sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
 const operations = 'drive_upload_part_operations';
 const observations = 'drive_upload_part_observations';
 const etag = new Uint8Array([99, 0x22, 0x80, 0xff, 0x22, 99]).subarray(1, 5);
@@ -53,6 +53,32 @@ it('records evidence only for a live exact allocation and does not fence existin
   await run("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", op.ownerId);
   await expect(ledger().recordAdmission({ ...op, operationId: 'revoked', partNumber: 4, intentVersion: 4 }))
     .rejects.toThrow('invalid or duplicate');
+});
+
+it('matches inherited SQLite text by its exact bytes without changing legacy writers', async () => {
+  const op = { ...operation('legacy-bytes'), intentId: new Uint8Array([0x61, 0, 0x80]),
+    ownerId: new Uint8Array([0x62, 0x81]), objectKey: new Uint8Array([0x63, 0x82]),
+    uploadId: new Uint8Array([0x64, 0x83]) };
+  await migrate();
+  await run("INSERT INTO drive_principals VALUES (CAST(x'6281' AS TEXT), 'member', 'active')");
+  await run(`INSERT INTO drive_upload_intents (id, owner_id, object_key, upload_id, version, state)
+    VALUES (CAST(x'610080' AS TEXT), CAST(x'6281' AS TEXT), CAST(x'6382' AS TEXT), CAST(x'6483' AS TEXT), 2, 'allocated')`);
+  await run(`INSERT INTO ${operations} SELECT ?, id, owner_id, object_key, ?, upload_id, version, 1, 5
+    FROM drive_upload_intents WHERE id = CAST(x'610080' AS TEXT)`, op.operationId, op.storageEpoch);
+  await expect(ledger().reconcileAdmissionWrite(op)).resolves.toBe('recorded');
+  await ledger().recordObservation(op, etag);
+  await expect(ledger().reconcileObservationWrite(op, etag)).resolves.toBe('recorded');
+  for (const key of ['intentId', 'ownerId', 'objectKey', 'uploadId']) {
+    const lossy = { ...op, [key]: new TextDecoder().decode(op[key]) };
+    await expect(ledger().recordObservation(lossy, null)).rejects.toThrow('No matching upload part operation');
+    await expect(ledger().reconcileAdmissionWrite(lossy)).resolves.toBe('unknown');
+    await expect(ledger().reconcileObservationWrite(lossy, etag)).resolves.toBe('unknown');
+  }
+  const next = { ...op, operationId: 'legacy-bytes-next', partNumber: 2 };
+  await ledger().recordAdmission(next);
+  expect(await rows(`SELECT hex(intent_id) AS intent, hex(owner_id) AS owner, hex(object_key) AS key,
+    hex(upload_id) AS upload FROM ${operations} WHERE operation_id = ?`, next.operationId))
+    .toEqual([{ intent: '610080', owner: '6281', key: '6382', upload: '6483' }]);
 });
 
 it('cannot replace an operation or observation through SQLite conflict policies', async () => {
@@ -121,6 +147,8 @@ it('resolves lost D1 acknowledgements and records a late report without clearing
   await run("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", op.ownerId);
   await run('DELETE FROM drive_upload_intents WHERE id = ?', op.intentId);
   await expect(lostAck.recordObservation(op, etag)).rejects.toThrow('D1 acknowledgement lost');
+  expect(await rows(`SELECT hex(reported_etag) AS etag FROM ${observations} WHERE kind = 'reported'`))
+    .toEqual([{ etag: '2280FF22' }]);
   const mismatches = { operationId: 'another-operation', intentId: 'another-intent', ownerId: 'another-owner',
     objectKey: 'another-key', storageEpoch: 'another-epoch', uploadId: 'another-upload', intentVersion: 3,
     partNumber: 2, sizeBytes: 6 };
