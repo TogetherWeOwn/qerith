@@ -22,7 +22,7 @@ export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
 const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
 
-function validateName(name: string): void {
+export function validateName(name: string): void {
   if (typeof name !== 'string' || name.length === 0) throw new TypeError('Invalid entry name');
   let bytes = 0;
   let meaningful = false;
