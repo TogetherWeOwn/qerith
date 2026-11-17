@@ -140,6 +140,26 @@ try {
     }
     await context.close();
   }
+  {
+    const context = await browser.newContext({ viewport: { width: 320, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    const name = 'áááááááááááá👩‍👩‍👧‍👦.txt';
+    const link = page.getByRole('list').getByRole('link', { name });
+    const parts = await link.locator('.name-start, .name-end').allTextContents();
+    assert.equal(parts.join(''), name);
+    const boundaries = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.index);
+    assert(boundaries.includes(parts[0].length), 'Filename split must occur at a grapheme boundary');
+    assert(parts[1].endsWith('👩‍👩‍👧‍👦.txt'));
+    const rtlName = 'تقرير-الميزانية-السنوية-النهائية.pdf';
+    const rtl = page.getByRole('list').getByRole('link', { name: rtlName });
+    assert.equal(await rtl.textContent(), rtlName);
+    assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
+    const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
+    assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
+    await context.close();
+  }
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `listing-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
@@ -149,11 +169,18 @@ try {
     await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
     const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
     assert.equal(await container.count(), 1);
-    assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, sorted by name, A to Z. Times in America/New_York.');
-    if (width > 820) assert.equal(await container.getByRole('columnheader', { name: 'Name' }).getAttribute('aria-sort'), 'ascending');
+    assert.equal(await container.getAttribute('aria-label') ?? await container.locator('caption').textContent(), 'Contents of My Drive, folders first, then files, each sorted by name, A to Z (binary order). Times in America/New_York.');
+    if (width > 820) assert.equal(await container.getByRole('columnheader', { name: 'Name' }).getAttribute('aria-sort'), 'other');
     assert.equal(await container.getByRole('link').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).getAttribute('href'), '#archive');
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
+    const longName = container.getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
+    assert.equal(await longName.textContent(), 'a-very-long-file-name-without-breaks-to-check-reflow.txt');
+    assert.equal(await longName.locator('.name-end').textContent(), 'reflow.txt');
+    if (width <= 390) {
+      assert.equal(await longName.locator('.name-start').evaluate(el => el.scrollWidth > el.clientWidth), true);
+      assert.equal(await longName.locator('.name-start').evaluate(el => getComputedStyle(el).textOverflow), 'ellipsis');
+    }
     assert.equal(await container.locator('time').count(), 3);
     assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
@@ -172,7 +199,7 @@ try {
       const folder = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Archive' }) });
       assert.equal((await folder.locator('.details').textContent()).trim(), 'Folder · 14 Nov');
       const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
-      assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
+      assert.equal((await row.locator('.details').textContent()).trim(), 'PDF · 5.4 MB · 13 Nov');
     }
     assert.equal(await container.locator('data').count(), 2);
     assert.equal(await container.locator('data[value="1000"]').textContent(), '1.0 KB');
@@ -209,12 +236,57 @@ try {
       await page.screenshot({ path: resolve(output, `${size}-reduced-motion.png`) });
       await page.emulateMedia({ forcedColors: 'active' });
       assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+      const glyphColours = await container.locator('svg').first().evaluate(el => ({
+        stroke: getComputedStyle(el).stroke,
+        canvasText: getComputedStyle(document.body).color
+      }));
+      assert.equal(glyphColours.stroke, glyphColours.canvasText);
       const link = container.getByRole('link', { name: 'Archive' });
       await link.focus();
       assert.equal(await link.evaluate(el => el === document.activeElement), true);
       await page.screenshot({ path: resolve(output, `${size}-forced-colours-focus.png`) });
       await writeFile(resolve(output, `${size}-modes.json`), JSON.stringify({ motion, forcedColours: true, focused: 'Archive' }, null, 2));
     }
+    await context.close();
+  }
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
+    const container = width > 820 ? page.getByRole('table') : page.getByRole('list');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await page.getByText('200 of 401 shown').count(), 1);
+    const more = page.getByRole('button', { name: 'Show 200 more' });
+    await more.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 400);
+    assert.equal(await more.evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 401);
+    assert.equal(await page.getByText('401 of 401 shown').count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'All items shown' }).evaluate(el => el === document.activeElement), true);
+    if (width > 820) await page.getByRole('button', { name: 'Name' }).click();
+    else await page.getByLabel('Sort').selectOption('desc');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await container.getByRole('link').first().textContent(), 'File 400.txt');
+    assert.equal(await page.getByRole('status').textContent(), 'Folders first, then files, each sorted by name, Z to A, in binary order.');
+    await page.screenshot({ path: resolve(output, `listing-paged-${width}.png`) });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
+    await writeFile(resolve(output, `axe-listing-paged-${width}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for paged ${width}: ${JSON.stringify(results.violations)}`);
+    await page.goto(`${origin}/?listing&paged&page-error`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Show 200 more' }).focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 200);
+    assert.equal(await page.getByRole('alert').textContent(), "More items didn't load. Check your connection, then try again.");
+    const retry = page.getByRole('button', { name: 'Try again' });
+    assert.equal(await retry.evaluate(el => el === document.activeElement), true);
+    await page.keyboard.press('Enter');
+    assert.equal(await container.getByRole('link').count(), 400);
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Show 200 more' }).evaluate(el => el === document.activeElement), true);
     await context.close();
   }
   for (const width of [1280, 390]) {

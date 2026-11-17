@@ -13,6 +13,26 @@
     { ...items[1], id: 'spaces', name: 'report  final.txt', href: '#spaces' },
     { ...items[1], id: 'tab', name: '\t', href: '#tab' }
   ];
+  const unicodeItems = [
+    { ...items[1], id: 'unicode', name: 'áááááááááááá👩‍👩‍👧‍👦.txt', href: '#unicode' },
+    { ...items[1], id: 'rtl', name: 'تقرير-الميزانية-السنوية-النهائية.pdf', href: '#rtl' }
+  ];
+  // Isolated synthetic pages exercise the controlled list without a route or identity.
+  const paged = new URLSearchParams(window.location.search).has('paged');
+  const pagedItems = Array.from({ length: 401 }, (_, index) => ({
+    ...items[1], id: `page-${index}`, name: `File ${String(index).padStart(3, '0')}.txt`, href: `#page-${index}`
+  }));
+  let direction = $state('asc');
+  let shown = $state(200);
+  let loadMoreError = $state(false);
+  let failNextPage = new URLSearchParams(window.location.search).has('page-error');
+  let visiblePage = $derived((direction === 'asc' ? pagedItems : [...pagedItems].reverse()).slice(0, shown));
+  function sortPage(next) { direction = next; shown = 200; loadMoreError = false; }
+  function showMore() {
+    if (failNextPage) { failNextPage = false; loadMoreError = true; return; }
+    loadMoreError = false;
+    shown += 200;
+  }
   const empty = new URLSearchParams(window.location.search).get('empty');
   let uploads = $state(0);
 
@@ -24,7 +44,7 @@
 </script>
 
 {#if listing}
-  <main><FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} /></main>
+  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}
