@@ -87,18 +87,41 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
 
 export type ImmutableS3Reference = { key: string; etag: string };
 
-function matchesRange(requested: string, contentRange: string | null): boolean {
+function rangeLength(requested: string, contentRange: string | null): bigint | undefined {
   const request = /^bytes=(\d*)-(\d*)$/i.exec(requested);
   const response = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(contentRange ?? '');
-  if (!request || !response) return false;
+  if (!request || !response) return undefined;
   const [, first, last] = request;
   const start = BigInt(response[1]);
   const end = BigInt(response[2]);
   const size = BigInt(response[3]);
-  if (size === 0n || start > end || end >= size) return false;
+  if (size === 0n || start > end || end >= size) return undefined;
   const expectedStart = first ? BigInt(first) : (BigInt(last) >= size ? 0n : size - BigInt(last));
   const expectedEnd = first && last && BigInt(last) < size ? BigInt(last) : size - 1n;
-  return start === expectedStart && end === expectedEnd;
+  return start === expectedStart && end === expectedEnd ? end - start + 1n : undefined;
+}
+
+function enforceRangeLength(body: ReadableStream<Uint8Array>, expected: bigint): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let length = 0n;
+  return new ReadableStream<Uint8Array>({
+    async pull(output) {
+      try {
+        const part = await reader.read();
+        if (part.done) {
+          if (length !== expected) output.error(new Error('S3 immutable read evidence mismatch'));
+          else output.close();
+        } else {
+          length += BigInt(part.value.byteLength);
+          if (length > expected) {
+            void reader.cancel().catch(() => {});
+            output.error(new Error('S3 immutable read evidence mismatch'));
+          } else output.enqueue(part.value);
+        }
+      } catch (error) { output.error(error); }
+    },
+    cancel() { return reader.cancel(); }
+  }, { highWaterMark: 0 });
 }
 
 /**
@@ -119,12 +142,15 @@ export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objec
     async get(reference: ImmutableS3Reference, options: { maxResponseBytes: number; signal?: AbortSignal; range?: string }) {
       const { key, etag } = validate(reference);
       const result = await objects.get(key, { maxResponseBytes: options.maxResponseBytes, signal: options.signal, range: options.range, ifMatch: etag });
-      if ((result.status === 200 || result.status === 206) &&
-          (result.etag !== etag || (options.range === undefined
-            ? result.status !== 200
-            : result.status !== 206 || !matchesRange(options.range, result.contentRange)))) {
-        void result.body.cancel().catch(() => {});
-        throw new Error('S3 immutable read evidence mismatch');
+      if (result.status === 200 || result.status === 206) {
+        const expected = options.range === undefined ? undefined : rangeLength(options.range, result.contentRange);
+        if (result.etag !== etag || (options.range === undefined
+          ? result.status !== 200
+          : result.status !== 206 || expected === undefined)) {
+          void result.body.cancel().catch(() => {});
+          throw new Error('S3 immutable read evidence mismatch');
+        }
+        if (expected !== undefined) return { ...result, body: enforceRangeLength(result.body, expected) };
       }
       return result;
     },

@@ -285,8 +285,9 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
 
 test('immutable range evidence accepts suffix and clipped ranges only when they match', async () => {
   let contentRange = '';
+  let body = '';
   const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
-    new Response('a', { status: 206, headers: { etag: '"tag"', 'content-range': contentRange } })
+    new Response(body, { status: 206, headers: { etag: '"tag"', 'content-range': contentRange } })
   }));
   const ref = { key: 'key', etag: '"tag"' };
   for (const [range, evidence] of [
@@ -296,10 +297,23 @@ test('immutable range evidence accepts suffix and clipped ranges only when they 
     ['bytes=7-', 'bytes 7-9/10']
   ]) {
     contentRange = evidence;
-    const result = await reader.get(ref, { maxResponseBytes: 1, range });
-    if (result.status === 206) await result.body.cancel();
+    body = 'x'.repeat(evidence === 'bytes 0-9/10' ? 10 : 3);
+    const result = await reader.get(ref, { maxResponseBytes: 20, range });
+    if (result.status !== 206) throw new Error('Expected streamed response');
+    assert.equal(await new Response(result.body).text(), body);
     contentRange = 'bytes 0-0/10';
-    await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range }), /evidence mismatch/);
+    await assert.rejects(reader.get(ref, { maxResponseBytes: 20, range }), /evidence mismatch/);
+  }
+});
+
+test('immutable range stream rejects short and excessive bodies', async () => {
+  for (const body of ['a', 'abcd']) {
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response(body, { status: 206, headers: { etag: '"tag"', 'content-range': 'bytes 0-2/3' } })
+    }));
+    const result = await reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 4, range: 'bytes=0-2' });
+    if (result.status !== 206) throw new Error('Expected streamed response');
+    await assert.rejects(new Response(result.body).text(), /evidence mismatch/);
   }
 });
 
