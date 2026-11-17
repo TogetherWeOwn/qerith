@@ -557,6 +557,7 @@ try {
     assert.equal(await container.getByRole('link').count(), 200);
     assert.equal(await page.getByText('200 of 401 shown', { exact: true }).count(), 1);
     await page.getByRole('button', { name: 'Show 200 more' }).focus();
+    await page.screenshot({ path: resolve(output, `listing-footer-default-${width}.png`) });
     await page.keyboard.press('Enter');
     assert.equal(await container.getByRole('link').count(), 400);
     assert.equal(await container.getByRole('link').nth(199).textContent(), 'File 199.txt');
@@ -588,6 +589,8 @@ try {
     assert.equal(await container.getByRole('link').count(), 200);
     assert.equal(await page.getByRole('alert').textContent(), "More items didn't load. Check your connection, then try again.");
     assert.equal(await page.getByRole('button', { name: 'Try again' }).evaluate(el => el === document.activeElement), true);
+    await page.getByRole('alert').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(output, `listing-footer-error-${width}.png`) });
     await page.keyboard.press('Enter');
     assert.equal(await container.getByRole('link').count(), 400);
     assert.equal(await page.getByRole('alert').count(), 0);
@@ -617,7 +620,7 @@ try {
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+  for (const name of ['head.txt', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
   }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
