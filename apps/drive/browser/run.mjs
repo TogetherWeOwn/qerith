@@ -840,7 +840,7 @@ try {
         await page.waitForFunction(({ width, factor }) => Math.abs(innerWidth * factor - width) <= factor * 2, { width: before.width, factor });
         await page.evaluate(() => document.fonts.ready);
         const after = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio, scrollWidth: document.documentElement.scrollWidth }));
-        assert.equal(applied, factor);
+        assert(Math.abs(applied - factor) < 1e-6, `Page zoom factor: requested ${factor}, reported ${applied}`);
         assert(Math.abs(after.dpr / before.dpr - factor) < 0.01, `Page zoom DPR: ${JSON.stringify({ before, after })}`);
         assert(after.scrollWidth <= after.width, `Page zoom horizontal overflow: ${JSON.stringify(after)}`);
         await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile', { width: after.width, height: 'measured on failure', segmenter: true, mode: `page-zoom-${factor * 100}`, fontRequests });
