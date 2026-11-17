@@ -23,6 +23,27 @@
     { ...items[1], id: 'spaces', name: 'report  final.txt', href: '#spaces' },
     { ...items[1], id: 'tab', name: '\t', href: '#tab' }
   ];
+  // Synthetic pages exercise the controlled list without a route or identity.
+  const paged = new URLSearchParams(window.location.search).has('paged');
+  const pagedItems = Array.from({ length: 401 }, (_, index) => ({
+    ...items[1], id: `page-${index}`, name: `File ${String(index).padStart(3, '0')}.txt`, href: `#page-${index}`
+  }));
+  let direction = $state('asc');
+  let shown = $state(200);
+  let loadMoreError = $state(false);
+  let loadingMore = $state(false);
+  let pageRequests = $state(0);
+  let failNextPage = new URLSearchParams(window.location.search).has('page-error');
+  let visiblePage = $derived((direction === 'asc' ? pagedItems : [...pagedItems].reverse()).slice(0, shown));
+  function sortPage(next) { if (!new URLSearchParams(window.location.search).has('reject-sort')) { direction = next; shown = 200; loadMoreError = false; } }
+  function showMore() {
+    pageRequests++;
+    if (new URLSearchParams(window.location.search).has('page-pending')) { loadingMore = true; return; }
+    if (failNextPage) { failNextPage = false; loadMoreError = true; return; }
+    loadMoreError = false;
+    shown += 200;
+  }
+  window.addEventListener('fixture-page-complete', () => { loadingMore = false; shown += 200; });
   const empty = new URLSearchParams(window.location.search).get('empty');
   let uploads = $state(0);
 
@@ -45,13 +66,13 @@
     <p aria-live="polite">{selected}</p>
   </main>
 {:else if listing}
-  <main><FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} /></main>
+  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}
   <SignInPage state={signInState} onSignIn={() => requests++} onCancel={() => cancellations++} />
 {/if}
-<output hidden data-requests={requests} data-cancellations={cancellations} data-uploads={uploads}></output>
+<output hidden data-requests={requests} data-cancellations={cancellations} data-uploads={uploads} data-page-requests={pageRequests}></output>
 
 <style>
   main { min-height: 100vh; background: var(--drive-color-bg-canvas); }
