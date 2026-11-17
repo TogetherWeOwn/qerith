@@ -17,9 +17,42 @@ test('completes once with ordered opaque parts and a signed request', async () =
   assert.equal(url.pathname, '/test-bucket/folder/a%20%2B%25/%C3%A9');
   assert.equal(url.searchParams.get('uploadId'), 'id+/=%');
   assert.equal(sent!.method, 'POST');
+  assert.equal(sent!.headers.get('if-none-match'), '*');
+  assert.match(sent!.headers.get('authorization') ?? '', /signedheaders=[^,]*if-none-match/i);
   assert.match(sent!.headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
   assert.match(await sent!.text(), /<PartNumber>1<\/PartNumber><ETag>"a&amp;b"<\/ETag>/);
   assert.equal(calls, 1);
+});
+
+test('rejects contradictory completion identity without retrying', async () => {
+  let calls = 0;
+  let identity = '<Bucket>other</Bucket><Key>key</Key>';
+  const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => {
+    calls++;
+    return new Response(`<CompleteMultipartUploadResult><ETag>"result"</ETag>${identity}</CompleteMultipartUploadResult>`);
+  } });
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  identity = '<Bucket>test-bucket</Bucket><Key>other</Key>';
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  identity = '<Bucket>test-bucket</Bucket><Key>key</Key>';
+  assert.equal((await complete('key', 'id', parts)).etag, '"result"');
+  assert.equal(calls, 3);
+});
+
+test('binds completion identity to the configured request bucket despite mutation', async () => {
+  const mutableConfig = { ...config };
+  let calls = 0;
+  let bucket = 'test-bucket';
+  const complete = createMultipartComplete(mutableConfig, { timeoutMs: 1000, fetch: async (input) => {
+    calls++;
+    assert.equal(new URL((input as Request).url).pathname, '/test-bucket/key');
+    mutableConfig.bucket = 'other';
+    return new Response(`<CompleteMultipartUploadResult><ETag>"result"</ETag><Bucket>${bucket}</Bucket><Key>key</Key></CompleteMultipartUploadResult>`);
+  } });
+  assert.equal((await complete('key', 'id', parts)).etag, '"result"');
+  bucket = 'other';
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  assert.equal(calls, 2);
 });
 
 test('distinguishes embedded errors from uncertain outcomes without leaking provider details', async () => {
@@ -61,6 +94,17 @@ for (const code of ['EntityTooSmall', 'InvalidPart', 'InvalidPartOrder', 'NoSuch
     assert.equal(calls, 1);
   });
 }
+
+test('completion preserves 409 and 412 as distinct rejections without retries', async () => {
+  let calls = 0;
+  const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => {
+    calls++;
+    return new Response(null, { status: calls === 1 ? 412 : 409 });
+  } });
+  await assert.rejects(complete('key', 'id', parts), /status 412/);
+  await assert.rejects(complete('key', 'id', parts), /status 409/);
+  assert.equal(calls, 2);
+});
 
 test('rejects invalid inputs and pre-cancellation without sending', async () => {
   let calls = 0;
