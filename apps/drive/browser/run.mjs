@@ -517,6 +517,9 @@ try {
     assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
     const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
+    const invoice = page.locator('ul.mobile a[data-item-id="invoice"]');
+    assert.equal(await invoice.textContent(), 'invoice-february.pdf');
+    assert.match(await invoice.locator('.name-end').textContent(), /^.+\.pdf$/, 'LTR filename must retain a tail before the extension');
     const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
     assert.equal(await wideSuffix.textContent(), 'abcdefghijklmnop.' + '界'.repeat(15));
     assert.equal(await wideSuffix.locator('.name-end').textContent(), '.' + '界'.repeat(15));

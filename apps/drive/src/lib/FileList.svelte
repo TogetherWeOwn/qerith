@@ -46,10 +46,11 @@
     };
   });
 
-  // Do not break a word across separately shaped spans.
+  // Keep cursive script letters together across separately shaped spans.
   function wordBoundary(characters: string[], split: number, suffixStart: number): number {
-    const letterOrMark = /[\p{L}\p{M}]/u;
-    while (split < suffixStart && letterOrMark.test(characters[split - 1]) && letterOrMark.test(characters[split])) split++;
+    const joiningScript = /[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Nko}\p{Script=Mongolian}\p{Script=Adlam}\p{Script=Mandaic}\p{Script=Hanifi_Rohingya}]/u;
+    const joining = (character: string) => joiningScript.test(character) && /[\p{L}\p{M}]/u.test(character);
+    while (split < suffixStart && joining(characters[split - 1]) && joining(characters[split])) split++;
     return split;
   }
 

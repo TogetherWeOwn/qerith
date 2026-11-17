@@ -26,6 +26,7 @@
   const unicodeItems = [
     { ...items[1], id: 'unicode', name: 'áááááááááááá👩‍👩‍👧‍👦.txt', href: '#unicode' },
     { ...items[1], id: 'rtl', name: 'تقرير-الميزانية-السنوية-النهائية.pdf', href: '#rtl' },
+    { ...items[1], id: 'invoice', name: 'invoice-february.pdf', href: '#invoice' },
     { ...items[1], id: 'wide-suffix', name: 'abcdefghijklmnop.' + '界'.repeat(15), href: '#wide-suffix' }
   ];
   // Synthetic pages exercise the controlled list without a route or identity.
