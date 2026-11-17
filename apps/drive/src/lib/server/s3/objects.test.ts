@@ -248,10 +248,11 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   const sent: Request[] = [];
   let status = 200;
   let etag: string | undefined = '"opaque+tag"';
+  let contentRange: string | undefined = 'bytes 0-0/1';
   const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
     const request = input as Request;
     sent.push(request);
-    return new Response(request.method === 'HEAD' || status === 412 ? null : 'a', { status, headers: etag ? { etag } : {} });
+    return new Response(request.method === 'HEAD' || status === 412 ? null : 'a', { status, headers: { ...(etag ? { etag } : {}), ...(contentRange ? { 'content-range': contentRange } : {}) } });
   } }));
   const ref = { key: 'key', etag: '"opaque+tag"' };
   const full = await reader.get(ref, { maxResponseBytes: 1 });
@@ -265,14 +266,41 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   assert.equal(sent[1].headers.get('range'), 'bytes=0-0');
   assert.match(sent[1].headers.get('authorization') ?? '', /signedheaders=[^,]*if-match/i);
   await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  status = 206;
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1 }), /evidence mismatch/);
+  contentRange = undefined;
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  contentRange = 'bytes 1-1/2';
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
+  status = 200;
   etag = undefined;
   await assert.rejects(reader.get(ref, { maxResponseBytes: 1 }), /evidence mismatch/);
   await assert.rejects(reader.head(ref), /evidence mismatch/);
   status = 412;
   assert.equal((await reader.get(ref, { maxResponseBytes: 1 })).status, 412);
-  assert.equal(sent.length, 7);
+  assert.equal(sent.length, 10);
   await assert.rejects(reader.get({ key: 'key', etag: '*' }, { maxResponseBytes: 1 }), /Invalid S3 immutable reference/);
-  assert.equal(sent.length, 7);
+  assert.equal(sent.length, 10);
+});
+
+test('immutable range evidence accepts suffix and clipped ranges only when they match', async () => {
+  let contentRange = '';
+  const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+    new Response('a', { status: 206, headers: { etag: '"tag"', 'content-range': contentRange } })
+  }));
+  const ref = { key: 'key', etag: '"tag"' };
+  for (const [range, evidence] of [
+    ['bytes=-3', 'bytes 7-9/10'],
+    ['bytes=-20', 'bytes 0-9/10'],
+    ['bytes=7-99', 'bytes 7-9/10'],
+    ['bytes=7-', 'bytes 7-9/10']
+  ]) {
+    contentRange = evidence;
+    const result = await reader.get(ref, { maxResponseBytes: 1, range });
+    if (result.status === 206) await result.body.cancel();
+    contentRange = 'bytes 0-0/10';
+    await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range }), /evidence mismatch/);
+  }
 });
 
 test('HEAD cancels without exposing abort reasons and rejects unsafe dot segments', async () => {

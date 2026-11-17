@@ -87,6 +87,20 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
 
 export type ImmutableS3Reference = { key: string; etag: string };
 
+function matchesRange(requested: string, contentRange: string | null): boolean {
+  const request = /^bytes=(\d*)-(\d*)$/i.exec(requested);
+  const response = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(contentRange ?? '');
+  if (!request || !response) return false;
+  const [, first, last] = request;
+  const start = BigInt(response[1]);
+  const end = BigInt(response[2]);
+  const size = BigInt(response[3]);
+  if (size === 0n || start > end || end >= size) return false;
+  const expectedStart = first ? BigInt(first) : (BigInt(last) >= size ? 0n : size - BigInt(last));
+  const expectedEnd = first && last && BigInt(last) < size ? BigInt(last) : size - 1n;
+  return start === expectedStart && end === expectedEnd;
+}
+
 /**
  * Reads require a strong, opaque publication ETag. A successful response without
  * the same ETag is rejected; 412 is returned unchanged and never retried.
@@ -106,7 +120,9 @@ export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objec
       const { key, etag } = validate(reference);
       const result = await objects.get(key, { maxResponseBytes: options.maxResponseBytes, signal: options.signal, range: options.range, ifMatch: etag });
       if ((result.status === 200 || result.status === 206) &&
-          (result.etag !== etag || (options.range !== undefined && result.status !== 206))) {
+          (result.etag !== etag || (options.range === undefined
+            ? result.status !== 200
+            : result.status !== 206 || !matchesRange(options.range, result.contentRange)))) {
         void result.body.cancel().catch(() => {});
         throw new Error('S3 immutable read evidence mismatch');
       }
