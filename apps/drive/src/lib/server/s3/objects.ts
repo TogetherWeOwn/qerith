@@ -1,3 +1,4 @@
+import { returnedChecksums } from './checksums';
 import { validateRange } from './range';
 import { createS3Transport } from './transport';
 
@@ -18,12 +19,15 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
     if (signal?.aborted) throw new Error('S3 request cancelled');
     let response: Awaited<ReturnType<typeof request>>;
     try {
-      response = await request({ method, key, body, signal, maxResponseBytes: 8192 });
+      response = await request({ method, key, body, signal, headers: method === 'PUT' ? { 'if-none-match': '*' } : undefined, maxResponseBytes: 8192 });
     } catch {
       throw new Error('S3 mutation outcome uncertain');
     }
     if (response.status >= 200 && response.status < 300) {
-      return { etag: response.headers.get('etag') };
+      const etag = response.headers.get('etag');
+      if (method === 'PUT' && (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag))) throw new Error('S3 mutation outcome uncertain');
+      const checksums = method === 'PUT' ? returnedChecksums(response.headers) : undefined;
+      return { etag, ...(checksums ? { checksums } : {}) };
     }
     if (response.status === 408 || response.status >= 500) throw new Error('S3 mutation outcome uncertain');
     throw new Error(`S3 request failed with status ${response.status}`);
@@ -77,6 +81,40 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
         return { status: response.status, etag: response.headers.get('etag') };
       }
       throw new Error(`S3 request failed with status ${response.status}`);
+    },
+  };
+}
+
+export type ImmutableS3Reference = { key: string; etag: string };
+
+/**
+ * Reads require a strong, opaque publication ETag. A successful response without
+ * the same ETag is rejected; 412 is returned unchanged and never retried.
+ * Provider qualification must establish atomic conditional writes and reads;
+ * mocked responses cannot prove that the provider honors these conditions.
+ */
+export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objects>) {
+  function validate(reference: ImmutableS3Reference) {
+    if (!reference || typeof reference.etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(reference.etag)) {
+      throw new Error('Invalid S3 immutable reference');
+    }
+    return { key: reference.key, etag: reference.etag };
+  }
+  return {
+    async get(reference: ImmutableS3Reference, options: { maxResponseBytes: number; signal?: AbortSignal; range?: string }) {
+      const { key, etag } = validate(reference);
+      const result = await objects.get(key, { maxResponseBytes: options.maxResponseBytes, signal: options.signal, range: options.range, ifMatch: etag });
+      if ((result.status === 200 || result.status === 206) && result.etag !== etag) {
+        void result.body.cancel().catch(() => {});
+        throw new Error('S3 immutable read evidence mismatch');
+      }
+      return result;
+    },
+    async head(reference: ImmutableS3Reference, options: { signal?: AbortSignal } = {}) {
+      const { key, etag } = validate(reference);
+      const result = await objects.head(key, { signal: options.signal, ifMatch: etag });
+      if (result.status === 200 && result.etag !== etag) throw new Error('S3 immutable read evidence mismatch');
+      return result;
     },
   };
 }

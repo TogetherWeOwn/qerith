@@ -13,7 +13,7 @@ export function createMultipartComplete(...args: Parameters<typeof createS3Trans
     if (signal?.aborted) throw new Error('S3 request cancelled');
     let response: Awaited<ReturnType<typeof request>>;
     try {
-      response = await request({ method: 'POST', key, query: { uploadId }, body, headers: { 'content-type': 'application/xml' }, signal, maxResponseBytes: 64 * 1024 });
+      response = await request({ method: 'POST', key, query: { uploadId }, body, headers: { 'content-type': 'application/xml', 'if-none-match': '*' }, signal, maxResponseBytes: 64 * 1024 });
     } catch {
       throw new Error('S3 multipart completion outcome uncertain');
     }
