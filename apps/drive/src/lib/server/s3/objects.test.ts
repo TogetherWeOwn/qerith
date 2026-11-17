@@ -264,14 +264,15 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   assert.deepEqual(sent.map((request) => request.headers.get('if-match')), [ref.etag, ref.etag, ref.etag]);
   assert.equal(sent[1].headers.get('range'), 'bytes=0-0');
   assert.match(sent[1].headers.get('authorization') ?? '', /signedheaders=[^,]*if-match/i);
+  await assert.rejects(reader.get(ref, { maxResponseBytes: 1, range: 'bytes=0-0' }), /evidence mismatch/);
   etag = undefined;
   await assert.rejects(reader.get(ref, { maxResponseBytes: 1 }), /evidence mismatch/);
   await assert.rejects(reader.head(ref), /evidence mismatch/);
   status = 412;
   assert.equal((await reader.get(ref, { maxResponseBytes: 1 })).status, 412);
-  assert.equal(sent.length, 6);
+  assert.equal(sent.length, 7);
   await assert.rejects(reader.get({ key: 'key', etag: '*' }, { maxResponseBytes: 1 }), /Invalid S3 immutable reference/);
-  assert.equal(sent.length, 6);
+  assert.equal(sent.length, 7);
 });
 
 test('HEAD cancels without exposing abort reasons and rejects unsafe dot segments', async () => {

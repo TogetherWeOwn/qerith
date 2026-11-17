@@ -90,8 +90,9 @@ export type ImmutableS3Reference = { key: string; etag: string };
 /**
  * Reads require a strong, opaque publication ETag. A successful response without
  * the same ETag is rejected; 412 is returned unchanged and never retried.
- * Provider qualification must establish atomic conditional writes and reads;
- * mocked responses cannot prove that the provider honors these conditions.
+ * An ETag is not a version ID: callers must prevent key reuse after deletion and
+ * gate cleanup independently. DELETE here is unconditional. Provider qualification
+ * must establish atomic conditional writes and reads; mocks cannot prove this.
  */
 export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objects>) {
   function validate(reference: ImmutableS3Reference) {
@@ -104,7 +105,8 @@ export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objec
     async get(reference: ImmutableS3Reference, options: { maxResponseBytes: number; signal?: AbortSignal; range?: string }) {
       const { key, etag } = validate(reference);
       const result = await objects.get(key, { maxResponseBytes: options.maxResponseBytes, signal: options.signal, range: options.range, ifMatch: etag });
-      if ((result.status === 200 || result.status === 206) && result.etag !== etag) {
+      if ((result.status === 200 || result.status === 206) &&
+          (result.etag !== etag || (options.range !== undefined && result.status !== 206))) {
         void result.body.cancel().catch(() => {});
         throw new Error('S3 immutable read evidence mismatch');
       }
