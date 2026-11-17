@@ -88,7 +88,7 @@
 {#if total !== undefined || onMore}
   <div class="paging">
     {#if onMore && ((total !== undefined && total > 200) || hasMore || loadingMore || usedPaging)}<button type="button" aria-busy={loadingMore} aria-disabled={loadingMore || !hasMore} on:click={() => { if (!loadingMore && hasMore) { usedPaging = true; onMore?.(); } }}>{loadingMore ? 'Showing more…' : hasMore ? loadMoreError ? 'Try again' : 'Show 200 more' : 'All items shown'}</button>{/if}
-    <span>{items.length.toLocaleString()}{#if total !== undefined} of {total.toLocaleString()}{/if} shown</span>
+    <span>{total === undefined ? `${items.length.toLocaleString()} shown` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown`}</span>
   </div>
   {#if loadMoreError}<p role="alert">More items didn't load. Check your connection, then try again.</p>{/if}
 {/if}
