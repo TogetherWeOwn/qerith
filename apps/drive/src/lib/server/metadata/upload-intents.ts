@@ -81,8 +81,9 @@ export class UploadIntents {
     return page.results;
   }
 
-  // Trusted cleanup must restart this scan: revocation can happen after success,
-  // or a late success can arrive behind the cursor. Never expose it to a principal.
+  // Trusted reconciliation only; never expose this scan to a principal. Restart
+  // from the beginning because revocation or late evidence may occur behind the
+  // cursor. A scan result alone does not authorize deletion or provider operations.
   async listRevokedEvidence(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
