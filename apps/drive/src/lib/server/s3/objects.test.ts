@@ -218,6 +218,16 @@ test('cancelled and oversized mutation responses do not imply rollback', async (
   await assert.rejects(oversized.delete('key'), { message: 'S3 mutation outcome uncertain' });
 });
 
+test('PUT treats unexpected success statuses as uncertain even with an ETag', async () => {
+  let calls = 0;
+  const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => {
+    calls++;
+    return new Response(null, { status: 202, headers: { etag: '"opaque"' } });
+  } });
+  await assert.rejects(objects.put('key', new Uint8Array()), { message: 'S3 mutation outcome uncertain' });
+  assert.equal(calls, 1);
+});
+
 test('PUT preserves optional provider checksum evidence', async () => {
   const objects = createS3Objects(config, { timeoutMs: 1000, fetch: async () => new Response(null, {
     headers: { etag: '"opaque"', 'x-amz-checksum-crc32c': 'provider-value' }

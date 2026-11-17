@@ -23,6 +23,9 @@ export function createS3Objects(...args: Parameters<typeof createS3Transport>) {
     } catch {
       throw new Error('S3 mutation outcome uncertain');
     }
+    if (method === 'PUT' && response.status >= 200 && response.status < 300 && response.status !== 200) {
+      throw new Error('S3 mutation outcome uncertain');
+    }
     if (response.status >= 200 && response.status < 300) {
       const etag = response.headers.get('etag');
       if (method === 'PUT' && (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag))) throw new Error('S3 mutation outcome uncertain');
