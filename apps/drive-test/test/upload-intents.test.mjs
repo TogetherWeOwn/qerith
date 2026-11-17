@@ -1,6 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
+import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 
 it('upgrades existing metadata with a private upload intent journal', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0016_upload_intents.sql'));
@@ -15,4 +16,62 @@ it('upgrades existing metadata with a private upload intent journal', async () =
     .toEqual({ state: 'created', version: 0, upload_id: null });
   await expect(env.DB.prepare("INSERT INTO drive_upload_intents (id, owner_id, object_key, state) VALUES ('invalid', 'alice', 'other', 'acknowledged')").run()).rejects.toThrow();
   expect((await env.DB.prepare('SELECT id FROM drive_entries').all()).results).toEqual([{ id: 'folder' }]);
+});
+
+it('claims attempts atomically, retains late evidence and isolates revoked owners', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+    .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
+  const intents = new UploadIntents(env.DB);
+  expect(await intents.create('revoked')).toBeNull();
+  const initial = await intents.create('alice');
+  expect(await intents.get('bob', initial.id)).toBeNull();
+  expect(await intents.claim('bob', initial.id, 0, 'allocation')).toBeNull();
+  const claims = await Promise.all([
+    intents.claim('alice', initial.id, 0, 'allocation'),
+    intents.claim('alice', initial.id, 0, 'allocation'),
+  ]);
+  expect(claims.filter(Boolean)).toHaveLength(1);
+  expect(await intents.recordNotDispatched('alice', initial.id, 1, 'allocation')).toBe(true);
+  expect(await intents.recordSuccess('alice', initial.id, 1, { kind: 'allocation', uploadId: 'stale' })).toBe(false);
+  expect(await intents.claim('alice', initial.id, 0, 'allocation')).toBeNull();
+  expect(await intents.claim('alice', initial.id, 2, 'allocation')).toMatchObject({ state: 'initiating', version: 3 });
+  expect(await intents.recordUncertain('alice', initial.id, 3, 'allocation')).toBe(true);
+  expect(await intents.claim('alice', initial.id, 4, 'allocation')).toBeNull();
+  expect(await intents.recordSuccess('alice', initial.id, 3, { kind: 'allocation', uploadId: 'late-id' })).toBe(true);
+  expect(await intents.recordSuccess('alice', initial.id, 3, { kind: 'allocation', uploadId: 'wrong-id' })).toBe(false);
+  expect(await intents.get('alice', initial.id)).toMatchObject({ state: 'uncertain', upload_id: 'late-id', version: 5 });
+
+  const completion = await intents.create('alice');
+  await intents.claim('alice', completion.id, 0, 'allocation');
+  await intents.recordSuccess('alice', completion.id, 1, { kind: 'allocation', uploadId: 'provider-id' });
+  expect(await intents.claim('alice', completion.id, 2, 'completion')).toMatchObject({ state: 'completing', version: 3 });
+  expect(await intents.recordNotDispatched('alice', completion.id, 3, 'completion')).toBe(true);
+  expect(await intents.claim('alice', completion.id, 4, 'completion')).toMatchObject({ version: 5 });
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
+  expect(await intents.get('alice', completion.id)).toBeNull();
+  expect(await intents.claim('alice', completion.id, 5, 'completion')).toBeNull();
+  expect(await intents.recordUncertain('alice', completion.id, 5, 'completion')).toBe(true);
+  expect(await intents.recordSuccess('alice', completion.id, 5, { kind: 'completion' })).toBe(true);
+  expect(await env.DB.prepare('SELECT state, upload_id, completion_acknowledged FROM drive_upload_intents WHERE id = ?')
+    .bind(completion.id).first()).toEqual({ state: 'uncertain', upload_id: 'provider-id', completion_acknowledged: 1 });
+  expect(await intents.get('bob', completion.id)).toBeNull();
+  expect((await env.DB.prepare('SELECT id FROM drive_entries').all()).results).toEqual([]);
+});
+
+it('rejects malformed outcomes and treats acknowledgements as terminal', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('alice', 'member', 'active')").run();
+  const intents = new UploadIntents(env.DB);
+  const intent = await intents.create('alice');
+  await expect(intents.claim('alice', intent.id, Number.MAX_SAFE_INTEGER - 2, 'allocation')).rejects.toThrow();
+  await expect(intents.claim('alice', intent.id, -1, 'allocation')).rejects.toThrow();
+  await intents.claim('alice', intent.id, 0, 'allocation');
+  await expect(intents.recordSuccess('alice', intent.id, 1, { kind: 'allocation', uploadId: '' })).rejects.toThrow();
+  await intents.recordSuccess('alice', intent.id, 1, { kind: 'allocation', uploadId: 'id' });
+  await intents.claim('alice', intent.id, 2, 'completion');
+  expect(await intents.recordSuccess('alice', intent.id, 3, { kind: 'completion' })).toBe(true);
+  expect(await intents.claim('alice', intent.id, 4, 'completion')).toBeNull();
+  expect(await intents.recordUncertain('alice', intent.id, 3, 'completion')).toBe(false);
+  expect(await intents.get('alice', intent.id)).toMatchObject({ state: 'acknowledged', version: 4 });
 });
