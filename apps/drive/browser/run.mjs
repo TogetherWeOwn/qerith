@@ -40,13 +40,26 @@ const filenameCases = [
   ['only-spaces', '   ']
 ];
 
+async function assertWhitespaceName(link, name) {
+  const nodes = await link.evaluate(el => ({
+    firstType: el.firstChild?.nodeType,
+    firstText: el.firstChild?.textContent,
+    annotation: el.querySelector('span')?.textContent
+  }));
+  assert.equal(nodes.firstType, 3, 'Stored filename must be a text node');
+  assert.equal(nodes.firstText, name, 'Stored filename must be preserved exactly');
+  assert.equal(nodes.annotation, '(Whitespace-only name)');
+  assert.equal(await link.textContent(), name + '(Whitespace-only name)');
+}
+
 async function assertFullFilenames(page, selector) {
   for (const [id, name] of filenameCases) {
     const link = page.locator(`${selector} a[data-item-id="${id}"]`);
-    const displayed = name.trim() ? name : name + ' (Whitespace-only name)';
-    assert.equal(await link.getAttribute('aria-label'), displayed);
+    const label = name.trim() ? name : name + ' (Whitespace-only name)';
+    assert.equal(await link.getAttribute('aria-label'), label);
     assert.equal(await link.getAttribute('href'), `#${id}`);
-    assert.equal(await link.textContent(), displayed);
+    if (name.trim()) assert.equal(await link.textContent(), name);
+    else await assertWhitespaceName(link, name);
     assert.equal(await link.evaluate(el => {
       const nameNode = el.firstChild;
       if (nameNode?.nodeType !== Node.TEXT_NODE) return false;
@@ -673,7 +686,7 @@ try {
     const tab = container.locator('a[data-item-id="tab"]');
     assert.equal(await spaces.textContent(), 'report  final.txt');
     assert.equal(await spaces.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
-    assert.equal(await tab.textContent(), '\t(Whitespace-only name)');
+    await assertWhitespaceName(tab, '\t');
     assert.equal(await container.getByRole('link', { name: '(Whitespace-only name)', exact: true }).count(), 1);
     const hit = await spaces.evaluate(el => {
       const style = getComputedStyle(el);
