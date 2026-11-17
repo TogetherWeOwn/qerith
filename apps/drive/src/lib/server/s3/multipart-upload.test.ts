@@ -23,6 +23,15 @@ test('uploads a part once with opaque identifiers and preserves its quoted ETag'
   assert.equal(calls, 1);
 });
 
+test('preserves returned checksum evidence with the actual part size', async () => {
+  const upload = createMultipartUpload(config, { timeoutMs: 1000, fetch: async () => new Response(null, {
+    headers: { etag: '"opaque"', 'x-amz-checksum-sha256': 'provider-value' }
+  }) });
+  assert.deepEqual(await upload('key', 'id', 1, new Uint8Array([1, 2])), {
+    partNumber: 1, etag: '"opaque"', size: 2, checksums: { 'x-amz-checksum-sha256': 'provider-value' }
+  });
+});
+
 test('reports the sent size if the caller detaches the input during upload', async () => {
   const body = new Uint8Array([1, 2, 3]);
   const upload = createMultipartUpload(config, { timeoutMs: 1000, fetch: async (input) => {
