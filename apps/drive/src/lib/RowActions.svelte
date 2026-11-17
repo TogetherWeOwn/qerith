@@ -9,6 +9,7 @@
   export let name: string;
   export let file = true;
   export let owned = true;
+  export let detailsOnly = false;
   export let onAction: (action: RowAction) => void;
   // The listing owns row navigation and dialog/removal focus after selection.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
@@ -22,27 +23,32 @@
   let menuId = '';
   onMount(() => {
     menuId = `row-actions-menu-${++nextMenuId}`;
-    const onScroll = (event: Event) => {
-      const target = event.target;
-      if (open && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
-        const restore = menu.contains(document.activeElement);
-        close();
-        if (restore) trigger.focus({ preventScroll: true });
-      }
-    };
-    window.addEventListener('scroll', onScroll, true);
-    return () => { close(); window.removeEventListener('scroll', onScroll, true); };
+    return () => close();
   });
+  function onScroll(event: Event) {
+    const target = event.target;
+    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
+      const restore = menu.contains(document.activeElement);
+      close();
+      if (restore) trigger.focus({ preventScroll: true });
+    }
+  }
+  function onResize() { if (open) close(true); }
   let menuLeft = 0;
   let menuTop = 0;
   $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
-  $: actions = (owned
+  $: actions = (detailsOnly ? ['Details'] : owned
     ? [...(file ? ['Download'] : []), 'Share', 'Rename', 'Move', 'Details', 'Delete']
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
 
   async function show(last = false) {
     const request = ++opening;
     compact = window.matchMedia('(max-width: 820px)').matches;
+    if (!open) {
+      window.addEventListener('scroll', onScroll, true);
+      window.addEventListener('pointerdown', outside);
+      window.addEventListener('resize', onResize);
+    }
     open = true;
     await tick();
     if (!open || !menu || request !== opening) return;
@@ -62,6 +68,9 @@
 
   function close(restore = false) {
     ++opening;
+    window.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('pointerdown', outside);
+    window.removeEventListener('resize', onResize);
     if (layer?.open) layer.close();
     else if (layer?.matches(':popover-open')) layer.hidePopover();
     open = false;
@@ -105,7 +114,6 @@
   }
 </script>
 
-<svelte:window onpointerdown={outside} onresize={() => { if (open) close(true); }} />
 <div class="anchor">
   <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${displayName}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>

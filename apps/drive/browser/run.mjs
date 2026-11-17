@@ -357,8 +357,10 @@ try {
     for (const name of ['Archive', 'a-very-long-file-name-without-breaks-to-check-reflow.txt', 'Résumé 2025.pdf']) {
       await page.keyboard.press('Tab');
       assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
+      await page.keyboard.press('Tab');
+      assert.equal(await container.getByRole('button', { name: `Actions for ${name}` }).evaluate(el => el === document.activeElement), true);
     }
-    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'actions', 'long file', 'actions', 'Résumé 2025.pdf', 'actions'] }));
     if (width !== 320) {
       const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
       await page.screenshot({ path: resolve(output, `${size}-greyscale.png`) });
@@ -411,8 +413,19 @@ try {
     const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     const page = await context.newPage();
-    await page.goto(`${origin}/?listing&details`, { waitUntil: 'networkidle' });
     const name = 'a-very-long-file-name-without-breaks-to-check-reflow.txt';
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: `Actions for ${name}` }).click();
+    assert.equal(await page.getByRole('menuitem').count(), 1);
+    assert.equal(await page.getByRole('menuitem', { name: 'Details' }).count(), 1);
+    await page.getByRole('menuitem', { name: 'Details' }).click();
+    assert.match(await page.getByRole('group', { name: `Details for ${name}` }).textContent(), /a-very-long-file-name-without-breaks-to-check-reflow\.txt/);
+    await page.goto(`${origin}/?listing&details&missing-details`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: `Actions for ${name}` }).click();
+    assert.equal(await page.getByRole('menuitem', { name: 'Download' }).count(), 1);
+    await page.getByRole('menuitem', { name: 'Details' }).click();
+    assert.equal(await page.getByRole('group', { name: `Details for ${name}` }).count(), 1);
+    await page.goto(`${origin}/?listing&details`, { waitUntil: 'networkidle' });
     const trigger = page.getByRole('button', { name: `Actions for ${name}` });
     await trigger.focus();
     await page.keyboard.press('Enter');
@@ -422,6 +435,16 @@ try {
     assert.match(await facts.textContent(), /1,000 bytes/);
     assert.match(await facts.textContent(), /Uploaded/);
     await page.waitForFunction(() => document.activeElement?.matches('[data-details-id]'));
+    await page.getByRole('button', { name: 'After listing' }).focus();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.getByRole('button', { name: 'After listing' }).evaluate(el => el === document.activeElement), true);
+    assert.equal(await facts.count(), 1);
+    await facts.evaluate(el => {
+      const skipped = document.createElement('button');
+      skipped.tabIndex = -1;
+      skipped.textContent = 'Programmatic focus only';
+      el.prepend(skipped);
+    });
     await trigger.focus();
     await page.keyboard.press('Enter');
     await page.keyboard.press('Tab');

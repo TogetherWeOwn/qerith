@@ -4,8 +4,8 @@
   export let size: string;
   export let bytes: number | null;
   export let kind: string;
-  export let modifiedFull: string;
-  export let uploaded: string;
+  export let modifiedFull: string | undefined = undefined;
+  export let uploaded: string | undefined = undefined;
   export let sharedWith: string[] | undefined = undefined;
   export let onClose: () => void;
 </script>
@@ -15,8 +15,8 @@
     <div><dt>Name</dt><dd dir="auto">{name}</dd></div>
     <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{size} · <data value={bytes}>{bytes.toLocaleString()} bytes</data>{/if}</dd></div>
     <div><dt>Kind</dt><dd>{kind}</dd></div>
-    <div><dt>Modified</dt><dd>{modifiedFull}</dd></div>
-    <div><dt>Uploaded</dt><dd>{uploaded}</dd></div>
+    {#if modifiedFull}<div><dt>Modified</dt><dd>{modifiedFull}</dd></div>{/if}
+    {#if uploaded}<div><dt>Uploaded</dt><dd>{uploaded}</dd></div>{/if}
     {#if sharedWith}<div><dt>Shared with</dt><dd>{sharedWith.join(', ')}</dd></div>{/if}
   </dl>
   <button type="button" on:click={onClose}>Hide details</button>
