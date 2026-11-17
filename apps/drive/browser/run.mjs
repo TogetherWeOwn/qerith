@@ -267,7 +267,7 @@ try {
     assert.equal(await page.getByText('401 of 401 shown').count(), 1);
     assert.equal(await page.getByRole('button', { name: 'All items shown' }).evaluate(el => el === document.activeElement), true);
     if (width > 820) await page.getByRole('button', { name: 'Name' }).click();
-    else await page.getByLabel('Sort').selectOption('desc');
+    else await page.getByLabel('Sort', { exact: true }).selectOption('desc');
     assert.equal(await container.getByRole('link').count(), 200);
     assert.equal(await container.getByRole('link').first().textContent(), 'File 400.txt');
     assert.equal(await page.getByRole('status').textContent(), 'Folders first, then files, each sorted by name, Z to A, in binary order.');
