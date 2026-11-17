@@ -147,12 +147,12 @@ export function createImmutableS3Reader(objects: ReturnType<typeof createS3Objec
       const range = options.range;
       const result = await objects.get(key, { maxResponseBytes: options.maxResponseBytes, signal: options.signal, range, ifMatch: etag });
       if (result.status === 200 || result.status === 206) {
-        const expected = range === undefined
-          ? result.contentLength !== null && /^\d+$/.test(result.contentLength) ? BigInt(result.contentLength) : undefined
-          : rangeLength(range, result.contentRange);
+        const declaredLength = result.contentLength !== null && /^\d+$/.test(result.contentLength)
+          ? BigInt(result.contentLength) : undefined;
+        const expected = range === undefined ? declaredLength : rangeLength(range, result.contentRange);
         if (result.etag !== etag || (range === undefined
-          ? result.status !== 200 || result.contentRange !== null || (result.contentLength !== null && expected === undefined)
-          : result.status !== 206 || expected === undefined)) {
+          ? result.status !== 200 || result.contentRange !== null || expected === undefined
+          : result.status !== 206 || expected === undefined || (result.contentLength !== null && declaredLength !== expected))) {
           void result.body.cancel().catch(() => {});
           throw new Error('S3 immutable read evidence mismatch');
         }

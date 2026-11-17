@@ -262,7 +262,7 @@ test('immutable reads pin full, range and HEAD, reject missing evidence and neve
   const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async (input) => {
     const request = input as Request;
     sent.push(request);
-    return new Response(request.method === 'HEAD' || status === 412 ? null : 'a', { status, headers: { ...(etag ? { etag } : {}), ...(contentRange ? { 'content-range': contentRange } : {}) } });
+    return new Response(request.method === 'HEAD' || status === 412 ? null : 'a', { status, headers: { ...(etag ? { etag } : {}), ...(contentRange ? { 'content-range': contentRange } : {}), 'content-length': '1' } });
   } }));
   const ref = { key: 'key', etag: '"opaque+tag"' };
   const full = await reader.get(ref, { maxResponseBytes: 1 });
@@ -299,6 +299,23 @@ test('immutable full reads reject contradictory Content-Range evidence', async (
     new Response('a', { headers: { etag: '"tag"', 'content-range': 'bytes 0-0/10' } })
   }));
   await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, { maxResponseBytes: 10 }), /evidence mismatch/);
+});
+
+test('immutable reads reject missing full length and contradictory range lengths', async () => {
+  const cases: Record<string, string>[] = [
+    { etag: '"tag"' },
+    { etag: '"tag"', 'content-range': 'bytes 0-2/3', 'content-length': '10' },
+    { etag: '"tag"', 'content-range': 'bytes 0-2/3', 'content-length': 'invalid' }
+  ];
+  for (const headers of cases) {
+    const ranged = 'content-range' in headers;
+    const reader = createImmutableS3Reader(createS3Objects(config, { timeoutMs: 1000, fetch: async () =>
+      new Response('abc', { status: ranged ? 206 : 200, headers })
+    }));
+    await assert.rejects(reader.get({ key: 'key', etag: '"tag"' }, {
+      maxResponseBytes: 10, ...(ranged ? { range: 'bytes=0-2' } : {})
+    }), /evidence mismatch/);
+  }
 });
 
 test('immutable full reads enforce a declared content length', async () => {
