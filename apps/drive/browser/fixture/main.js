@@ -9,10 +9,11 @@ if (new URLSearchParams(window.location.search).has('listing')) {
     { url: sansUrl, face: new FontFace('Qerith Sans', `url(${JSON.stringify(sansUrl)})`, { weight: '200 900', stretch: '75% 125%', display: 'swap', unicodeRange }) },
     { url: monoUrl, face: new FontFace('Fragment Mono', `url(${JSON.stringify(monoUrl)})`, { weight: '400', display: 'optional', unicodeRange }) }
   ];
-  // Load before mounting so optional font display does not race the first layout.
-  // A failed load still allows the listing's existing fallback stack to render.
-  await Promise.allSettled(faces.map(async ({ face }) => { document.fonts.add(await face.load()); }));
-  window.fixtureFonts = faces;
+  // Register loaded faces so optional display does not race the font download.
+  // The listing can render with its existing fallback stack while requests settle.
+  window.fixtureFonts = Promise.allSettled(faces.map(async ({ face }) => {
+    document.fonts.add(await face.load());
+  })).then(() => faces);
 }
 
 mount(Fixture, { target: document.getElementById('app') });

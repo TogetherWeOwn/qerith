@@ -11,7 +11,7 @@ import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 
 async function assertListingFonts(page, responses, origin) {
-  const faces = await page.evaluate(() => window.fixtureFonts.map(({ url, face }) => ({
+  const faces = await page.evaluate(async () => (await window.fixtureFonts).map(({ url, face }) => ({
     url: new URL(url, document.baseURI).href,
     family: face.family,
     status: face.status,
@@ -52,9 +52,10 @@ async function assertListingFonts(page, responses, origin) {
     await session.send('DOM.enable');
     await session.send('CSS.enable');
     const { root } = await session.send('DOM.getDocument');
-    for (const [selector, text, family] of [
-      ['table.desktop a[data-item-id="2"]', 'Résumé 2025.pdf', 'Qerith Sans'],
-      ['table.desktop th[aria-sort]', 'Name', 'Fragment Mono']
+    // Chromium can decorate the reported family name with its font backend.
+    for (const [selector, text, postScriptName] of [
+      ['table.desktop a[data-item-id="2"]', 'Résumé 2025.pdf', 'QerithSans-Regular'],
+      ['table.desktop th[aria-sort]', 'Name', 'FragmentMono-Regular']
     ]) {
       const sample = page.locator(selector);
       assert.equal(await sample.isVisible(), true, `${text}: must be visible in the desktop fixture`);
@@ -62,8 +63,8 @@ async function assertListingFonts(page, responses, origin) {
       const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
       assert(nodeId, `${text}: expected a CDP node`);
       const { fonts } = await session.send('CSS.getPlatformFontsForNode', { nodeId });
-      assert(fonts.length > 0 && fonts.every(font => font.familyName === family && font.isCustomFont && font.glyphCount > 0),
-        `${text}: expected only custom ${family}, got ${JSON.stringify(fonts)}`);
+      assert(fonts.length > 0 && fonts.every(font => font.postScriptName === postScriptName && font.isCustomFont && font.glyphCount > 0),
+        `${text}: expected only custom ${postScriptName}, got ${JSON.stringify(fonts)}`);
       samples.push({ selector, text, fonts });
     }
   } finally {
