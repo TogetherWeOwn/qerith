@@ -70,6 +70,16 @@ export class UploadIntents {
     return page.results;
   }
 
+  // Reconciliation must also restart this scan after interruption, including for
+  // revoked owners. The upload ID distinguishes completion from allocation.
+  async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state = 'uncertain' AND id > ? ORDER BY id LIMIT ?`)
+      .bind(afterId, limit).all<UploadIntent>();
+    return page.results;
+  }
+
   // The following methods are trusted provider-operation code only. Their arguments
   // must come from the successful claim, never directly from a request. They record
   // outcomes after revocation without returning reconciliation data to the caller.
@@ -90,9 +100,12 @@ export class UploadIntents {
     validateVersion(version);
     if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
     const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
-      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? RETURNING id`)
+      WHERE id = ? AND owner_id = ?
+        AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${operation === 'allocation' ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
+      RETURNING id`)
       .bind(operation === 'allocation' ? 'created' : 'allocated', id, ownerId,
-        operation === 'allocation' ? 'initiating' : 'completing', version).first<{ id: string }>();
+        operation === 'allocation' ? 'initiating' : 'completing', version, version + 1).first<{ id: string }>();
     return row !== null;
   }
 
