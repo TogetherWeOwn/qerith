@@ -1,10 +1,12 @@
 -- Evidence only: no backfill, existing-writer fence, or provider authority.
 CREATE TABLE drive_upload_part_operations (
-  operation_id TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 128),
+  operation_id TEXT PRIMARY KEY NOT NULL CHECK (length(operation_id) BETWEEN 1 AND 128
+    AND length(operation_id) = length(CAST(operation_id AS BLOB)) AND operation_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
   intent_id TEXT NOT NULL REFERENCES drive_upload_intent_reservations (intent_id),
   owner_id TEXT NOT NULL,
   object_key TEXT NOT NULL,
-  storage_epoch TEXT NOT NULL CHECK (length(CAST(storage_epoch AS BLOB)) BETWEEN 1 AND 128),
+  storage_epoch TEXT NOT NULL CHECK (length(storage_epoch) BETWEEN 1 AND 128
+    AND length(storage_epoch) = length(CAST(storage_epoch AS BLOB)) AND storage_epoch NOT GLOB '*[^A-Za-z0-9._:-]*'),
   upload_id TEXT NOT NULL CHECK (length(CAST(upload_id AS BLOB)) BETWEEN 1 AND 65536),
   intent_version INTEGER NOT NULL CHECK (intent_version BETWEEN 0 AND 9007199254740991),
   part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
@@ -37,7 +39,7 @@ BEGIN SELECT RAISE(ABORT, 'upload part operations are permanent'); END;
 CREATE TABLE drive_upload_part_observations (
   operation_id TEXT NOT NULL REFERENCES drive_upload_part_operations (operation_id),
   kind TEXT NOT NULL,
-  reported_etag TEXT,
+  reported_etag BLOB,
   PRIMARY KEY (operation_id, kind)
 ) STRICT, WITHOUT ROWID;
 CREATE TRIGGER drive_upload_part_observations_guard_insert
@@ -46,8 +48,8 @@ WHEN EXISTS (SELECT 1 FROM drive_upload_part_observations
   WHERE operation_id = NEW.operation_id AND kind = NEW.kind)
   OR NOT EXISTS (SELECT 1 FROM drive_upload_part_operations WHERE operation_id = NEW.operation_id)
   OR NOT ((NEW.kind IS 'uncertain' AND NEW.reported_etag IS NULL)
-    OR (NEW.kind IS 'reported' AND typeof(NEW.reported_etag) = 'text'
-      AND length(CAST(NEW.reported_etag AS BLOB)) BETWEEN 1 AND 1024))
+    OR (NEW.kind IS 'reported' AND typeof(NEW.reported_etag) = 'blob'
+      AND length(NEW.reported_etag) BETWEEN 1 AND 8192))
 BEGIN SELECT RAISE(ABORT, 'invalid or duplicate upload part observation'); END;
 CREATE TRIGGER drive_upload_part_observations_no_update
 BEFORE UPDATE ON drive_upload_part_observations

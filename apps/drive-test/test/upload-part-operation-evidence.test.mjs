@@ -4,39 +4,24 @@ import { expect, it } from 'vitest';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 import { UploadPartOperationEvidence } from '../../drive/src/lib/server/metadata/upload-part-operation-evidence.ts';
 
-const prior = '0019_upload_operation_evidence.sql';
 const migration = '0020_upload_part_operation_evidence.sql';
-const migrate = (limit = migration) => applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name <= limit));
+const migrate = () => applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name <= migration));
 const run = (sql, ...args) => env.DB.prepare(sql).bind(...args).run();
 const rows = async (sql) => (await env.DB.prepare(sql).all()).results;
 const operations = 'drive_upload_part_operations';
 const observations = 'drive_upload_part_observations';
-const etag = '"unverified-tag"';
+const etag = new Uint8Array([99, 0x22, 0x80, 0xff, 0x22, 99]).subarray(1, 5);
 const operation = (id) => ({ operationId: id, intentId: `intent-${id}`, ownerId: `owner-${id}`,
   objectKey: `key-${id}`, storageEpoch: 'epoch-1', uploadId: 'opaque-upload-id', intentVersion: 2,
   partNumber: 1, sizeBytes: 5 });
-const insertIntent = (op, state = 'allocated', acknowledged = 0) => run(`INSERT INTO drive_upload_intents
-  (id, owner_id, object_key, upload_id, version, state, completion_acknowledged) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-op.intentId, op.ownerId, op.objectKey, op.uploadId, op.intentVersion, state, acknowledged);
+const insertIntent = (op) => run(`INSERT INTO drive_upload_intents
+  (id, owner_id, object_key, upload_id, version, state) VALUES (?, ?, ?, ?, ?, 'allocated')`,
+  op.intentId, op.ownerId, op.objectKey, op.uploadId, op.intentVersion);
 async function seed(op) {
   await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", op.ownerId);
   await insertIntent(op);
 }
 const ledger = () => new UploadPartOperationEvidence(env.DB);
-
-it('upgrades 0019 without inferring part evidence from legacy rows', async () => {
-  const op = operation('legacy-part');
-  await migrate(prior);
-  await insertIntent(op, 'acknowledged', 1);
-  const before = await rows('SELECT * FROM drive_upload_intents');
-  await migrate();
-  await migrate();
-  expect(await rows('SELECT * FROM drive_upload_intents')).toEqual(before);
-  expect(await rows(`SELECT * FROM ${operations}`)).toEqual([]);
-  expect(await rows(`SELECT * FROM ${observations}`)).toEqual([]);
-  await expect(ledger().reconcileAdmissionWrite(op)).resolves.toBe('unknown');
-  await expect(ledger().reconcileObservationWrite(op, etag)).resolves.toBe('unknown');
-});
 
 it('records evidence only for a live exact allocation and does not fence existing writers', async () => {
   const op = operation('admission');
@@ -61,11 +46,12 @@ it('records evidence only for a live exact allocation and does not fence existin
     .rejects.toThrow('invalid or duplicate');
   await expect(ledger().recordAdmission({ ...anotherPart, operationId: 'sealed', partNumber: 3, intentVersion: 3 }))
     .rejects.toThrow('invalid or duplicate');
-  await run('UPDATE drive_upload_intents SET state = ?, version = 4 WHERE id = ?', 'allocated', op.intentId);
+  await expect(intents.recordNotDispatched(op.ownerId, op.intentId, 3, 'completion')).resolves.toBe(true);
   await expect(ledger().recordAdmission({ ...op, operationId: 'attempt-on-new-version', intentVersion: 4 }))
     .rejects.toThrow('invalid or duplicate');
+  await ledger().recordAdmission({ ...op, operationId: 'unused-on-new-version', partNumber: 3, intentVersion: 4 });
   await run("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", op.ownerId);
-  await expect(ledger().recordAdmission({ ...anotherPart, operationId: 'revoked', partNumber: 3, intentVersion: 4 }))
+  await expect(ledger().recordAdmission({ ...op, operationId: 'revoked', partNumber: 4, intentVersion: 4 }))
     .rejects.toThrow('invalid or duplicate');
 });
 
@@ -73,7 +59,19 @@ it('cannot replace an operation or observation through SQLite conflict policies'
   const op = operation('immutable-part');
   await migrate();
   await seed(op);
+  for (const [id, epoch] of [["CAST(x'80' AS TEXT)", '?'], ['?', "CAST(x'80' AS TEXT)"]]) {
+    await expect(run(`INSERT INTO ${operations} SELECT ${id}, id, owner_id, object_key, ${epoch}, upload_id,
+      version, 1, 5 FROM drive_upload_intents WHERE id = ?`, epoch === '?' ? op.storageEpoch : op.operationId, op.intentId))
+      .rejects.toThrow('CHECK constraint failed');
+  }
   await ledger().recordAdmission(op);
+  await expect(run(`INSERT OR IGNORE INTO ${observations} VALUES (?, 'reported', CAST(x'80' AS TEXT))`, op.operationId))
+    .rejects.toThrow(/invalid or duplicate|cannot store TEXT/);
+  for (const [kind, value] of [['reported', "x''"], ['reported', 'zeroblob(8193)'],
+    ['uncertain', "x'80'"], ['other', 'NULL']]) {
+    await expect(run(`INSERT OR IGNORE INTO ${observations} VALUES (?, ?, ${value})`, op.operationId, kind))
+      .rejects.toThrow('invalid or duplicate');
+  }
   await ledger().recordObservation(op, etag);
   for (const policy of ['', 'OR ABORT', 'OR IGNORE', 'OR REPLACE', 'OR FAIL', 'OR ROLLBACK']) {
     for (const [id, part] of [["'alias'", 'part_number'], ['operation_id', 'part_number + 1']]) {
@@ -82,23 +80,25 @@ it('cannot replace an operation or observation through SQLite conflict policies'
         .rejects.toThrow('invalid or duplicate');
     }
     for (const id of [op.operationId, 'absent']) {
-      await expect(run(`INSERT ${policy} INTO ${observations} VALUES (?, 'reported', 'different')`, id))
+      await expect(run(`INSERT ${policy} INTO ${observations} VALUES (?, 'reported', x'01')`, id))
         .rejects.toThrow('invalid or duplicate');
     }
     await expect(run(`UPDATE ${policy} ${operations} SET size_bytes = 0 WHERE operation_id = ?`, op.operationId))
       .rejects.toThrow('immutable');
-    await expect(run(`UPDATE ${policy} ${observations} SET reported_etag = 'changed' WHERE operation_id = ?`, op.operationId))
+    await expect(run(`UPDATE ${policy} ${observations} SET reported_etag = x'01' WHERE operation_id = ?`, op.operationId))
       .rejects.toThrow('immutable');
   }
-  await expect(run(`INSERT INTO ${observations} VALUES (?, 'reported', 'different')
+  await expect(run(`INSERT INTO ${observations} VALUES (?, 'reported', x'01')
     ON CONFLICT (operation_id, kind) DO UPDATE SET reported_etag = excluded.reported_etag`, op.operationId))
     .rejects.toThrow('invalid or duplicate');
   for (const table of [observations, operations]) {
     await expect(run(`DELETE FROM ${table} WHERE operation_id = ?`, op.operationId)).rejects.toThrow('permanent');
   }
   await expect(ledger().reconcileObservationWrite(op, etag)).resolves.toBe('recorded');
-  await expect(ledger().recordObservation(op, 'é'.repeat(513))).rejects.toThrow('Invalid reported part ETag');
-  await expect(ledger().reconcileObservationWrite(op, '\ud800')).rejects.toThrow('Invalid reported part ETag');
+  const oversized = new Uint8Array(8193);
+  Object.defineProperty(oversized, 'byteLength', { value: 1 });
+  await expect(ledger().recordObservation(op, oversized)).rejects.toThrow('Invalid reported part ETag');
+  await expect(ledger().reconcileObservationWrite(op, new Uint16Array([1]))).rejects.toThrow('Invalid reported part ETag');
 });
 
 it('resolves lost D1 acknowledgements and records a late report without clearing uncertainty', async () => {
@@ -131,7 +131,7 @@ it('resolves lost D1 acknowledgements and records a late report without clearing
     await expect(reconciler.reconcileObservationWrite(wrong, etag)).resolves.toBe('unknown');
   }
   await expect(reconciler.reconcileObservationWrite(op, etag)).resolves.toBe('recorded');
-  await expect(reconciler.reconcileObservationWrite(op, '"different"')).resolves.toBe('conflict');
+  await expect(reconciler.reconcileObservationWrite(op, new Uint8Array([0x22, 0x80, 0xfe, 0x22]))).resolves.toBe('conflict');
   await expect(reconciler.reconcileObservationWrite(op, null)).resolves.toBe('recorded');
   await expect(insertIntent({ ...op, objectKey: 'alternate-key' })).rejects.toThrow('upload intent ID already reserved');
   expect(await rows("SELECT id FROM drive_upload_intents WHERE id = 'intent-late-part'")).toEqual([]);

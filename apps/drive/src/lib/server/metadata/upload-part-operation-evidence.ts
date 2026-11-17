@@ -1,5 +1,5 @@
 interface Statement {
-  bind(...values: (string | number | null)[]): Statement;
+  bind(...values: (string | number | ArrayBuffer | null)[]): Statement;
   first<T>(): Promise<T | null>;
 }
 interface Session { prepare(sql: string): Statement }
@@ -27,11 +27,13 @@ function identity(op: UploadPartOperation): (string | number)[] {
 }
 const exactOperation = `o.operation_id = ? AND o.intent_id = ? AND o.owner_id = ? AND o.object_key = ?
   AND o.storage_epoch = ? AND o.upload_id = ? AND o.intent_version = ? AND o.part_number = ? AND o.size_bytes = ?`;
-function kind(reportedEtag: string | null): 'uncertain' | 'reported' {
-  if (reportedEtag === null) return 'uncertain';
-  if (!isText(reportedEtag) || reportedEtag.length < 1 || reportedEtag.length > 1024
-      || new TextEncoder().encode(reportedEtag).length > 1024) throw new TypeError('Invalid reported part ETag');
-  return 'reported';
+const typedArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag)!.get!;
+function observation(reportedEtag: Uint8Array | null): ['uncertain' | 'reported', ArrayBuffer | null] {
+  if (reportedEtag === null) return ['uncertain', null];
+  if (typedArrayTag.call(reportedEtag) !== 'Uint8Array') throw new TypeError('Invalid reported part ETag');
+  const size: number = Reflect.get(Uint8Array.prototype, 'byteLength', reportedEtag);
+  if (size < 1 || size > 8192) throw new TypeError('Invalid reported part ETag');
+  return ['reported', new Uint8Array(reportedEtag).buffer];
 }
 
 // Unwired server-side ledger. A recorded admission is a snapshot, not a claim
@@ -46,11 +48,11 @@ export class UploadPartOperationEvidence {
     if (!row) throw new Error('No upload part admission recorded');
   }
 
-  // Null records uncertainty. Non-null records only what the caller reported.
-  async recordObservation(op: UploadPartOperation, reportedEtag: string | null): Promise<void> {
+  // Null records uncertainty. Non-null stores opaque caller-supplied ETag bytes.
+  async recordObservation(op: UploadPartOperation, reportedEtag: Uint8Array | null): Promise<void> {
     const row = await this.db.prepare(`INSERT INTO drive_upload_part_observations (operation_id, kind, reported_etag)
       SELECT o.operation_id, ?, ? FROM drive_upload_part_operations o WHERE ${exactOperation}
-      RETURNING operation_id`).bind(kind(reportedEtag), reportedEtag, ...identity(op)).first();
+      RETURNING operation_id`).bind(...observation(reportedEtag), ...identity(op)).first();
     if (!row) throw new Error('No matching upload part operation');
   }
 
@@ -62,10 +64,11 @@ export class UploadPartOperationEvidence {
     return row ? 'recorded' : 'unknown';
   }
 
-  async reconcileObservationWrite(op: UploadPartOperation, reportedEtag: string | null): Promise<'recorded' | 'conflict' | 'unknown'> {
+  async reconcileObservationWrite(op: UploadPartOperation, reportedEtag: Uint8Array | null): Promise<'recorded' | 'conflict' | 'unknown'> {
+    const [kind, bytes] = observation(reportedEtag);
     const row = await this.db.withSession('first-primary').prepare(`SELECT (e.reported_etag IS ?) AS matches
       FROM drive_upload_part_operations o JOIN drive_upload_part_observations e ON e.operation_id = o.operation_id
-      WHERE e.kind = ? AND ${exactOperation}`).bind(reportedEtag, kind(reportedEtag), ...identity(op))
+      WHERE e.kind = ? AND ${exactOperation}`).bind(bytes, kind, ...identity(op))
       .first<{ matches: number }>();
     if (!row) return 'unknown';
     return row.matches === 1 ? 'recorded' : 'conflict';
