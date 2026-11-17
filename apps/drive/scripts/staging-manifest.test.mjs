@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { preparationManifest } from './staging-manifest.mjs';
+import { assertPreparationMatchesRun, preparationManifest } from './staging-manifest.mjs';
 
 const input = { sha: 'a'.repeat(40), runId: '123', runAttempt: '1' };
 
@@ -23,7 +23,22 @@ test('rejects malformed metadata instead of creating an unsafe prefix', () => {
   for (const invalid of [
     { sha: 'main' }, { sha: 'A'.repeat(40) }, { runId: '../1' },
     { runId: '0' }, { runAttempt: '' }, { runAttempt: '01' },
+    { runId: 123 }, { runAttempt: 1 }, { sha: { toString: () => input.sha } },
   ]) {
     assert.throws(() => preparationManifest({ ...input, ...invalid }));
   }
+});
+
+test('checks all preparation fields against the current run without granting admission', () => {
+  const manifest = preparationManifest(input);
+  assert.doesNotThrow(() => assertPreparationMatchesRun(manifest, input));
+  for (const [key, value] of Object.entries(manifest)) {
+    assert.throws(() => assertPreparationMatchesRun({ ...manifest, [key]: `${value}x` }, input));
+    const missing = { ...manifest };
+    delete missing[key];
+    assert.throws(() => assertPreparationMatchesRun(missing, input));
+  }
+  assert.throws(() => assertPreparationMatchesRun(manifest, { ...input, runAttempt: '2' }));
+  assert.throws(() => assertPreparationMatchesRun(null, input));
+  assert.throws(() => assertPreparationMatchesRun(Object.create(manifest), input));
 });

@@ -39,15 +39,16 @@ jobs:
           set -euo pipefail
           node --test scripts/staging-manifest.test.mjs
           node --input-type=module <<'NODE'
-          import { writeFileSync } from 'node:fs';
-          import { preparationManifest } from './scripts/staging-manifest.mjs';
-          const manifest = preparationManifest({
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { assertPreparationMatchesRun, preparationManifest } from './scripts/staging-manifest.mjs';
+          const run = {
             sha: process.env.GITHUB_SHA,
             runId: process.env.GITHUB_RUN_ID,
             runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-          });
-          writeFileSync(`${process.env.RUNNER_TEMP}/drive-staging-preparation.json`,
-            `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
+          };
+          const path = `${process.env.RUNNER_TEMP}/drive-staging-preparation.json`;
+          writeFileSync(path, `${JSON.stringify(preparationManifest(run), null, 2)}\n`, { flag: 'wx' });
+          assertPreparationMatchesRun(JSON.parse(readFileSync(path, 'utf8')), run);
           NODE
       - name: Upload preparation metadata
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
