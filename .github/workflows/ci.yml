@@ -183,6 +183,10 @@ jobs:
           fi
           [ "$fail" -eq 0 ] || exit 1
           echo "pin check: ${count} velmora git package(s) pinned by full rev"
+      - name: Verify advisory exception expiry guard
+        run: |
+          python3 -m unittest discover -s scripts -p test_advisory_expiry.py
+          python3 scripts/check_advisory_expiry.py
       - name: Audit advisories, bans, licenses, sources
         run: cargo-deny --manifest-path Cargo.toml check
 
