@@ -12,15 +12,16 @@ afterEach(async () => {
 });
 
 const migration = '0017_upload_key_reservations.sql';
+const throughKeyReservation = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= migration);
 const insert = (id, owner, key, policy = '') => env.DB.prepare(`INSERT ${policy} INTO drive_upload_intents
   (id, owner_id, object_key, state) VALUES (?, ?, ?, 'created')`).bind(id, owner, key).run();
 const keys = async () => (await env.DB.prepare('SELECT object_key FROM drive_upload_key_reservations ORDER BY object_key').all()).results;
 
 it('backfills existing keys and permanently reserves new keys across deletion', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name < migration));
+  await applyD1Migrations(env.DB, throughKeyReservation.filter(({ name }) => name < migration));
   await insert('old', 'alice', 'old-key');
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await applyD1Migrations(env.DB, throughKeyReservation);
+  await applyD1Migrations(env.DB, throughKeyReservation);
   expect(await keys()).toEqual([{ object_key: 'old-key' }]);
   await insert('new', 'bob', 'new-key');
   await env.DB.prepare("DELETE FROM drive_upload_intents WHERE id IN ('old', 'new')").run();
@@ -33,7 +34,7 @@ it('backfills existing keys and permanently reserves new keys across deletion', 
 });
 
 it('rejects identity mutations and conflict-policy replacement without losing evidence', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await applyD1Migrations(env.DB, throughKeyReservation);
   await insert('intent', 'alice', 'key');
   for (const column of ['id', 'owner_id', 'object_key']) {
     for (const policy of ['', 'OR IGNORE', 'OR REPLACE', 'OR FAIL', 'OR ROLLBACK']) {
@@ -54,7 +55,7 @@ it('rejects identity mutations and conflict-policy replacement without losing ev
 });
 
 it('does not reserve a key when the journal insert fails', async () => {
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await applyD1Migrations(env.DB, throughKeyReservation);
   await expect(env.DB.prepare("INSERT INTO drive_upload_intents (id, owner_id, object_key, state) VALUES ('bad', 'alice', 'unused', 'invalid')").run()).rejects.toThrow();
   expect(await keys()).toEqual([]);
   await insert('good', 'alice', 'unused');
