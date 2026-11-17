@@ -81,6 +81,17 @@ export class UploadIntents {
     return page.results;
   }
 
+  // Trusted cleanup must restart this scan: revocation can happen after success,
+  // or a late success can arrive behind the cursor. Never expose it to a principal.
+  async listRevokedEvidence(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state IN ('allocated', 'acknowledged') AND id > ?
+        AND NOT EXISTS (SELECT 1 FROM drive_active_members WHERE id = owner_id)
+      ORDER BY id LIMIT ?`).bind(afterId, limit).all<UploadIntent>();
+    return page.results;
+  }
+
   // The following methods are trusted provider-operation code only. Their arguments
   // must come from the successful claim or a trusted recovery scan, never directly
   // from a request. They record

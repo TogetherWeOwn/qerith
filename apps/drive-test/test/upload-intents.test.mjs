@@ -95,6 +95,40 @@ it('scans interrupted claims in bounded pages and quarantines without authorizin
   expect(await intents.listInFlight('', 100)).toHaveLength(1);
 });
 
+it('discovers revoked owners’ provider evidence after late success and restart', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('evidence-owner', 'member', 'active')").run();
+  let intents = new UploadIntents(env.DB);
+  const allocation = await intents.create('evidence-owner');
+  const completion = await intents.create('evidence-owner');
+  await intents.claim('evidence-owner', allocation.id, 0, 'allocation');
+  await intents.claim('evidence-owner', completion.id, 0, 'allocation');
+  await intents.recordSuccess('evidence-owner', completion.id, 1, { kind: 'allocation', uploadId: 'complete-id' });
+  expect(await intents.listRevokedEvidence('', 100)).not.toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: completion.id }),
+  ]));
+  await intents.claim('evidence-owner', completion.id, 2, 'completion');
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'evidence-owner'").run();
+  await intents.recordUncertain('evidence-owner', allocation.id, 1, 'allocation');
+  expect(await intents.recordSuccess('evidence-owner', allocation.id, 1, { kind: 'allocation', uploadId: 'late-id' })).toBe(true);
+  expect(await intents.recordSuccess('evidence-owner', completion.id, 3, { kind: 'completion' })).toBe(true);
+  intents = new UploadIntents(env.DB);
+  expect(await intents.get('evidence-owner', allocation.id)).toBeNull();
+  const rows = [];
+  let cursor = '';
+  for (;;) {
+    const page = await intents.listRevokedEvidence(cursor, 1);
+    if (!page.length) break;
+    rows.push(page[0]);
+    cursor = page[0].id;
+  }
+  expect(rows).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: allocation.id, state: 'allocated', upload_id: 'late-id' }),
+    expect.objectContaining({ id: completion.id, state: 'acknowledged', upload_id: 'complete-id', completion_acknowledged: 1 }),
+  ]));
+  await expect(intents.listRevokedEvidence('', 101)).rejects.toThrow();
+});
+
 it('rejects malformed outcomes and treats acknowledgements as terminal', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('terminal-owner', 'member', 'active')").run();
