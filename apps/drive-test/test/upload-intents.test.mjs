@@ -22,45 +22,45 @@ it('claims attempts atomically, retains late evidence and isolates revoked owner
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
   await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
-    .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
+    .bind('claim-alice', 'member', 'active', 'claim-bob', 'member', 'active', 'claim-revoked', 'member', 'revoked').run();
   const intents = new UploadIntents(env.DB);
-  expect(await intents.create('revoked')).toBeNull();
-  const initial = await intents.create('alice');
-  expect(await intents.get('bob', initial.id)).toBeNull();
-  expect(await intents.claim('bob', initial.id, 0, 'allocation')).toBeNull();
+  expect(await intents.create('claim-revoked')).toBeNull();
+  const initial = await intents.create('claim-alice');
+  expect(await intents.get('claim-bob', initial.id)).toBeNull();
+  expect(await intents.claim('claim-bob', initial.id, 0, 'allocation')).toBeNull();
   const claims = await Promise.all([
-    intents.claim('alice', initial.id, 0, 'allocation'),
-    intents.claim('alice', initial.id, 0, 'allocation'),
+    intents.claim('claim-alice', initial.id, 0, 'allocation'),
+    intents.claim('claim-alice', initial.id, 0, 'allocation'),
   ]);
   expect(claims.filter(Boolean)).toHaveLength(1);
-  expect(await intents.recordNotDispatched('alice', initial.id, 1, 'allocation')).toBe(true);
-  expect(await intents.recordSuccess('alice', initial.id, 1, { kind: 'allocation', uploadId: 'stale' })).toBe(false);
-  expect(await intents.claim('alice', initial.id, 0, 'allocation')).toBeNull();
-  expect(await intents.claim('alice', initial.id, 2, 'allocation')).toMatchObject({ state: 'initiating', version: 3 });
-  expect(await intents.recordUncertain('alice', initial.id, 3, 'allocation')).toBe(true);
-  expect(await intents.claim('alice', initial.id, 4, 'allocation')).toBeNull();
-  expect(await intents.recordSuccess('alice', initial.id, 3, { kind: 'allocation', uploadId: 'late-id' })).toBe(true);
-  expect(await intents.recordSuccess('alice', initial.id, 3, { kind: 'allocation', uploadId: 'wrong-id' })).toBe(false);
-  expect(await intents.get('alice', initial.id)).toMatchObject({ state: 'allocated', upload_id: 'late-id', version: 5 });
-  expect(await intents.claim('alice', initial.id, 5, 'completion')).toMatchObject({ state: 'completing', version: 6 });
-  expect(await intents.recordSuccess('alice', initial.id, 6, { kind: 'completion' })).toBe(true);
+  expect(await intents.recordNotDispatched('claim-alice', initial.id, 1, 'allocation')).toBe(true);
+  expect(await intents.recordSuccess('claim-alice', initial.id, 1, { kind: 'allocation', uploadId: 'stale' })).toBe(false);
+  expect(await intents.claim('claim-alice', initial.id, 0, 'allocation')).toBeNull();
+  expect(await intents.claim('claim-alice', initial.id, 2, 'allocation')).toMatchObject({ state: 'initiating', version: 3 });
+  expect(await intents.recordUncertain('claim-alice', initial.id, 3, 'allocation')).toBe(true);
+  expect(await intents.claim('claim-alice', initial.id, 4, 'allocation')).toBeNull();
+  expect(await intents.recordSuccess('claim-alice', initial.id, 3, { kind: 'allocation', uploadId: 'late-id' })).toBe(true);
+  expect(await intents.recordSuccess('claim-alice', initial.id, 3, { kind: 'allocation', uploadId: 'wrong-id' })).toBe(false);
+  expect(await intents.get('claim-alice', initial.id)).toMatchObject({ state: 'allocated', upload_id: 'late-id', version: 5 });
+  expect(await intents.claim('claim-alice', initial.id, 5, 'completion')).toMatchObject({ state: 'completing', version: 6 });
+  expect(await intents.recordSuccess('claim-alice', initial.id, 6, { kind: 'completion' })).toBe(true);
 
-  const completion = await intents.create('alice');
-  await intents.claim('alice', completion.id, 0, 'allocation');
-  await intents.recordSuccess('alice', completion.id, 1, { kind: 'allocation', uploadId: 'provider-id' });
-  expect(await intents.claim('alice', completion.id, 2, 'completion')).toMatchObject({ state: 'completing', version: 3 });
-  expect(await intents.recordUncertain('alice', completion.id, 3, 'completion')).toBe(true);
-  expect(await intents.recordNotDispatched('alice', completion.id, 3, 'allocation')).toBe(false);
-  expect(await intents.recordNotDispatched('alice', completion.id, 3, 'completion')).toBe(true);
-  expect(await intents.claim('alice', completion.id, 5, 'completion')).toMatchObject({ version: 6 });
-  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
-  expect(await intents.get('alice', completion.id)).toBeNull();
-  expect(await intents.claim('alice', completion.id, 6, 'completion')).toBeNull();
-  expect(await intents.recordUncertain('alice', completion.id, 6, 'completion')).toBe(true);
-  expect(await intents.recordSuccess('alice', completion.id, 6, { kind: 'completion' })).toBe(true);
+  const completion = await intents.create('claim-alice');
+  await intents.claim('claim-alice', completion.id, 0, 'allocation');
+  await intents.recordSuccess('claim-alice', completion.id, 1, { kind: 'allocation', uploadId: 'provider-id' });
+  expect(await intents.claim('claim-alice', completion.id, 2, 'completion')).toMatchObject({ state: 'completing', version: 3 });
+  expect(await intents.recordUncertain('claim-alice', completion.id, 3, 'completion')).toBe(true);
+  expect(await intents.recordNotDispatched('claim-alice', completion.id, 3, 'allocation')).toBe(false);
+  expect(await intents.recordNotDispatched('claim-alice', completion.id, 3, 'completion')).toBe(true);
+  expect(await intents.claim('claim-alice', completion.id, 5, 'completion')).toMatchObject({ version: 6 });
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'claim-alice'").run();
+  expect(await intents.get('claim-alice', completion.id)).toBeNull();
+  expect(await intents.claim('claim-alice', completion.id, 6, 'completion')).toBeNull();
+  expect(await intents.recordUncertain('claim-alice', completion.id, 6, 'completion')).toBe(true);
+  expect(await intents.recordSuccess('claim-alice', completion.id, 6, { kind: 'completion' })).toBe(true);
   expect(await env.DB.prepare('SELECT state, upload_id, completion_acknowledged FROM drive_upload_intents WHERE id = ?')
     .bind(completion.id).first()).toEqual({ state: 'acknowledged', upload_id: 'provider-id', completion_acknowledged: 1 });
-  expect(await intents.get('bob', completion.id)).toBeNull();
+  expect(await intents.get('claim-bob', completion.id)).toBeNull();
   expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(entriesBefore);
 });
 
@@ -110,4 +110,28 @@ it('rejects malformed outcomes and treats acknowledgements as terminal', async (
   expect(await intents.claim('terminal-owner', intent.id, 4, 'completion')).toBeNull();
   expect(await intents.recordUncertain('terminal-owner', intent.id, 3, 'completion')).toBe(false);
   expect(await intents.get('terminal-owner', intent.id)).toMatchObject({ state: 'acknowledged', version: 4 });
+});
+it('creates private intents only for active members and isolates owners', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+    .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
+  const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
+  const intentsBefore = (await env.DB.prepare('SELECT id FROM drive_upload_intents').all()).results;
+  const intents = new UploadIntents(env.DB);
+  expect(await intents.create('revoked')).toBeNull();
+  expect(await intents.create('missing')).toBeNull();
+  const intent = await intents.create('alice');
+  expect(intent).toMatchObject({ owner_id: 'alice', state: 'created', version: 0, upload_id: null, completion_acknowledged: 0 });
+  expect(intent.id).toBeTruthy();
+  expect(intent.object_key).toBeTruthy();
+  expect(await intents.get('alice', intent.id)).toEqual(intent);
+  expect(await intents.get('bob', intent.id)).toBeNull();
+  expect(await intents.get('alice', 'missing')).toBeNull();
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
+  expect(await intents.get('alice', intent.id)).toBeNull();
+  expect(await intents.create('alice')).toBeNull();
+  const intentsAfter = (await env.DB.prepare('SELECT id FROM drive_upload_intents').all()).results;
+  expect(intentsAfter).toEqual(expect.arrayContaining([...intentsBefore, { id: intent.id }]));
+  expect(intentsAfter).toHaveLength(intentsBefore.length + 1);
+  expect((await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results).toEqual(entriesBefore);
 });
