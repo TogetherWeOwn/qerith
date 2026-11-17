@@ -25,6 +25,8 @@ export function createMultipartComplete(...args: Parameters<typeof createS3Trans
         if (['EntityTooSmall', 'InvalidPart', 'InvalidPartOrder', 'NoSuchUpload'].includes(result.code)) throw new Error('S3 multipart completion failed');
         throw new Error('S3 multipart completion outcome uncertain');
       }
+      if ((result.bucket !== undefined && result.bucket !== args[0].bucket) ||
+          (result.key !== undefined && result.key !== key)) throw new Error('S3 multipart completion outcome uncertain');
       return result;
     }
     if (response.status === 408 || response.status >= 500 || (response.status >= 200 && response.status < 300)) throw new Error('S3 multipart completion outcome uncertain');

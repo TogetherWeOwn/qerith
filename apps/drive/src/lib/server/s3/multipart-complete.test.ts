@@ -24,6 +24,21 @@ test('completes once with ordered opaque parts and a signed request', async () =
   assert.equal(calls, 1);
 });
 
+test('rejects contradictory completion identity without retrying', async () => {
+  let calls = 0;
+  let identity = '<Bucket>other</Bucket><Key>key</Key>';
+  const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => {
+    calls++;
+    return new Response(`<CompleteMultipartUploadResult><ETag>"result"</ETag>${identity}</CompleteMultipartUploadResult>`);
+  } });
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  identity = '<Bucket>test-bucket</Bucket><Key>other</Key>';
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  identity = '<Bucket>test-bucket</Bucket><Key>key</Key>';
+  assert.equal((await complete('key', 'id', parts)).etag, '"result"');
+  assert.equal(calls, 3);
+});
+
 test('distinguishes embedded errors from uncertain outcomes without leaking provider details', async () => {
   let calls = 0;
   let response: () => Promise<Response> = async () => new Response('<Error><Code>InvalidPart</Code><Message>secret</Message></Error>');
