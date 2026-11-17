@@ -52,7 +52,79 @@ async function assertWhitespaceName(link, name) {
   assert.equal(await link.textContent(), name + '(Whitespace-only name)');
 }
 
-async function assertFullFilenames(page, selector) {
+function observeFontRequests(page) {
+  const requests = [];
+  page.on('response', response => {
+    if (response.request().resourceType() === 'font' && requests.length < 32) requests.push({ url: response.url(), status: response.status() });
+  });
+  page.on('requestfailed', request => {
+    if (request.resourceType() === 'font' && requests.length < 32) requests.push({ url: request.url(), failure: request.failure()?.errorText });
+  });
+  return requests;
+}
+
+async function captureVisibilityFailure(page, link, context) {
+  const layout = await link.evaluate(el => {
+    const rect = r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height });
+    const describe = node => {
+      const s = getComputedStyle(node);
+      return { tag: node.tagName, className: typeof node.className === 'string' ? node.className : '', bounds: rect(node.getBoundingClientRect()),
+        overflowX: s.overflowX, overflowY: s.overflowY, clipPath: s.clipPath, lineClamp: s.webkitLineClamp,
+        whiteSpace: s.whiteSpace, overflowWrap: s.overflowWrap, wordBreak: s.wordBreak, unicodeBidi: s.unicodeBidi,
+        textOverflow: s.textOverflow, fontFamily: s.fontFamily, fontSize: s.fontSize, fontWeight: s.fontWeight,
+        fontStretch: s.fontStretch, lineHeight: s.lineHeight, zoom: s.zoom, transform: s.transform };
+    };
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const rects = [...range.getClientRects()].map(rect);
+    const anchor = describe(el);
+    const row = describe(el.closest('li, tr'));
+    const chain = [];
+    for (let node = el.parentElement; node; node = node.parentElement) chain.push(describe(node));
+    const deltas = (r, box) => ({ left: r.left - box.left, right: box.right - r.right, top: r.top - box.top, bottom: box.bottom - r.bottom });
+    const fails = edges => Object.fromEntries(Object.entries(edges).map(([edge, delta]) => [edge, delta < -1]));
+    const checks = rects.map(r => ({ anchor: { edges: deltas(r, anchor.bounds), failed: fails(deltas(r, anchor.bounds)) },
+      row: { edges: deltas(r, row.bounds), failed: fails(deltas(r, row.bounds)) },
+      ancestors: chain.map(node => {
+        const edges = deltas(r, node.bounds);
+        const clipped = ['hidden', 'clip', 'auto', 'scroll'];
+        return { tag: node.tag, className: node.className, edges,
+          failed: { left: clipped.includes(node.overflowX) && edges.left < -1, right: clipped.includes(node.overflowX) && edges.right < -1,
+            top: clipped.includes(node.overflowY) && edges.top < -1, bottom: clipped.includes(node.overflowY) && edges.bottom < -1,
+            clipPath: node.clipPath !== 'none', lineClamp: !['none', ''].includes(node.lineClamp) } };
+      }) }));
+    const cssExpected = { whiteSpace: 'break-spaces', overflowWrap: 'anywhere', wordBreak: 'normal', unicodeBidi: 'plaintext',
+      textOverflow: 'clip', overflowX: 'visible', overflowY: 'visible' };
+    const failedCss = Object.fromEntries(Object.entries(cssExpected).filter(([key, value]) => anchor[key] !== value));
+    const text = el.textContent;
+    return { nodeType: el.firstChild?.nodeType, text, codePoints: [...text].map(c => `U+${c.codePointAt(0).toString(16).toUpperCase()}`),
+      anchor, row, chain, rects, checks, failedCss, failedNodeType: el.firstChild?.nodeType !== Node.TEXT_NODE,
+      failedLineClamp: !['none', ''].includes(anchor.lineClamp), failedEmptyRange: !rects.length, tolerance: 1,
+      viewport: { innerWidth, innerHeight, clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
+        dpr: devicePixelRatio, visualScale: visualViewport?.scale },
+      fonts: [...document.fonts].map(f => ({ family: f.family, style: f.style, weight: f.weight, stretch: f.stretch, unicodeRange: f.unicodeRange, display: f.display, status: f.status })) };
+  });
+  const fonts = {};
+  let session;
+  try {
+    session = await page.context().newCDPSession(page);
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    const anchorSelector = `${context.selector} a[data-item-id="${context.id}"]`;
+    const rowSelector = `${context.selector} ${context.selector === 'table.desktop' ? 'tr' : 'li'}:has(a[data-item-id="${context.id}"])`;
+    for (const [label, selector] of Object.entries({ anchor: anchorSelector, row: rowSelector, header: `${context.selector} th`, data: `${rowSelector} td:not(:first-child)` })) {
+      try {
+        const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+        fonts[label] = nodeId ? await session.send('CSS.getPlatformFontsForNode', { nodeId }) : { unavailable: 'node not found' };
+      } catch (error) { fonts[label] = { unavailable: String(error) }; }
+    }
+  } catch (error) { fonts.unavailable = String(error); }
+  finally { if (session) await session.detach().catch(() => {}); }
+  console.error('VISIBILITY_DIAGNOSTIC', JSON.stringify({ context, layout, fonts, fontStateTiming: 'post-failure; font selection may race' }));
+}
+
+async function assertFullFilenames(page, selector, context = {}) {
   for (const [id, name] of filenameCases) {
     const link = page.locator(`${selector} a[data-item-id="${id}"]`);
     const label = name.trim() ? name : name + ' (Whitespace-only name)';
@@ -60,7 +132,8 @@ async function assertFullFilenames(page, selector) {
     assert.equal(await link.getAttribute('href'), `#${id}`);
     if (name.trim()) assert.equal(await link.textContent(), name);
     else await assertWhitespaceName(link, name);
-    assert.equal(await link.evaluate(el => {
+    try {
+      assert.equal(await link.evaluate(el => {
       const nameNode = el.firstChild;
       if (nameNode?.nodeType !== Node.TEXT_NODE) return false;
       const style = getComputedStyle(el);
@@ -86,7 +159,12 @@ async function assertFullFilenames(page, selector) {
         }
         return true;
       });
-    }), true, `${selector} ${id}: full text must remain visible in one text run`);
+      }), true, `${selector} ${id}: full text must remain visible in one text run`);
+    } catch (error) {
+      try { await captureVisibilityFailure(page, link, { ...context, selector, id, expectedText: name }); }
+      catch (diagnosticError) { console.error('VISIBILITY_DIAGNOSTIC_UNAVAILABLE', String(diagnosticError)); }
+      throw error;
+    }
   }
 }
 
@@ -580,9 +658,10 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     if (!segmenter) await context.addInitScript(() => { Intl.Segmenter = undefined; });
     const page = await context.newPage();
+    const fontRequests = observeFontRequests(page);
     await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
     const selector = width > 820 ? 'table.desktop' : 'ul.mobile';
-    await assertFullFilenames(page, selector);
+    await assertFullFilenames(page, selector, { width, height, segmenter, mode: 'baseline', fontRequests });
     assert.equal(await page.locator(`${selector} a[data-item-id="rtl"]`).evaluate(el => getComputedStyle(el).direction), 'rtl');
     const alignment = await page.locator(`${selector} a[data-item-id="ascii-255"]`).evaluate(el => {
       const range = document.createRange();
@@ -622,7 +701,7 @@ try {
       ]) {
         const override = await page.addStyleTag({ content: css });
         await page.evaluate(() => document.fonts.ready);
-        await assertFullFilenames(page, selector);
+        await assertFullFilenames(page, selector, { width, height, segmenter, mode, fontRequests });
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${mode}: horizontal page overflow`);
         await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${mode}.png`), fullPage: true });
         await override.evaluate(el => el.remove());
@@ -650,6 +729,7 @@ try {
         await context.routeWebSocket('**/*', socket => socket.close());
         const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
         const page = await context.newPage();
+        const fontRequests = observeFontRequests(page);
         await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
         const before = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio }));
         const applied = await worker.evaluate(async ({ url, factor }) => {
@@ -665,7 +745,7 @@ try {
         assert.equal(applied, factor);
         assert(Math.abs(after.dpr / before.dpr - factor) < 0.01, `Page zoom DPR: ${JSON.stringify({ before, after })}`);
         assert(after.scrollWidth <= after.width, `Page zoom horizontal overflow: ${JSON.stringify(after)}`);
-        await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile');
+        await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile', { width: after.width, height: 'measured on failure', segmenter: true, mode: `page-zoom-${factor * 100}`, fontRequests });
         await page.screenshot({ path: resolve(output, `listing-unicode-page-zoom-${factor * 100}.png`), fullPage: true });
         await writeFile(resolve(output, `listing-unicode-page-zoom-${factor * 100}.json`), JSON.stringify({ factor: applied, before, after }, null, 2));
       } finally {
