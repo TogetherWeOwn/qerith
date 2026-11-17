@@ -59,15 +59,19 @@
     // Keep non-Latin letter runs together; mixed-direction stems need one bidi span.
     const extension = name.lastIndexOf('.');
     const stem = extension > 0 ? name.slice(0, extension) : name;
-    // Retain an ASCII extension without splitting Latin or emoji runs. Requiring
-    // an ASCII letter or digit before the dot makes this safe without Segmenter.
-    if (/[\p{Script=Latin}\p{Emoji_Modifier}\p{Regional_Indicator}]/u.test(stem) &&
-        /[^\x00-\x7f]/u.test(stem) && /[A-Za-z0-9]$/.test(stem) &&
-        /^\.[A-Za-z0-9]{1,15}$/.test(name.slice(extension)) &&
-        Array.from(stem).every(char => /^[\x20-\x7e]$/u.test(char) ||
-          (/\p{Script=Latin}/u.test(char) && /\p{L}/u.test(char)) ||
-          /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}‍️]/u.test(char))) {
-      return [stem, name.slice(extension)];
+    // For ordinary Latin/emoji stems, keep the entire stem in one shaping and
+    // bidi span. The ASCII dot starts a grapheme after this restricted repertoire
+    // (which excludes controls and prepend characters), even without Segmenter.
+    const ordinaryStem = Array.from(stem).every(char => /^[\x20-\x7e]$/u.test(char) ||
+      (/\p{Script=Latin}/u.test(char) && /\p{L}/u.test(char)) ||
+      /[̀-ͯ\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}️]/u.test(char));
+    if (extension > 0 && /[^\x00-\x7f]/u.test(stem) && ordinaryStem &&
+        /^\.[A-Za-z0-9]{1,15}$/.test(name.slice(extension))) {
+      if (typeof Intl.Segmenter !== 'function' ||
+          Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name)).some(part => part.index === extension)) {
+        return [stem, name.slice(extension)];
+      }
+      return [name, ''];
     }
     // Punctuation and numbers can have directional effects without being letters.
     // Emoji and combining marks remain eligible for grapheme-safe splitting.

@@ -29,6 +29,36 @@ async function assertTruncatedExtensions(page) {
   }
 }
 
+async function assertSuffixBoundaries(page, selector) {
+  for (const [id, name] of [
+    ['accented-terminal', 'budget-annuel-résumé.pdf'],
+    ['emoji-terminal', 'annual-budget-👍🏽.pdf'],
+    ['decomposed', 'Résumé-café-final-report.pdf'],
+    ['accented-terminal-long', 'budget-annuel-version-finale-résumé.pdf'],
+    ['emoji-terminal-long', 'annual-budget-version-final-report-👍🏽.pdf'],
+    ['decomposed-long', 'Résumé-café-version-finale-annual-report.pdf']
+  ]) {
+    const link = page.locator(`${selector} a[data-item-id="${id}"]`);
+    assert.equal(await link.getAttribute('aria-label'), name);
+    assert.equal(await link.getAttribute('href'), `#${id}`);
+    assert.equal(await link.textContent(), name);
+    assert.equal(await link.locator('.name-end').textContent(), '.pdf');
+    await link.evaluate(el => { el.style.width = '120px'; });
+    assert.equal(await link.evaluate(el => {
+      const start = el.querySelector('.name-start');
+      const end = el.querySelector('.name-end');
+      const range = document.createRange();
+      range.selectNodeContents(end);
+      const text = range.getBoundingClientRect();
+      const span = end.getBoundingClientRect();
+      const bounds = el.getBoundingClientRect();
+      return start.scrollWidth > start.clientWidth && end.scrollWidth <= end.clientWidth &&
+        text.left >= span.left - 1 && text.right <= span.right + 1 &&
+        text.left >= bounds.left - 1 && text.right <= bounds.right + 1;
+    }), true, `${selector} ${id}: clipped stem and fully rendered extension required`);
+  }
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
 const expectedHead = process.env.DRIVE_BROWSER_HEAD;
@@ -515,6 +545,15 @@ try {
       await page.screenshot({ path: resolve(output, `${size}-forced-colours-focus.png`) });
       await writeFile(resolve(output, `${size}-modes.json`), JSON.stringify({ motion, forcedColours: true, focused: 'Archive' }, null, 2));
     }
+    await context.close();
+  }
+  for (const width of [390, 1280]) for (const segmenter of [true, false]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    if (!segmenter) await context.addInitScript(() => { Intl.Segmenter = undefined; });
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    await assertSuffixBoundaries(page, width > 820 ? 'table.desktop' : 'ul.mobile');
     await context.close();
   }
   {
