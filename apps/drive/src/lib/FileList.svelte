@@ -66,14 +66,15 @@
         return [name, ''];
       }
       const suffixStart = dot > 0 && name.length - dot <= 16 ? dot : name.length;
-      const split = suffixStart - Math.min(6, Math.floor(suffixStart / 2));
+      const retained = name.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
+      const split = suffixStart - retained;
       return [name.slice(0, split), name.slice(split)];
     }
     const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.segment);
     if (characters.length <= 12) return [name, ''];
     const dot = characters.lastIndexOf('.');
     const suffixStart = dot > 0 && characters.length - dot <= 16 ? dot : characters.length;
-    const retained = Math.min(6, Math.floor(suffixStart / 2));
+    const retained = characters.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
     const split = suffixStart - retained;
     return [characters.slice(0, split).join(''), characters.slice(split).join('')];
   }

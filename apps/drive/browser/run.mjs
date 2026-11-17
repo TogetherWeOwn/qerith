@@ -517,6 +517,15 @@ try {
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
     const wideSuffix = page.locator('ul.mobile a[data-item-id="wide-suffix"]');
     assert.equal(await wideSuffix.textContent(), 'abcdefghijklmnop.' + '界'.repeat(15));
+    assert.equal(await wideSuffix.locator('.name-end').textContent(), '.' + '界'.repeat(15));
+    assert.equal(await wideSuffix.locator('.name-end').evaluate(el => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const text = range.getBoundingClientRect();
+      const span = el.getBoundingClientRect();
+      const row = el.closest('li').getBoundingClientRect();
+      return el.scrollWidth <= el.clientWidth && text.left >= span.left - 1 && text.right <= span.right + 1 && text.left >= row.left && text.right <= row.right;
+    }), true, 'The entire wide suffix must be visible within the row');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
     assert.equal(await wideSuffix.evaluate(el => el.getBoundingClientRect().right <= el.closest('li').getBoundingClientRect().right), true);
     await page.screenshot({ path: resolve(output, 'listing-unicode-320.png') });
