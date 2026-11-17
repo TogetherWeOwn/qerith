@@ -22,8 +22,9 @@ const exactOperation = `o.operation_id = ? AND o.intent_id = ? AND o.owner_id = 
   AND o.storage_epoch = ? AND o.upload_id = ? AND o.intent_version = ?`;
 
 function receiptBuffer(bytes: Uint8Array): ArrayBuffer {
-  if (bytes.byteLength < 1 || bytes.byteLength > 64 * 1024) throw new TypeError('Invalid completion evidence size');
-  return new Uint8Array(bytes).buffer;
+  const copy = new Uint8Array(bytes);
+  if (copy.byteLength < 1 || copy.byteLength > 64 * 1024) throw new TypeError('Invalid completion evidence size');
+  return copy.buffer;
 }
 
 // Unwired, server-only evidence storage. An operation row is not a dispatch claim;

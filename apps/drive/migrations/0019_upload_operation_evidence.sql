@@ -9,11 +9,11 @@ CREATE TABLE drive_upload_completion_operations (
   upload_id TEXT NOT NULL CHECK (length(upload_id) > 0),
   intent_version INTEGER NOT NULL CHECK (typeof(intent_version) = 'integer' AND intent_version BETWEEN 0 AND 9007199254740991),
   UNIQUE (intent_id, intent_version)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 CREATE TABLE drive_upload_completion_evidence (
   operation_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_upload_completion_operations (operation_id),
   receipt_bytes BLOB NOT NULL CHECK (typeof(receipt_bytes) = 'blob' AND length(receipt_bytes) BETWEEN 1 AND 65536)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 
 -- Check both uniqueness keys before SQLite can apply an outer conflict policy.
 CREATE TRIGGER drive_upload_completion_operations_guard_insert

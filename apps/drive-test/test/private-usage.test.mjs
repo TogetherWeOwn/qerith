@@ -14,7 +14,9 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
   usage: await rows('SELECT owner_id, CAST(high AS TEXT) AS high, low FROM drive_owner_usage ORDER BY owner_id') });
 
 beforeEach(async () => {
-  await env.DB.exec(`DROP TABLE IF EXISTS drive_upload_intents;
+  await env.DB.exec(`DROP TABLE IF EXISTS drive_upload_completion_evidence;
+    DROP TABLE IF EXISTS drive_upload_completion_operations;
+    DROP TABLE IF EXISTS drive_upload_intents;
     DROP TABLE IF EXISTS drive_upload_intent_reservations;
     DROP TABLE IF EXISTS drive_upload_key_reservations;
     DROP TABLE IF EXISTS drive_read_grants;
