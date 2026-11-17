@@ -156,6 +156,19 @@ sharing and revocation. Exercise the configured S3 provider through real multipa
 upload, complete, list, head, get, range, abort and delete; verify sizes and
 checksums, retries and uncertain completion, and persistence after restart.
 
+Multipart response-loss recovery is default-deny unless the configured provider's
+actual access, listing pagination and encoding, visibility, and exclusive
+single-initiation invariants have been established. Record each capability as
+supported, unsupported, or unavailable; published API documentation alone is not
+endpoint evidence. If discovery is exercised in an already-authorized exact-SHA
+window, cover complete exact-key scans yielding zero, one and multiple matches,
+including multi-page results, unavailable listing and lost responses. A prefix
+match or partial scan does not establish unique upload identity; do not
+redispatch or adopt automatically. A missing completion receipt remains
+quarantined: HEAD, ETag and NoSuchUpload do not prove completion, and no durable
+completion-result lookup has been established. Keep the affected paths closed
+when required evidence is missing.
+
 For immutable generations, qualify absence-tested PUT and multipart completion,
 permanent key non-reuse and If-Match reads against the actual configured endpoint;
 do not assume version IDs. Retain exact-SHA Actions evidence for conflicting
