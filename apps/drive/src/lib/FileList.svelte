@@ -46,6 +46,13 @@
     };
   });
 
+  // Do not break a word across separately shaped spans.
+  function wordBoundary(characters: string[], split: number, suffixStart: number): number {
+    const letterOrMark = /[\p{L}\p{M}]/u;
+    while (split < suffixStart && letterOrMark.test(characters[split - 1]) && letterOrMark.test(characters[split])) split++;
+    return split;
+  }
+
   // Keep the end of the name, including its extension, outside the ellipsized span.
   function nameParts(name: string): [string, string] {
     // Without segmentation, split only at boundaries known not to divide a grapheme.
@@ -67,7 +74,7 @@
       }
       const suffixStart = dot > 0 && name.length - dot <= 16 ? dot : name.length;
       const retained = name.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
-      const split = suffixStart - retained;
+      const split = wordBoundary(Array.from(name), suffixStart - retained, suffixStart);
       return [name.slice(0, split), name.slice(split)];
     }
     const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.segment);
@@ -75,7 +82,7 @@
     const dot = characters.lastIndexOf('.');
     const suffixStart = dot > 0 && characters.length - dot <= 16 ? dot : characters.length;
     const retained = characters.length - suffixStart > 8 ? 0 : Math.min(6, Math.floor(suffixStart / 2));
-    const split = suffixStart - retained;
+    const split = wordBoundary(characters, suffixStart - retained, suffixStart);
     return [characters.slice(0, split).join(''), characters.slice(split).join('')];
   }
 

@@ -512,6 +512,8 @@ try {
     const rtlName = 'تقرير-الميزانية-السنوية-النهائية.pdf';
     const rtl = page.getByRole('list').getByRole('link', { name: rtlName });
     assert.equal(await rtl.textContent(), rtlName);
+    assert.equal(await rtl.locator('.name-end').textContent(), '.pdf');
+    assert((await rtl.locator('.name-start').textContent()).endsWith('النهائية'));
     assert.equal(await rtl.evaluate(el => getComputedStyle(el).direction), 'rtl');
     const rtlParts = await rtl.locator('.name-start, .name-end').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().x));
     assert(rtlParts[0] > rtlParts[1], 'RTL filename suffix should follow its start visually');
