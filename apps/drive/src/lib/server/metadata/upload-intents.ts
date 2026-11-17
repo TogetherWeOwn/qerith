@@ -3,6 +3,7 @@
 interface Statement {
   bind(...values: (string | number | null)[]): Statement;
   first<T>(): Promise<T | null>;
+  all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
 
@@ -56,6 +57,19 @@ export class UploadIntents {
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
   }
 
+  // Trusted recovery scans must periodically restart at the beginning; an intent
+  // claimed behind the cursor is picked up on the next pass. This is not a lease:
+  // quarantining a live attempt is safe, but it must never authorize a retry.
+  // Integration must schedule bounded scans and call recordUncertain with each
+  // row's owner, id, version and operation; this module does not run a scheduler.
+  async listInFlight(afterId: string, limit: number): Promise<UploadIntent[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
+    const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
+      WHERE state IN ('initiating', 'completing') AND id > ? ORDER BY id LIMIT ?`)
+      .bind(afterId, limit).all<UploadIntent>();
+    return page.results;
+  }
+
   // The following methods are trusted provider-operation code only. Their arguments
   // must come from the successful claim, never directly from a request. They record
   // outcomes after revocation without returning reconciliation data to the caller.
@@ -92,7 +106,7 @@ export class UploadIntents {
     }
     const allocation = result.kind === 'allocation';
     const row = await this.db.prepare(`UPDATE drive_upload_intents
-      SET state = CASE WHEN state = 'uncertain' THEN state ELSE ? END,
+      SET state = ?,
         upload_id = COALESCE(?, upload_id),
         completion_acknowledged = CASE WHEN ? = 'completion' THEN 1 ELSE completion_acknowledged END,
         version = version + 1
