@@ -56,12 +56,17 @@ if ($Phase -eq 'Acquire') {
        SHA = '051f993c915b6b89f4921c4f8d2d6c5ebed98c024ee7d1f6ad54edc427ae5a87';
        Destination = "$env:RUNNER_TEMP/pw-firefox" }
   )
+  # Handle native exit codes here so transfer failures name the archive and phase.
+  $PSNativeCommandUseErrorActionPreference = $false
   foreach ($archive in $archives) {
     $file = "$env:RUNNER_TEMP/$($archive.Name).zip"
     if ((Test-Path -LiteralPath $file) -or (Test-Path -LiteralPath $archive.Destination)) {
       throw "Archive path must be fresh for $($archive.Name)"
     }
-    Invoke-WebRequest -Uri $archive.URL -OutFile $file -TimeoutSec 180
+    # Bound the entire transfer, including redirects and the response body.
+    curl.exe --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+      --max-time 180 --output $file -- $archive.URL
+    if ($LASTEXITCODE -ne 0) { throw "Acquire failed for $($archive.Name): curl exit $LASTEXITCODE (180s transfer limit)" }
     if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine $archive.SHA) { throw "Digest mismatch for $($archive.Name)" }
     Expand-Archive -LiteralPath $file -DestinationPath $archive.Destination
   }

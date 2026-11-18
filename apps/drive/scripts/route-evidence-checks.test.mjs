@@ -37,7 +37,11 @@ test('rejects drift and non-registry specs without resolving dependencies', () =
     lock.packages['node_modules/fixturedep'] = { ...entry, ...bad };
     assert.throws(() => verifyManifest(manifest, lock), /Expected registry source and integrity/);
   }
-  for (const spec of ['file:./fixture', 'git+https://example.invalid/fixture', 'https://example.invalid/fixture.tgz', 'npm:fixture@1.2.3', '^1.2.3']) {
+  verifyManifest(...fixture('1.2.3-preview.0'));
+  for (const spec of [
+    'file:./fixture', 'git+https://example.invalid/fixture', 'https://example.invalid/fixture.tgz', 'npm:fixture@1.2.3', '^1.2.3',
+    '1.2.3-preview_build', '01.2.3', '1.2.3-preview..1', '1.2.3-preview.01', '9007199254740992.2.3',
+  ]) {
     assert.throws(() => verifyManifest(...fixture(spec)), /Expected a locked exact registry version/);
   }
 });
