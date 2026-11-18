@@ -10,25 +10,7 @@ const storedClaim = (intent) => sql('SELECT intent_id FROM drive_upload_cleanup_
 const intents = new UploadIntents(env.DB);
 
 // Seed the historical journal state before any other case applies 0030.
-it('retains a dispatch whose D1 acknowledgement was lost', async () => {
-  await applyD1Migrations(env.DB, preGenerationMigrations);
-  const id = 'unconfirmed-dispatch', { token, intent } = await seed(id), fetch = vi.fn();
-  const service = producer(fetch, async () => parts, loseAcknowledgement('dispatches', false));
-  await expect(service.complete(token, id)).resolves.toBe('uncertain');
-  expect(await evidence('dispatches', id)).not.toBeNull();
-  expect(await evidence('receipts', id)).toBeNull();
-  expect(await evidence('quarantine', id)).toBeNull();
-  await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
-  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
-  expect(fetch).not.toHaveBeenCalled();
-
-  // Acknowledge only the journal before upgrading; the dispatch alone must reject cleanup.
-  await sql(`UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1,
-    version = 4 WHERE id = ?`, intent).run();
-  await applyD1Migrations(env.DB, migrations);
-  expect(await intentRow(intent)).toMatchObject({ state: 'acknowledged', version: 4 });
-  await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
-});
+it('retains a dispatch whose D1 acknowledgement was lost', checkHistoricalDispatch);
 
 it('rechecks cleanup at dispatch after preflight and prevents direct dispatch', async () => {
   await applyD1Migrations(env.DB, migrations);
@@ -80,6 +62,26 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
   expect(fetch).toHaveBeenCalledOnce();
 });
 
+async function checkHistoricalDispatch() {
+  await applyD1Migrations(env.DB, preGenerationMigrations);
+  const id = 'unconfirmed-dispatch', { token, intent } = await seed(id), fetch = vi.fn();
+  const service = producer(fetch, async () => parts, loseAcknowledgement('dispatches', false));
+  await expect(service.complete(token, id)).resolves.toBe('uncertain');
+  expect(await evidence('dispatches', id)).not.toBeNull();
+  expect(await evidence('receipts', id)).toBeNull();
+  expect(await evidence('quarantine', id)).toBeNull();
+  await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
+  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
+  expect(fetch).not.toHaveBeenCalled();
+
+  // Acknowledge only the journal before upgrading; the dispatch alone must reject cleanup.
+  await sql(`UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1,
+    version = 4 WHERE id = ?`, intent).run();
+  await applyD1Migrations(env.DB, migrations);
+  expect(await intentRow(intent)).toMatchObject({ state: 'acknowledged', version: 4 });
+  await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
+}
+
 it('keeps an existing tombstone effective before dispatch without treating it as a cleanup claim', async () => {
   await applyD1Migrations(env.DB, migrations);
   const id = 'tombstone-first', { token, intent } = await seed(id), fetch = vi.fn();
@@ -109,7 +111,7 @@ it('excludes legacy allocation and completion claims in both orders', async () =
   const pending = await intents.create(owner), fencedAllocation = await intents.create(owner);
   await claim(fencedAllocation.id);
   await expect(intents.claim(owner, fencedAllocation.id, 0, 'allocation')).resolves.toBeNull();
-  await expect(intents.claim(owner, pending.id, 0, 'allocation')).resolves.toMatchObject({ version: 1 });
+  expect(await intents.claim(owner, pending.id, 0, 'allocation')).toMatchObject({ version: 1 });
   await expect(claim(pending.id)).rejects.toThrow('upload cleanup not admitted');
   expect(await intents.recordUncertain(owner, pending.id, 1, 'allocation')).toBe(true);
   await expect(claim(pending.id)).rejects.toThrow('upload cleanup not admitted');
