@@ -55,6 +55,8 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
   expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(true);
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
   expect(await storedClaim(intent)).toBeNull();
+  expect(await sql('SELECT intent_id FROM drive_upload_publication_tombstones WHERE intent_id = ?', intent).first())
+    .toEqual({ intent_id: intent });
   await expect(service.complete(token, id)).resolves.toBe('not-admitted');
   expect(fetch).toHaveBeenCalledOnce();
 });
