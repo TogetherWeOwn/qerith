@@ -26,7 +26,7 @@ export function producer(fetch, verifyParts = async () => parts, db = env.DB, qu
 }
 
 // Seed ledger rows directly so this also covers inherited, non-UTF-8 SQLite TEXT.
-export async function seed(id, { legacy = false, sized = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}`, declaredSize = sized ? 7 : undefined } = {}) {
+export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}`, declaredSize } = {}) {
   const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
