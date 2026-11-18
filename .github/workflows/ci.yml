@@ -334,6 +334,9 @@ jobs:
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
       - name: Test staging preparation metadata
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-manifest.test.mjs
+      - name: Test staging publish orchestration
+        if: hashFiles('apps/drive/scripts/staging-publish.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-publish.test.mjs
       - name: Test migration source ledger
         if: hashFiles('apps/drive/scripts/staging-migrations.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migrations.test.mjs

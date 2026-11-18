@@ -44,3 +44,35 @@ jobs:
         run: node apps/drive/scripts/staging-migrations.mjs >> "$GITHUB_STEP_SUMMARY"
       - name: Test closed-admission metadata
         run: node --test apps/drive/scripts/staging-manifest.test.mjs
+
+  publish:
+    # Live execution requires a separately reviewed enabling change and staging config.
+    if: ${{ false }}
+    needs: preparation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify source and lock
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+      - name: Install and build exact source
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Publish built staging Worker
+        run: node scripts/staging-publish.mjs
