@@ -85,7 +85,10 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const complete = createMultipartComplete(settings, { ...transport });
+  const complete = createMultipartComplete(settings, { ...transport, async fetch(...args) {
+    if (await verifier?.isQualified(storageConfigId) !== true) throw new Error('Storage no longer qualified');
+    return transport.fetch(...args);
+  } });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
@@ -134,7 +137,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       } catch { return 'not-admitted'; }
       if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
-        !await verifier.isQualified(storageConfigId)) return 'not-admitted';
+        await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
       const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
         objectKey, uploadId, intentVersion: upload.intent_version }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
@@ -143,6 +146,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       try { manifest = new Uint8Array(completionXml(parts)); } catch { return 'not-admitted'; }
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
+      if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {

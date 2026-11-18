@@ -24,13 +24,13 @@ export interface UploadRouteEnv extends DriveAuthEnv {
   };
 }
 
-const reply = (status: number) => new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
+const headers = { 'cache-control': 'private, no-store' };
+const reply = (status: number) => new Response(null, { status, headers });
 
-const allocated = `FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id
-  JOIN drive_sessions s ON s.principal_id = i.owner_id JOIN drive_active_members m ON m.id = i.owner_id
-  WHERE i.id = ? AND i.owner_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ?
-    AND i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.upload_id IS NOT NULL
+const owned = `JOIN drive_sessions s ON s.principal_id = i.owner_id JOIN drive_active_members m ON m.id = i.owner_id
+  WHERE i.id = ? AND i.owner_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
+const allocated = `FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id ${owned}
+    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ? AND i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.upload_id IS NOT NULL
     AND i.version < 9007199254740990 AND i.declared_size IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = i.id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = i.id)
@@ -40,9 +40,8 @@ const allocated = `FROM drive_upload_intents i JOIN drive_upload_storage_binding
 async function destination(request: Request): Promise<{ name: string; parentId: string | null }> {
   const length = request.headers.get('content-length') ?? '';
   const size = Number(length);
-  if (request.headers.get('content-type') !== 'application/json' || !/^\d{1,4}$/.test(length) || size < 1 || size > 4096) {
+  if (request.headers.get('content-type') !== 'application/json' || !/^\d{1,4}$/.test(length) || size < 1 || size > 4096)
     throw new TypeError('Invalid publication body');
-  }
   const bytes = await readUploadBody(request, size);
   if (!bytes) throw new TypeError('Invalid publication body');
   const { name, parentId } = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
@@ -91,17 +90,16 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
               // Only the highest part may be short. The unclaimed slots must still fit the remaining bytes.
               const claim = await db.prepare(`INSERT INTO drive_upload_part_operations
                 SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version, ?, ? ${allocated}
-                  AND i.version = ? AND NOT EXISTS (
-                    SELECT 1 FROM drive_upload_part_operations WHERE intent_id = i.id AND part_number = ?)
+                  AND i.version = ? AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
+                    LEFT JOIN drive_upload_part_observations r ON r.operation_id = p.operation_id AND r.kind = 'uncertain'
+                    WHERE p.intent_id = i.id AND (p.part_number = ? OR r.operation_id IS NOT NULL))
                   AND EXISTS (SELECT sum(size_bytes) FROM (
                     SELECT ? AS part_number, ? AS size_bytes UNION ALL
                     SELECT part_number, size_bytes FROM drive_upload_part_operations WHERE intent_id = i.id)
                     HAVING sum(size_bytes < ${MIN_PART_BYTES}) <= 1 AND max(CASE WHEN size_bytes < ${MIN_PART_BYTES}
                       THEN part_number ELSE 0 END) IN (0, max(part_number))
-                    AND i.declared_size - sum(size_bytes) BETWEEN 0 AND ${MAX_PART_BYTES} *
-                      (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*))
-                    AND (i.declared_size = sum(size_bytes) OR i.declared_size - sum(size_bytes) >= ${MIN_PART_BYTES}
-                      OR (min(size_bytes) >= ${MIN_PART_BYTES} AND max(part_number) < ${MAX_PARTS})))
+                    AND i.declared_size - sum(size_bytes) BETWEEN ${MIN_PART_BYTES} * (max(part_number) - count(*)) AND ${MAX_PART_BYTES} *
+                      (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*)))
                 RETURNING hex(object_key) AS key_hex, hex(upload_id) AS upload_hex`)
                 .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version, partNumber, partNumber, sizeBytes)
                 .first<{ key_hex: string; upload_hex: string }>();
@@ -119,17 +117,15 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     },
 
     async complete(request: Request, session: Session | undefined, intentId: string): Promise<Response> {
-      let access;
-      try { access = await authorize(request, session, intentId); } catch { return reply(503); }
+      const access = await authorize(request, session, intentId).catch(() => reply(503));
       if (access instanceof Response) return access;
-      let target;
-      try { target = await destination(request); } catch { return reply(400); }
+      const target = await destination(request).catch(() => null);
+      if (!target) return reply(400);
       const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
       const { parentId, name } = target;
-      const destinationBindings = [parentId, parentId, parentId, name];
-      const operationId = crypto.randomUUID();
+      const destinationBindings = [parentId, parentId, parentId, name], operationId = crypto.randomUUID();
       try {
-        // Seal only a fresh operation; the trigger rolls back incomplete or uncertain snapshots.
+        // The seal trigger rolls back incomplete or uncertain snapshots.
         await db.batch([
           db.prepare(`INSERT INTO drive_upload_completion_operations
             SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version ${allocated}
@@ -150,14 +146,21 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
             AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
-        if (!row) return reply(404);
+        if (!row) {
+          const published = await db.withSession('first-primary').prepare(`SELECT p.entry_id AS id
+            FROM drive_upload_publications p JOIN drive_upload_intents i ON i.id = p.intent_id AND i.owner_id = p.owner_id
+            JOIN drive_published_generations g ON g.entry_id = p.entry_id JOIN drive_entries e ON e.id = p.entry_id AND e.owner_id = p.owner_id
+            ${owned} AND g.endpoint = ? AND g.bucket = ? AND g.storage_epoch = ? AND p.parent_id IS ? AND p.name = ?`)
+            .bind(...bindings, parentId, name).first<{ id: string }>();
+          return published ? Response.json(published, { headers }) : reply(404);
+        }
         if (!row.recorded) {
           const complete = createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier);
           if (await complete.complete(token, row.operation_id, target) !== 'recorded') return reply(409);
         }
         const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
         const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
-        return published ? Response.json({ id: published.id }, { status: 201, headers: { 'cache-control': 'private, no-store' } }) : reply(409);
+        return published ? Response.json({ id: published.id }, { status: 201, headers }) : reply(409);
       } catch { return reply(409); }
     }
   };
