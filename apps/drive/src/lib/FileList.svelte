@@ -21,6 +21,15 @@
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
   let desktopSort: HTMLButtonElement;
+  const desktopActions: Record<string, { dismiss(): void; openFromContextMenu(event: MouseEvent): void } | undefined> = Object.create(null);
+  const compactActions: typeof desktopActions = Object.create(null);
+  const actionTrigger = 'button[aria-haspopup="menu"]';
+  let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined;
+
+  function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
+    const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
+    if (onAction && (event.button === 2 || controlClick)) action?.openFromContextMenu(event);
+  }
 
   onMount(() => {
     const compactViewport = window.matchMedia('(max-width: 820px)');
@@ -30,47 +39,66 @@
       lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || desktop.contains(target) || mobile.contains(target)) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
-      if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
+      if (!lastFocused || event.target !== lastFocused) return;
+      // A top-layer item can have a box after its listing view becomes hidden.
+      const view = lastFocused.closest('[data-action-row]') ? (desktop.contains(lastFocused) ? desktop : mobile) : lastFocused;
+      if (view.getClientRects().length) lastFocused = null;
+    };
+    const dismissMenus = (view: HTMLElement, actions: typeof desktopActions) => {
+      const expanded = view.querySelectorAll<HTMLButtonElement>(`${actionTrigger}[aria-expanded="true"]`);
+      for (const trigger of expanded) {
+        const id = trigger.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+        if (id !== undefined) actions[id]?.dismiss();
+      }
     };
     const transferFocus = () => {
       const compact = desktop.getClientRects().length === 0;
       const from = compact ? desktop : mobile;
       const to = compact ? mobile : desktop;
+      // Closing a top-layer menu can itself change focus, so snapshot it first.
+      const active = document.activeElement;
+      const focused = active === document.body ? lastFocused : active;
+      dismissMenus(from, compact ? desktopActions : compactActions);
       if (!to.getClientRects().length) {
+        dismissMenus(to, compact ? compactActions : desktopActions);
         lastFocused = null;
         return;
       }
-      const active = document.activeElement;
       const hiddenSort = compact ? desktopSort : compactSort;
       const visibleSort = compact ? compactSort : desktopSort;
-      if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
+      if (hiddenSort && focused === hiddenSort) {
         lastFocused = null;
         visibleSort?.focus();
         return;
       }
-      const source = active instanceof HTMLElement && from.contains(active) ? active :
-        active === document.body ? (lastFocused && from.contains(lastFocused) ? lastFocused :
-          from.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"][aria-expanded="true"]')) : null;
-      if (!source) return;
+      if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
-      if (source instanceof HTMLAnchorElement) target = Array.from(to.querySelectorAll<HTMLAnchorElement>('a[data-item-id]')).find(link => link.dataset.itemId === source.dataset.itemId);
-      else {
-        const facts = source.closest<HTMLElement>('[data-details-id]');
-        const row = source.closest<HTMLElement>('[data-row-id]');
+      if (focused instanceof HTMLAnchorElement) {
+        target = Array.from(to.querySelectorAll<HTMLAnchorElement>('a[data-item-id]')).find(link => link.dataset.itemId === focused.dataset.itemId);
+      } else {
+        const facts = focused.closest<HTMLElement>('[data-details-id]');
         if (facts) {
           const next = Array.from(to.querySelectorAll<HTMLElement>('[data-details-id]')).find(element => element.dataset.detailsId === facts.dataset.detailsId);
-          target = source === facts ? next : next?.querySelector('button');
-        } else if (row) {
-          const trigger = row.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
-          if (trigger?.getAttribute('aria-expanded') === 'true') trigger.click();
-          target = Array.from(to.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === row.dataset.rowId)?.querySelector('button[aria-haspopup="menu"]');
+          target = focused === facts ? next : next?.querySelector('button');
+        } else {
+          const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+          const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(element => element.dataset.actionRow === id);
+          target = row?.querySelector(actionTrigger);
         }
       }
       lastFocused = null;
       target?.focus();
     };
+    let openingFrame = 0;
+    // A menu can open in a transient layout that ResizeObserver never reports.
+    checkLayoutOnOpen = (when) => {
+      if (when === 'now') { transferFocus(); return; }
+      cancelAnimationFrame(openingFrame);
+      openingFrame = requestAnimationFrame(transferFocus);
+    };
     document.addEventListener('focusin', rememberFocus);
-    document.addEventListener('focusout', forgetFocus);
+    // Observe focus loss before a target blur handler can change the layout.
+    document.addEventListener('blur', forgetFocus, true);
     // Keep viewport handoff timing; observe both views for container-only changes.
     compactViewport.addEventListener('change', transferFocus);
     const observer = new ResizeObserver(transferFocus);
@@ -78,8 +106,9 @@
     observer.observe(mobile);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
-      document.removeEventListener('focusout', forgetFocus);
+      document.removeEventListener('blur', forgetFocus, true);
       compactViewport.removeEventListener('change', transferFocus);
+      cancelAnimationFrame(openingFrame);
       observer.disconnect();
     };
   });
@@ -111,13 +140,13 @@
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th><th scope="col">Actions</th></tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th><th scope="col" class="actions">Actions</th></tr></thead>
   <tbody>
     {#each items as item (item.id)}
-      <tr>
+      <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div></td>
+        <td data-action-row={item.id} data-row-id={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></td>
       </tr>
       {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
@@ -125,7 +154,10 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
+    <li class="with-actions" on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
+      <div data-action-row={item.id} data-row-id={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div>
+      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(mobile, item.id)} />{/if}
+    </li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}
@@ -146,7 +178,8 @@
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
   td { vertical-align: baseline; }
-  th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); } th:nth-child(5) { width: var(--drive-size-column-actions); }
+  th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
+  th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
   a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
@@ -174,6 +207,10 @@
   button:focus-visible, select:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .mobile { display: none; margin: 0; padding: 0; list-style: none; }
   li { min-height: var(--drive-size-row-dense); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
+  li.with-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  li.with-actions > [data-action-row] { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin-inline-start: var(--drive-space-2); }
+  li.with-actions > :global([data-details-id]) { grid-column: 1 / -1; }
+  tbody tr:has([data-action-row] :global(button[aria-expanded='true'])), li:has([data-action-row] :global(button[aria-expanded='true'])) { background-color: var(--drive-color-bg-raised); }
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }

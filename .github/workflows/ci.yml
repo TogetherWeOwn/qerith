@@ -332,6 +332,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+      - name: Test staging preparation metadata
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-manifest.test.mjs
       - name: Test offline bundle validation
         run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
 
