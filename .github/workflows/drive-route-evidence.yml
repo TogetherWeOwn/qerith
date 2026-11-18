@@ -1,0 +1,118 @@
+name: Drive folder route evidence
+
+on:
+  pull_request:
+    paths: [.github/workflows/drive-route-evidence.yml, 'apps/drive/route-evidence/**']
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full current head SHA of the same-repository Drive folder route PR (#139)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  evidence:
+    if: >-
+      github.repository == 'TogetherWeOwn/qerith' &&
+      ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork && github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      HARNESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EVIDENCE: ${{ runner.temp }}/drive-route-evidence
+      GUIDEPUP_SCREEN_READERS_PATH: ${{ runner.temp }}/guidepup
+      FIREFOX_EXE: ${{ runner.temp }}/pw-firefox/firefox/firefox.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HARNESS_SHA }}
+          path: harness
+          persist-credentials: false
+      - name: Admit exact same-repository source head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected full lowercase SHA' }
+          $pr = gh api repos/TogetherWeOwn/qerith/pulls/139 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $pr.state -ne 'open' -or $pr.base.ref -ne 'main' -or
+              $pr.head.repo.full_name -cne 'TogetherWeOwn/qerith' -or $pr.head.repo.fork -or
+              $pr.head.sha -cne $env:SOURCE_SHA) { throw 'SHA is not the current admitted PR head' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Record checkout and runner provenance
+        run: |
+          New-Item -ItemType Directory $env:EVIDENCE
+          $harness = git -C harness rev-parse HEAD
+          if ($harness -cne $env:HARNESS_SHA) { throw 'Harness checkout mismatch' }
+          $source = $null
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $source = git -C source rev-parse HEAD
+            if ($source -cne $env:SOURCE_SHA) { throw 'Source checkout mismatch' }
+          }
+          @{ harness = $harness; source = $source; event = $env:GITHUB_EVENT_NAME;
+             run = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; os = $env:RUNNER_OS;
+             arch = $env:RUNNER_ARCH; image = $env:ImageOS; imageVersion = $env:ImageVersion;
+             windows = [Environment]::OSVersion.VersionString } | ConvertTo-Json > "$env:EVIDENCE/provenance.json"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Acquire digest-pinned portable NVDA and Playwright Firefox
+        run: |
+          $profiles = Get-NetFirewallProfile -PolicyStore ActiveStore
+          if (!$profiles -or ($profiles | Where-Object { $_.Enabled -ne 'True' -or $_.DefaultInboundAction -eq 'Allow' })) {
+            throw 'NVDA relay requires the hosted runner default inbound firewall protection'
+          }
+          $archives = @(
+            @{ Name = 'nvda'; URL = 'https://github.com/guidepup/nvda/releases/download/0.2.1-2026.3/guidepup-nvda-0.2.1-2026.3.zip';
+               SHA = '508ba38e9a48f4534bfc7fb1fa2f08f2ae10550983a53f1272abbeb50b2d2e19';
+               Destination = "$env:GUIDEPUP_SCREEN_READERS_PATH/nvda/all/0.2.1-2026.3/extracted" },
+            @{ Name = 'firefox'; URL = 'https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/firefox/1538/firefox-win64.zip';
+               SHA = '051f993c915b6b89f4921c4f8d2d6c5ebed98c024ee7d1f6ad54edc427ae5a87';
+               Destination = "$env:RUNNER_TEMP/pw-firefox" }
+          )
+          foreach ($archive in $archives) {
+            $file = "$env:RUNNER_TEMP/$($archive.Name).zip"
+            Invoke-WebRequest -Uri $archive.URL -OutFile $file -TimeoutSec 180
+            if ((Get-FileHash $file -Algorithm SHA256).Hash -ine $archive.SHA) { throw "Digest mismatch for $($archive.Name)" }
+            Expand-Archive -LiteralPath $file -DestinationPath $archive.Destination
+          }
+          $nvda = Get-Item "$env:GUIDEPUP_SCREEN_READERS_PATH/nvda/all/0.2.1-2026.3/extracted/nvda.exe"
+          @{ NVDA = $nvda.VersionInfo.ProductVersion; firefox = (Get-Item $env:FIREFOX_EXE).VersionInfo.ProductVersion;
+             nvdaSHA256 = $archives[0].SHA; firefoxSHA256 = $archives[1].SHA } | ConvertTo-Json > "$env:EVIDENCE/tools.json"
+      - name: Install locked harness dependencies without lifecycle hooks
+        working-directory: harness/apps/drive/route-evidence
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare the separate route build
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: harness/apps/drive/route-evidence
+        run: |
+          $projection = "$env:RUNNER_TEMP/folder-route-build"
+          node project.mjs "$env:GITHUB_WORKSPACE/source" $projection
+          if ($LASTEXITCODE -ne 0) { throw 'Could not project the admitted route' }
+          npm ci --prefix $projection --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the admitted route lock' }
+          "PROJECTION=$projection" >> $env:GITHUB_ENV
+      - name: Capture speech and applicable route checks
+        working-directory: harness/apps/drive/route-evidence
+        run: node run.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: drive-folder-route-${{ env.SOURCE_SHA || 'self-check' }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7
