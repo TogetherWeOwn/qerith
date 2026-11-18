@@ -1015,6 +1015,31 @@ try {
         below: el.contains(document.elementFromPoint(x, rect.bottom - 4)) };
     });
     assert.deepEqual(hit, { top: 8, bottom: 8, above: true, below: true });
+    assert.equal(await page.locator('button[aria-haspopup="menu"], th.actions').count(), 0);
+
+    await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
+    assert.equal(await container.getByRole('button', { name: /^Actions for / }).count(), 3);
+    assert.equal(await page.getByRole('columnheader', { name: 'Actions', exact: true }).count(), width > 820 ? 1 : 0);
+    const trigger = container.getByRole('button', { name: 'Actions for Archive', exact: true });
+    const focus = page.locator(':focus');
+    for (const [key, row] of [['Tab', '3'], ['Shift+Tab', '1']]) {
+      await trigger.press('ArrowDown');
+      const details = page.getByRole('menuitem', { name: 'Details', exact: true });
+      await details.and(focus).waitFor({ timeout: 5000 });
+      assert.equal(await page.getByRole('menuitem').count(), 1);
+      await page.keyboard.press(key);
+      await container.locator(`a[data-item-id="${row}"]`).and(focus).waitFor({ timeout: 5000 });
+      assert.equal(await page.getByRole('menu').count(), 0);
+    }
+    await trigger.press('ArrowDown');
+    await page.getByRole('menuitem', { name: 'Details', exact: true }).click();
+    assert.equal(await page.locator('main > p').textContent(), '1: Details');
+    await trigger.and(focus).waitFor({ timeout: 5000 });
+    await container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true }).press('ArrowDown');
+    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
+    assert.equal(await page.locator('main > p').textContent(), '2: Rename');
+    assert.equal(await page.getByRole('menu').count(), 0);
+    console.log(`Listing actions at ${width}px: opt-in, native Tab order, caller-owned Details and Rename`);
     await context.close();
   }
   {
@@ -1065,6 +1090,41 @@ try {
     await afterLayout();
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
     console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
+
+    await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
+    const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
+    for (const [from, to, source, destination] of [[1000, 500, table, list], [500, 1000, list, table]]) {
+      for (const phase of ['settled', 'opening']) {
+        await setContainerWidth(from);
+        const trigger = menuTrigger(source);
+        await trigger.focus();
+        if (phase === 'opening') {
+          await main.evaluate((el, width) => {
+            delete el.dataset.resizedDuringOpening;
+            const showPopover = HTMLDialogElement.prototype.showPopover;
+            HTMLDialogElement.prototype.showPopover = function () {
+              delete HTMLDialogElement.prototype.showPopover;
+              const result = showPopover.call(this);
+              // Change layout before RowActions resumes and assigns menu-item focus.
+              el.style.width = `${width}px`;
+              el.dataset.resizedDuringOpening = 'true';
+              return result;
+            };
+          }, to);
+        }
+        await page.keyboard.press('ArrowDown');
+        if (phase === 'settled') {
+          await page.getByRole('menuitem', { name: 'Download' }).and(focus).waitFor({ timeout: 5000 });
+          await setContainerWidth(to);
+        } else {
+          await main.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
+        }
+        await menuTrigger(destination).and(focus).waitFor({ timeout: 5000 });
+        await page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
+        assert.equal(await page.evaluate(() => innerWidth), 1280);
+        console.log(`Listing action menu: ${phase} ${from}→${to} closed and moved focus to the same row`);
+      }
+    }
     await context.close();
   }
   {

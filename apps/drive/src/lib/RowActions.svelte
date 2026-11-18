@@ -115,6 +115,9 @@
     if (event.target === layer) close(true);
   }
 
+  // A layout switch closes the old layer without restoring its hidden trigger.
+  export function dismiss() { close(); }
+
   // A parent row can call this for its pointer-only context menu.
   export function openFromContextMenu(event: MouseEvent) {
     event.preventDefault();

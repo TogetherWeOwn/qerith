@@ -2,42 +2,65 @@
   import { onMount } from 'svelte';
   import './tokens.css';
   import KindGlyph from './KindGlyph.svelte';
+  import RowActions, { type RowAction } from './RowActions.svelte';
 
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
   let desktopSort: HTMLButtonElement;
+  const desktopActions: Record<string, { dismiss(): void } | undefined> = Object.create(null);
+  const compactActions: typeof desktopActions = Object.create(null);
+  const actionTrigger = 'button[aria-haspopup="menu"]';
 
   onMount(() => {
     const compactViewport = window.matchMedia('(max-width: 820px)');
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && target instanceof HTMLAnchorElement)) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row]')))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
+    };
+    const dismissMenus = (view: HTMLElement, actions: typeof desktopActions) => {
+      const expanded = view.querySelectorAll<HTMLButtonElement>(`${actionTrigger}[aria-expanded="true"]`);
+      for (const trigger of expanded) {
+        const id = trigger.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+        if (id !== undefined) actions[id]?.dismiss();
+      }
+      return expanded[0];
     };
     const transferFocus = () => {
       const compact = desktop.getClientRects().length === 0;
       const from = compact ? desktop : mobile;
       const to = compact ? mobile : desktop;
+      // Closing a top-layer menu can itself change focus, so snapshot it first.
+      const active = document.activeElement;
+      const focused = active === document.body ? lastFocused : active;
+      const expanded = onAction ? dismissMenus(from, compact ? desktopActions : compactActions) : undefined;
       if (!to.getClientRects().length) {
+        if (onAction) dismissMenus(to, compact ? compactActions : desktopActions);
         lastFocused = null;
         return;
       }
-      const active = document.activeElement;
       const hiddenSort = compact ? desktopSort : compactSort;
       const visibleSort = compact ? compactSort : desktopSort;
-      if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
+      if (hiddenSort && focused === hiddenSort) {
         lastFocused = null;
         visibleSort?.focus();
         return;
       }
-      const source = active instanceof HTMLAnchorElement && from.contains(active) ? active :
-        active === document.body && lastFocused instanceof HTMLAnchorElement && from.contains(lastFocused) ? lastFocused : null;
+      const source = focused instanceof HTMLElement && from.contains(focused) ? focused :
+        active === document.body ? expanded : undefined;
       if (!source) return;
-      const target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
+      let target: HTMLElement | null | undefined;
+      if (source instanceof HTMLAnchorElement) {
+        target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
+      } else {
+        const id = source.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+        const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(row => row.dataset.actionRow === id);
+        target = row?.querySelector(actionTrigger);
+      }
       lastFocused = null;
       target?.focus();
     };
@@ -70,7 +93,8 @@
   let usedPaging = false;
   $: orderDescription = direction === 'asc' ? 'A to Z' : 'Z to A';
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${orderDescription} (binary order). Times in ${timeZone}.`;
-  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean }[];
+  export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
+  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean; owned?: boolean }[];
 </script>
 
 <div class="listing">
@@ -81,19 +105,26 @@
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th></tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th>{#if onAction}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
+        {#if onAction}
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></td>
+        {/if}
       </tr>
     {/each}
   </tbody>
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div></li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
+      {#if onAction}
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
+      {/if}
+    </li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}
@@ -115,6 +146,7 @@
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
   td { vertical-align: baseline; }
   th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
+  th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
   a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
