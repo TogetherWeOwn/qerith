@@ -40,8 +40,12 @@ it('upgrades without backfill, publishes after restart and reconciles an exact l
   await sql("UPDATE drive_entries SET size_bytes = 8 WHERE id = 'entry-legacy'").run();
   expect(await sql("SELECT size_bytes FROM drive_entries WHERE id = 'entry-legacy'").first()).toEqual({ size_bytes: 8 });
   const { evidence_revision } = await evidence('receipts', id);
-  for (const policy of ['IGNORE', 'FAIL']) await expect(sql(`INSERT OR ${policy} INTO drive_upload_publications VALUES (?, ?, ?, ?, NULL, ?)`,
-    dest.entryId, owner, id, evidence_revision, '.').run()).rejects.toThrow('invalid or duplicate upload publication');
+  await sql("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('full-folder', ?, 'full', 'folder')", owner).run();
+  await sql("UPDATE drive_folder_counts SET item_count = 9007199254740991 WHERE folder_id = 'full-folder'").run();
+  for (const policy of ['IGNORE', 'FAIL']) for (const [parent, name] of [[null, '.'], ['full-folder', dest.name]]) {
+    await expect(sql(`INSERT OR ${policy} INTO drive_upload_publications VALUES (?, ?, ?, ?, ?, ?)`,
+      dest.entryId, owner, id, evidence_revision, parent, name).run()).rejects.toThrow('invalid or duplicate upload publication');
+  }
   expect(await alreadyMapped(id)).toBeNull();
   expect(await sql('SELECT id FROM drive_entries WHERE id = ?', dest.entryId).first()).toBeNull();
   expect(await intentRow(intent)).toMatchObject({ state: 'completing', completion_acknowledged: 0, version: 3 });
@@ -143,18 +147,19 @@ it.each([false, true])('cannot publish an uncertain dispatch with or without lat
   expect(await evidence('receipts', id) !== null).toBe(late);
 });
 
-it('reconciles an exact winner between the initial map lookup and receipt lookup', async () => {
+it.each(['receipt lookup', 'failed HEAD'])('reconciles an exact winner during %s', async (race) => {
   await migrate();
   const id = 'exact-race', dest = destination(id), { token } = await completed(id);
-  const winner = publisher(async () => head()), fetch = vi.fn();
+  const win = () => publisher(async () => head()).publish(token, id, dest);
+  const fetch = vi.fn(async () => { await win(); throw new Error('lost HEAD response'); });
   const db = { prepare: (query) => env.DB.prepare(query), withSession: (mode) => ({ prepare: (query) => ({
     bind: (...args) => ({ async first() {
-      if (query.includes('AS key_hex')) await expect(winner.publish(token, id, dest)).resolves.toBe(true);
+      if (race === 'receipt lookup' && query.includes('AS key_hex')) await win();
       return env.DB.withSession(mode).prepare(query).bind(...args).first();
     } }),
   }) }) };
   await expect(publisher(fetch, db).publish(token, id, dest)).resolves.toBe(true);
-  expect(fetch).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(race === 'failed HEAD' ? 1 : 0);
 });
 
 it('serializes competing uploads for one destination and preserves the losing receipt', async () => {

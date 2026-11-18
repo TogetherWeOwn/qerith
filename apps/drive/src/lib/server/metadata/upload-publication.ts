@@ -46,7 +46,7 @@ export function createAtomicUploadPublication(db: UploadEvidenceDatabase, epoch:
         const metadata = await reader.head({ key: decodeUploadIdentity(receipt.key_hex), etag: receipt.etag });
         if (metadata.status !== 200 || typeof metadata.contentLength !== 'string' ||
           !/^\d+$/.test(metadata.contentLength) || Number(metadata.contentLength) !== receipt.size_bytes) return false;
-      } catch { return false; }
+      } catch { return committed(); } // Only acknowledge an exact winner; never write after failed HEAD.
 
       try {
         const published = await db.prepare(`INSERT INTO drive_upload_publications

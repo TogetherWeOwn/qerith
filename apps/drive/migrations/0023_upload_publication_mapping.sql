@@ -39,6 +39,7 @@ CREATE TRIGGER drive_upload_publications_guard_insert
 BEFORE INSERT ON drive_upload_publications
 WHEN length(NEW.entry_id) = 0 OR length(CAST(NEW.name AS BLOB)) NOT BETWEEN 1 AND 255
   OR length(trim(NEW.name, ' .')) = 0 OR instr(NEW.name, '/') != 0 OR instr(NEW.name, char(0)) != 0
+  OR EXISTS (SELECT 1 FROM drive_folder_counts WHERE folder_id = NEW.parent_id AND item_count = 9007199254740991)
   OR EXISTS (SELECT 1 FROM drive_upload_publications WHERE entry_id = NEW.entry_id OR operation_id = NEW.operation_id)
   OR NOT EXISTS (
     SELECT 1 FROM drive_upload_publishable_receipts r WHERE r.operation_id = NEW.operation_id
