@@ -10,8 +10,8 @@ export const headOk = () => new Response(null, { headers: { etag, 'content-lengt
 export const publisher = (fetch, qualify = qualified, s3 = config, storageEpoch = epoch) =>
   createTrustedUploadPublication(env.DB, storageEpoch, s3, { fetch, timeoutMs: 5000 }, qualify);
 
-export async function setup(operation, options = {}) {
-  await applyD1Migrations(env.DB, migrations);
+export async function setup(operation, options = {}, schema = migrations) {
+  await applyD1Migrations(env.DB, schema);
   const { token, key, intent, part } = await seed(operation, { declaredSize: 7, ...options });
   const owner = `owner-${operation}`;
   const complete = producer(async () => response(key));
@@ -38,8 +38,8 @@ export async function expectPublicationRaceRejected(fixture, race) {
   expect(result).toBeNull();
 }
 
-export async function seedBoundPublication(label, { key, service = publisher(headOk) } = {}) {
-  const { complete, publish, token, key: objectKey, intent } = await setup(label, { key });
+export async function seedBoundPublication(label, { key, service = publisher(headOk), schema } = {}) {
+  const { complete, publish, token, key: objectKey, intent } = await setup(label, { key }, schema);
   expect(await complete()).toBe('recorded');
   const { evidence_revision: evidenceRevision } = await evidence('receipts', label);
   const { id } = await publish(service);
