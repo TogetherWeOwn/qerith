@@ -5,8 +5,8 @@ import { PrivateDeletion } from '../../drive/src/lib/server/metadata/private-del
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
 import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
-import { config, epoch, evidence, intentRow, migrations, parts, preGenerationMigrations, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
-import { etag, headOk, publisher, qualified, seedBoundPublication, setup } from './fixtures/upload-publication-generation.mjs';
+import { config, epoch, evidence, intentRow, migrations, parts, preGenerationMigrations, producer, response, seed, sql } from './fixtures/upload-completion.mjs';
+import { changeOne, etag, expectPublicationRaceRejected, headOk, publisher, qualified, revokeSession, seedBoundPublication, setup } from './fixtures/upload-publication-generation.mjs';
 
 const generationsFor = (intent) => sql('SELECT * FROM drive_published_generations WHERE intent_id = CAST(? AS TEXT)', intent).all().then(({ results }) => results);
 
@@ -108,18 +108,16 @@ it.each([['status', 412, etag, '7'], ['etag', 200, '"different"', '7'], ['size',
   });
 
 it.each([
-  ['session revocation', ({ token }) => sessions.revoke(token)],
-  ['membership revocation', ({ owner }) => sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner).run()],
-  ['journal version change', ({ intent }) => sql('UPDATE drive_upload_intents SET version = 4 WHERE id = CAST(? AS TEXT)', intent).run()],
-  ['journal upload ID change', ({ intent }) => sql("UPDATE drive_upload_intents SET upload_id = 'different' WHERE id = CAST(? AS TEXT)", intent).run()],
-  ['tombstone', ({ intent }) => sql('INSERT INTO drive_upload_publication_tombstones VALUES (CAST(? AS TEXT))', intent).run()],
-  ['late part uncertainty', ({ part }) => sql("INSERT INTO drive_upload_part_observations VALUES (?, 'uncertain', NULL)", part).run()],
+  ['session revocation', revokeSession],
+  ['membership revocation', ({ owner }) => changeOne("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner)],
+  ['journal version change', ({ intent }) => changeOne('UPDATE drive_upload_intents SET version = 4 WHERE id = CAST(? AS TEXT)', intent)],
+  ['journal upload ID change', ({ intent }) => changeOne("UPDATE drive_upload_intents SET upload_id = 'different' WHERE id = CAST(? AS TEXT)", intent)],
+  ['tombstone', ({ intent }) => changeOne('INSERT INTO drive_upload_publication_tombstones VALUES (CAST(? AS TEXT))', intent)],
+  ['late part uncertainty', ({ part }) => changeOne("INSERT INTO drive_upload_part_observations VALUES (?, 'uncertain', NULL)", part)],
 ])('rechecks %s in the publication write after a matching HEAD', async (label, race) => {
   const fixture = await setup(`publication-race-${label.replaceAll(' ', '-')}`);
   expect(await fixture.complete()).toBe('recorded');
-  const head = vi.fn(async () => { await race(fixture); return headOk(); });
-  expect(await fixture.publish(publisher(head))).toBeNull();
-  expect(head).toHaveBeenCalledTimes(1);
+  await expectPublicationRaceRejected(fixture, race);
   expect(await generationsFor(fixture.intent)).toEqual([]);
   expect(await sql('SELECT id FROM drive_entries WHERE owner_id = ?', fixture.owner).first()).toBeNull();
 });
