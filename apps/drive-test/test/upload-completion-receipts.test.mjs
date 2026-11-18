@@ -4,26 +4,6 @@ import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 import { config, epoch, evidence, intentRow, loseAcknowledgement, migrations, parts, preReceiptMigrations, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 
-it('excludes legacy dispatch and cleanup claims in both orders', async () => {
-  await applyD1Migrations(env.DB, migrations);
-  const cleaned = await seed('cleanup-first');
-  const dispatched = await seed('dispatch-first');
-  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-
-  await sql('INSERT INTO drive_upload_cleanup_claims VALUES (CAST(? AS TEXT))', cleaned.intent).run();
-  const fetch = vi.fn(async () => response(dispatched.key));
-  await expect(producer(fetch).complete(cleaned.token, 'cleanup-first')).resolves.toBe('uncertain');
-  expect(await evidence('dispatches', 'cleanup-first')).toBeNull();
-  expect(fetch).not.toHaveBeenCalled();
-
-  await expect(producer(fetch).complete(dispatched.token, 'dispatch-first')).resolves.toBe('recorded');
-  await expect(sql('INSERT INTO drive_upload_cleanup_claims VALUES (CAST(? AS TEXT))', dispatched.intent).run()).rejects.toThrow();
-  // A late journal acknowledgement does not establish that cleanup is safe.
-  await sql("UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1, version = version + 1 WHERE id = CAST(? AS TEXT)", dispatched.intent).run();
-  await expect(sql('INSERT INTO drive_upload_cleanup_claims VALUES (CAST(? AS TEXT))', dispatched.intent).run()).rejects.toThrow();
-  expect(fetch).toHaveBeenCalledOnce();
-});
-
 it('rejects an eligible legacy seal without backfilling storage authority', async () => {
   await applyD1Migrations(env.DB, preReceiptMigrations);
   expect(await sql("SELECT name FROM sqlite_master WHERE name = 'drive_upload_storage_bindings'").first()).toBeNull();

@@ -49,6 +49,8 @@ it('does not complete an upload with a stale version, wrong owner, or cleanup cl
   const intent = await allocate(intents, 'v0-fenced');
   let calls = 0;
   const publication = new UploadPublication(env.DB, async () => { calls++; return { etag: '"complete"', size: 7 }; });
+  const pending = await intents.createSized('v0-fenced', 7);
+  expect(await publication.completeAndPublish('v0-fenced', pending.id, 0, null, 'pending', parts)).toBeNull();
   expect(await publication.completeAndPublish('v0-fenced', intent.id, 1, null, 'file', parts)).toBeNull();
   expect(await publication.completeAndPublish('wrong-owner', intent.id, 2, null, 'file', parts)).toBeNull();
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'v0-fenced'").run();

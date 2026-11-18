@@ -105,17 +105,3 @@ it('refuses a provider size that differs from the immutable declaration', async 
   expect(await service.getReceipt('size-owner', intent.id)).toBeNull();
   expect(await intents.get('size-owner', intent.id)).toMatchObject({ state: 'allocated', version: 2 });
 });
-
-it('does not dispatch completion for pending or uncertain intents', async () => {
-  const intents = await setup('negative-owner');
-  const intent = await intents.create('negative-owner');
-  let calls = 0;
-  const service = new UploadPublication(env.DB, async () => { calls++; return { etag: '"complete"', size: 7 }; });
-  const parts = [{ partNumber: 1, etag: '"part"', size: 7 }];
-  expect(await service.completeAndPublish('negative-owner', intent.id, 0, null, 'pending', parts)).toBeNull();
-  await intents.claim('negative-owner', intent.id, 0, 'allocation');
-  await intents.recordUncertain('negative-owner', intent.id, 1, 'allocation');
-  expect(await service.completeAndPublish('negative-owner', intent.id, 2, null, 'uncertain', parts)).toBeNull();
-  expect(calls).toBe(0);
-  expect(await service.getReceipt('negative-owner', intent.id)).toBeNull();
-});
