@@ -18,8 +18,8 @@ const sealed = new UploadSealedEvidence(env.DB);
 const report = new Uint8Array([99, 0, 255, 99]).subarray(1, 3);
 const utf8 = new TextEncoder();
 
-async function seed(id, { missing = false, uncertain = false, otherEpoch = false, short = false } = {}) {
-  const operation = { operationId: `complete-${id}`, intentId: `intent-${id}`, ownerId: `owner-${id}`,
+async function seed(id, { missing = false, uncertain = false, otherEpoch = false, short = false, operationId = `complete-${id}` } = {}) {
+  const operation = { operationId, intentId: `intent-${id}`, ownerId: `owner-${id}`,
     objectKey: `key-${id}`, storageEpoch: 'epoch-1', uploadId: `upload-${id}`, intentVersion: 2 };
   await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", operation.ownerId);
   await run(`INSERT INTO ${journal} (id, owner_id, object_key, upload_id, state, version)
@@ -119,6 +119,18 @@ it('rejects replacing, mutating or deleting a sealed snapshot or report', async 
     await expect(run(`UPDATE ${table} SET operation_id = 'replacement'`)).rejects.toThrow('immutable');
     await expect(run(`DELETE FROM ${table}`)).rejects.toThrow('permanent');
   }
+});
+
+it('enforces the same identity byte bound in SQL and the server API', async () => {
+  await migrate();
+  const operationId = '界'.repeat(65536);
+  const bounded = await seed('bounded', { operationId });
+  await sealed.recordSnapshot(bounded);
+  await expect(sealed.reconcileSnapshotWrite(bounded)).resolves.toBe('recorded');
+  const oversized = await seed('oversized', { operationId: `${operationId}x` });
+  await expect(sealed.recordSnapshot(oversized)).rejects.toThrow('Invalid sealed upload identity');
+  await expect(run(`INSERT INTO ${snapshots} (operation_id, part_numbers, size_bytes) VALUES (?, '[1,3]', ?)`,
+    oversized.operation.operationId, oversized.sizeBytes)).rejects.toThrow('invalid or duplicate');
 });
 
 it('binds all 10000 slots and matches inherited identities by exact bytes', async () => {

@@ -22,7 +22,9 @@ function copyBytes(bytes: Uint8Array, limit: number, message: string): ArrayBuff
   if (typedArrayTag.call(bytes) !== 'Uint8Array') throw new TypeError(message);
   const size: number = Reflect.get(Uint8Array.prototype, 'byteLength', bytes);
   if (size < 1 || size > limit) throw new TypeError(message);
-  return new Uint8Array(bytes).buffer;
+  const span = new Uint8Array(Reflect.get(Uint8Array.prototype, 'buffer', bytes),
+    Reflect.get(Uint8Array.prototype, 'byteOffset', bytes), size);
+  return new Uint8Array(span).buffer;
 }
 function text(value: Identity): ArrayBuffer {
   const message = 'Invalid sealed upload identity';

@@ -18,6 +18,13 @@ WHEN NOT EXISTS (
   JOIN drive_active_members m ON m.id = i.owner_id
   WHERE o.operation_id = NEW.operation_id AND i.state = 'allocated' AND i.completion_acknowledged = 0
     AND i.version = o.intent_version AND i.upload_id = o.upload_id
+    -- Admit only identities the bounded server API can bind and reconcile.
+    AND length(CAST(o.operation_id AS BLOB)) BETWEEN 1 AND 196608
+    AND length(CAST(o.intent_id AS BLOB)) BETWEEN 1 AND 196608
+    AND length(CAST(o.owner_id AS BLOB)) BETWEEN 1 AND 196608
+    AND length(CAST(o.object_key AS BLOB)) BETWEEN 1 AND 196608
+    AND length(CAST(o.storage_epoch AS BLOB)) BETWEEN 1 AND 196608
+    AND length(CAST(o.upload_id AS BLOB)) BETWEEN 1 AND 196608
     AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations prior
       LEFT JOIN drive_upload_sealed_snapshots s USING (operation_id)
       LEFT JOIN drive_upload_completion_evidence e USING (operation_id)
