@@ -2,10 +2,10 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
-import { config, epoch, evidence, intentRow, loseAcknowledgement, migrations, parts, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
+import { config, epoch, evidence, intentRow, loseAcknowledgement, migrations, parts, preReceiptMigrations, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 
 it('rejects an eligible legacy seal without backfilling storage authority', async () => {
-  await applyD1Migrations(env.DB, migrations.slice(0, -1));
+  await applyD1Migrations(env.DB, preReceiptMigrations);
   expect(await sql("SELECT name FROM sqlite_master WHERE name = 'drive_upload_storage_bindings'").first()).toBeNull();
   const { token, bindStorage } = await seed('legacy', { legacy: true });
   await applyD1Migrations(env.DB, migrations);
