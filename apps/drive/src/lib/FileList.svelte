@@ -214,4 +214,8 @@
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
+  @container (max-width: 200px) {
+    li.with-actions > :first-child { grid-column: 1 / -1; }
+    li.with-actions > [data-action-row] { grid-row: 2; }
+  }
 </style>
