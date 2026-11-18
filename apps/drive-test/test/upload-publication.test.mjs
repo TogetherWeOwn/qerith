@@ -14,7 +14,7 @@ import { createCompleteForPublication } from '../../drive/src/lib/server/s3/comp
 
 async function setup(owner) {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES (?, 'member', 'active')").bind(owner).run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   sessionToken = (await new Sessions(env.DB).issue(owner)).token;
   return new UploadIntents(env.DB);
 }

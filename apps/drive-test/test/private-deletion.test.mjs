@@ -16,7 +16,7 @@ const entry = (id, owner, parent = null, key = null) => sql('INSERT INTO drive_e
 const evidence = (owner) => sql('SELECT entry_id, object_key FROM drive_deleted_entries WHERE owner_id = ? ORDER BY entry_id', owner).all();
 
 async function member(id, role = 'member') {
-  await sql("INSERT INTO drive_principals VALUES (?, ?, 'active')", id, role).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')", id, role).run();
   return (await sessions().issue(id)).token;
 }
 

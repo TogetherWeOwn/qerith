@@ -15,7 +15,7 @@ const folder = (id, owner, name = 'folder') => sql('INSERT INTO drive_entries (i
 beforeEach(() => applyD1Migrations(env.DB, migrations));
 
 async function allocated(owner) {
-  await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", owner).run();
   const intent = await intents.createSized(owner, 7);
   await intents.claim(owner, intent.id, 0, 'allocation');
   expect(await intents.recordSuccess(owner, intent.id, 1, { kind: 'allocation', uploadId: 'upload' })).toBe(true);

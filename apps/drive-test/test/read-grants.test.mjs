@@ -12,7 +12,7 @@ async function setup() {
     env.DB.prepare('DELETE FROM drive_sessions'),
     env.DB.prepare('DELETE FROM drive_credentials'),
     env.DB.prepare('DELETE FROM drive_principals'),
-    env.DB.prepare("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('alice', 'member', 'active'), ('bob', 'member', 'active'), ('disabled', 'member', 'revoked')"),
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('alice', 'member', 'active'), ('bob', 'member', 'active'), ('disabled', 'member', 'revoked')"),
     env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('folder', 'alice', 'folder', 'folder'), ('private', 'bob', 'private', 'folder'), ('root', 'owner', 'root', 'folder')"),
     env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES ('file', 'alice', 'folder', 'file', 'file', 'key', 1)"),
   ]);
