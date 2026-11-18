@@ -1,17 +1,16 @@
 <script lang="ts">
   import './tokens.css';
 
-  // Owned folders only; shared folders have a different empty state and no upload action.
   export let root: boolean;
-  export let onUpload: () => void;
+  export let onUpload: (() => void) | undefined = undefined;
 </script>
 
 <section class="empty" aria-labelledby="empty-title">
   <div>
     <h2 id="empty-title">{root ? 'Your drive is empty.' : 'This folder is empty.'}</h2>
-    <p>{root ? 'Upload a file or make a folder to start.' : 'Drop files here or use Upload.'}</p>
+    {#if onUpload}<p>{root ? 'Upload a file or make a folder to start.' : 'Drop files here or use Upload.'}</p>{/if}
   </div>
-  <button type="button" onclick={onUpload}>Upload files</button>
+  {#if onUpload}<button type="button" onclick={onUpload}>Upload files</button>{/if}
 </section>
 
 <style>

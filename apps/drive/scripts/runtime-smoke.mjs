@@ -42,10 +42,11 @@ const files = await readdir(root, { recursive: true, withFileTypes: true });
 const file = files.find((entry) => entry.isFile() && relative(root, entry.parentPath).startsWith('_app'));
 if (!file) throw new Error('No generated app asset found');
 const asset = `${relative(root, file.parentPath)}/${file.name}`;
+const denied = ['/', '/f/private'].map(path => [path, 503, 'Service unavailable']);
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
-  await exercise(['--config', config], [['/', 503, 'Service unavailable'], [`/${asset}`, 503, 'Service unavailable']]);
+  await exercise(['--config', config], [...denied, [`/${asset}`, 503, 'Service unavailable']]);
 }
-await exercise(['.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.build.jsonc'], [['/', 503, 'Service unavailable']]);
+await exercise(['.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.build.jsonc'], denied);
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);

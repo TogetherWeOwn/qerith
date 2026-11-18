@@ -3,6 +3,14 @@
   import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
   import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
+  import FolderView from '../../src/lib/FolderView.svelte';
+
+  const folderState = new URLSearchParams(window.location.search).get('folder-view');
+  const folderView = folderState === 'unavailable' ? { status: 'unavailable' } : { status: 'ok', folder: {
+    name: 'Receipts', paged: folderState === 'end',
+    entries: folderState === 'list' ? [{ id: 'archive', name: 'Archive', kind: 'folder' }, { id: 'file', name: 'Résumé.pdf', kind: 'file' }] : [],
+    nextPage: folderState === 'list' ? JSON.stringify(['Résumé.pdf', 'file']) : null
+  } };
 
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
   const rowName = new URLSearchParams(window.location.search).get('name') ?? (new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file');
@@ -83,7 +91,9 @@
   window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-{#if menuFixture}
+{#if folderState}
+  <FolderView result={folderView} />
+{:else if menuFixture}
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>
