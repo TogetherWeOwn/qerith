@@ -37,7 +37,12 @@ test('checks all preparation fields against the current run without granting adm
     assert.throws(() => assertPreparationMatchesRun(missing, input));
   }
   assert.throws(() => assertPreparationMatchesRun(null, input));
-  assert.throws(() => assertPreparationMatchesRun(Object.create(manifest), input));
+});
+
+test('rejects an inherited field even with the expected own-field count', () => {
+  const { admission, ...fields } = preparationManifest(input);
+  const manifest = Object.assign(Object.create({ admission }), fields, { extra: 'not allowed' });
+  assert.throws(() => assertPreparationMatchesRun(manifest, input), /metadata mismatch: admission/);
 });
 
 test('rejects metadata with fields outside the v1 contract', () => {
