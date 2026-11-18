@@ -13,26 +13,31 @@ test('does not read without authorization or with a malformed page', async () =>
   let reads = 0;
   assert.deepEqual(await folderPage(request, 'private'), unavailable);
   assert.deepEqual(await folderPage(request, 'private', { authorize: async () => null, readAccess }), unavailable);
-  for (const bad of ['page=null', 'page=%22ab%22', 'page=&page=', `page=${'x'.repeat(2049)}`]) {
+  for (const bad of ['page=', 'page=a&page=b', `page=${'x'.repeat(129)}`]) {
     assert.deepEqual(await folderPage(new Request(`${request.url}?${bad}`), 'private', { authorize, readAccess }), unavailable);
   }
   assert.equal(reads, 0);
 });
 
-test('projects safe fields and round-trips the cursor without conflating the end and an empty folder', async () => {
-  const cursor = { id: 'row', name: 'Résumé & receipts.pdf' };
+test('projects safe fields and resolves an ID-only continuation without exposing the filename in the URL', async () => {
+  const cursor = { id: 'import:2026', name: 'Résumé & receipts.pdf' };
   const item = { ...cursor, kind: 'file' as const };
-  const nextPage = JSON.stringify([cursor.name, cursor.id]);
-  const next = new Request(`${request.url}?${new URLSearchParams({ page: nextPage })}`);
+  const next = new Request(`${request.url}?${new URLSearchParams({ page: cursor.id })}`);
+  const lookup = async (token: string, id: string) => {
+    assert.equal(token, 'session-token');
+    return id === 'private' ? get() : id === cursor.id ? item : null;
+  };
   for (const [incoming, expected, entries] of [[request, null, [item]], [request, null, []], [next, cursor, []]] as const) {
     const list = async (token: string, id: string, after?: typeof cursor | null) => {
       assert.equal(token, 'session-token'); assert.equal(id, 'private'); assert.deepEqual(after, expected);
       return { entries: entries.map(entry => ({ ...entry, object_key: 'private-key' })), nextCursor: entries.length ? cursor : null };
     };
-    assert.deepEqual(await folderPage(incoming, 'private', { authorize, readAccess: { get, list } }), {
-      status: 'ok', folder: { name: 'Receipts', entries, nextPage: entries.length ? nextPage : null, paged: expected !== null }
+    assert.deepEqual(await folderPage(incoming, 'private', { authorize, readAccess: { get: lookup, list } }), {
+      status: 'ok', folder: { name: 'Receipts', entries, nextPage: entries.length ? cursor.id : null, paged: expected !== null }
     });
   }
+  const list = async () => ({ entries: [], nextCursor: null });
+  assert.deepEqual(await folderPage(new Request(`${request.url}?page=missing`), 'private', { authorize, readAccess: { get: lookup, list } }), unavailable);
 });
 
 test('does not disclose the title if live listing is denied, fails or exceeds the bound', async () => {

@@ -269,6 +269,8 @@ try {
       await page.goto(`${origin}/?folder-view=${state}`, { waitUntil: 'networkidle' });
       await page.getByText(text, { exact: true }).waitFor();
       assert.deepEqual(await page.getByRole('link').allTextContents(), links);
+      assert.deepEqual(await page.getByRole('link').evaluateAll(elements => elements.map(el => el.getAttribute('href'))),
+        state === 'list' ? ['/f/archive', '?page=file'] : state === 'end' ? ['?'] : []);
       for (const name of links) {
         await page.keyboard.press('Tab');
         assert.equal(await page.getByRole('link', { name, exact: true }).evaluate(el => el === document.activeElement), true);

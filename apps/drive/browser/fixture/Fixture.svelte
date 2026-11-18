@@ -9,7 +9,7 @@
   const folderView = folderState === 'unavailable' ? { status: 'unavailable' } : { status: 'ok', folder: {
     name: 'Receipts', paged: folderState === 'end',
     entries: folderState === 'list' ? [{ id: 'archive', name: 'Archive', kind: 'folder' }, { id: 'file', name: 'Résumé.pdf', kind: 'file' }] : [],
-    nextPage: folderState === 'list' ? JSON.stringify(['Résumé.pdf', 'file']) : null
+    nextPage: folderState === 'list' ? 'file' : null
   } };
 
   const menuFixture = new URLSearchParams(window.location.search).get('menu');

@@ -16,7 +16,7 @@
           {@const name = entry.name.trim() ? entry.name : `${entry.name} (Whitespace-only name)`}
           <li>
             <KindGlyph kind={entry.kind} />
-            {#if entry.kind === 'folder'}<a href={'/f/' + entry.id} dir="auto">{name}</a>
+            {#if entry.kind === 'folder' && !['.', '..'].includes(entry.id)}<a href={'/f/' + encodeURIComponent(entry.id)} dir="auto">{name}</a>
             {:else}<span dir="auto">{name}</span>{/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
           </li>
