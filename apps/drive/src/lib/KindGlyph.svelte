@@ -18,4 +18,5 @@
 
 <style>
   svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); flex: none; color: var(--drive-color-text-secondary); }
+  @media (forced-colors: active) { svg { color: CanvasText; } }
 </style>
