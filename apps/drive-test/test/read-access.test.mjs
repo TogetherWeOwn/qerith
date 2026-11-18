@@ -123,19 +123,21 @@ it.each(['asc', 'desc'])('lists folders first, with a binary name seek in %s ord
 it.each(['asc', 'desc'])('keeps the saved boundary and current total after writes in %s order', async (direction) => {
   const { reads, alice } = await setup();
   await seedListing(201);
+  await env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
+    VALUES ('receipt', 'alice', 'root', 'receipt', 'file', 'receipt-key', 0)`).run();
   const first = await reads.listPage(alice, 'root', null, direction);
-  expect(first.total).toBe(202);
+  expect(first.total).toBe(203);
   expect(first.entries).toHaveLength(200);
-  expect(first.nextCursor).not.toBeNull();
+  expect(first.entries.every(entry => entry.kind === 'folder')).toBe(true);
   await env.DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(first.entries.at(-1).id).run();
-  const remaining = direction === 'asc' ? ['item-200', 'nested'] : ['item-001', 'item-000'];
+  const remaining = direction === 'asc' ? ['item-200', 'nested', 'receipt'] : ['item-001', 'item-000', 'receipt'];
   const afterDelete = await reads.listPage(alice, 'root', first.nextCursor, direction);
-  expect(afterDelete.total).toBe(201);
+  expect(afterDelete.total).toBe(202);
   expect(afterDelete.entries.map(entry => entry.name)).toEqual(remaining);
   await env.DB.prepare("UPDATE drive_entries SET parent_id = 'elsewhere' WHERE name = ? AND parent_id = 'root'")
-    .bind(direction === 'asc' ? 'item-200' : 'item-001').run();
+    .bind(remaining[0]).run();
   const afterMove = await reads.listPage(alice, 'root', first.nextCursor, direction);
-  expect(afterMove).toMatchObject({ total: 200, nextCursor: null });
+  expect(afterMove).toMatchObject({ total: 201, nextCursor: null });
   expect(afterMove.entries.map(entry => entry.name)).toEqual(remaining.slice(1));
   expect((await reads.listPage(alice, 'elsewhere')).total).toBe(1);
 });
