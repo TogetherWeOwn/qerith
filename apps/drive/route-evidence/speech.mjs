@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { appendFile } from 'node:fs/promises';
 import guidepup from '@guidepup/guidepup';
 import { normalizeSpeech, unavailableHeadingSpeech } from '../scripts/route-evidence-checks.mjs';
-import { assessArrivalTrials, observeRouterClick, trials } from './arrival-diagnostic.mjs';
 
+const unavailableTitle = /Folder unavailable.*Drive/i;
+const arrivalPatterns = [/Folder unavailable\W+Drive, document\b/i, unavailableHeadingSpeech];
 const { nvda, NVDAKeyCodeCommands: commands, WindowsKeyCodes: key, WindowsModifiers: modifier } = guidepup;
+const start = () => nvda.start({ capture: 'initial', restoreUserScreenReader: false });
+export const nvdaAssetVersion = nvda.version;
 
-export async function captureSpeech(page, path, selfCheck) {
+function speechRecorder(page, path) {
   const perform = (code, ...modifiers) => nvda.perform({ keyCode: [code], modifiers }, { capture: true });
   const record = data => appendFile(path, JSON.stringify(data) + '\n');
   async function recordSpeech(step, action) {
@@ -45,71 +48,59 @@ export async function captureSpeech(page, path, selfCheck) {
       assert.match(page.url(), url);
     }, announcement);
   }
-  const origin = new URL(page.url()).origin;
-  const unavailableTitle = /Folder unavailable.*Drive/i;
-  const arrivalPatterns = [/Folder unavailable\W+Drive, document\b/i, unavailableHeadingSpeech];
-  async function prepareArrival(mode) {
-    await page.goto(`${origin}/f/populated`);
-    if (mode) await page.evaluate(mode => sessionStorage.setItem('route-evidence-click', mode), mode);
-    await browse(); await top();
+  async function unavailable(step, destination, trace = {}) {
+    // Read the sole heading on arrival, without corrective focus or a second reading.
+    const arrivalStep = `${step}: direct full navigation`;
+    const phrases = await recordSpeech(arrivalStep, async () => {
+      const { result } = await nvda.capture(async () => {
+        if (trace.controlTitle) trace.control = await documentState(page);
+        trace.navigationStarted = Date.now();
+        return page.goto(destination).catch(error => error);
+      }, { capture: true });
+      trace.captureEnded = Date.now();
+      if (result instanceof Error) throw result;
+      assert(result && !result.request().redirectedFrom(), `${step}: expected a direct document response`);
+      assert.equal(page.url(), destination);
+    });
+    trace.arrived = await documentState(page);
+    const spokenTitle = await title(step, unavailableTitle);
+    return [requireSpeech(arrivalStep, phrases, ...arrivalPatterns), spokenTitle];
   }
-  async function navigateAndCapture(destination) {
-    const { result } = await nvda.capture(() => page.goto(destination).catch(error => error), { capture: true });
-    if (result instanceof Error) throw result;
-    assert.equal(page.url(), destination);
-  }
-  async function unavailable(id) {
-    await prepareArrival();
-    // Arrival already reads the sole heading. Control+Home can be silent when NVDA is already there.
-    const arrival = await hear(`${id}: direct full navigation`, () => navigateAndCapture(`${origin}/f/${id}`), ...arrivalPatterns);
-    if (selfCheck) assert.equal(await page.getByRole('link').count(), 0, `${id}: expected a no-link fixture`);
-    return [arrival, await title(id, unavailableTitle)];
-  }
-  const compareUnavailable = async () => {
-    assert.deepEqual(await unavailable('denied'), await unavailable('missing'), 'Unavailable announcements differ');
-  };
-  async function diagnoseArrival() {
-    await page.addInitScript(observeRouterClick);
-    const samples = [];
-    try {
-      for (const trial of trials) {
-        const { mode, route, pair } = trial;
-        const step = `Timing ${pair} ${mode} ${route}`;
-        const sample = { ...trial, destination: `${origin}/f/${route}`, errors: [] };
-        samples.push(sample);
-        await prepareArrival(mode);
-        try {
-          const phrases = await recordSpeech(`${step}: direct full navigation`, async () => {
-            sample.navigationStarted = Date.now();
-            await navigateAndCapture(sample.destination);
-          });
-          sample.speechRead = Date.now();
-          sample.arrival = requireSpeech(step, phrases, ...arrivalPatterns);
-        } catch (error) { sample.errors.push(error.message); }
-        finally {
-          // Read and persist raw arrival speech before releasing the listener on this document.
-          try { sample.trace = await page.evaluate(() => window.finishRouteEvidenceArrival?.()); }
-          catch (error) { sample.errors.push(error.message); }
-        }
-        try {
-          sample.title = await title(step, unavailableTitle);
-          assert.equal(await page.getByRole('link').count(), 0, `${step}: expected a no-link fixture`);
-        } catch (error) { sample.errors.push(error.message); }
-      }
-    } finally {
-      await record({ step: 'Synthetic timing diagnostic (not qualification)', finding: assessArrivalTrials(samples), samples });
-    }
-  }
-  await nvda.start({ capture: 'initial', restoreUserScreenReader: false });
+  return { browse, top, heading, tab, hear, title, follow, perform, unavailable };
+}
+
+function documentState(page) {
+  return page.evaluate(() => ({ url: location.href, documentStart: performance.timeOrigin,
+    foreground: document.hasFocus() && document.visibilityState === 'visible', ready: document.readyState }));
+}
+
+export async function captureFreshArrival(page, path, sample, inspectNVDA) {
+  const { browse, top, title, unavailable } = speechRecorder(page, path);
+  await start();
   try {
-    if (selfCheck) {
-      let ordinaryFailure;
-      try { await compareUnavailable(); }
-      catch (error) { ordinaryFailure = error; }
-      try { await diagnoseArrival(); }
-      finally { if (ordinaryFailure) throw ordinaryFailure; }
-      await page.goto(`${origin}/f/populated`);
-    }
+    const step = `Fresh ${sample.index + 1} ${sample.route}`;
+    await browse(); await top();
+    sample.screenReader = await inspectNVDA();
+    sample.controlTitle = await title(`${step}: control`, /Route evidence self-check/i);
+    sample.control = await documentState(page);
+    assert(sample.control.foreground && sample.control.ready === 'complete', `${step}: control not ready in foreground`);
+    [sample.arrival, sample.title] = await unavailable(step, sample.destination, sample);
+    assert.equal(await page.getByRole('link').count(), 0, `${step}: expected a no-link fixture`);
+  } finally {
+    await nvda.stop();
+  }
+}
+
+export async function captureSpeech(page, path, selfCheck) {
+  const { browse, top, heading, tab, hear, title, follow, perform, unavailable } = speechRecorder(page, path);
+  const origin = new URL(page.url()).origin;
+  async function captureUnavailable(id) {
+    await page.goto(`${origin}/f/populated`);
+    await browse(); await top();
+    return unavailable(id, `${origin}/f/${id}`);
+  }
+  await start();
+  try {
     await browse();
     if (selfCheck) {
       await heading('Self-check', /Route evidence self-check/i);
@@ -138,7 +129,7 @@ export async function captureSpeech(page, path, selfCheck) {
     await tab('Past-end', /First page/i);
     await follow('First page', /\/f\/populated\??$/, /Project records\W*Drive, document\b/i);
     await heading('First page', /Project records/i);
-    await compareUnavailable();
+    assert.deepEqual(await captureUnavailable('denied'), await captureUnavailable('missing'), 'Unavailable announcements differ');
   } finally {
     await nvda.stop();
   }

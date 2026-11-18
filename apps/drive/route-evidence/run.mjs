@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { isDeepStrictEqual } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { firefox } from 'playwright';
-import { captureSpeech } from './speech.mjs';
+import { assertFreshArrivals, routes } from './arrival-diagnostic.mjs';
+import { captureFreshArrival, captureSpeech, nvdaAssetVersion } from './speech.mjs';
 import { unavailableResponse } from '../scripts/route-evidence-checks.mjs';
 
 const { EVIDENCE, PROJECTION, FIREFOX_EXE } = process.env;
@@ -103,20 +106,82 @@ async function inspect(context, page, origin) {
   }
 }
 
+async function configureContext(context, origin) {
+  await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+  if (!selfCheck) await context.addCookies([{ url: origin, name: 'route-session', value: 'synthetic' }]);
+}
+
+async function freshArrivalDiagnostic(origin, path, launchOptions) {
+  const asset = join(process.env.GUIDEPUP_SCREEN_READERS_PATH, 'nvda', 'all', nvdaAssetVersion);
+  const executable = join(asset, 'extracted', 'nvda.exe');
+  const config = join(asset, 'sessionUserConfig');
+  async function processes() {
+    const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const script = `$ErrorActionPreference = 'Stop'; ConvertTo-Json -Compress -InputObject @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'nvda.exe' OR Name = 'firefox.exe'" | Select-Object Name, ProcessId, ExecutablePath)`;
+    const { stdout } = await promisify(execFile)(powershell, ['-NoProfile', '-NonInteractive', '-Command', script],
+      { cwd: process.env.RUNNER_TEMP, timeout: 10000, windowsHide: true });
+    return JSON.parse(stdout);
+  }
+  async function assertReset() {
+    assert.deepEqual(await processes(), [], 'Expected no existing NVDA or Firefox processes');
+    const previousConfig = await lstat(config).catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    assert.equal(previousConfig, undefined, 'Old NVDA session config remains');
+  }
+  async function inspectNVDA() {
+    const [reader, ...otherReaders] = (await processes()).filter(process => process.Name.toLowerCase() === 'nvda.exe');
+    assert.equal(otherReaders.length, 0, 'Expected exactly one running NVDA');
+    assert.equal(reader?.ExecutablePath?.toLowerCase(), executable.toLowerCase(), 'Expected the pinned NVDA process');
+    const configHash = createHash('sha256').update(await readFile(join(config, 'nvda.ini'))).digest('hex');
+    return { id: reader.ProcessId, configHash };
+  }
+  const samples = routes.map((route, index) => ({ route, index, destination: `${origin}/f/${route}`, errors: [] }));
+  for (const sample of samples) {
+    let context;
+    let profile;
+    try {
+      await assertReset();
+      sample.reset = true;
+      profile = await mkdtemp(join(process.env.RUNNER_TEMP, 'route-firefox-'));
+      sample.profile = basename(profile);
+      context = await firefox.launchPersistentContext(profile, launchOptions);
+      await configureContext(context, origin);
+      const [page] = context.pages();
+      assert.equal(context.pages().length, 1, 'Expected one foreground Firefox page');
+      page.setDefaultTimeout(10000);
+      await page.goto(`${origin}/f/populated`);
+      await captureFreshArrival(page, path, sample, inspectNVDA);
+    } catch (error) { sample.errors.push(error.message); }
+    finally {
+      try {
+        await context?.close();
+        await assertReset();
+        sample.stopped = true;
+        if (profile) await rm(profile, { recursive: true });
+      } catch (error) { sample.errors.push(error.message); }
+      await save('fresh-arrivals', { kind: 'lifecycle-diagnostic-only', samples });
+    }
+  }
+  assertFreshArrivals(samples, origin);
+}
+
 let browser;
 try {
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
-  browser = await firefox.launch({ executablePath: FIREFOX_EXE, headless: false });
+  const path = join(EVIDENCE, 'speech.jsonl');
+  const launchOptions = { executablePath: FIREFOX_EXE, headless: false };
+  if (selfCheck) await freshArrivalDiagnostic(origin, path, launchOptions);
+  browser = await firefox.launch(launchOptions);
   await save('browser', { firefox: browser.version(), node: process.version, origin });
   const context = await browser.newContext();
-  await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-  if (!selfCheck) await context.addCookies([{ url: origin, name: 'route-session', value: 'synthetic' }]);
+  await configureContext(context, origin);
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
   await page.goto(`${origin}/f/populated`);
-  await captureSpeech(page, join(EVIDENCE, 'speech.jsonl'), selfCheck);
+  await captureSpeech(page, path, selfCheck);
   await inspect(context, page, origin);
-  assert(!selfCheck, 'Synthetic timing diagnostic only; no qualifying self-check result');
+  assert(!selfCheck, 'Synthetic lifecycle diagnostic only; no qualifying self-check result');
   await save('result', { kind: 'exact-head-route', status: 'captured', visualReview: 'required' });
 } finally {
   try { await browser?.close(); } finally { await app.close(); }

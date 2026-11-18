@@ -1,58 +1,39 @@
-export const trials = [
-  ['immediate', 'denied', 'missing'],
-  ['held', 'denied', 'missing'],
-  ['held', 'missing', 'denied'],
-  ['immediate', 'missing', 'denied']
-].flatMap(([mode, ...routes], pair) => routes.map((route, position) => ({ mode, route, pair, position })));
+import assert from 'node:assert/strict';
 
-// Serialized by Playwright. Only instrument the two fixed synthetic documents.
-export function observeRouterClick() {
-  if (!/^\/f\/(denied|missing)$/.test(location.pathname) || window !== window.top) return;
-  const mode = sessionStorage.getItem('route-evidence-click');
-  if (mode !== 'held' && mode !== 'immediate') return;
-  const native = EventTarget.prototype.addEventListener;
-  const trace = { mode, url: location.href, documentStart: performance.timeOrigin, registrations: [] };
-  let pending;
-  EventTarget.prototype.addEventListener = function (...args) {
-    const [type, listener] = args;
-    if (this !== document.documentElement || type !== 'click' || args.length !== 2 || typeof listener !== 'function') {
-      return native.apply(this, args);
-    }
-    // Match the pinned Kit router, not Svelte's own delegated events or other root listeners.
-    const source = Function.prototype.toString.call(listener);
-    if (!source.includes('composedPath') || !source.includes('SVGAElement')) return native.apply(this, args);
-    const entry = { requested: performance.now(), attached: null };
-    trace.registrations.push(entry);
-    const attach = () => {
-      native.apply(this, args);
-      entry.attached = performance.now();
-    };
-    if (mode !== 'held' || trace.windowClosed !== undefined || pending) return attach();
-    pending = attach;
-  };
-  window.finishRouteEvidenceArrival = () => {
-    trace.windowClosed = performance.now();
-    trace.foreground = document.visibilityState === 'visible' && document.hasFocus();
-    pending?.();
-    pending = undefined;
-    return trace;
-  };
-}
+// Each entry gets its own processes; neither route always occupies the first position.
+export const routes = ['denied', 'missing', 'missing', 'denied'];
 
-export function assessArrivalTrials(samples) {
-  if (samples.length !== trials.length || new Set(samples.map(({ trace }) => trace?.documentStart)).size !== trials.length) return 'inconclusive';
-  const title = samples[0].title;
-  const valid = samples.every(({ mode, route, pair, position, destination, trace, navigationStarted, speechRead, arrival, title: spokenTitle, errors }, i) => {
-    const expected = trials[i];
-    const [{ requested, attached } = {}] = trace?.registrations ?? [];
-    if (errors?.length !== 0 || !arrival || !title || title !== spokenTitle || mode !== expected.mode || route !== expected.route ||
-      pair !== expected.pair || position !== expected.position || trace?.mode !== mode || !trace.foreground ||
-      !destination.endsWith(`/f/${route}`) || trace.url !== destination || trace.registrations.length !== 1 ||
-      ![navigationStarted, speechRead, trace.documentStart, requested, attached, trace.windowClosed].every(Number.isFinite) ||
-      speechRead < navigationStarted || requested >= trace.windowClosed || attached < requested) return false;
-    return mode === 'held' ? attached >= trace.windowClosed : attached < trace.windowClosed;
-  });
-  if (!valid) return 'inconclusive';
-  return samples.every(({ mode, arrival }) => /\bclickable\b/i.test(arrival) === (mode === 'immediate'))
-    ? 'clickable-follows-registration' : 'inconclusive';
+export function assertFreshArrivals(samples, origin) {
+  assert.equal(samples.length, routes.length, 'Incomplete first-arrival schedule');
+  const started = new Set();
+  const profiles = new Set();
+  const documentStarts = new Set();
+  const reference = samples[0];
+  for (const [index, sample] of samples.entries()) {
+    const { route, screenReader, profile, control, controlTitle, arrived, navigationStarted, captureEnded } = sample;
+    const step = `Fresh ${index + 1} ${routes[index]}`;
+    assert.deepEqual(sample.errors, [], step);
+    assert.equal(sample.index, index, step);
+    assert.equal(route, routes[index], step);
+    assert.equal(sample.reset, true, step);
+    assert.equal(sample.stopped, true, step);
+    assert(Number.isInteger(screenReader?.id) && screenReader.id > 0 && !started.has(screenReader.id), `${step}: NVDA instance was not fresh`);
+    started.add(screenReader.id);
+    assert.match(screenReader.configHash, /^[0-9a-f]{64}$/i, step);
+    assert.equal(screenReader.configHash, reference.screenReader.configHash, `${step}: NVDA settings differ`);
+    assert(profile && !profiles.has(profile), `${step}: Firefox profile was not fresh`);
+    profiles.add(profile);
+    assert(control?.foreground && control.ready === 'complete', `${step}: control not ready in foreground`);
+    assert.equal(control.url, `${origin}/f/populated`, step);
+    assert(controlTitle && controlTitle === reference.controlTitle, `${step}: control title speech differs`);
+    assert(arrived?.foreground && arrived.ready === 'complete', `${step}: arrival not ready in foreground`);
+    assert.equal(arrived.url, `${origin}/f/${route}`, step);
+    assert([navigationStarted, control.documentStart, arrived.documentStart, captureEnded].every(Number.isFinite) &&
+      control.documentStart < navigationStarted && navigationStarted <= arrived.documentStart && arrived.documentStart < captureEnded &&
+      !documentStarts.has(arrived.documentStart), `${step}: not a new arrival document`);
+    documentStarts.add(arrived.documentStart);
+    assert(sample.arrival && sample.title, `${step}: missing separate arrival or title speech`);
+    assert.equal(sample.arrival, reference.arrival, 'Unavailable announcements differ');
+    assert.equal(sample.title, reference.title, 'Unavailable titles differ');
+  }
 }
