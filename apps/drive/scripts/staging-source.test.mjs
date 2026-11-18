@@ -10,15 +10,16 @@ const workflow = readFileSync(
 const sourceStep = 'Verify dispatch source';
 const checkoutStep = 'Verify checked-out commit';
 const sourceSha = '0123456789abcdef0123456789abcdef01234567';
+const steps = workflow.split(/^      - /m).slice(1);
 
 function runStep(name, overrides = {}) {
-  // Run the workflow's literal Bash block, not a copy of the guard.
-  const step = workflow.split('\n      - ').find((step) => step.startsWith(`name: ${name}\n`));
-  const block = step?.match(/^        run: \|((?:\n {10}[^\n]*)+)/m)?.[1];
+  // Run the workflow's literal Bash block, including any blank lines.
+  const step = steps.find((step) => step.startsWith(`name: ${name}\n`));
+  const block = step?.match(/^        run: \|((?:\n(?: {10}[^\n]*| *(?=\n|$)))+)/m)?.[1];
   assert.ok(block, `missing script for ${name}`);
   const script = block.replace(/^ {10}/gm, '');
   const git = `git() {
-    [[ "$*" == 'rev-parse --verify HEAD' ]] || return 2
+    [[ $# == 3 && "$1" == rev-parse && "$2" == --verify && "$3" == HEAD ]] || return 2
     printf '%s\\n' "$TEST_CHECKOUT_SHA"
     return "$TEST_GIT_STATUS"
   }`;
@@ -45,11 +46,15 @@ function assertRejected(result, reason) {
 }
 
 test('checks the dispatch before checkout and the commit before metadata tests', () => {
-  const source = workflow.indexOf(`- name: ${sourceStep}\n`);
-  const checkout = workflow.indexOf('- uses: actions/checkout@');
-  const commit = workflow.indexOf(`- name: ${checkoutStep}\n`);
-  const metadata = workflow.indexOf('- name: Test closed-admission metadata');
+  const source = steps.findIndex((step) => step.startsWith(`name: ${sourceStep}\n`));
+  const checkout = steps.findIndex((step) => step.startsWith('uses: actions/checkout@'));
+  const commit = steps.findIndex((step) => step.startsWith(`name: ${checkoutStep}\n`));
+  const metadata = steps.findIndex((step) => step.startsWith('name: Test closed-admission metadata\n'));
   assert.ok(source >= 0 && source < checkout && checkout < commit && commit < metadata);
+  for (const i of [source, checkout, commit, metadata]) {
+    assert.doesNotMatch(steps[i], /^        (?:if|continue-on-error):/m);
+  }
+  assert.match(steps[checkout], /^          ref: \$\{\{ github\.sha \}\}$/m);
 });
 
 test('accepts a matching main dispatch checkout', () => {
@@ -70,7 +75,7 @@ test('rejects the wrong repository, event or ref before checkout', () => {
 });
 
 test('rejects malformed source SHAs independently of checkout identity', () => {
-  for (const sha of ['HEAD', sourceSha.toUpperCase(), '']) {
+  for (const sha of ['', 'HEAD', sourceSha.slice(1), `${sourceSha}0`, `g${sourceSha.slice(1)}`, sourceSha.toUpperCase()]) {
     assertRejected(runStep(sourceStep, { GITHUB_SHA: sha }), /invalid source SHA/);
   }
 });
