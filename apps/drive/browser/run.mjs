@@ -256,6 +256,75 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
+  for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
+    const size = `${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    const name = '  تقرير  ' + 'a'.repeat(180) + '.pdf  ';
+    await page.goto(`${origin}/?details=full`, { waitUntil: 'networkidle' });
+    const details = page.getByRole('group', { name: /^Details for تقرير/ });
+    assert.equal(await details.getAttribute('data-details-id'), 'sample');
+    assert.deepEqual(await details.locator('dt').allTextContents(), ['Name', 'Size', 'Kind', 'Modified', 'Uploaded', 'Shared with']);
+    assert.deepEqual(await details.locator('dd').allTextContents(), [name, '5.4 GB · 5,368,709,120 bytes', 'PDF', '14 Nov 2026, 09:00 UTC', '12 Nov 2026, 09:00 UTC', 'Mora, Sam']);
+    assert.equal(await details.locator('data').getAttribute('value'), '5368709120');
+    const filename = details.locator('dd[dir="auto"]');
+    assert.deepEqual(await filename.evaluate(el => {
+      const { whiteSpace, unicodeBidi, textAlign } = getComputedStyle(el);
+      const wrapsWithinCell = el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight;
+      return { whiteSpace, unicodeBidi, textAlign, wrapsWithinCell };
+    }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', textAlign: 'right', wrapsWithinCell: true });
+    assert.equal(await details.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `details-${size}.png`), fullPage: true });
+    if (width === 320) {
+      await context.close();
+      continue;
+    }
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-details-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for details-${size}: ${JSON.stringify(results.violations)}`);
+
+    const close = details.getByRole('button', { name: 'Hide details' });
+    assert((await close.boundingBox())?.height >= 36, 'Hide details must meet the Drive minimum control height');
+    await page.keyboard.press('Tab');
+    const hasFocusRing = el => el === document.activeElement && el.matches(':focus-visible') && getComputedStyle(el).outlineStyle === 'solid';
+    assert.equal(await close.evaluate(hasFocusRing), true);
+    const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+    await page.screenshot({ path: resolve(output, `details-${size}-greyscale.png`) });
+    await greyscale.evaluate(el => el.remove());
+    await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
+    assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches && document.getAnimations().length === 0), true);
+    assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+    assert.equal(await close.evaluate(hasFocusRing), true);
+    await page.screenshot({ path: resolve(output, `details-${size}-forced-colours-focus.png`) });
+    await page.emulateMedia({ reducedMotion: null, forcedColors: null });
+    if (width === 390) await close.click();
+    else await page.keyboard.press('Enter');
+    await details.waitFor({ state: 'detached' });
+
+    await page.goto(`${origin}/?details=missing`, { waitUntil: 'networkidle' });
+    const missing = page.getByRole('group', { name: 'Details for whitespace-only name', exact: true });
+    assert.deepEqual(await missing.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+    assert.deepEqual(await missing.locator('dd').allTextContents(), [' \t ', '—', 'Folder']);
+    assert.equal(await missing.locator('data').count(), 0);
+    await page.screenshot({ path: resolve(output, `details-missing-${size}.png`), fullPage: true });
+
+    for (const [variant, filename, bytes, sizeText] of [['zero', 'Empty.txt', '0', '0 bytes'], ['one', 'Tiny.txt', '1', '1 byte']]) {
+      await page.goto(`${origin}/?details=${variant}`, { waitUntil: 'networkidle' });
+      const small = page.getByRole('group', { name: `Details for ${filename}`, exact: true });
+      assert.deepEqual(await small.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+      assert.deepEqual(await small.locator('dd').allTextContents(), [filename, sizeText, 'File']);
+      assert.equal(await small.locator('data').getAttribute('value'), bytes);
+      await page.screenshot({ path: resolve(output, `details-${variant}-${size}.png`), fullPage: true });
+    }
+    await context.close();
+    console.log(`FileDetails facts, filenames, close and axe passed at ${size}`);
+  }
   for (const [width, height] of [[1280, 800], [390, 844]]) for (const state of states) {
     const size = `${state}-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
@@ -1054,7 +1123,7 @@ try {
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+  for (const name of ['head.txt', 'details-1280x800.png', 'details-390x844.png', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
   }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
