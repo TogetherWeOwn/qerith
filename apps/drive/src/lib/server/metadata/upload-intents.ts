@@ -64,7 +64,7 @@ export class UploadIntents {
     return this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${active}
         AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
-        AND NOT EXISTS (SELECT 1 FROM drive_upload_settled_completions WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
           JOIN drive_upload_completion_dispatches d ON d.operation_id = o.operation_id

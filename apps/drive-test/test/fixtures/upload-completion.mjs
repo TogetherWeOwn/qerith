@@ -9,7 +9,8 @@ export const config = { endpoint: 'https://storage.example', bucket: 'drive-test
 export const epoch = 'epoch-1';
 export const parts = [{ partNumber: 2, etag: '"part-&-ÿ"', size: 7 }];
 export const response = (key) => new Response(`<CompleteMultipartUploadResult><Bucket>drive-test</Bucket><Key>${key}</Key><ETag>"final-opaque"</ETag><ChecksumSHA256>example-checksum</ChecksumSHA256><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>`);
-export const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
+export const migrations = env.DRIVE_MIGRATIONS;
+export const preReceiptMigrations = migrations.filter(({ name }) => name < '0022_upload_publication_receipts.sql');
 export const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
 export const intentRow = (id) => sql('SELECT * FROM drive_upload_intents WHERE id = CAST(? AS TEXT)', id).first();
 
@@ -25,11 +26,12 @@ export function producer(fetch, verifyParts = async () => parts, db = env.DB, qu
 }
 
 // Seed ledger rows directly so this also covers inherited, non-UTF-8 SQLite TEXT.
-export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}` } = {}) {
+export async function seed(id, { legacy = false, sized = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}` } = {}) {
   const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
-  await sql("INSERT INTO drive_upload_intents VALUES (CAST(? AS TEXT), ?, ?, NULL, 0, 'created', 0)", intent, owner, key).run();
+  await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state${sized ? ', declared_size' : ''})
+    VALUES (CAST(? AS TEXT), ?, ?, 'created'${sized ? ', 7' : ''})`, intent, owner, key).run();
   if (!legacy) await bindStorage();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = CAST(? AS TEXT)", upload, intent).run();
   await sql('INSERT INTO drive_upload_completion_operations VALUES (?, CAST(? AS TEXT), ?, ?, ?, ?, 2)', id, intent, owner, key, epoch, upload).run();
@@ -65,7 +67,10 @@ export function loseAcknowledgement(table, loseBeforeCommit) {
 }
 
 // The migration replay fixtures must drop children before their ledger parents.
-export const dropCompletionReceiptEvidence = `DROP VIEW IF EXISTS drive_upload_sealed_candidates;
+export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_upload_intents_cleanup_fence;
+  DROP TRIGGER IF EXISTS drive_upload_dispatch_cleanup_fence;
+  DROP TABLE IF EXISTS drive_upload_cleanup_claims;
+  DROP VIEW IF EXISTS drive_upload_sealed_candidates;
   DROP TABLE IF EXISTS drive_upload_completion_quarantine;
   DROP TABLE IF EXISTS drive_upload_completion_receipts;
   DROP TABLE IF EXISTS drive_upload_completion_dispatches;

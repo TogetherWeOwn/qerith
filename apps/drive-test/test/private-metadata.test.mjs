@@ -10,6 +10,7 @@ beforeEach(async () => {
   await env.DB.exec(dropCompletionReceiptEvidence);
   await env.DB.exec(`DROP TABLE IF EXISTS drive_upload_publications;
     DROP TABLE IF EXISTS drive_upload_cleanup_claims;
+    DROP TABLE IF EXISTS drive_upload_publication_attempts;
     DROP TABLE IF EXISTS drive_upload_sealed_reports;
     DROP TABLE IF EXISTS drive_upload_sealed_snapshots;
     DROP TABLE IF EXISTS drive_upload_part_observations;

@@ -40,7 +40,8 @@ interface UploadPublicationVerifier {
 
 const utf8 = new TextEncoder();
 const allocated = `FROM drive_upload_sealed_candidates o
-  WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?`;
+  WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?
+    AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = o.intent_id)`;
 
 async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
