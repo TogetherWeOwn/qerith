@@ -1057,8 +1057,19 @@ try {
       assert.ok(button.x >= name.x + name.width && button.y < metadata.y + metadata.height);
     }
     const metadata = archive.locator(width > 820 ? 'td:nth-child(4)' : '.details');
+    await archive.evaluate(row => {
+      row.addEventListener('beforetoggle', event => {
+        event.preventDefault();
+        row.dataset.cancelledMenuOpen = String(event.defaultPrevented);
+      }, { capture: true, once: true });
+    });
+    await metadata.click({ button: 'right' });
+    await archive.and(page.locator('[data-cancelled-menu-open="true"]')).waitFor({ timeout: 5000 });
+    await trigger.and(page.locator('[aria-expanded="false"]')).waitFor({ timeout: 5000 });
+    assert.equal(await archive.locator('dialog').count(), 0);
     await metadata.click({ button: 'right' });
     await page.getByRole('menuitem', { name: 'Details', exact: true }).and(focus).waitFor({ timeout: 5000 });
+    console.log(`Listing actions at ${width}px: cancelled opening collapses and the next right-click reopens`);
     await archive.evaluate(el => {
       const probe = document.createElement('span');
       probe.style.color = getComputedStyle(el).getPropertyValue('--drive-color-bg-raised');

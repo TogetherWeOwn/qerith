@@ -67,6 +67,8 @@
     if (compact) layer.showModal();
     else layer.showPopover();
     if (!open || request !== opening) return;
+    // A beforetoggle listener can cancel the native opening.
+    if (!(compact ? layer.open : layer.matches(':popover-open'))) { close(); return; }
     // Showing a layer can run focus handlers that hide its trigger synchronously.
     if (hiddenByParent()) { checkLayoutOnOpen?.('now'); return; }
     const rect = menu.getBoundingClientRect();
