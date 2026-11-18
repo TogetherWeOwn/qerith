@@ -116,7 +116,8 @@ try {
   await page.goto(`${origin}/f/populated`);
   await captureSpeech(page, join(EVIDENCE, 'speech.jsonl'), selfCheck);
   await inspect(context, page, origin);
-  await save('result', { kind: selfCheck ? 'runner-self-check' : 'exact-head-route', status: 'captured', visualReview: selfCheck ? 'not applicable' : 'required' });
+  assert(!selfCheck, 'Synthetic timing diagnostic only; no qualifying self-check result');
+  await save('result', { kind: 'exact-head-route', status: 'captured', visualReview: 'required' });
 } finally {
   try { await browser?.close(); } finally { await app.close(); }
 }

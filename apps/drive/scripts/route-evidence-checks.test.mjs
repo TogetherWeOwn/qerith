@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import { assessArrivalTrials, observeRouterClick, trials } from '../route-evidence/arrival-diagnostic.mjs';
 import { normalizeSpeech, unavailableHeadingSpeech, unavailableResponse, verifyManifest } from './route-evidence-checks.mjs';
 
 const readJson = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
@@ -99,5 +101,62 @@ test('unavailable arrival requires the exact spoken level-1 heading', () => {
   assert.match(normalizeSpeech([document, `${heading}.`]), unavailableHeadingSpeech);
   for (const wrong of ['', `${heading} to guest accounts.`, heading.replace('level 1', 'level 2')]) {
     assert.doesNotMatch(normalizeSpeech([document, wrong]), unavailableHeadingSpeech);
+  }
+});
+
+test('the synthetic hook delays only delegated root click registration and releases it after speech', () => {
+  for (const [mode, pathname, held] of [['held', '/f/denied', true], ['immediate', '/f/missing', false], ['held', '/f/populated', false]]) {
+    const observed = [];
+    class EventTarget {
+      addEventListener(type, listener) { observed.push(listener); }
+    }
+    const root = new EventTarget();
+    const window = {};
+    window.top = window;
+    const router = async event => event.composedPath()[0] instanceof SVGAElement;
+    let now = 0;
+    runInNewContext(`(${observeRouterClick})()`, {
+      window, EventTarget, location: { pathname, href: `http://localhost${pathname}` },
+      document: { documentElement: root, visibilityState: 'visible', hasFocus: () => true },
+      sessionStorage: { getItem: () => mode }, performance: { now: () => ++now, timeOrigin: 1 }
+    });
+    const other = () => {};
+    root.addEventListener('click', other);
+    root.addEventListener('click', router);
+    new EventTarget().addEventListener('click', router);
+    root.addEventListener('submit', router);
+    assert.deepEqual(observed, held ? [other, router, router] : [other, router, router, router]);
+    const trace = window.finishRouteEvidenceArrival?.();
+    if (held) assert.deepEqual(observed, [other, router, router, router]);
+    if (trace) assert.equal(trace.registrations[0].attached > trace.windowClosed, held);
+    else assert.equal(pathname, '/f/populated');
+  }
+});
+
+test('the timing diagnosis requires separated phases and clickable to follow timing in both route orders', () => {
+  const samples = trials.map((trial, i) => {
+    const destination = `http://localhost/f/${trial.route}`;
+    const immediate = trial.mode === 'immediate';
+    return { ...trial, destination, errors: [], title: 'Folder unavailable Drive',
+      arrival: immediate ? 'Folder unavailable Drive, document clickable' : 'Folder unavailable Drive, document',
+      navigationStarted: 1, speechRead: 4, trace: { mode: trial.mode, url: destination, documentStart: i + 2,
+        foreground: true, windowClosed: 3, registrations: [{ requested: 1, attached: immediate ? 2 : 4 }] } };
+  });
+  assert.equal(assessArrivalTrials(samples), 'clickable-follows-registration');
+  for (const change of [
+    copy => copy.pop(),
+    copy => { copy[0].position = 1; },
+    copy => { copy[2].trace.registrations[0].attached = 2; },
+    copy => { copy[2].trace.registrations[0].requested = 4; },
+    copy => { copy[2].trace.documentStart = copy[0].trace.documentStart; },
+    copy => { copy[2].trace.url = copy[3].trace.url; },
+    copy => { copy[2].title += ' different'; },
+    copy => { copy[2].arrival += ' clickable'; },
+    copy => { copy[0].arrival = copy[2].arrival; },
+    copy => { copy[0].trace.foreground = false; },
+  ]) {
+    const copy = structuredClone(samples);
+    change(copy);
+    assert.equal(assessArrivalTrials(copy), 'inconclusive');
   }
 });
