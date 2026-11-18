@@ -38,27 +38,25 @@ export class PasskeyLogin {
     this.#verifier = createCeremonyVerifier(rpID, origin);
   }
 
-  async issueChallenge(context: string, expectedChallenge?: string): Promise<string> {
+  issueChallenge(context: string, expectedChallenge?: string): Promise<string> {
     return new BoundChallenges(this.db).issue(context, 'authentication', expectedChallenge);
   }
 
-  async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON | null): Promise<{ token: string; expiresAt: number }> {
+  async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON): Promise<{ token: string; expiresAt: number }> {
     // Snapshot membership before consuming so revocation during login cannot be missed.
-    let row: CredentialRow | null = null;
+    let row: CredentialRow | null;
     try {
-      if (response) {
-        row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation, p.status,
-          c.webauthn_user_handle AS credential_handle, p.webauthn_user_handle AS principal_handle
-          FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
-          JOIN drive_login_generations g ON g.principal_id = p.id
-          WHERE c.id = ?`).bind(response.id).first<CredentialRow>();
-      }
+      row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation, p.status,
+        c.webauthn_user_handle AS credential_handle, p.webauthn_user_handle AS principal_handle
+        FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
+        JOIN drive_login_generations g ON g.principal_id = p.id
+        WHERE c.id = ?`).bind(response.id).first<CredentialRow>();
     } finally {
       // Even an invalid assertion or an ambiguous write needs a new challenge.
       await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
     }
-    const handle = response?.response?.userHandle;
-    if (!row || !response || typeof handle !== 'string' || !userHandlePattern.test(handle) ||
+    const handle = response.response?.userHandle;
+    if (!row || typeof handle !== 'string' || !userHandlePattern.test(handle) ||
         handle !== row.credential_handle || handle !== row.principal_handle) {
       throw new PasskeyDenied('Authentication unavailable');
     }

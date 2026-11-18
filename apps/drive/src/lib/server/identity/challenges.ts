@@ -25,20 +25,20 @@ export class BoundChallenges {
     const challenge = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
     await this.db.prepare(`DELETE FROM drive_bound_ceremonies
       WHERE expires_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)`).run();
-    const inserted = await this.db.prepare(`INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
-      SELECT ?, ?, ?, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?
-      WHERE ((SELECT count(*) FROM drive_bound_ceremonies) < ? AND
-        (? = 'registration' OR (SELECT count(*) FROM drive_bound_ceremonies WHERE purpose = 'authentication') < ?))
-        OR EXISTS (SELECT 1 FROM drive_bound_ceremonies WHERE context = ? AND purpose = ?)
-      ON CONFLICT (context, purpose) DO UPDATE SET challenge = excluded.challenge, expires_at = excluded.expires_at
-        WHERE ? = '' OR drive_bound_ceremonies.challenge = ?
-      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, purpose, authenticationCapacity,
-        context, purpose, expectedChallenge ?? '', expectedChallenge ?? '').first<{ challenge: string }>();
-    if (!inserted) {
-      if (expectedChallenge !== undefined) throw new ChallengeUnavailable('Challenge unavailable');
-      throw new CeremonyCapacityReached('Ceremony capacity reached');
-    }
-    return inserted.challenge;
+    // A stale replacement returns the unchanged challenge; capacity refusal returns no row.
+    const row = await this.db.prepare(`INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
+      SELECT ?1, ?2, ?3, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?4
+      WHERE ((SELECT count(*) FROM drive_bound_ceremonies) < ?5 AND
+        (?2 = 'registration' OR (SELECT count(*) FROM drive_bound_ceremonies WHERE purpose = 'authentication') < ?6))
+        OR EXISTS (SELECT 1 FROM drive_bound_ceremonies WHERE context = ?1 AND purpose = ?2)
+      ON CONFLICT (context, purpose) DO UPDATE SET
+        challenge = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.challenge ELSE drive_bound_ceremonies.challenge END,
+        expires_at = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.expires_at ELSE drive_bound_ceremonies.expires_at END
+      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, authenticationCapacity, expectedChallenge ?? '')
+      .first<{ challenge: string }>();
+    if (!row) throw new CeremonyCapacityReached('Ceremony capacity reached');
+    if (row.challenge !== challenge) throw new ChallengeUnavailable('Challenge unavailable');
+    return challenge;
   }
 
   private validate(context: string, purpose: ChallengePurpose): void {

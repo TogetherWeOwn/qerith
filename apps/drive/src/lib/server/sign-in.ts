@@ -1,4 +1,5 @@
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
+import { decodeClientDataJSON, isoBase64URL } from '@simplewebauthn/server/helpers';
 import { CeremonyCapacityReached, ChallengeUnavailable } from './identity/challenges';
 import { PasskeyDenied, PasskeyLogin, RevokedPasskey } from './identity/login';
 import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie } from './request-auth';
@@ -12,7 +13,7 @@ function hostCookie(name: string, value: string, maxAge: number, sameSite: 'Stri
   return `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=${sameSite}; Max-Age=${maxAge}`;
 }
 
-async function readAssertion(request: Request): Promise<AuthenticationResponseJSON | null> {
+async function readAssertion(request: Request, challenge: string): Promise<AuthenticationResponseJSON | null> {
   if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' ||
       !request.body || request.body.locked) return null;
   const reader = request.body.getReader();
@@ -36,6 +37,8 @@ async function readAssertion(request: Request): Promise<AuthenticationResponseJS
         !base64url(data.response.signature) ||
         (data.response.userHandle !== undefined && !base64url(data.response.userHandle))) return null;
     const { clientDataJSON, authenticatorData, signature, userHandle } = data.response;
+    // Correlate before spending the challenge; the verifier still checks signed client data.
+    if (decodeClientDataJSON(clientDataJSON).challenge !== challenge) return null;
     return {
       id: data.id, rawId: data.id, type: 'public-key', clientExtensionResults: {},
       response: { clientDataJSON, authenticatorData, signature, userHandle },
@@ -65,19 +68,18 @@ export async function signIn(
 
   try {
     const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin);
-    const cookie = readOpaqueCookie(request, transactionCookie, transactionPattern);
-    const [context, challenge] = cookie?.split('.') ?? [];
+    const [context, challenge] = readOpaqueCookie(request, transactionCookie, transactionPattern)?.split('.') ?? [];
     if (step === 'challenge') {
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
-      const nextContext = context ?? btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      const nextContext = context ?? isoBase64URL.fromBuffer(crypto.getRandomValues(new Uint8Array(32)));
       const nextChallenge = await login.issueChallenge(nextContext, challenge);
       headers.append('set-cookie', hostCookie(transactionCookie, `${nextContext}.${nextChallenge}`, 300, 'Strict'));
       return Response.json({ challenge: nextChallenge, rpId: origin.hostname, userVerification: 'required', timeout: 300_000 }, { headers });
     }
 
-    if (!cookie) return reply(401, 'denied');
+    const assertion = challenge && await readAssertion(request, challenge);
+    if (!assertion) return reply(401, 'denied');
     // The database consumes the challenge; a delayed response must not clear a newer cookie.
-    const session = await login.authenticate(context, challenge, await readAssertion(request));
+    const session = await login.authenticate(context, challenge, assertion);
     const maxAge = Math.floor((session.expiresAt - Date.now()) / 1000);
     if (maxAge <= 0) return reply(503, 'unavailable');
     headers.append('set-cookie', hostCookie(sessionCookie, session.token, maxAge, 'Lax'));

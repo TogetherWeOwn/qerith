@@ -63,22 +63,26 @@ it('replaces a live challenge without retaining its slot or clearing the replace
   const winner = replacements.find(response => response.status === 200);
   const loser = replacements.find(response => response.status === 401);
   expect(loser.headers.getSetCookie()).toEqual([]);
-  const denied = await post('verify', { cookie }, body);
+  const currentCookie = winner.headers.getSetCookie()[0].split(';')[0];
+  const denied = await post('verify', { cookie: currentCookie }, body);
   expect(denied.status).toBe(401);
   expect(denied.headers.getSetCookie()).toEqual([]);
   const row = await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all();
   expect(row.results).toEqual([{ challenge: (await winner.json()).challenge }]);
-  expect(cookie).not.toContain(row.results[0].challenge);
 });
 
 it('reserves ceremony capacity for registration when authentication is full', async () => {
-  await begin();
-  await env.DB.prepare(`WITH RECURSIVE slots(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM slots WHERE n < 511)
+  const { cookie, body } = await begin();
+  expect((await post('verify', { cookie }, body)).status).toBe(204);
+  await env.DB.prepare(`WITH RECURSIVE slots(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM slots WHERE n < 512)
     INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
     SELECT 'slot-' || n, 'authentication', printf('%043d', n), ? FROM slots`).bind(Date.now() + 300_000).run();
-  const refused = await post('challenge');
-  expect(refused.status).toBe(429);
-  expect(refused.headers.getSetCookie()).toEqual([]);
+  for (const headers of [{}, { cookie }]) {
+    const refused = await post('challenge', headers);
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('retry-after')).toBe('60');
+    expect(refused.headers.getSetCookie()).toEqual([]);
+  }
   await expect(new BoundChallenges(env.DB).issue('registration-test', 'registration')).resolves.toMatch(/^[\w-]{43}$/);
 });
 
@@ -107,7 +111,7 @@ it.each(['missing', 'malformed', 'other account', 'legacy', 'replacement'])('den
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
 });
 
-it('consumes denied attempts and distinguishes revoked proof from generic denial', async () => {
+it('consumes matched attempts and distinguishes revoked proof from generic denial', async () => {
   for (const state of ['oversized', 'expired', 'wrong-origin', 'bad-signature', 'revoked']) {
     const options = state === 'wrong-origin' ? { origin: 'https://other.test' } : { badSignature: state === 'bad-signature' };
     const { cookie, body } = await begin(options, state === 'revoked' || state === 'bad-signature' ? 'revoked' : 'active');
@@ -117,7 +121,7 @@ it('consumes denied attempts and distinguishes revoked proof from generic denial
     expect(await denied.json()).toEqual({ code: state === 'revoked' ? 'revoked' : 'denied' });
     expect(denied.headers.getSetCookie()).toEqual([]);
     expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n)
-      .toBe(state === 'expired' ? 1 : 0);
+      .toBe(state === 'expired' || state === 'oversized' ? 1 : 0);
     expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
   }
 });
