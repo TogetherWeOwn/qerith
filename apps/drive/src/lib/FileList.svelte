@@ -9,6 +9,7 @@
   let desktopSort: HTMLButtonElement;
 
   onMount(() => {
+    const compactViewport = window.matchMedia('(max-width: 820px)');
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
@@ -42,12 +43,15 @@
     };
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);
-    // The table's box disappears for either CSS breakpoint, even at a fixed viewport width.
+    // Keep viewport handoff timing; observe both views for container-only changes.
+    compactViewport.addEventListener('change', transferFocus);
     const observer = new ResizeObserver(transferFocus);
     observer.observe(desktop);
+    observer.observe(mobile);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
       document.removeEventListener('focusout', forgetFocus);
+      compactViewport.removeEventListener('change', transferFocus);
       observer.disconnect();
     };
   });

@@ -1043,14 +1043,28 @@ try {
       await desktop.and(focus).waitFor({ timeout: 5000 });
     }
     const paging = page.getByRole('button', { name: 'Show 200 more' });
+    const afterLayout = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await paging.focus();
     for (const [width, layout] of [[740, list], [741, table]]) {
       await setContainerWidth(width);
-      await layout.waitFor();
-      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await layout.waitFor({ timeout: 5000 });
+      await afterLayout();
       assert.equal(await paging.and(focus).count(), 1, 'Container resize must not steal focus from paging');
     }
-    console.log('Listing container-only focus passed in both directions for sort and file link; paging kept focus');
+    await setContainerWidth(740);
+    const compactLink = list.getByRole('link', link);
+    await compactLink.focus();
+    await compactLink.and(focus).waitFor({ timeout: 5000 });
+    const main = page.locator('main');
+    await main.evaluate(el => { el.hidden = true; });
+    await page.waitForFunction(() => document.activeElement === document.body, null, { timeout: 5000 });
+    await afterLayout();
+    await setContainerWidth(741);
+    await main.evaluate(el => { el.hidden = false; });
+    await table.waitFor({ timeout: 5000 });
+    await afterLayout();
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
+    console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
     await context.close();
   }
   {
