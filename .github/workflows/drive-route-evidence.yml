@@ -1,5 +1,4 @@
 name: Drive folder route evidence
-
 on:
   pull_request:
     paths:
@@ -17,7 +16,6 @@ on:
         description: Full current head SHA of the same-repository Drive folder route PR (#139)
         required: true
         type: string
-
 permissions:
   contents: read
   pull-requests: read
@@ -30,9 +28,6 @@ jobs:
        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: windows-2025
     timeout-minutes: 20
-    defaults:
-      run:
-        shell: pwsh
     env:
       HARNESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       SOURCE_SHA: ${{ inputs.source_sha }}
@@ -64,14 +59,14 @@ jobs:
         with:
           node-version: '24.21.0'
       - name: Acquire digest-pinned portable NVDA and Playwright Firefox
+        timeout-minutes: 4
         run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Acquire
       - name: Verify locks and prepare the separate SvelteKit build
+        timeout-minutes: 4
         working-directory: harness/apps/drive/route-evidence
         run: |
           $projection = "$env:RUNNER_TEMP/folder-route-build"
-          $source = if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { 'harness' } else { 'source' }
-          $mode = if ($source -eq 'harness') { 'self-check' } else { 'exact-head' }
-          node project.mjs "$env:GITHUB_WORKSPACE/$source" $projection $mode
+          node project.mjs "$env:GITHUB_WORKSPACE/${{ github.event_name == 'pull_request' && 'harness' || 'source' }}" $projection
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the route projection' }
           foreach ($dir in @($projection, $PWD.Path)) {
             npm ci --prefix $dir --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ --allow-directory=none --allow-file=none --allow-git=none --allow-remote=none
@@ -79,11 +74,11 @@ jobs:
           }
           "PROJECTION=$projection" >> $env:GITHUB_ENV
       - name: Contain the relay and capture route evidence
+        timeout-minutes: 6
         working-directory: harness/apps/drive/route-evidence
         run: |
           ../scripts/route-evidence-tools.ps1 -Phase Protect
           node run.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Route evidence failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

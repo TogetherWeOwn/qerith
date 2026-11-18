@@ -73,7 +73,10 @@ export async function captureSpeech(page, path, selfCheck) {
     async function unavailable(id) {
       await page.goto(`${origin}/f/populated`);
       await browse(); await top();
-      const arrival = await hear(`${id}: direct full navigation`, () => nvda.capture(() => page.goto(`${origin}/f/${id}`), { capture: true }), /Folder unavailable|This folder isn't available/i);
+      const arrival = await hear(`${id}: direct full navigation`, async () => {
+        const { result } = await nvda.capture(() => page.goto(`${origin}/f/${id}`).catch(error => error), { capture: true });
+        if (result instanceof Error) throw result;
+      }, /Folder unavailable|This folder isn't available/i);
       await browse();
       return [arrival, await title(id, /Folder unavailable.*Drive/i), await heading(id, /This folder isn't available/i)];
     }

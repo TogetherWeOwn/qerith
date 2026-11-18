@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { firefox } from 'playwright';
 import { captureSpeech } from './speech.mjs';
 import { unavailableResponse } from '../scripts/route-evidence-checks.mjs';
@@ -21,23 +22,34 @@ async function inspect(context, page, origin) {
     const stops = [];
     for (const label of tabs) {
       await page.keyboard.press('Tab');
-      const stop = await page.evaluate(() => {
+      stops.push(await page.evaluate(() => {
         const el = document.activeElement;
         const r = el.getBoundingClientRect();
         const style = getComputedStyle(el);
         return { label: el.textContent.trim(), visible: el.matches(':focus-visible') && style.outlineStyle !== 'none' &&
           parseFloat(style.outlineWidth) > 0 && !/transparent|, 0\)$/.test(style.outlineColor) &&
           r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
-      });
-      await shot(`${name}-focus-${stops.length + 1}`);
-      stops.push(stop);
-      assert.deepEqual(stop, { label, visible: true });
+      }));
+      await shot(`${name}-focus-${stops.length}`);
+      assert.deepEqual(stops.at(-1), { label, visible: true });
     }
     await save(`keyboard-${name}`, stops);
   }
   await page.addInitScript(() => {
     for (const event of ['animationstart', 'transitionrun']) addEventListener(event, () => { window.routeMotionObserved = true; }, true);
   });
+  async function reducedMotion(state, tabs) {
+    const moving = () => page.evaluate(() => !!window.routeMotionObserved || document.getAnimations().some(a => a.pending || a.playState === 'running'));
+    await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'reduce' });
+    await page.reload();
+    assert(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce) and (forced-colors: none)').matches));
+    if (selfCheck) await page.addStyleTag({ content: 'a { transition: opacity 60s } a:focus-visible { opacity: .5; outline: 2px solid currentColor }' });
+    assert(!await moving(), `Startup motion under reduce: ${state}`);
+    await keyboard(`${state}-reduced-motion`, tabs);
+    assert.equal(await moving(), selfCheck, `Unexpected motion observation under reduce: ${state}`);
+    await save(`motion-${state}`, { startupMotion: false, motionAfterTab: selfCheck });
+  }
+  if (selfCheck) return reducedMotion('self-check', ['New document']);
   await page.goto(`${origin}/f/populated`);
   const next = new URL(await page.getByRole('link', { name: 'Next page' }).getAttribute('href'), page.url());
   const unavailable = "This folder isn't available.";
@@ -59,12 +71,11 @@ async function inspect(context, page, origin) {
       if (state === 'empty') assert.equal(await page.getByRole('heading', { level: 2 }).textContent(), 'This folder is empty.');
       if (state === 'pastEnd') assert(await page.getByText('No more items.').isVisible());
       if (heading === unavailable) {
-        assert.equal(await page.title(), 'Folder unavailable · Drive');
-        assert.equal((await page.locator('main').innerText()).trim(), unavailable);
+        assert(await page.title() === 'Folder unavailable · Drive' && (await page.locator('main').innerText()).trim() === unavailable, `Wrong unavailable page: ${state}`);
         const outward = await unavailableResponse(response);
         assert(!/Synthetic title that must not leak|Project records/.test(await page.content()));
         if (state === 'denied') denied.set(width, outward);
-        else assert.deepEqual(outward, denied.get(width), `${state}: unavailable response differs from denied`);
+        else for (const field of ['status', 'headers', 'body']) assert(isDeepStrictEqual(outward[field], denied.get(width)[field]), `${state} ${width}: unavailable ${field} differs from denied`);
         await save(`unavailable-${state}-${width}`, outward);
       }
       await page.addScriptTag({ path: fileURLToPath(new URL('./node_modules/axe-core/axe.min.js', import.meta.url)) });
@@ -87,9 +98,7 @@ async function inspect(context, page, origin) {
     assert(await page.evaluate(() => matchMedia('(forced-colors: active)').matches));
     await shot(`${state}-forced-colors`);
     await keyboard(`${state}-forced-colors`, tabs);
-    await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'reduce' });
-    await page.reload();
-    assert(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches && !window.routeMotionObserved && !document.getAnimations().some(a => a.playState === 'running')), `Motion under reduce: ${state}`);
+    await reducedMotion(state, tabs);
     await page.emulateMedia({ forcedColors: null, reducedMotion: null });
   }
 }
@@ -106,7 +115,7 @@ try {
   page.setDefaultTimeout(10000);
   await page.goto(`${origin}/f/populated`);
   await captureSpeech(page, join(EVIDENCE, 'speech.jsonl'), selfCheck);
-  if (!selfCheck) await inspect(context, page, origin);
+  await inspect(context, page, origin);
   await save('result', { kind: selfCheck ? 'runner-self-check' : 'exact-head-route', status: 'captured', visualReview: selfCheck ? 'not applicable' : 'required' });
 } finally {
   try { await browser?.close(); } finally { await app.close(); }
