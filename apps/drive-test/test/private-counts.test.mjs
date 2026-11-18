@@ -43,7 +43,7 @@ beforeEach(async () => {
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active')");
 });
 
 it('upgrades seeded entries and maintains direct counts through mutations', async () => {
