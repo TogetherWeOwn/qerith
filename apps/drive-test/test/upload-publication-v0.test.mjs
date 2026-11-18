@@ -62,9 +62,11 @@ it('does not complete an upload with a stale version, wrong owner, or cleanup cl
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'v0-fenced'").run();
   expect(await publication.completeAndPublish('v0-fenced', intent.id, 2, null, 'file', parts)).toBeNull();
   await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'v0-fenced'").run();
+  sessionToken = (await new Sessions(env.DB).issue('v0-fenced')).token;
   await env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)').bind(intent.id).run();
   expect(await intents.claim('v0-fenced', intent.id, 2, 'completion')).toBeNull();
-  expect(await publication.completeAndPublish('v0-fenced', intent.id, 2, null, 'file', parts)).toBeNull();
+  expect(await new UploadPublication(env.DB, async () => { calls++; }).completeAndPublish('v0-fenced', intent.id, 2, null, 'file', parts)).toBeNull();
+  expect(await env.DB.prepare('SELECT intent_id FROM drive_upload_publication_attempts WHERE intent_id = ?').bind(intent.id).first()).toBeNull();
   expect(calls).toBe(0);
 });
 
@@ -120,6 +122,8 @@ it('requires the initiating live session before dispatch and for receipt access'
   const foreign = new Publication(env.DB, complete, (await sessions.issue('session-other')).token);
   expect(await missing.completeAndPublish('session-owner', intent.id, 2, null, 'file', parts)).toBeNull();
   expect(await foreign.completeAndPublish('session-owner', intent.id, 2, null, 'file', parts)).toBeNull();
+  expect(await foreign.completeAndPublish('session-other', intent.id, 2, null, 'file', parts)).toBeNull();
+  expect(await env.DB.prepare('SELECT intent_id FROM drive_upload_publication_attempts WHERE intent_id = ?').bind(intent.id).first()).toBeNull();
   await env.DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = ?').bind('session-owner').run();
   expect(await original.completeAndPublish('session-owner', intent.id, 2, null, 'file', parts)).toBeNull();
   expect(calls).toBe(0);
