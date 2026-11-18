@@ -1,25 +1,27 @@
 import { tokenHash } from './identity/sessions';
 import { validateName } from './metadata/private';
-import { createUploadCompletionReceipts } from './metadata/upload-completion-receipts';
+import { availableUploadDestination, createUploadCompletionReceipts } from './metadata/upload-completion-receipts';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
 import { decodeUploadIdentity, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication } from './metadata/upload-trusted-publication';
 import { allowsOrigin, authOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
+import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartUpload } from './s3/multipart-upload';
 import { readUploadBody, uploadIdPattern, uploadPart } from './upload-part';
 
 type Database = Parameters<typeof createUploadCompletionReceipts>[0];
-type Statement = ReturnType<Database['prepare']>;
 type Verifier = NonNullable<Parameters<typeof createUploadCompletionReceipts>[4]>;
 type Session = NonNullable<App.Locals['driveSession']>;
 
 export interface UploadRouteEnv extends DriveAuthEnv {
-  DB?: Database & { batch(statements: Statement[]): Promise<{ meta: { changes: number } }[]> };
+  DB?: Database & { batch(statements: ReturnType<Database['prepare']>[]): Promise<unknown> };
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
-  // Trusted binding, not a request setting or a boolean deployment flag.
-  DRIVE_UPLOAD_VERIFIER?: Verifier;
+  DRIVE_UPLOAD_VERIFIER?: Verifier & {
+    // Full response-body budget attested by the qualifier for this storage identity.
+    completionTimeoutMs(storageConfigId: string): number | null;
+  };
 }
 
 const reply = (status: number) => new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
@@ -63,10 +65,11 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const isQualified = (id: string) => verifier.isQualified(id);
     if (await isQualified(storageConfigId) !== true) return reply(503);
-    const ownerId = session.principal.id;
-    const token = session.token;
+    const timeoutMs = verifier.completionTimeoutMs?.(storageConfigId);
+    if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 0x7fffffff) return reply(503);
+    const { token, principal: { id: ownerId } } = session;
     const bindings = [intentId, ownerId, await tokenHash(token), settings.endpoint, settings.bucket, epoch];
-    return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId };
+    return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs };
   }
 
   return {
@@ -85,14 +88,22 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             return { async claim(partNumber, sizeBytes) {
               if (await isQualified(storageConfigId) !== true) return null;
               const operationId = crypto.randomUUID();
-              // The permanent part slot is claimed in the same write as the live session check.
+              // Only the highest part may be short. The unclaimed slots must still fit the remaining bytes.
               const claim = await db.prepare(`INSERT INTO drive_upload_part_operations
                 SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version, ?, ? ${allocated}
-                  AND i.version = ? AND i.declared_size >= ? + COALESCE((SELECT sum(size_bytes)
-                    FROM drive_upload_part_operations WHERE intent_id = i.id), 0)
-                  AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations WHERE intent_id = i.id AND part_number = ?)
+                  AND i.version = ? AND NOT EXISTS (
+                    SELECT 1 FROM drive_upload_part_operations WHERE intent_id = i.id AND part_number = ?)
+                  AND EXISTS (SELECT sum(size_bytes) FROM (
+                    SELECT ? AS part_number, ? AS size_bytes UNION ALL
+                    SELECT part_number, size_bytes FROM drive_upload_part_operations WHERE intent_id = i.id)
+                    HAVING sum(size_bytes < ${MIN_PART_BYTES}) <= 1 AND max(CASE WHEN size_bytes < ${MIN_PART_BYTES}
+                      THEN part_number ELSE 0 END) IN (0, max(part_number))
+                    AND i.declared_size - sum(size_bytes) BETWEEN 0 AND ${MAX_PART_BYTES} *
+                      (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*))
+                    AND (i.declared_size = sum(size_bytes) OR i.declared_size - sum(size_bytes) >= ${MIN_PART_BYTES}
+                      OR (min(size_bytes) >= ${MIN_PART_BYTES} AND max(part_number) < ${MAX_PARTS})))
                 RETURNING hex(object_key) AS key_hex, hex(upload_id) AS upload_hex`)
-                .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version, sizeBytes, partNumber)
+                .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version, partNumber, partNumber, sizeBytes)
                 .first<{ key_hex: string; upload_hex: string }>();
               if (!claim) return null;
               const objectKey = decodeUploadIdentity(claim.key_hex), uploadId = decodeUploadIdentity(claim.upload_hex);
@@ -113,32 +124,39 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       if (access instanceof Response) return access;
       let target;
       try { target = await destination(request); } catch { return reply(400); }
-      const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier } = access;
+      const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
       const { parentId, name } = target;
+      const destinationBindings = [parentId, parentId, parentId, name];
       const operationId = crypto.randomUUID();
       try {
-        const complete = createUploadCompletionReceipts(db, epoch, settings, transport, {
-          isQualified, verifyParts: (upload) => verifier.verifyParts(upload)
-        });
-        const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
-        // The seal trigger checks the exact ordered observed slots, declared size
-        // and lack of uncertainty. A failed seal rolls back the operation row too.
-        const [operation] = await db.batch([
+        // Seal only a fresh operation; the trigger rolls back incomplete or uncertain snapshots.
+        await db.batch([
           db.prepare(`INSERT INTO drive_upload_completion_operations
             SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version ${allocated}
-              AND (? IS NULL OR EXISTS (SELECT 1 FROM drive_entries WHERE id = ? AND owner_id = i.owner_id AND kind = 'folder'))`)
-            .bind(operationId, ...bindings, parentId, parentId),
+              AND ${availableUploadDestination('i.owner_id')}`).bind(operationId, ...bindings, ...destinationBindings),
           db.prepare(`INSERT INTO drive_upload_sealed_snapshots
             SELECT o.operation_id, (SELECT json_group_array(part_number) FROM
               (SELECT part_number FROM drive_upload_part_operations WHERE intent_id = o.intent_id ORDER BY part_number)),
               i.declared_size FROM drive_upload_completion_operations o JOIN drive_upload_intents i ON i.id = o.intent_id
             WHERE o.operation_id = ?`).bind(operationId)
         ]);
-        if (operation.meta.changes !== 1) return reply(404);
-        const row = await db.withSession('first-primary').prepare(`SELECT intent_version FROM drive_upload_completion_operations
-          WHERE operation_id = ?`).bind(operationId).first<{ intent_version: number }>();
-        if (!row || await complete.complete(token, operationId) !== 'recorded') return reply(409);
-        const published = await publisher.publish(token, ownerId, intentId, row.intent_version + 1, operationId, parentId, name);
+        // The producer views exclude dispatched operations without a verified receipt.
+        const row = await db.withSession('first-primary').prepare(`WITH c AS (
+          SELECT operation_id, intent_version + 1 AS claim_version, 0 AS recorded, intent_id, owner_id,
+            session_hash, endpoint, bucket, storage_epoch FROM drive_upload_sealed_candidates
+          UNION ALL SELECT operation_id, claim_version, 1, intent_id, owner_id,
+            session_hash, endpoint, bucket, storage_epoch FROM drive_upload_publishable_completions)
+          SELECT operation_id, claim_version, recorded FROM c
+          WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
+            AND ${availableUploadDestination('c.owner_id')}`)
+          .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
+        if (!row) return reply(404);
+        if (!row.recorded) {
+          const complete = createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier);
+          if (await complete.complete(token, row.operation_id, target) !== 'recorded') return reply(409);
+        }
+        const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
+        const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
         return published ? Response.json({ id: published.id }, { status: 201, headers: { 'cache-control': 'private, no-store' } }) : reply(409);
       } catch { return reply(409); }
     }
