@@ -40,5 +40,7 @@ jobs:
             printf '%s\n' 'checkout SHA mismatch' >&2
             exit 1
           fi
+      - name: Record migration source inputs
+        run: node apps/drive/scripts/staging-migrations.mjs >> "$GITHUB_STEP_SUMMARY"
       - name: Test closed-admission metadata
         run: node --test apps/drive/scripts/staging-manifest.test.mjs

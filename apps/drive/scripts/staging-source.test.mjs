@@ -49,9 +49,10 @@ test('checks the dispatch before checkout and the commit before metadata tests',
   const source = steps.findIndex((step) => step.startsWith(`name: ${sourceStep}\n`));
   const checkout = steps.findIndex((step) => step.startsWith('uses: actions/checkout@'));
   const commit = steps.findIndex((step) => step.startsWith(`name: ${checkoutStep}\n`));
+  const ledger = steps.findIndex((step) => step.startsWith('name: Record migration source inputs\n'));
   const metadata = steps.findIndex((step) => step.startsWith('name: Test closed-admission metadata\n'));
-  assert.ok(source >= 0 && source < checkout && checkout < commit && commit < metadata);
-  for (const i of [source, checkout, commit, metadata]) {
+  assert.ok(source >= 0 && source < checkout && checkout < commit && commit < ledger && ledger < metadata);
+  for (const i of [source, checkout, commit, ledger, metadata]) {
     assert.doesNotMatch(steps[i], /^        (?:if|continue-on-error):/m);
   }
   assert.match(steps[checkout], /^          ref: \$\{\{ github\.sha \}\}$/m);
