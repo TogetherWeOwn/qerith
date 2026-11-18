@@ -14,10 +14,10 @@ it('rejects an eligible legacy seal without backfilling storage authority', asyn
   expect(await evidence('dispatches', 'legacy')).toBeNull();
 });
 
-it.each(['claim', 'receipt', 'receipt-write-read'])('recovers from lost %s D1 results without redispatch', async (lost) => {
+it.each(['claim', 'receipt', 'receipt-write-read', 'receipt-write-read-after-quarantine'])('recovers from lost %s D1 results without redispatch', async (lost) => {
   await applyD1Migrations(env.DB, migrations);
   const id = `lost-${lost}`, { token, key, intent } = await seed(id);
-  const late = lost === 'receipt-write-read';
+  const late = lost === 'receipt-write-read-after-quarantine';
   let inFlightIntent;
   const fetch = vi.fn(async (request) => {
     expect(request.method).toBe('POST');
@@ -31,7 +31,7 @@ it.each(['claim', 'receipt', 'receipt-write-read'])('recovers from lost %s D1 re
     }
     return response(key);
   });
-  const db = loseAcknowledgement(lost === 'claim' ? 'dispatches' : 'receipts', late);
+  const db = loseAcknowledgement(lost === 'claim' ? 'dispatches' : 'receipts', lost.startsWith('receipt-write-read'));
   const withSession = vi.spyOn(db, 'withSession');
   const verify = vi.fn(async () => parts), first = producer(fetch, verify, db);
   const results = await Promise.all([first.complete(token, id), first.complete(token, id)]);
