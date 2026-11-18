@@ -968,11 +968,28 @@ try {
       await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
       await second.locator('button[aria-label="Actions for Archive"]:visible').click();
       assert.equal(await page.getByRole('menu').count(), 1);
+      const beforeResize = await second.evaluate(el => ({
+        active: document.activeElement?.outerHTML.slice(0, 500),
+        activeInListing: el.contains(document.activeElement),
+        expanded: Array.from(el.querySelectorAll('button[aria-label="Actions for Archive"]'), button => button.getAttribute('aria-expanded')),
+      }));
       await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, to);
-      await page.waitForFunction(({ selector }) => {
-        const active = document.activeElement;
-        return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
-      }, { selector });
+      try {
+        await page.waitForFunction(({ selector }) => {
+          const active = document.activeElement;
+          return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
+        }, { selector });
+      } catch (error) {
+        console.error('Resize focus state:', await second.evaluate(el => ({
+          active: document.activeElement?.outerHTML.slice(0, 500),
+          triggers: Array.from(el.querySelectorAll('button[aria-label="Actions for Archive"]'), button => ({
+            expanded: button.getAttribute('aria-expanded'),
+            visible: button.getClientRects().length > 0,
+            layout: button.closest('table') ? 'desktop' : 'mobile',
+          })),
+        })), { from, to, beforeResize });
+        throw error;
+      }
       assert.equal(await page.getByRole('menu').count(), 0);
     }
     await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
