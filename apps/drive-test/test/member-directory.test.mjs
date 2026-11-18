@@ -22,14 +22,14 @@ it('projects only status, identity and exact file usage, including revoked membe
     env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('bob', 'member', 'active')"),
     env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES
       ('a', 'bob', 'private name', 'file', 'private-key', 9007199254740991),
-      ('b', 'bob', 'other name', 'file', 'other-key', 9007199254740991),
+      ('b', 'bob', 'other name', 'file', 'other-key', 745259010),
       ('c', 'alice', 'folder', 'folder', NULL, NULL), ('d', 'admin', 'file', 'file', 'admin-key', 17)`),
     env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'bob'"),
   ]);
   const members = [
     { id: 'admin', role: 'owner', status: 'active', usageBytes: '17' },
     { id: 'alice', role: 'member', status: 'active', usageBytes: '0' },
-    { id: 'bob', role: 'member', status: 'revoked', usageBytes: '18014398509481982' },
+    { id: 'bob', role: 'member', status: 'revoked', usageBytes: '9007200000000001' },
   ];
   expect(await directory.listPage(admin.token)).toEqual({ members, nextCursor: null });
   await env.DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'bob'").run();
@@ -39,15 +39,19 @@ it('projects only status, identity and exact file usage, including revoked membe
 
 it('reads one primary statement and distinguishes authorized empty from denial', async () => {
   const { directory, sessions, admin } = await setup();
+  const all = vi.fn(statement => statement.all());
   const withSession = vi.fn(constraint => {
     const db = env.DB.withSession(constraint);
-    return { prepare: prepare.mockImplementation(sql => db.prepare(sql)) };
+    return { prepare: sql => ({ bind: (...values) => ({ all: () => all(db.prepare(sql).bind(...values)) }) }) };
   });
-  const prepare = vi.fn();
   const read = new MemberDirectory({ withSession });
-  expect(await read.listPage(admin.token, 'z')).toEqual({ members: [], nextCursor: null });
+  await expect(read.listPage(admin.token, 'a'.repeat(513))).rejects.toThrow('Invalid member directory cursor');
+  await expect(read.listPage(admin.token, 42)).rejects.toThrow('Invalid member directory cursor');
+  expect(withSession).not.toHaveBeenCalled();
+  expect((await read.listPage(admin.token)).members.map(({ id }) => id)).toEqual(['admin', 'alice']);
   expect(withSession.mock.calls).toEqual([['first-primary']]);
-  expect(prepare).toHaveBeenCalledTimes(1);
+  expect(all).toHaveBeenCalledTimes(1);
+  expect(await directory.listPage(admin.token, 'z')).toEqual({ members: [], nextCursor: null });
   expect(await directory.listPage((await sessions.issue('alice')).token)).toBeNull();
   expect(await directory.listPage('admin')).toBeNull();
   await sessions.revoke(admin.token);
@@ -67,10 +71,11 @@ it('bounds pages by ID and reauthorizes even after the cursor row disappears', a
   const first = await directory.listPage(admin.token);
   expect(first.members.map(({ id }) => id)).toEqual(expected.slice(0, 100));
   expect(first.nextCursor).toBe(expected[99]);
-  await env.DB.prepare('DELETE FROM drive_principals WHERE id = ?').bind(first.nextCursor).run();
   const last = await directory.listPage(admin.token, first.nextCursor);
   expect(last.members.map(({ id }) => id)).toEqual(expected.slice(100));
   expect(last.nextCursor).toBeNull();
+  await env.DB.prepare('DELETE FROM drive_principals WHERE id = ?').bind(first.nextCursor).run();
+  expect(await directory.listPage(admin.token, first.nextCursor)).toEqual(last);
 
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'admin'").run();
   // Restore the fixture session to prove an unexpired row alone is insufficient.

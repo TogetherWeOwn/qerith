@@ -24,8 +24,11 @@ export class MemberDirectory {
   // The cursor is only a seek boundary, not a snapshot or an authorization token.
   async listPage(token: string, afterId: string | null = null): Promise<MemberDirectoryPage | null> {
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
-    if (afterId !== null && typeof afterId !== 'string') throw new TypeError('Invalid member directory cursor');
+    if (afterId !== null && (typeof afterId !== 'string' || afterId.length > 512)) {
+      throw new TypeError('Invalid member directory cursor');
+    }
     const hash = await tokenHash(token);
+    // Without authorization the scalar seek key is NULL, so there is no ID range to read.
     const { results } = await this.db.withSession('first-primary').prepare(`WITH authorized AS (
       SELECT 1 FROM drive_sessions s
       JOIN drive_principals p ON p.id = s.principal_id
@@ -33,7 +36,7 @@ export class MemberDirectory {
         AND p.role = 'owner' AND p.status = 'active'
     ), page AS (
       SELECT id, role, status FROM drive_principals
-      WHERE id > ? AND EXISTS (SELECT 1 FROM authorized)
+      WHERE id > (SELECT ? FROM authorized)
       ORDER BY id LIMIT ?
     ) SELECT page.id, page.role, page.status,
       CAST(COALESCE(u.high, 0) AS TEXT) || printf('%09d', COALESCE(u.low, 0)) AS usageBytes
