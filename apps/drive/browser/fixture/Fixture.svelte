@@ -3,7 +3,9 @@
   import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
   import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
+  import DetailsFixture from './DetailsFixture.svelte';
 
+  const details = new URLSearchParams(window.location.search).get('details');
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
   const rowName = new URLSearchParams(window.location.search).get('name') ?? (new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file');
   let firstName;
@@ -94,7 +96,9 @@
   window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-{#if menuFixture}
+{#if details === 'full' || details === 'missing' || details === 'zero'}
+  <main><DetailsFixture variant={details} /></main>
+{:else if menuFixture}
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>

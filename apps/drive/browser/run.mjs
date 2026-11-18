@@ -256,6 +256,48 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
+  for (const [width, height] of [[1280, 800], [390, 844]]) {
+    const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    const name = '  تقرير  ' + 'a'.repeat(180) + '.pdf  ';
+    await page.goto(`${origin}/?details=full`, { waitUntil: 'networkidle' });
+    const details = page.getByRole('group', { name: /^Details for تقرير/ });
+    assert.equal(await details.getAttribute('data-details-id'), 'sample');
+    assert.deepEqual(await details.locator('dt').allTextContents(), ['Name', 'Size', 'Kind', 'Modified', 'Uploaded', 'Shared with']);
+    assert.deepEqual(await details.locator('dd').allTextContents(), [name, '5.4 GB · 5,368,709,120 bytes', 'PDF', '14 Nov 2026, 09:00 UTC', '12 Nov 2026, 09:00 UTC', 'Mora, Sam']);
+    assert.equal(await details.locator('data').getAttribute('value'), '5368709120');
+    const filename = details.locator('dd[dir="auto"]');
+    assert.deepEqual(await filename.evaluate(el => {
+      const { whiteSpace, unicodeBidi } = getComputedStyle(el);
+      return { whiteSpace, unicodeBidi, wrapsWithinCell: el.scrollWidth <= el.clientWidth };
+    }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', wrapsWithinCell: true });
+    assert.equal(await details.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `details-${width}x${height}.png`) });
+    const close = details.getByRole('button', { name: 'Hide details' });
+    if (width === 390) await close.click();
+    else {
+      await page.keyboard.press('Tab');
+      assert.equal(await close.evaluate(el => el === document.activeElement), true);
+      await page.keyboard.press('Enter');
+    }
+    await details.waitFor({ state: 'detached' });
+
+    await page.goto(`${origin}/?details=missing`, { waitUntil: 'networkidle' });
+    const missing = page.getByRole('group', { name: 'Details for whitespace-only name', exact: true });
+    assert.deepEqual(await missing.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+    assert.deepEqual(await missing.locator('dd').allTextContents(), [' \t ', '—', 'Folder']);
+    assert.equal(await missing.locator('data').count(), 0);
+
+    await page.goto(`${origin}/?details=zero`, { waitUntil: 'networkidle' });
+    const zero = page.getByRole('group', { name: 'Details for Empty.txt', exact: true });
+    assert.deepEqual(await zero.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+    assert.equal(await zero.locator('data').getAttribute('value'), '0');
+    assert.equal(await zero.locator('data').textContent(), '0 bytes');
+    await context.close();
+    console.log(`FileDetails facts, filenames and close passed at ${width}x${height}`);
+  }
   for (const [width, height] of [[1280, 800], [390, 844]]) for (const state of states) {
     const size = `${state}-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
@@ -1054,7 +1096,7 @@ try {
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+  for (const name of ['head.txt', 'details-1280x800.png', 'details-390x844.png', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
   }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
