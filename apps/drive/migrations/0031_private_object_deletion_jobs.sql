@@ -3,7 +3,9 @@ CREATE TABLE drive_object_deletion_jobs (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   available_at INTEGER NOT NULL DEFAULT (unixepoch()),
   lease_token TEXT,
-  completed_at INTEGER
+  completed_at INTEGER,
+  completion_token TEXT,
+  CHECK ((completed_at IS NULL) = (completion_token IS NULL))
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX drive_object_deletion_jobs_due ON drive_object_deletion_jobs (available_at, entry_id)
   WHERE completed_at IS NULL;

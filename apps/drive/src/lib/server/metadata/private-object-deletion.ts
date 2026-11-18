@@ -29,6 +29,7 @@ interface DeleteTarget {
 // Qualification must establish exclusive mutation, non-versioned permanent
 // deletion and atomic If-Match. Only a reply that distinguishes removal from
 // an already-absent object may count as deleted. No HEAD-then-delete fallback.
+// The adapter must honor the signal at the provider dispatch boundary.
 export type ResolveObjectDeleter = (storageConfigId: string) => {
   storageConfigId: string;
   deleteIfMatch(target: Readonly<DeleteTarget>, signal: AbortSignal): Promise<'deleted' | 'unconfirmed'>;
@@ -39,7 +40,8 @@ const leaseSeconds = 60;
 const retrySeconds = 300;
 const requestMs = 5000;
 
-async function remove(row: GenerationRow, resolve: ResolveObjectDeleter, leaseDeadline: number): Promise<boolean> {
+async function remove(row: GenerationRow, resolve: ResolveObjectDeleter, leaseDeadline: number,
+  readLease: () => Promise<{ remaining_ms: number } | null>): Promise<boolean> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -51,8 +53,12 @@ async function remove(row: GenerationRow, resolve: ResolveObjectDeleter, leaseDe
     const provider = resolve(storageConfigId);
     if (provider?.storageConfigId !== storageConfigId) return false;
     const target = Object.freeze({ key, etag, sizeBytes: size_bytes, evidenceRevision: evidence_revision });
+    const checkStarted = performance.now();
+    if (checkStarted + requestMs >= leaseDeadline) return false;
+    // Workers clocks may not advance during synchronous resolver work.
+    const freshLease = await readLease();
     const requestDeadline = performance.now() + requestMs;
-    if (requestDeadline >= leaseDeadline) return false;
+    if (!freshLease || requestDeadline >= Math.min(leaseDeadline, checkStarted + freshLease.remaining_ms)) return false;
     const deadline = new Promise<'unconfirmed'>((done) => {
       timer = setTimeout(() => { controller.abort(); done('unconfirmed'); }, requestMs);
     });
@@ -91,17 +97,25 @@ export async function reconcilePrivateObjectDeletions(db: Database, resolve?: Re
     // Charge the whole D1 round trip against the lease without comparing the
     // Worker's wall clock with D1's. A stale read must not start a provider call.
     const leaseDeadline = readStarted + (row?.lease_remaining_ms ?? 0);
-    const deleted = row !== null && await remove(row, resolve, leaseDeadline);
+    const readLease = () => db.withSession('first-primary').prepare(`SELECT 1000 * (available_at - unixepoch('subsec')) AS remaining_ms
+      FROM drive_object_deletion_jobs
+      WHERE entry_id = ? AND lease_token = ? AND available_at > unixepoch() AND completed_at IS NULL`)
+      .bind(claim.entry_id, token).first<{ remaining_ms: number }>();
+    const deleted = row !== null && await remove(row, resolve, leaseDeadline, readLease);
     // Only the current lease can settle, even if an issued request outlives it.
     const settle = () => session.prepare(`UPDATE drive_object_deletion_jobs
-      SET lease_token = NULL, available_at = unixepoch() + ?, completed_at = CASE WHEN ? THEN unixepoch() ELSE NULL END
+      SET lease_token = NULL, available_at = unixepoch() + ?, completed_at = CASE WHEN ? THEN unixepoch() ELSE NULL END,
+        completion_token = CASE WHEN ? THEN lease_token ELSE NULL END
       WHERE entry_id = ? AND lease_token = ? AND available_at > unixepoch() AND completed_at IS NULL
-      RETURNING completed_at`).bind(retrySeconds, Number(deleted), claim.entry_id, token).first<{ completed_at: number | null }>();
-    const settled = await settle().catch(error => {
-      // Retry the fenced D1 write once while the positive reply is still in
-      // memory. If the first write committed, the second cannot change it.
-      if (deleted && performance.now() < leaseDeadline) return settle();
-      throw error;
+      RETURNING completed_at`).bind(retrySeconds, Number(deleted), Number(deleted), claim.entry_id, token).first<{ completed_at: number | null }>();
+    const settled = await settle().catch(async error => {
+      if (!deleted) throw error;
+      // Retry only the fenced write, then look for this lease's receipt if
+      // the first write may have committed without a reply.
+      const retried = performance.now() < leaseDeadline ? await settle() : null;
+      return retried ?? db.withSession('first-primary').prepare(`SELECT completed_at
+        FROM drive_object_deletion_jobs WHERE entry_id = ? AND completion_token = ?`)
+        .bind(claim.entry_id, token).first<{ completed_at: number }>();
     });
     if (settled?.completed_at != null) completed++;
   }

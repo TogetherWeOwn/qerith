@@ -144,10 +144,32 @@ it('does not dispatch if the generation read leaves too little time on the lease
   expect((await job(id)).completed_at).toBeNull();
 });
 
-it('retries a failed receipt write without repeating the provider delete', async () => {
-  const { id, token } = await seedBoundPublication('receipt-retry');
+it('refreshes the lease after resolving the provider and before dispatch', async () => {
+  const { id, token } = await seedBoundPublication('dispatch-lease');
   expect(await remove(token, id)).toBe(true);
-  const write = vi.fn(async first => first()).mockRejectedValueOnce(new Error('receipt write unavailable'));
+  const deleteIfMatch = vi.fn(async () => 'deleted');
+  const steps = [];
+  const db = interceptStatement('SELECT 1000 * (available_at', async first => {
+    steps.push('lease');
+    await sql("UPDATE drive_object_deletion_jobs SET lease_token = 'contender', available_at = unixepoch() + 60 WHERE entry_id = ?", id).run();
+    return first();
+  });
+  expect(await reconcilePrivateObjectDeletions(db, () => {
+    steps.push('resolve');
+    return { storageConfigId: configId, deleteIfMatch };
+  })).toBe(0);
+  expect(steps).toEqual(['resolve', 'lease']);
+  expect(deleteIfMatch).not.toHaveBeenCalled();
+  expect((await job(id)).completed_at).toBeNull();
+});
+
+it.each(['before commit', 'after commit'])('recovers a receipt write error %s without repeating the provider delete', async (when) => {
+  const { id, token } = await seedBoundPublication(`receipt-${when.replaceAll(' ', '-')}`);
+  expect(await remove(token, id)).toBe(true);
+  const write = vi.fn(async first => first()).mockImplementationOnce(async first => {
+    if (when === 'after commit') await first();
+    throw new Error('receipt write unacknowledged');
+  });
   const db = interceptStatement('UPDATE drive_object_deletion_jobs\n      SET lease_token = NULL', write);
   const deleteIfMatch = vi.fn(async () => 'deleted');
   expect(await reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }))).toBe(1);
