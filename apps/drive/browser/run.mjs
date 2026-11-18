@@ -882,7 +882,10 @@ try {
     await page.getByRole('button', { name: `Actions for ${name}` }).click();
     assert.equal(await page.getByRole('menuitem', { name: 'Download' }).count(), 1);
     await page.getByRole('menuitem', { name: 'Details' }).click();
-    assert.equal(await page.getByRole('group', { name: `Details for ${name}` }).count(), 1);
+    const fallbackFacts = page.getByRole('group', { name: `Details for ${name}` });
+    assert.equal(await fallbackFacts.count(), 1);
+    const rowDate = await page.getByRole('link', { name }).evaluate(el => el.closest('tr, li').querySelector('time').textContent);
+    assert.equal(await fallbackFacts.locator('dt').filter({ hasText: 'Modified' }).locator('..').locator('dd').textContent(), rowDate);
     await page.goto(`${origin}/?listing&details`, { waitUntil: 'networkidle' });
     const trigger = page.getByRole('button', { name: `Actions for ${name}` });
     await trigger.focus();
@@ -912,6 +915,16 @@ try {
       disabled.innerHTML = '<button>Disabled fieldset target</button>';
       el.prepend(skipped, hidden, inert, disabled);
     });
+    await facts.evaluate(el => {
+      const details = document.createElement('details');
+      details.innerHTML = '<summary>Native summary target</summary>';
+      el.prepend(details);
+    });
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.getByText('Native summary target').evaluate(el => el === document.activeElement), true);
+    await page.getByText('Native summary target').evaluate(el => el.parentElement.remove());
     await trigger.focus();
     await page.keyboard.press('Enter');
     await page.keyboard.press('Tab');
@@ -951,6 +964,17 @@ try {
     assert.equal(await lists.nth(0).locator('[data-details-id]').count(), 1);
     assert.equal(await lists.nth(1).locator('[data-details-id]').count(), 0);
     assert.equal(await lists.nth(1).getByRole('button', { name: 'Actions for Archive' }).evaluate(el => el === document.activeElement), true);
+    for (const [from, to, selector] of [[500, 1000, 'table.desktop'], [1000, 500, 'ul.mobile']]) {
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
+      await second.locator('button[aria-label="Actions for Archive"]:visible').click();
+      assert.equal(await page.getByRole('menu').count(), 1);
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, to);
+      await page.waitForFunction(({ selector }) => {
+        const active = document.activeElement;
+        return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
+      }, { selector });
+      assert.equal(await page.getByRole('menu').count(), 0);
+    }
     await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
     await page.locator('[data-row-id="tab"] button:visible').click();
     await page.getByRole('menuitem', { name: 'Details' }).click();

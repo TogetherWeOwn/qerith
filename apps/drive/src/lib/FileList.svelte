@@ -17,20 +17,6 @@
     const row = Array.from(container.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === id);
     row?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')?.focus();
   }
-  function tabFromMenu(container: HTMLElement, id: string, direction: 'next' | 'previous') {
-    const links = Array.from(container.querySelectorAll<HTMLAnchorElement>('a[data-item-id]'));
-    const index = links.findIndex(link => link.dataset.itemId === id);
-    if (direction === 'previous') { if (!links[index]) return false; links[index].focus(); return true; }
-    const row = Array.from(container.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === id);
-    const trigger = row?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
-    const focusable = Array.from(document.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]')).filter(element => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[inert]') && element.getClientRects().length > 0 && getComputedStyle(element).visibility === 'visible');
-    const triggerIndex = trigger ? focusable.indexOf(trigger) : -1;
-    const next = triggerIndex >= 0 ? focusable[triggerIndex + 1] : undefined;
-    if (!next) return false;
-    next.focus();
-    return true;
-  }
-
   let listing: HTMLDivElement;
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
@@ -71,6 +57,8 @@
           const next = Array.from(to.querySelectorAll<HTMLElement>('[data-details-id]')).find(element => element.dataset.detailsId === facts.dataset.detailsId);
           target = source === facts ? next : next?.querySelector('button');
         } else if (row) {
+          const trigger = row.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+          if (trigger?.getAttribute('aria-expanded') === 'true') trigger.click();
           target = Array.from(to.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === row.dataset.rowId)?.querySelector('button[aria-haspopup="menu"]');
         }
       }
@@ -123,15 +111,15 @@
       <tr>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(desktop, item.id, direction)} /></div></td>
+        <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div></td>
       </tr>
-      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
+      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
   </tbody>
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}
