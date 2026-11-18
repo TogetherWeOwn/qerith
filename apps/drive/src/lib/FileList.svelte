@@ -6,11 +6,10 @@
   import RowActions, { type RowAction } from './RowActions.svelte';
 
   let detailsId: string | null = null;
-  async function showDetails(id: string) {
+  async function showDetails(container: HTMLElement, id: string) {
     detailsId = id;
     await tick();
     if (detailsId !== id) return;
-    const container = window.matchMedia('(max-width: 820px)').matches ? mobile : desktop;
     Array.from(container.querySelectorAll<HTMLElement>('[data-details-id]')).find(element => element.dataset.detailsId === id)?.focus();
   }
   function closeDetails(container: HTMLElement, id: string) {
@@ -24,7 +23,7 @@
     if (direction === 'previous') { if (!links[index]) return false; links[index].focus(); return true; }
     const row = Array.from(container.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === id);
     const trigger = row?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
-    const focusable = Array.from(document.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]')).filter(element => element.tabIndex >= 0 && element.getClientRects().length > 0);
+    const focusable = Array.from(document.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]')).filter(element => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[inert]') && element.getClientRects().length > 0 && getComputedStyle(element).visibility === 'visible');
     const triggerIndex = trigger ? focusable.indexOf(trigger) : -1;
     const next = triggerIndex >= 0 ? focusable[triggerIndex + 1] : undefined;
     if (!next) return false;
@@ -32,6 +31,7 @@
     return true;
   }
 
+  let listing: HTMLDivElement;
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
@@ -48,11 +48,12 @@
       if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
     };
     const transferFocus = () => {
-      const from = compact.matches ? desktop : mobile;
-      const to = compact.matches ? mobile : desktop;
+      const isCompact = desktop.getClientRects().length === 0;
+      const from = isCompact ? desktop : mobile;
+      const to = isCompact ? mobile : desktop;
       const active = document.activeElement;
-      const hiddenSort = compact.matches ? desktopSort : compactSort;
-      const visibleSort = compact.matches ? compactSort : desktopSort;
+      const hiddenSort = isCompact ? desktopSort : compactSort;
+      const visibleSort = isCompact ? compactSort : desktopSort;
       if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
         lastFocused = null;
         visibleSort?.focus();
@@ -79,10 +80,13 @@
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);
     compact.addEventListener('change', transferFocus);
+    const observer = new ResizeObserver(transferFocus);
+    observer.observe(listing);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
       document.removeEventListener('focusout', forgetFocus);
       compact.removeEventListener('change', transferFocus);
+      observer.disconnect();
     };
   });
 
@@ -104,8 +108,8 @@
   export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean; owned?: boolean; details?: { modifiedFull: string; uploaded: string; sharedWith?: string[] } }[];
 </script>
 
-<svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element && document.activeElement.closest('[data-details-id]')?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(window.matchMedia('(max-width: 820px)').matches ? mobile : desktop, detailsId); } }} />
-<div class="listing">
+<svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element) { const facts = document.activeElement.closest('[data-details-id]'); const container = facts && (desktop.contains(facts) ? desktop : mobile.contains(facts) ? mobile : null); if (container && facts?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(container, detailsId); } } }} />
+<div class="listing" bind:this={listing}>
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
@@ -119,7 +123,7 @@
       <tr>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(desktop, item.id, direction)} /></div></td>
+        <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(desktop, item.id, direction)} /></div></td>
       </tr>
       {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
@@ -127,7 +131,7 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}

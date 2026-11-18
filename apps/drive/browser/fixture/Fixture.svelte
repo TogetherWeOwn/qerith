@@ -95,6 +95,8 @@
     <button bind:this={nextName}>Next file</button>
     <p aria-live="polite">{selected}</p>
   </main>
+{:else if listing && new URLSearchParams(window.location.search).has('two-lists')}
+  <main><div style="width: 500px"><FileList folder="First" timeZone="UTC" {items} /></div><div style="width: 500px"><FileList folder="Second" timeZone="UTC" {items} /></div></main>
 {:else if listing}
   <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else if new URLSearchParams(window.location.search).has('details')}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('missing-details') ? items : detailsItems} onAction={(_id, action) => { selected = action; }} /><button>After listing</button>{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}

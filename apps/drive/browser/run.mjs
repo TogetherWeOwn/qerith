@@ -789,7 +789,16 @@ try {
       const skipped = document.createElement('button');
       skipped.tabIndex = -1;
       skipped.textContent = 'Programmatic focus only';
-      el.prepend(skipped);
+      const hidden = document.createElement('button');
+      hidden.style.visibility = 'hidden';
+      hidden.textContent = 'Hidden focus target';
+      const inert = document.createElement('div');
+      inert.inert = true;
+      inert.innerHTML = '<button>Inert focus target</button>';
+      const disabled = document.createElement('fieldset');
+      disabled.disabled = true;
+      disabled.innerHTML = '<button>Disabled fieldset target</button>';
+      el.prepend(skipped, hidden, inert, disabled);
     });
     await trigger.focus();
     await page.keyboard.press('Enter');
@@ -808,6 +817,32 @@ try {
     assert.equal(await facts.count(), 0);
     assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     await page.setViewportSize({ width, height: 844 });
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&two-lists`, { waitUntil: 'networkidle' });
+    const lists = page.locator('ul.mobile');
+    for (let i = 0; i < 2; i++) {
+      await lists.nth(i).getByRole('button', { name: 'Actions for Archive' }).click();
+      await page.getByRole('menuitem', { name: 'Details' }).click();
+      await page.waitForFunction(() => document.activeElement?.matches('[data-details-id]'));
+    }
+    const second = page.locator('.listing').nth(1);
+    await second.evaluate(el => { el.parentElement.style.width = '1000px'; });
+    await page.waitForFunction(() => document.activeElement?.matches('table.desktop [data-details-id]'));
+    await second.evaluate(el => { el.parentElement.style.width = '500px'; });
+    await page.waitForFunction(() => document.activeElement?.matches('ul.mobile [data-details-id]'));
+    await page.keyboard.press('Escape');
+    assert.equal(await lists.nth(0).locator('[data-details-id]').count(), 1);
+    assert.equal(await lists.nth(1).locator('[data-details-id]').count(), 0);
+    assert.equal(await lists.nth(1).getByRole('button', { name: 'Actions for Archive' }).evaluate(el => el === document.activeElement), true);
+    await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
+    await page.locator('[data-row-id="tab"] button:visible').click();
+    await page.getByRole('menuitem', { name: 'Details' }).click();
+    assert.equal(await page.getByRole('group', { name: 'Details for whitespace-only name' }).count(), 1);
     await context.close();
   }
   for (const width of [1280, 390, 320]) for (const segmenter of [true, false]) {

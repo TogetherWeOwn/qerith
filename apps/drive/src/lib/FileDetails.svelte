@@ -10,7 +10,7 @@
   export let onClose: () => void;
 </script>
 
-<div class="facts" data-details-id={id} tabindex="-1" role="group" aria-label={`Details for ${name}`}>
+<div class="facts" data-details-id={id} tabindex="-1" role="group" aria-label={name.trim() ? `Details for ${name}` : 'Details for whitespace-only name'}>
   <dl>
     <div><dt>Name</dt><dd dir="auto">{name}</dd></div>
     <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{size} · <data value={bytes}>{bytes.toLocaleString()} bytes</data>{/if}</dd></div>
