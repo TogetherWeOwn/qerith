@@ -104,7 +104,7 @@ export async function reconcilePrivateObjectDeletions(db: Database, resolve?: Re
       .bind(claim.entry_id, token).first<{ remaining_ms: number }>();
     const deleted = row !== null && await remove(row, resolve, leaseDeadline, readLease);
     // Only the current lease can settle, even if an issued request outlives it.
-    const settle = () => session.prepare(`UPDATE drive_object_deletion_jobs
+    const settle = async () => session.prepare(`UPDATE drive_object_deletion_jobs
       SET lease_token = NULL, available_at = unixepoch() + ?, completed_at = CASE WHEN ? THEN unixepoch() ELSE NULL END,
         completion_token = CASE WHEN ? THEN lease_token ELSE NULL END
       WHERE entry_id = ? AND lease_token = ? AND available_at > unixepoch() AND completed_at IS NULL

@@ -161,21 +161,23 @@ it.each(['lease', 'adapter'])('checks the %s remains bound after resolving the p
   expect((await job(id)).completed_at).toBeNull();
 });
 
-it.each(['before commit', 'after commit', 'after retry commit', 'without a commit'])('handles a lost receipt acknowledgement %s without another provider delete', async (when) => {
+it.each(['before commit', 'after commit', 'after retry commit', 'sync retry error', 'without a commit', 'foreign receipt'])('handles a lost receipt acknowledgement %s without another provider delete', async (when) => {
   const { id, token } = await seedBoundPublication(`receipt-${when.replaceAll(' ', '-')}`);
   expect(await remove(token, id)).toBe(true);
-  let attempts = 0;
-  const write = vi.fn(async first => {
-    const retry = ++attempts === 2;
-    if (retry && when === 'without a commit') return null;
+  const foreign = when === 'foreign receipt';
+  const write = vi.fn(first => {
+    const retry = write.mock.calls.length === 2;
+    if (retry && when === 'sync retry error') throw new Error('synchronous receipt error');
+    if (retry && foreign) return sql(`UPDATE drive_object_deletion_jobs SET lease_token = NULL,
+      completed_at = unixepoch(), completion_token = 'contender' WHERE entry_id = ?`, id).run().then(() => null);
     if (retry && (when === 'before commit' || when === 'after commit')) return first();
-    if (when === 'after commit' || (retry && when === 'after retry commit')) await first();
-    throw new Error('receipt write unacknowledged');
+    const commit = when === 'after commit' || when === 'sync retry error' || (retry && when === 'after retry commit');
+    return (commit ? first() : Promise.resolve()).then(() => { throw new Error(retry ? 'receipt retry failed' : 'receipt write unacknowledged'); });
   });
   const db = interceptStatement('UPDATE drive_object_deletion_jobs\n      SET lease_token = NULL', write);
   const deleteIfMatch = vi.fn(async () => 'deleted');
   const pass = reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }));
-  if (when === 'without a commit') await expect(pass).rejects.toThrow('receipt write unacknowledged');
+  if (foreign || when === 'without a commit') await expect(pass).rejects.toThrow(foreign ? 'receipt write unacknowledged' : 'receipt retry failed');
   else await expect(pass).resolves.toBe(1);
   expect(deleteIfMatch).toHaveBeenCalledTimes(1);
   expect(write).toHaveBeenCalledTimes(2);
