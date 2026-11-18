@@ -49,9 +49,9 @@ export type PublishedReadReference = Readonly<ImmutableS3Reference & {
 interface PublishedRow {
   keyHex: string;
   nameHex: string;
+  revisionHex: string;
   etag: string;
   sizeBytes: number;
-  evidenceRevision: string;
 }
 
 /** Server-only. Resolve once per download; never serialize or cache the reference. */
@@ -68,7 +68,7 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
         // history alone does not establish that the file is still visible.
         const row = await db.withSession('first-primary').prepare(`${access}
           SELECT hex(g.object_key) AS keyHex, hex(e.name) AS nameHex, g.etag,
-            g.size_bytes AS sizeBytes, g.evidence_revision AS evidenceRevision
+            g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex
           FROM permitted a JOIN drive_entries e ON e.id = a.id
           JOIN drive_published_generations g ON g.entry_id = e.id AND g.owner_id = e.owner_id
             AND g.object_key = e.object_key AND g.size_bytes = e.size_bytes
@@ -81,10 +81,12 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
             AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_quarantine q WHERE q.operation_id = p.completion_operation_id)`)
           .bind(id, hash, id, endpoint, bucket, epoch).first<PublishedRow>();
         if (!row) return null;
-        const { etag, sizeBytes, evidenceRevision } = row;
+        const { etag, sizeBytes } = row;
         if (typeof etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag) ||
-            !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || typeof evidenceRevision !== 'string' ||
-            !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(evidenceRevision)) return null;
+            !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return null;
+        // The ledger defines an opaque 36-character revision, not a UUID version.
+        const evidenceRevision = decodeUploadIdentity(row.revisionHex);
+        if ([...evidenceRevision].length !== 36 || evidenceRevision.includes('\0')) return null;
         const key = decodeUploadIdentity(row.keyHex);
         if (!key || key.includes('\0') || key.split('/').some((segment) => segment === '.' || segment === '..')) return null;
         const name = decodeUploadIdentity(row.nameHex);
