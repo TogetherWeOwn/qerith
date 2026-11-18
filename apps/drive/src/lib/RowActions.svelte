@@ -130,10 +130,7 @@
   // A parent row can call this for its pointer-only context menu.
   export function openFromContextMenu(event: MouseEvent) {
     event.preventDefault();
-    if (!open) {
-      trigger.focus({ preventScroll: true });
-      void show();
-    }
+    if (!open) void show();
   }
 </script>
 
