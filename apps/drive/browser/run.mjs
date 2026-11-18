@@ -462,6 +462,32 @@ try {
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
     await context.close();
   }
+  for (const [width, height] of [[1280, 800], [390, 844]]) {
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=shared&native-tab`, { waitUntil: 'networkidle' });
+    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    for (const [openKey, tabKey, item, direction, target] of [
+      ['ArrowUp', 'Tab', 'Details', 'next', 'Next file'],
+      ['ArrowDown', 'Shift+Tab', 'Download', 'previous', 'Sample file']
+    ]) {
+      await trigger.focus();
+      await page.keyboard.press(openKey);
+      await menu.waitFor();
+      assert.equal(await menu.getByRole('menuitem', { name: item }).evaluate(el => el === document.activeElement), true);
+      await page.keyboard.press(tabKey);
+      await menu.waitFor({ state: 'hidden' });
+      const { tabDirection, tabLayerOpen } = await page.evaluate(() => ({ ...document.body.dataset }));
+      assert.equal(tabDirection, direction);
+      assert.equal(tabLayerOpen, 'false');
+      assert.equal(await page.getByRole('button', { name: target, exact: true }).evaluate(el => el === document.activeElement), true, `${tabKey} must follow native tab order at ${width}px`);
+    }
+    console.log(`Row menu native Tab and Shift+Tab passed at ${width}x${height}`);
+    await context.close();
+  }
   for (const [width, height] of [[1280, 180], [390, 240], [1280, 800]]) {
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
