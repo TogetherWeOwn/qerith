@@ -49,6 +49,10 @@ jobs:
     # Live execution requires a separately reviewed enabling change and staging config.
     if: ${{ false }}
     needs: preparation
+    # Serializes only jobs using this group; it does not fence external D1 writers.
+    concurrency:
+      group: drive-staging-d1-writer
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
