@@ -11,6 +11,7 @@ export const parts = [{ partNumber: 2, etag: '"part-&-ÿ"', size: 7 }];
 export const response = (key) => new Response(`<CompleteMultipartUploadResult><Bucket>drive-test</Bucket><Key>${key}</Key><ETag>"final-opaque"</ETag><ChecksumSHA256>example-checksum</ChecksumSHA256><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>`);
 export const migrations = env.DRIVE_MIGRATIONS;
 export const preReceiptMigrations = migrations.filter(({ name }) => name < '0022_upload_publication_receipts.sql');
+export const preGenerationMigrations = migrations.filter(({ name }) => name < '0030_upload_published_generations.sql');
 export const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
 export const intentRow = (id) => sql('SELECT * FROM drive_upload_intents WHERE id = CAST(? AS TEXT)', id).first();
 

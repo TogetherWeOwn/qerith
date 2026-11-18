@@ -2,14 +2,15 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
-import { evidence, intentRow, loseAcknowledgement, migrations, parts, producer, response, seed, sql } from './fixtures/upload-completion.mjs';
+import { evidence, intentRow, loseAcknowledgement, preGenerationMigrations, parts, producer, response, seed, sql } from './fixtures/upload-completion.mjs';
 
 const claim = (intent) => sql('INSERT INTO drive_upload_cleanup_claims VALUES (?)', intent).run();
 const tombstone = (intent) => sql('INSERT INTO drive_upload_publication_tombstones VALUES (?)', intent).run();
 const storedClaim = (intent) => sql('SELECT intent_id FROM drive_upload_cleanup_claims WHERE intent_id = ?', intent).first();
 const intents = new UploadIntents(env.DB);
 
-beforeEach(() => applyD1Migrations(env.DB, migrations));
+// Exercise the cleanup fence even in historical states that 0030 now prevents.
+beforeEach(() => applyD1Migrations(env.DB, preGenerationMigrations));
 
 it('rechecks cleanup at dispatch after preflight and prevents direct dispatch', async () => {
   const id = 'cleanup-first', { token, intent } = await seed(id);
@@ -49,10 +50,11 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
   const service = producer(fetch);
   await expect(service.complete(token, id)).resolves.toBe(outcome === 'receipt' ? 'recorded' : 'uncertain');
   expect(await evidence(outcome === 'receipt' ? 'receipts' : 'quarantine', id)).not.toBeNull();
-  expect(await intents.recordUncertain(`owner-${id}`, intent, 3, 'completion')).toBe(true);
+  await sql("UPDATE drive_upload_intents SET state = 'uncertain', version = 4 WHERE id = ?", intent).run();
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
   // Even a journal acknowledgement cannot remove the durable dispatch fence.
-  expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(true);
+  await sql(`UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1,
+    version = 5 WHERE id = ?`, intent).run();
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
   expect(await storedClaim(intent)).toBeNull();
   expect(await sql('SELECT intent_id FROM drive_upload_publication_tombstones WHERE intent_id = ?', intent).first())
@@ -73,7 +75,8 @@ it('retains a dispatch whose D1 acknowledgement was lost', async () => {
   expect(fetch).not.toHaveBeenCalled();
 
   // Acknowledge only the journal so the dispatch alone must reject cleanup.
-  expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(true);
+  await sql(`UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1,
+    version = 4 WHERE id = ?`, intent).run();
   expect(await intentRow(intent)).toMatchObject({ state: 'acknowledged', version: 4 });
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
 });
