@@ -1,3 +1,14 @@
+-- Existing intents have no declared size and cannot be published.
+ALTER TABLE drive_upload_intents ADD COLUMN declared_size INTEGER
+  CHECK (declared_size IS NULL OR (typeof(declared_size) = 'integer' AND declared_size BETWEEN 0 AND 9007199254740991));
+
+CREATE TRIGGER drive_upload_intents_declared_size_immutable
+BEFORE UPDATE OF declared_size ON drive_upload_intents
+WHEN NEW.declared_size IS NOT OLD.declared_size
+BEGIN
+  SELECT RAISE(ABORT, 'declared upload size is immutable');
+END;
+
 -- Cleanup and publication contend on the same D1 write lock. A cleanup worker
 -- must acquire this permanent claim before deleting the provider object.
 CREATE TABLE drive_upload_cleanup_claims (
@@ -7,7 +18,8 @@ CREATE TABLE drive_upload_cleanup_claims (
 CREATE TRIGGER drive_upload_cleanup_claims_admit
 BEFORE INSERT ON drive_upload_cleanup_claims
 WHEN EXISTS (SELECT 1 FROM drive_upload_publications WHERE intent_id = NEW.intent_id)
-  OR EXISTS (SELECT 1 FROM drive_upload_intents WHERE id = NEW.intent_id AND state = 'completing')
+  OR EXISTS (SELECT 1 FROM drive_upload_intents WHERE id = NEW.intent_id
+    AND (state = 'completing' OR (state = 'uncertain' AND upload_id IS NOT NULL)))
 BEGIN
   SELECT RAISE(ABORT, 'upload cannot be cleaned up');
 END;
@@ -37,7 +49,8 @@ CREATE TRIGGER drive_upload_publications_admit
 BEFORE INSERT ON drive_upload_publications
 WHEN NOT EXISTS (SELECT 1 FROM drive_upload_intents i JOIN drive_active_members m ON m.id = i.owner_id
   WHERE i.id = NEW.intent_id AND i.owner_id = NEW.owner_id AND i.object_key = NEW.object_key
-    AND i.state = 'completing' AND i.version = NEW.intent_version)
+    AND i.state = 'completing' AND i.version = NEW.intent_version
+    AND i.declared_size IS NOT NULL AND i.declared_size = NEW.size_bytes)
   OR EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = NEW.intent_id)
 BEGIN
   SELECT RAISE(ABORT, 'upload publication not admitted');

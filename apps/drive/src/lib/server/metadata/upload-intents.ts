@@ -37,6 +37,13 @@ export class UploadIntents {
       .bind(crypto.randomUUID(), principalId, crypto.randomUUID(), principalId).first<UploadIntent>();
   }
 
+  async createSized(principalId: string, declaredSize: number): Promise<UploadIntent | null> {
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) throw new TypeError('Invalid upload size');
+    return this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
+      SELECT ?, ?, ?, 'created', ? WHERE ${active} RETURNING ${columns}`)
+      .bind(crypto.randomUUID(), principalId, crypto.randomUUID(), declaredSize, principalId).first<UploadIntent>();
+  }
+
   async get(principalId: string, id: string): Promise<UploadIntent | null> {
     return this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
       WHERE id = ? AND owner_id = ? AND ${active}`)

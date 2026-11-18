@@ -9,12 +9,12 @@ it('publishes the same-request completion and fences later cleanup', async () =>
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-success', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-success');
+  const intent = await intents.createSized('v0-success', 7);
   await intents.claim('v0-success', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-success', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
   const publication = new UploadPublication(env.DB, async (key, uploadId, parts) => {
     expect([key, uploadId, parts[0].size]).toEqual([intent.object_key, 'upload-id', 7]);
-    return { etag: '"complete"' };
+    return { etag: '"complete"', size: 7 };
   });
   const entry = await publication.completeAndPublish('v0-success', intent.id, 2, null, '文件', [
     { partNumber: 1, etag: '"part"', size: 7 },
@@ -38,11 +38,11 @@ it('does not complete an upload with a stale version, wrong owner, or cleanup cl
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-fenced', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-fenced');
+  const intent = await intents.createSized('v0-fenced', 7);
   await intents.claim('v0-fenced', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-fenced', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
   let calls = 0;
-  const publication = new UploadPublication(env.DB, async () => { calls++; return { etag: '"complete"' }; });
+  const publication = new UploadPublication(env.DB, async () => { calls++; return { etag: '"complete"', size: 7 }; });
   const parts = [{ partNumber: 1, etag: '"part"', size: 7 }];
   expect(await publication.completeAndPublish('v0-fenced', intent.id, 1, null, 'file', parts)).toBeNull();
   expect(await publication.completeAndPublish('wrong-owner', intent.id, 2, null, 'file', parts)).toBeNull();
@@ -55,7 +55,7 @@ it('excludes cleanup and a second completion while the provider call is in fligh
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-inflight', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-inflight');
+  const intent = await intents.createSized('v0-inflight', 7);
   await intents.claim('v0-inflight', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-inflight', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
   const parts = [{ partNumber: 1, etag: '"part"', size: 7 }];
@@ -65,7 +65,7 @@ it('excludes cleanup and a second completion while the provider call is in fligh
     await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
       .bind(intent.id).run()).rejects.toThrow();
     expect(await publication.completeAndPublish('v0-inflight', intent.id, 2, null, 'other', parts)).toBeNull();
-    return { etag: '"complete"' };
+    return { etag: '"complete"', size: 7 };
   });
   expect(await publication.completeAndPublish('v0-inflight', intent.id, 2, null, 'file', parts)).not.toBeNull();
   expect(await publication.completeAndPublish('v0-inflight', intent.id, 2, null, 'file', parts)).toBeNull();
@@ -74,12 +74,31 @@ it('excludes cleanup and a second completion while the provider call is in fligh
     .bind(intent.id).first()).toEqual({ count: 1 });
 });
 
+it('keeps cleanup excluded if a recovery scan quarantines an in-flight completion', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-scan', 'member', 'active')").run();
+  const intents = new UploadIntents(env.DB);
+  const intent = await intents.createSized('v0-scan', 7);
+  await intents.claim('v0-scan', intent.id, 0, 'allocation');
+  await intents.recordSuccess('v0-scan', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
+  const publication = new UploadPublication(env.DB, async () => {
+    expect(await intents.recordUncertain('v0-scan', intent.id, 3, 'completion')).toBe(true);
+    await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
+      .bind(intent.id).run()).rejects.toThrow();
+    return { etag: '"complete"', size: 7 };
+  });
+  expect(await publication.completeAndPublish('v0-scan', intent.id, 2, null, 'file', [
+    { partNumber: 1, etag: '"part"', size: 7 },
+  ])).toBeNull();
+  expect(await publication.getReceipt('v0-scan', intent.id)).toBeNull();
+});
+
 it('rechecks membership after completion and never replaces a conflicting name', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-conflict', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
   async function allocated() {
-    const intent = await intents.create('v0-conflict');
+    const intent = await intents.createSized('v0-conflict', 7);
     await intents.claim('v0-conflict', intent.id, 0, 'allocation');
     await intents.recordSuccess('v0-conflict', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
     return intent;
@@ -88,7 +107,7 @@ it('rechecks membership after completion and never replaces a conflicting name',
   const revoked = await allocated();
   const publication = new UploadPublication(env.DB, async () => {
     await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'v0-conflict'").run();
-    return { etag: '"complete"' };
+    return { etag: '"complete"', size: 7 };
   });
   expect(await publication.completeAndPublish('v0-conflict', revoked.id, 2, null, 'file', parts)).toBeNull();
   await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'v0-conflict'").run();
@@ -96,7 +115,7 @@ it('rechecks membership after completion and never replaces a conflicting name',
     .bind(revoked.id).first()).toBeNull();
   await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('existing', 'v0-conflict', 'file', 'folder')").run();
   const conflict = await allocated();
-  const next = new UploadPublication(env.DB, async () => ({ etag: '"complete"' }));
+  const next = new UploadPublication(env.DB, async () => ({ etag: '"complete"', size: 7 }));
   await expect(next.completeAndPublish('v0-conflict', conflict.id, 2, null, 'file', parts)).rejects.toThrow();
   expect(await env.DB.prepare("SELECT id, kind FROM drive_entries WHERE id = 'existing'").first())
     .toEqual({ id: 'existing', kind: 'folder' });
@@ -108,10 +127,10 @@ it('rolls back the receipt and journal update for an invalid parent', async () =
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-parent', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-parent');
+  const intent = await intents.createSized('v0-parent', 7);
   await intents.claim('v0-parent', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-parent', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
-  const publication = new UploadPublication(env.DB, async () => ({ etag: '"complete"' }));
+  const publication = new UploadPublication(env.DB, async () => ({ etag: '"complete"', size: 7 }));
   await expect(publication.completeAndPublish('v0-parent', intent.id, 2, 'missing', 'file', [
     { partNumber: 1, etag: '"part"', size: 7 },
   ])).rejects.toThrow();
@@ -125,13 +144,13 @@ it('does not publish when the intent version changes during completion', async (
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-version', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-version');
+  const intent = await intents.createSized('v0-version', 7);
   await intents.claim('v0-version', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-version', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
   const publication = new UploadPublication(env.DB, async () => {
     await env.DB.prepare('UPDATE drive_upload_intents SET version = version + 1 WHERE id = ?')
       .bind(intent.id).run();
-    return { etag: '"complete"' };
+    return { etag: '"complete"', size: 7 };
   });
   expect(await publication.completeAndPublish('v0-version', intent.id, 2, null, 'file', [
     { partNumber: 1, etag: '"part"', size: 7 },
@@ -145,7 +164,7 @@ it('quarantines an invalid completion response instead of publishing', async () 
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-invalid-etag', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-invalid-etag');
+  const intent = await intents.createSized('v0-invalid-etag', 7);
   await intents.claim('v0-invalid-etag', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-invalid-etag', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
   const publication = new UploadPublication(env.DB, async () => ({ etag: 'invalid' }));
@@ -156,11 +175,28 @@ it('quarantines an invalid completion response instead of publishing', async () 
   expect(await intents.get('v0-invalid-etag', intent.id)).toMatchObject({ state: 'uncertain' });
 });
 
+it('quarantines missing or mismatched completion sizes', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-invalid-size', 'member', 'active')").run();
+  const intents = new UploadIntents(env.DB);
+  for (const size of [undefined, 8]) {
+    const intent = await intents.createSized('v0-invalid-size', 7);
+    await intents.claim('v0-invalid-size', intent.id, 0, 'allocation');
+    await intents.recordSuccess('v0-invalid-size', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
+    const publication = new UploadPublication(env.DB, async () => ({ etag: '"complete"', size }));
+    await expect(publication.completeAndPublish('v0-invalid-size', intent.id, 2, null, 'file', [
+      { partNumber: 1, etag: '"part"', size: 7 },
+    ])).rejects.toThrow('Invalid completion size');
+    expect(await publication.getReceipt('v0-invalid-size', intent.id)).toBeNull();
+    expect(await intents.get('v0-invalid-size', intent.id)).toMatchObject({ state: 'uncertain' });
+  }
+});
+
 it('does not publish an upload when the same-request completion response is lost', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES ('v0-owner', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
-  const intent = await intents.create('v0-owner');
+  const intent = await intents.createSized('v0-owner', 7);
   await intents.claim('v0-owner', intent.id, 0, 'allocation');
   await intents.recordSuccess('v0-owner', intent.id, 1, { kind: 'allocation', uploadId: 'upload-id' });
 
@@ -178,4 +214,10 @@ it('does not publish an upload when the same-request completion response is lost
   expect(await env.DB.prepare('SELECT id FROM drive_entries WHERE object_key = ?')
     .bind(intent.object_key).first()).toBeNull();
   expect(await intents.get('v0-owner', intent.id)).toMatchObject({ state: 'uncertain' });
+  expect(await publication.completeAndPublish('v0-owner', intent.id, 4, null, 'file', [
+    { partNumber: 1, etag: '"part"', size: 7 },
+  ])).toBeNull();
+  expect(calls).toBe(1);
+  const retry = await intents.createSized('v0-owner', 7);
+  expect(retry.object_key).not.toBe(intent.object_key);
 });
