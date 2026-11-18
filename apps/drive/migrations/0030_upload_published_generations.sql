@@ -52,6 +52,19 @@ WHEN (NEW.completion_operation_id IS NULL AND NOT EXISTS (
    OR EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = NEW.intent_id)
 BEGIN SELECT RAISE(ABORT, 'upload publication not admitted'); END;
 
+-- A trusted dispatch uses its own quarantine ledger. Only the atomic
+-- publication may settle its journal state; legacy recovery cannot do so.
+CREATE TRIGGER drive_upload_trusted_dispatch_journal_fence
+BEFORE UPDATE OF state, completion_acknowledged ON drive_upload_intents
+WHEN OLD.state IN ('completing', 'uncertain')
+  AND (NEW.state IS NOT OLD.state OR NEW.completion_acknowledged IS NOT OLD.completion_acknowledged)
+  AND EXISTS (SELECT 1 FROM drive_upload_completion_operations o
+    JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.intent_id = OLD.id)
+  AND NOT (OLD.state = 'completing' AND NEW.state = 'acknowledged' AND NEW.completion_acknowledged = 1
+    AND NEW.version = OLD.version + 1 AND EXISTS (SELECT 1 FROM drive_upload_publications p
+      WHERE p.intent_id = OLD.id AND p.intent_version = OLD.version AND p.completion_operation_id IS NOT NULL))
+BEGIN SELECT RAISE(ABORT, 'trusted dispatch requires atomic publication'); END;
+
 -- Receipt history, not a visibility or authorization query. The consumer
 -- decides separately whether an entry can be served or its object removed.
 CREATE VIEW drive_published_generations AS
