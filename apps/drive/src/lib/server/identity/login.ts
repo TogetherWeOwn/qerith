@@ -1,5 +1,5 @@
 import type { AuthenticationResponseJSON, WebAuthnCredential } from '@simplewebauthn/server';
-import { BoundChallenges } from './challenges';
+import { BoundChallenges, ChallengeUnavailable } from './challenges';
 import { createCeremonyVerifier } from './ceremony';
 import { tokenHash } from './sessions';
 
@@ -33,8 +33,14 @@ export class PasskeyLogin {
     this.#verifier = createCeremonyVerifier(rpID, origin);
   }
 
-  issueChallenge(context: string): Promise<string> {
-    return new BoundChallenges(this.db).issue(context, 'authentication');
+  async issueChallenge(context: string, previous?: { context: string; challenge: string }): Promise<string> {
+    const challenges = new BoundChallenges(this.db);
+    if (previous) {
+      await challenges.consume(previous.context, 'authentication', previous.challenge).catch(error => {
+        if (!(error instanceof ChallengeUnavailable)) throw error;
+      });
+    }
+    return challenges.issue(context, 'authentication');
   }
 
   async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON | null): Promise<{ token: string; expiresAt: number }> {
@@ -79,6 +85,7 @@ export class PasskeyLogin {
         AND EXISTS (SELECT 1 FROM drive_sessions WHERE token_hash = ?)`)
         .bind(result.authenticationInfo.newCounter, row.id, hash),
     ]);
+    if (batch[0].meta.changes === 0 && batch[1].meta.changes === 0) throw new PasskeyDenied('Authentication unavailable');
     if (batch[0].meta.changes !== 1 || batch[1].meta.changes !== 1) throw new Error('Authentication unavailable');
     const session = await this.db.prepare('SELECT expires_at FROM drive_sessions WHERE token_hash = ?').bind(hash).first<{ expires_at: number }>();
     if (!session) throw new Error('Authentication unavailable');

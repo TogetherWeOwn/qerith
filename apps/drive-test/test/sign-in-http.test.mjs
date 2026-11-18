@@ -42,10 +42,9 @@ it('requires the browser transaction cookie and issues a hardened session only o
   expect(success.status).toBe(204);
   expect(success.headers.get('cache-control')).toBe('private, no-store');
   expect(success.headers.getSetCookie()).toEqual([
-    '__Host-drive-login=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0',
     expect.stringMatching(/^__Host-drive-session=[\w-]{43}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=\d+$/),
   ]);
-  const cookiePair = success.headers.getSetCookie()[1].split(';')[0];
+  const cookiePair = success.headers.getSetCookie()[0].split(';')[0];
   const request = new Request(origin, { headers: { cookie: cookiePair } });
   expect((await readSession(request, env.DB)).principal).toEqual({ id: 'owner', role: 'owner' });
   expect((await post('verify', { cookie }, body)).status).toBe(401);
@@ -53,17 +52,28 @@ it('requires the browser transaction cookie and issues a hardened session only o
   expect(await readSession(request, env.DB)).toBeNull();
 });
 
+it('replaces a live challenge without retaining its slot or clearing the replacement on verification', async () => {
+  const { cookie, body } = await begin();
+  expect((await post('challenge', { cookie })).status).toBe(200);
+  const denied = await post('verify', { cookie }, body);
+  expect(denied.status).toBe(401);
+  expect(denied.headers.getSetCookie()).toEqual([]);
+  const row = await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all();
+  expect(row.results).toHaveLength(1);
+  expect(cookie).not.toContain(row.results[0].challenge);
+});
+
 it('consumes denied attempts and distinguishes revoked proof from generic denial', async () => {
   for (const state of ['oversized', 'expired', 'wrong-origin', 'bad-signature', 'revoked']) {
-    await setup();
     const options = state === 'wrong-origin' ? { origin: 'https://other.test' } : { badSignature: state === 'bad-signature' };
     const { cookie, body } = await begin(options, state === 'revoked' || state === 'bad-signature' ? 'revoked' : 'active');
     if (state === 'expired') await env.DB.exec('UPDATE drive_bound_ceremonies SET expires_at = 1');
     const denied = await post('verify', { cookie }, state === 'oversized' ? ' '.repeat(16 * 1024) + body : body);
     expect(denied.status).toBe(state === 'revoked' ? 403 : 401);
     expect(await denied.json()).toEqual({ code: state === 'revoked' ? 'revoked' : 'denied' });
-    expect(denied.headers.getSetCookie()).not.toContainEqual(expect.stringContaining('__Host-drive-session='));
-    expect((await post('verify', { cookie }, body)).status).toBe(401);
+    expect(denied.headers.getSetCookie()).toEqual([]);
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n)
+      .toBe(state === 'expired' ? 1 : 0);
     expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
   }
 });

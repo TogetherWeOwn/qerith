@@ -13,7 +13,8 @@ function hostCookie(name: string, value: string, maxAge: number, sameSite: 'Stri
 }
 
 async function readAssertion(request: Request): Promise<AuthenticationResponseJSON | null> {
-  if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' || !request.body) return null;
+  if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' ||
+      !request.body || request.body.locked) return null;
   const reader = request.body.getReader();
   const bytes = new Uint8Array(assertionLimit);
   try {
@@ -22,7 +23,8 @@ async function readAssertion(request: Request): Promise<AuthenticationResponseJS
       const { value, done } = await reader.read();
       if (done) break;
       if (value.length > bytes.length - length) {
-        await reader.cancel();
+        // A cloned stream may not finish cancellation until its other branch reads.
+        void reader.cancel().catch(() => {});
         return null;
       }
       bytes.set(value, length);
@@ -63,18 +65,18 @@ export async function signIn(
 
   try {
     const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin);
+    const cookie = readOpaqueCookie(request, transactionCookie, transactionPattern);
+    const [context, challenge] = cookie?.split('.') ?? [];
     if (step === 'challenge') {
       const bytes = crypto.getRandomValues(new Uint8Array(32));
-      const context = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-      const challenge = await login.issueChallenge(context);
-      headers.append('set-cookie', hostCookie(transactionCookie, `${context}.${challenge}`, 300, 'Strict'));
-      return Response.json({ challenge, rpId: origin.hostname, userVerification: 'required', timeout: 300_000 }, { headers });
+      const nextContext = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      const nextChallenge = await login.issueChallenge(nextContext, cookie ? { context, challenge } : undefined);
+      headers.append('set-cookie', hostCookie(transactionCookie, `${nextContext}.${nextChallenge}`, 300, 'Strict'));
+      return Response.json({ challenge: nextChallenge, rpId: origin.hostname, userVerification: 'required', timeout: 300_000 }, { headers });
     }
 
-    const transaction = readOpaqueCookie(request, transactionCookie, transactionPattern);
-    headers.append('set-cookie', hostCookie(transactionCookie, '', 0, 'Strict'));
-    if (!transaction) return reply(401, 'denied');
-    const [context, challenge] = transaction.split('.');
+    if (!cookie) return reply(401, 'denied');
+    // The database consumes the challenge; a delayed response must not clear a newer cookie.
     const session = await login.authenticate(context, challenge, await readAssertion(request));
     const maxAge = Math.floor((session.expiresAt - Date.now()) / 1000);
     if (maxAge <= 0) return reply(503, 'unavailable');
