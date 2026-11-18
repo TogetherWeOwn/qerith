@@ -22,9 +22,9 @@ interface SealedUpload {
 interface Receipt { evidence_revision: string; etag: string; response_checksums: string }
 
 // A composition-root dependency, not request input. Qualification must cover
-// this exact immutable namespace and exclusive writers. The part verifier must
-// independently establish acknowledged ETags and actual byte counts for this
-// admitted upload; sealed observation rows alone do not establish either.
+// the signer's exact namespace and exclusive writers; a namespace change requires
+// a different epoch even if the endpoint and bucket are unchanged. The verifier
+// must establish acknowledged ETags and actual byte counts independently of D1.
 interface UploadPublicationVerifier {
   isQualified(storageConfigId: string): Promise<boolean>;
   verifyParts(upload: Readonly<{
@@ -116,10 +116,12 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
           .bind(operation, evidence_revision, etag, response_checksums).first();
         if (written) return true;
       } catch { /* Reconcile a potentially committed write before retrying it. */ }
-      const current = await db.withSession('first-primary').prepare(`SELECT evidence_revision, etag, response_checksums
-        FROM drive_upload_completion_receipts WHERE operation_id = CAST(? AS TEXT)`).bind(operation).first<Receipt>();
-      if (current) return current.evidence_revision === evidence_revision && current.etag === etag &&
-        current.response_checksums === response_checksums;
+      try {
+        const current = await db.withSession('first-primary').prepare(`SELECT evidence_revision, etag, response_checksums
+          FROM drive_upload_completion_receipts WHERE operation_id = CAST(? AS TEXT)`).bind(operation).first<Receipt>();
+        if (current) return current.evidence_revision === evidence_revision && current.etag === etag &&
+          current.response_checksums === response_checksums;
+      } catch { /* Only the same immutable receipt insert may be retried. */ }
     }
     return false;
   }

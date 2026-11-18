@@ -23,6 +23,31 @@ export async function seed(id, { legacy = false, endpoint = config.endpoint, key
   return { token: (await sessions.issue(owner)).token, key, intent, part, bindStorage };
 }
 
+export function loseAcknowledgement(table, loseBeforeCommit) {
+  let lostWrite = false, lostRead = false;
+  return {
+    withSession(mode) {
+      const session = env.DB.withSession(mode);
+      return { prepare(query) {
+        if (loseBeforeCommit && lostWrite && !lostRead && query.startsWith('SELECT evidence_revision')) {
+          lostRead = true;
+          return { bind: () => ({ async first() { throw new Error('primary read unavailable'); } }) };
+        }
+        return session.prepare(query);
+      } };
+    },
+    prepare(query) {
+      if (!query.startsWith(`INSERT INTO drive_upload_completion_${table}`)) return env.DB.prepare(query);
+      return { bind: (...args) => ({ async first() {
+        if (lostWrite) return sql(query, ...args).first();
+        if (!loseBeforeCommit && !await sql(query, ...args).first()) return null;
+        lostWrite = true;
+        throw new Error('lost acknowledgement');
+      } }) };
+    }
+  };
+}
+
 // The migration replay fixtures must drop children before their ledger parents.
 export const dropCompletionReceiptEvidence = `DROP VIEW IF EXISTS drive_upload_sealed_candidates;
   DROP TABLE IF EXISTS drive_upload_completion_quarantine;

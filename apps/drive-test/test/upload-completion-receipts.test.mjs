@@ -2,7 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
-import { config, epoch, parts, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
+import { config, epoch, loseAcknowledgement, parts, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 
 const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
 const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
@@ -16,6 +16,7 @@ function producer(fetch, verifyParts = vi.fn(async () => parts), db = env.DB) {
 
 it('rejects an eligible legacy seal without backfilling storage authority', async () => {
   await applyD1Migrations(env.DB, migrations.slice(0, -1));
+  expect(await sql("SELECT name FROM sqlite_master WHERE name = 'drive_upload_storage_bindings'").first()).toBeNull();
   const { token, bindStorage } = await seed('legacy', { legacy: true });
   await applyD1Migrations(env.DB, migrations);
   await expect(bindStorage()).rejects.toThrow('storage binding must precede allocation');
@@ -23,7 +24,7 @@ it('rejects an eligible legacy seal without backfilling storage authority', asyn
   expect(await evidence('dispatches', 'legacy')).toBeNull();
 });
 
-it.each(['claim', 'receipt'])('loses the %s acknowledgement without redispatch', async (lost) => {
+it.each(['claim', 'receipt', 'receipt-write-read'])('recovers from lost %s D1 results without redispatch', async (lost) => {
   await applyD1Migrations(env.DB, migrations);
   const id = `lost-${lost}`, { token, key, intent } = await seed(id);
   const fetch = vi.fn(async (request) => {
@@ -34,12 +35,8 @@ it.each(['claim', 'receipt'])('loses the %s acknowledgement without redispatch',
     expect(await request.text()).toContain('<PartNumber>2</PartNumber><ETag>"part-&amp;-ÿ"</ETag>');
     return response(key);
   });
-  const table = lost === 'claim' ? 'dispatches' : 'receipts';
-  const db = { withSession: vi.fn((mode) => env.DB.withSession(mode)), prepare: (query) => query.startsWith(`INSERT INTO drive_upload_completion_${table}`)
-    ? { bind: (...args) => ({ async first() {
-      if (await sql(query, ...args).first()) throw new Error('lost acknowledgement');
-      return null;
-    } }) } : env.DB.prepare(query) };
+  const db = loseAcknowledgement(lost === 'claim' ? 'dispatches' : 'receipts', lost === 'receipt-write-read');
+  const withSession = vi.spyOn(db, 'withSession');
   const verify = vi.fn(async () => parts), first = producer(fetch, verify, db);
   const results = await Promise.all([first.complete(token, id), first.complete(token, id)]);
   expect(results.sort()).toEqual(['not-admitted', lost === 'claim' ? 'uncertain' : 'recorded']);
@@ -48,7 +45,7 @@ it.each(['claim', 'receipt'])('loses the %s acknowledgement without redispatch',
   const durable = await evidence('receipts', id);
   if (lost === 'claim') expect(durable).toBeNull();
   else {
-    expect(db.withSession).toHaveBeenCalledTimes(3);
+    expect(withSession).toHaveBeenCalledTimes(3);
     expect(durable).toMatchObject({ etag: '"final-opaque"', response_checksums: '{"ChecksumSHA256":"example-checksum","ChecksumType":"COMPOSITE"}' });
   }
   expect(await evidence('quarantine', id)).toBeNull();
