@@ -78,25 +78,39 @@ $nonLoopback = @('0.0.0.0-126.255.255.255', '128.0.0.0-255.255.255.255', '::2-ff
 $ruleName = 'QerithDriveBlockNonLoopbackNvdaRelay'
 $expected = @{
   Name = $ruleName; Enabled = 'True'; Direction = 'Inbound'; Action = 'Block'; Profile = 'Any'
-  PrimaryStatus = 'OK'; EnforcementStatus = 'Full'; EdgeTraversalPolicy = 'Block'
+  PrimaryStatus = 'OK'; EdgeTraversalPolicy = 'Block'
   Protocol = 'TCP'; LocalPort = '6837'; RemotePort = 'Any'; RemoteAddress = 'Any'
   LocalAddress = ($nonLoopback | Sort-Object) -join ','
   InterfaceAlias = 'Any'; InterfaceType = 'Any'; Program = 'Any'; Service = 'Any'
 }
 
-function Assert-RelayBoundary($Actual) {
+function Assert-RelayBoundary($Actual, [int]$ActiveProfileMask) {
   foreach ($field in $expected.Keys) {
     if ($Actual[$field] -ine $expected[$field]) { throw "NVDA relay boundary mismatch: $field" }
+  }
+  # NetSecurity reports both Enforced and ProfileInactive on the hosted image.
+  # The latter is tolerable only when some profiles are actually inactive.
+  $state = ($Actual.EnforcementStatus -split ',' | Sort-Object) -join ','
+  if ($ActiveProfileMask -lt 1 -or $ActiveProfileMask -gt 7 -or
+      ($state -cne 'Enforced' -and ($state -cne 'Enforced,ProfileInactive' -or $ActiveProfileMask -eq 7))) {
+    throw 'NVDA relay boundary mismatch: EnforcementStatus'
   }
 }
 
 # These controls alter only a synthetic readback, never the actual firewall.
-Assert-RelayBoundary $expected
-foreach ($field in 'LocalPort', 'LocalAddress') {
-  $mock = $expected.Clone()
-  $mock[$field] = if ($field -eq 'LocalPort') { '6838' } else { ($nonLoopback[0..1] | Sort-Object) -join ',' }
+$synthetic = $expected.Clone()
+$synthetic.EnforcementStatus = 'ProfileInactive,Enforced'
+Assert-RelayBoundary $synthetic 4
+$badReadbacks = @{
+  LocalPort = '6838'
+  LocalAddress = ($nonLoopback[0..1] | Sort-Object) -join ','
+  EnforcementStatus = 'ProfileInactive'
+}
+foreach ($field in $badReadbacks.Keys) {
+  $mock = $synthetic.Clone()
+  $mock[$field] = $badReadbacks[$field]
   try {
-    Assert-RelayBoundary $mock
+    Assert-RelayBoundary $mock 4
     throw "Synthetic bad $field passed"
   } catch {
     if ($_.Exception.Message -cne "NVDA relay boundary mismatch: $field") { throw }
@@ -107,18 +121,24 @@ foreach ($serviceName in 'BFE', 'MpsSvc') {
   $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
   if ($service.State -ne 'Running' -or $service.StartMode -ne 'Auto') { throw "$serviceName must be running and enabled" }
 }
+function Test-InterfaceExclusion($Aliases) {
+  return [bool]($Aliases | Where-Object { $_ -and $_ -ne 'NotConfigured' })
+}
+if (!(Test-InterfaceExclusion @('Synthetic excluded interface')) -or (Test-InterfaceExclusion @('NotConfigured'))) {
+  throw 'Synthetic interface exclusion check failed'
+}
 $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore)
-if (($profiles.Name | Sort-Object) -join ',' -ne 'Domain,Private,Public' -or ($profiles | Where-Object {
+if ((($profiles.Name | Sort-Object) -join ',') -ne 'Domain,Private,Public' -or ($profiles | Where-Object {
   $_.Enabled -ne 'True' -or $_.DefaultInboundAction -eq 'Allow' -or
     $_.AllowInboundRules -eq 'False' -or $_.AllowLocalFirewallRules -eq 'False' -or
-    ($_.DisabledInterfaceAliases | Where-Object { $_ -and $_ -ne 'NotConfigured' })
+    !$_.CimInstanceProperties['DisabledInterfaceAliases'] -or (Test-InterfaceExclusion $_.DisabledInterfaceAliases)
 })) { throw 'NVDA relay requires effective firewall policy on all profiles and interfaces' }
 
-# Ordinary allow rules cannot override an explicit block. Authenticated bypass rules can.
-$allows = @(Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound -Action Allow)
-$security = @($allows | Get-NetFirewallSecurityFilter)
-if ($security.Count -ne $allows.Count -or ($security | Where-Object { [string]$_.OverrideBlockRules -notin 'True', 'False' })) {
-  throw 'Could not verify the ActiveStore inbound allow security filters'
+# Inspect all inbound rules rather than assuming bypass rules are returned by -Action Allow.
+$inbound = @(Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound)
+$security = @($inbound | Get-NetFirewallSecurityFilter)
+if ($security.Count -ne $inbound.Count -or ($security | Where-Object { [string]$_.OverrideBlockRules -notin 'True', 'False' })) {
+  throw 'Could not verify the ActiveStore inbound security filters'
 }
 if ($security | Where-Object { $_.OverrideBlockRules -eq 'True' }) {
   throw 'ActiveStore contains an enabled inbound authenticated bypass rule'
@@ -148,12 +168,15 @@ $actual.InterfaceAlias = ($rule[0] | Get-NetFirewallInterfaceFilter).InterfaceAl
 $actual.InterfaceType = ($rule[0] | Get-NetFirewallInterfaceTypeFilter).InterfaceType -join ','
 $actual.Program = $app.Program -join ','
 $actual.Service = ($rule[0] | Get-NetFirewallServiceFilter).Service -join ','
+# Read the current Domain (1), Private (2), Public (4) mask from the firewall itself.
+$activeProfileMask = [int](New-Object -ComObject HNetCfg.FwPolicy2).CurrentProfileTypes
 # Report only status/shape from our named fixture rule, not other machine policy.
-Write-Host "ActiveStore relay: primary='$($actual.PrimaryStatus)' enforcement='$($actual.EnforcementStatus)'"
+Write-Host "ActiveStore relay: primary='$($actual.PrimaryStatus)' enforcement='$($actual.EnforcementStatus)' activeProfileMask='$activeProfileMask'"
 Write-Host "ActiveStore relay: profile='$($actual.Profile)' protocol='$($actual.Protocol)' port='$($actual.LocalPort)' local='$($actual.LocalAddress)'"
-Assert-RelayBoundary $actual
+Assert-RelayBoundary $actual $activeProfileMask
 
 # No removal: the hosted VM's destruction is the end of this protection window.
-@{ policyStore = 'ActiveStore'; rule = $actual; profiles = @($profiles.Name);
-   syntheticWrongPortRejected = $true; syntheticMissingIPv6Rejected = $true } |
+@{ policyStore = 'ActiveStore'; rule = $actual; profiles = @($profiles.Name); activeProfileMask = $activeProfileMask;
+   syntheticWrongPortRejected = $true; syntheticMissingIPv6Rejected = $true;
+   syntheticInactiveOnlyRejected = $true; syntheticExcludedInterfaceRejected = $true } |
   ConvertTo-Json -Depth 4 > "$evidence/relay.json"
