@@ -17,11 +17,12 @@ export function preparationManifest({ sha, runId, runAttempt }) {
 
 // Matching preparation metadata does not authorize fixture creation or cleanup.
 export function assertPreparationMatchesRun(manifest, run) {
-  const expected = preparationManifest(run);
-  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+  const expected = Object.entries(preparationManifest(run));
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)
+    || Reflect.ownKeys(manifest).length !== expected.length) {
     throw new Error('invalid preparation metadata');
   }
-  for (const [key, value] of Object.entries(expected)) {
+  for (const [key, value] of expected) {
     if (!Object.hasOwn(manifest, key) || manifest[key] !== value) {
       throw new Error(`preparation metadata mismatch: ${key}`);
     }

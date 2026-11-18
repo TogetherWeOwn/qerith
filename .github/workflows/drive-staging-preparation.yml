@@ -1,0 +1,38 @@
+name: Drive staging source preparation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preparation:
+    if: github.repository == 'TogetherWeOwn/qerith' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify source context and checked-out commit
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_EVENT: ${{ github.event_name }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          export CHECKOUT_SHA="$(git rev-parse HEAD)"
+          node --input-type=module <<'NODE'
+          import { assertStagingSource } from './apps/drive/scripts/staging-source.mjs';
+          assertStagingSource({
+            repository: process.env.SOURCE_REPOSITORY,
+            event: process.env.SOURCE_EVENT,
+            ref: process.env.SOURCE_REF,
+            sha: process.env.SOURCE_SHA,
+            checkoutSha: process.env.CHECKOUT_SHA,
+          });
+          NODE
+      - name: Test closed-admission metadata
+        run: node --test apps/drive/scripts/staging-manifest.test.mjs
