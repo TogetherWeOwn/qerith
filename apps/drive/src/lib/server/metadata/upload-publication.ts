@@ -41,7 +41,7 @@ export function createAtomicUploadPublication(db: UploadEvidenceDatabase, epoch:
         WHERE operation_id = CAST(? AS TEXT) AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?`;
       const receipt = await db.withSession('first-primary').prepare(`SELECT hex(object_key) AS key_hex, evidence_revision, etag, size_bytes ${eligible}`)
         .bind(...scope).first<{ key_hex: string; evidence_revision: string; etag: string; size_bytes: number }>();
-      if (!receipt) return false;
+      if (!receipt) return committed(); // An exact winner can commit between the two primary reads.
       try {
         const metadata = await reader.head({ key: decodeUploadIdentity(receipt.key_hex), etag: receipt.etag });
         if (metadata.status !== 200 || typeof metadata.contentLength !== 'string' ||
