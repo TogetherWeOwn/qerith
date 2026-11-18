@@ -67,9 +67,15 @@ it('retains a dispatch whose D1 acknowledgement was lost', async () => {
   await expect(service.complete(token, id)).resolves.toBe('uncertain');
   expect(await evidence('dispatches', id)).not.toBeNull();
   expect(await evidence('receipts', id)).toBeNull();
+  expect(await evidence('quarantine', id)).toBeNull();
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
   await expect(service.complete(token, id)).resolves.toBe('not-admitted');
   expect(fetch).not.toHaveBeenCalled();
+
+  // Acknowledge only the journal so the dispatch alone must reject cleanup.
+  expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(true);
+  expect(await intentRow(intent)).toMatchObject({ state: 'acknowledged', version: 4 });
+  await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
 });
 
 it('keeps an existing tombstone effective before dispatch without treating it as a cleanup claim', async () => {

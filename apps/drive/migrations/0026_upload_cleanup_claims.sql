@@ -1,4 +1,5 @@
 -- Permanent intent-wide exclusion, not authorization to delete provider data.
+-- Publication tombstones (0022) still gate sealed completion but do not replace this claim.
 CREATE TABLE drive_upload_cleanup_claims (
   intent_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_upload_intent_reservations (intent_id)
 ) STRICT, WITHOUT ROWID;
