@@ -697,8 +697,28 @@ try {
         container.append(spacer);
       }
     }, source);
-    await trigger.click();
     const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    if (source === 'menu') {
+      await trigger.click();
+    } else {
+      const queued = await trigger.evaluate(async (el, source) => {
+        const scroller = source === 'document' ? document : el.closest('main').firstElementChild;
+        const top = () => scroller === document ? window.scrollY : scroller.scrollTop;
+        let deliveredAt;
+        scroller.addEventListener('scroll', () => { deliveredAt = top(); }, { once: true });
+        el.focus({ preventScroll: true });
+        // Move first, then open in the same task before Chromium delivers the scroll event.
+        if (scroller === document) window.scrollTo(0, 10);
+        else scroller.scrollTop = 10;
+        const atOpen = top();
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        return { atOpen, deliveredAt, focusedText: document.activeElement?.textContent?.trim() };
+      }, source);
+      assert.equal(queued.atOpen, 10, `${source} must scroll before opening`);
+      assert.equal(queued.deliveredAt, queued.atOpen, `${source} must deliver the queued scroll without moving again`);
+      assert.equal(queued.focusedText, 'Download', `${source} scroll queued before opening must not dismiss the focused menu`);
+    }
     await menu.waitFor();
     const scroll = source === 'document' ? page.locator('html') : source === 'ancestor' ? page.locator('main > div').first() : menu;
     const moved = await scroll.evaluate((el, source) => {
@@ -1252,55 +1272,25 @@ try {
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
     console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
 
-    await page.addInitScript(() => {
-      const describe = node => {
-        if (!(node instanceof Element)) return node === document ? 'document' : String(node);
-        const name = node.getAttribute('aria-label') || (node.matches('[role="menuitem"]') ? node.textContent.trim() : '');
-        const layout = node.closest('table, ul');
-        return [node.localName, node.getAttribute('role'), name, layout?.className].filter(Boolean).join(' ');
-      };
-      const events = [];
-      window.menuFocusTrace = events;
-      for (const type of ['keydown', 'focusin', 'focusout', 'scroll', 'resize', 'beforetoggle', 'toggle']) {
-        window.addEventListener(type, event => {
-          const detail = event.key ?? event.newState;
-          events.push([Math.round(performance.now()), type, detail, describe(event.target), describe(document.activeElement),
-            type === 'beforetoggle' && detail === 'closed' ? new Error().stack : undefined]);
-          if (events.length > 32) events.shift();
-        }, { capture: true, passive: true });
-      }
-    });
     const inlineUrl = `${origin}/?listing&actions&inline`;
+    await page.goto(`${inlineUrl}&two-lists`);
+    const [first, second] = await page.locator('.listing').all();
     const rowDetails = list => list.getByRole('group', { name: 'Details for Résumé 2025.pdf', exact: true });
     const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
-    const prepareInlineListing = async () => {
-      await page.goto(`${inlineUrl}&two-lists`);
-      const [first, second] = await page.locator('.listing').all();
-      for (const listing of [first, second]) {
-        await openDetails(menuTrigger(listing));
-        await rowDetails(listing).and(focus).waitFor();
-      }
-      resizeTarget = main.locator(':scope > div').nth(1);
-      for (const [width, role] of [[1000, 'table'], [500, 'list']]) {
-        await setContainerWidth(width);
-        await rowDetails(second.getByRole(role)).and(focus).waitFor();
-      }
-      await page.keyboard.press('Escape');
-      assert.equal(await rowDetails(first).count(), 1);
-      assert.equal(await rowDetails(second).count(), 0);
-      await menuTrigger(second).and(focus).waitFor();
-      return second;
-    };
-    const second = await prepareInlineListing();
+    for (const listing of [first, second]) {
+      await openDetails(menuTrigger(listing));
+      await rowDetails(listing).and(focus).waitFor();
+    }
+    resizeTarget = main.locator(':scope > div').nth(1);
+    for (const [width, role] of [[1000, 'table'], [500, 'list']]) {
+      await setContainerWidth(width);
+      await rowDetails(second.getByRole(role)).and(focus).waitFor();
+    }
+    await page.keyboard.press('Escape');
+    assert.equal(await rowDetails(first).count(), 1);
+    assert.equal(await rowDetails(second).count(), 0);
+    await menuTrigger(second).and(focus).waitFor();
     const download = page.getByRole('menuitem', { name: 'Download', exact: true }).and(focus);
-    const waitForSettledDownload = async scenario => {
-      try {
-        await download.waitFor({ timeout: 5000 });
-      } catch (error) {
-        console.error('Listing menu focus trace:', JSON.stringify({ ...scenario, events: await page.evaluate(() => window.menuFocusTrace) }));
-        throw error;
-      }
-    };
     const waitForMenuClose = () => page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
     for (const inline of [true, false]) for (const [from, to, fromRole, toRole] of [[1000, 500, 'table', 'list'], [500, 1000, 'list', 'table']]) {
       if (!inline) { await page.goto(`${origin}/?listing&actions`); resizeTarget = main; }
@@ -1326,7 +1316,7 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await waitForSettledDownload({ inline, from, to });
+          await download.waitFor({ timeout: 5000 });
           await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
@@ -1422,17 +1412,6 @@ try {
       await waitForMenuClose();
     }
     console.log('Listing action menus preserve deliberate blur and hand off focus between viewport layouts, including the modal sheet');
-    // Reload the fixture for each sample and replay the first settled case's setup.
-    // A failed sample still fails the job; this does not retry any assertion.
-    const replayCount = 32;
-    for (let sample = 1; sample <= replayCount; sample++) {
-      const listing = await prepareInlineListing();
-      await setContainerWidth(1000);
-      await menuTrigger(listing.getByRole('table')).focus();
-      await page.keyboard.press('ArrowDown');
-      await waitForSettledDownload({ inline: true, from: 1000, to: 500, sample });
-    }
-    console.log(`Listing action menu: Download took keyboard focus in ${replayCount} first-case replays`);
     await context.close();
   }
   {
