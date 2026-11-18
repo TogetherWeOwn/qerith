@@ -68,7 +68,14 @@ async function exercisePrivateBoundary(main) {
 
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
-    assert.equal((await access({ method: 'POST', headers: { cookie } })).status, 403, 'mutation needs the exact Origin');
+    const mutation = await access({ method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
+    assert.equal(mutation.status, 403, 'mutation needs the exact Origin');
+    assert.equal(mutation.headers.get('cache-control'), 'private, no-store');
+    for (const suffix of ['', '/']) {
+      const part = await worker.fetch(`${origin}/api/uploads/fixture/parts/1${suffix}`, { redirect: 'manual' });
+      assert.equal(part.status, 401, 'the private endpoint is guarded before any slash redirect');
+      assert.equal(part.headers.get('cache-control'), 'private, no-store');
+    }
     const authorized = await access({ headers: { cookie } });
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
