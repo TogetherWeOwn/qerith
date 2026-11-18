@@ -115,15 +115,22 @@ if (($profiles.Name | Sort-Object) -join ',' -ne 'Domain,Private,Public' -or ($p
 })) { throw 'NVDA relay requires effective firewall policy on all profiles and interfaces' }
 
 # Ordinary allow rules cannot override an explicit block. Authenticated bypass rules can.
-$bypass = Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound -Action Allow |
-  Get-NetFirewallSecurityFilter | Where-Object { $_.OverrideBlockRules -eq 'True' }
-if ($bypass) { throw 'ActiveStore contains an enabled inbound authenticated bypass rule' }
+$allows = @(Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound -Action Allow)
+$security = @($allows | Get-NetFirewallSecurityFilter)
+if ($security.Count -ne $allows.Count -or ($security | Where-Object { [string]$_.OverrideBlockRules -notin 'True', 'False' })) {
+  throw 'Could not verify the ActiveStore inbound allow security filters'
+}
+if ($security | Where-Object { $_.OverrideBlockRules -eq 'True' }) {
+  throw 'ActiveStore contains an enabled inbound authenticated bypass rule'
+}
 
 New-NetFirewallRule -PolicyStore PersistentStore -Name $ruleName -DisplayName $ruleName -Enabled True `
   -Direction Inbound -Action Block -Profile Any -Protocol TCP -LocalPort 6837 `
   -LocalAddress $nonLoopback -EdgeTraversalPolicy Block | Out-Null
-$rule = @(Get-NetFirewallRule -PolicyStore ActiveStore -Name $ruleName)
-if ($rule.Count -ne 1) { throw 'Expected exactly one named relay rule in ActiveStore' }
+$rule = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Name $ruleName)
+if ($rule.Count -ne 1 -or $rule[0].PolicyStoreSourceType -ne 'Local') {
+  throw 'Expected exactly one locally installed named relay rule in ActiveStore'
+}
 $actual = @{}
 foreach ($field in 'Name', 'Enabled', 'Direction', 'Action', 'Profile', 'PrimaryStatus', 'EnforcementStatus', 'EdgeTraversalPolicy') {
   $actual[$field] = $rule[0].$field -join ','
@@ -141,6 +148,9 @@ $actual.InterfaceAlias = ($rule[0] | Get-NetFirewallInterfaceFilter).InterfaceAl
 $actual.InterfaceType = ($rule[0] | Get-NetFirewallInterfaceTypeFilter).InterfaceType -join ','
 $actual.Program = $app.Program -join ','
 $actual.Service = ($rule[0] | Get-NetFirewallServiceFilter).Service -join ','
+# Report only status/shape from our named fixture rule, not other machine policy.
+Write-Host "ActiveStore relay: primary='$($actual.PrimaryStatus)' enforcement='$($actual.EnforcementStatus)'"
+Write-Host "ActiveStore relay: profile='$($actual.Profile)' protocol='$($actual.Protocol)' port='$($actual.LocalPort)' local='$($actual.LocalAddress)'"
 Assert-RelayBoundary $actual
 
 # No removal: the hosted VM's destruction is the end of this protection window.
