@@ -5,6 +5,7 @@ import { createS3Transport } from '../src/lib/server/s3/transport';
 
 const config = { endpoint: 'https://storage.example', bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'access', secretAccessKey: 'secret' };
 const operation = { method: 'GET' as const, key: 'key', maxResponseBytes: 32 * 1024 * 1024 };
+const budgets = { timeoutMs: 15, streamBudget: { idleMs: 30, totalMs: 100 } };
 
 test('streams on demand with a bound larger than a part', async () => {
   let pulls = 0;
@@ -67,16 +68,13 @@ test('consumer cancellation and idle timeout cancel upstream', async () => {
   assert.equal(cancelled, 2);
 });
 
-const budgets = { timeoutMs: 15, streamBudget: { idleMs: 30, totalMs: 100 } };
-
-function streamClock(t: TestContext) {
+function streamClock(t: TestContext, now = () => 0) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  // Isolate timer delivery from host timing; Workers clocks can freeze between I/O turns.
-  t.mock.method(performance, 'now', () => 0);
+  t.mock.method(performance, 'now', now);
   return (ms: number) => t.mock.timers.tick(ms);
 }
 
-function controlledBody() {
+function controlledDownload({ deferHeaders = false, streamBudget = budgets.streamBudget } = {}) {
   let source!: ReadableStreamDefaultController<Uint8Array>;
   let pulls = 0;
   let cancellations = 0;
@@ -85,88 +83,97 @@ function controlledBody() {
     pull() { pulls++; },
     cancel() { cancellations++; return new Promise<void>(() => {}); }
   }, { highWaterMark: 0 }));
-  return { response, source, pulls: () => pulls, cancellations: () => cancellations };
+  const fetched = Promise.withResolvers<Request>();
+  const headers = Promise.withResolvers<Response>();
+  if (!deferHeaders) headers.resolve(response);
+  const request = createS3Transport(config, { ...budgets, streamBudget,
+    fetch: async (input) => { fetched.resolve(input as Request); return headers.promise; }
+  });
+  return { request, signed: fetched.promise, respond: () => headers.resolve(response), source,
+    pulls: () => pulls, cancellations: () => cancellations };
 }
 
 test('the headers deadline aborts the request and cancels a late response', async (t) => {
   const tick = streamClock(t);
-  const body = controlledBody();
-  const fetched = Promise.withResolvers<Request>();
-  const headers = Promise.withResolvers<Response>();
-  const request = createS3Transport(config, { ...budgets, fetch: async (input) => {
-    fetched.resolve(input as Request);
-    return headers.promise;
-  } });
-  const rejected = assert.rejects(request.stream(operation), /stream request failed/);
-  const signed = await fetched.promise;
+  const download = controlledDownload({ deferHeaders: true });
+  const rejected = assert.rejects(download.request.stream(operation), /stream request failed/);
+  const { signal } = await download.signed;
   tick(14);
-  assert.equal(signed.signal.aborted, false);
+  assert.equal(signal.aborted, false);
   tick(1);
   await rejected;
-  assert.equal(signed.signal.aborted, true);
-  headers.resolve(body.response);
+  assert.equal(signal.aborted, true);
+  download.respond();
   await nextTurn();
-  assert.equal(body.cancellations(), 1);
+  assert.equal(download.cancellations(), 1);
 });
 
 test('reads progress past the headers deadline and pause past idle, but not past the total deadline', async (t) => {
   const tick = streamClock(t);
-  const body = controlledBody();
-  const request = createS3Transport(config, { ...budgets, fetch: async () => body.response });
-  const reader = (await request.stream(operation)).body.getReader();
-  assert.equal(body.pulls(), 0);
+  const inherited = { get idleMs() { return 30; }, get totalMs() { return 100; } };
+  const download = controlledDownload({ deferHeaders: true, streamBudget: Object.create(inherited) });
+  const stream = download.request.stream(operation);
+  const { signal } = await download.signed;
+  tick(10);
+  download.respond();
+  const reader = (await stream).body.getReader();
+  assert.equal(download.pulls(), 0);
   for (let byte = 1; byte <= 2; byte++) {
     const pending = reader.read();
     await nextTurn();
     tick(20);
-    body.source.enqueue(new Uint8Array(0));
-    body.source.enqueue(new Uint8Array([byte]));
+    download.source.enqueue(new Uint8Array([byte]));
     assert.deepEqual((await pending).value, new Uint8Array([byte]));
     if (byte === 1) tick(35);
-    assert.equal(body.pulls(), byte);
+    assert.equal(download.pulls(), byte);
   }
-  tick(24);
-  assert.equal(body.cancellations(), 0);
+  tick(14);
+  assert.equal(signal.aborted, false);
   tick(1);
+  assert.equal(signal.aborted, true);
+  assert.equal(download.cancellations(), 1);
   await assert.rejects(reader.read(), /aborted or timed out/);
-  assert.equal(body.cancellations(), 1);
 });
 
 test('empty chunks do not extend demanded-read idle, including a stalled EOF check', async (t) => {
   const tick = streamClock(t);
-  const body = controlledBody();
-  let signed!: Request;
-  const request = createS3Transport(config, { ...budgets, fetch: async (input) => {
-    signed = input as Request;
-    return body.response;
-  } });
-  const reader = (await request.stream({ ...operation, maxResponseBytes: 1 })).body.getReader();
-  body.source.enqueue(new Uint8Array([42]));
+  const download = controlledDownload();
+  const reader = (await download.request.stream({ ...operation, maxResponseBytes: 1 })).body.getReader();
+  download.source.enqueue(new Uint8Array([42]));
   assert.deepEqual((await reader.read()).value, new Uint8Array([42]));
   const rejected = assert.rejects(reader.read(), /aborted or timed out/);
   await nextTurn();
   tick(20);
-  body.source.enqueue(new Uint8Array(0));
+  download.source.enqueue(Object.defineProperty(new Uint8Array(0), 'byteLength', { value: 1 }));
   await nextTurn();
   tick(9);
-  assert.equal(signed.signal.aborted, false);
+  assert.equal((await download.signed).signal.aborted, false);
   tick(1);
   await rejected;
-  assert.equal(signed.signal.aborted, true);
-  assert.equal(body.cancellations(), 1);
+  assert.equal((await download.signed).signal.aborted, true);
+  assert.equal(download.cancellations(), 1);
+});
+
+test('idle includes a fairness yield before the first upstream read', async (t) => {
+  let now = 0;
+  const tick = streamClock(t, () => now);
+  const download = controlledDownload();
+  const reader = (await download.request.stream(operation)).body.getReader();
+  now = 5;
+  const rejected = assert.rejects(reader.read(), /aborted or timed out/);
+  await nextTurn();
+  now += 31; // Deliver the yield callback before the delayed idle timer callback.
+  tick(1);
+  await rejected;
+  assert.equal(download.pulls(), 0);
 });
 
 for (const callerAbort of [true, false]) {
   test(`budgeted ${callerAbort ? 'caller abort' : 'consumer cancellation'} never waits for upstream cancellation`, async (t) => {
-    const tick = streamClock(t);
+    streamClock(t);
     const caller = new AbortController();
-    const body = controlledBody();
-    let signed!: Request;
-    const request = createS3Transport(config, { ...budgets, fetch: async (input) => {
-      signed = input as Request;
-      return body.response;
-    } });
-    const reader = (await request.stream({ ...operation, signal: caller.signal })).body.getReader();
+    const download = controlledDownload();
+    const reader = (await download.request.stream({ ...operation, signal: caller.signal })).body.getReader();
     const pending = reader.read();
     await nextTurn();
     if (callerAbort) {
@@ -176,26 +183,21 @@ for (const callerAbort of [true, false]) {
       await reader.cancel('private');
       assert.equal((await pending).done, true);
     }
-    assert.equal(signed.signal.aborted, true);
-    tick(100);
-    assert.equal(body.cancellations(), 1);
+    assert.equal((await download.signed).signal.aborted, true);
+    assert.equal(download.cancellations(), 1);
   });
 }
 
 test('normal EOF clears deadlines and detaches the caller signal', async (t) => {
   const tick = streamClock(t);
   const caller = new AbortController();
-  let signed!: Request;
-  const request = createS3Transport(config, { ...budgets, fetch: async (input) => {
-    signed = input as Request;
-    return new Response(new Uint8Array([42]));
-  } });
-  const reader = (await request.stream({ ...operation, signal: caller.signal })).body.getReader();
-  assert.deepEqual((await reader.read()).value, new Uint8Array([42]));
+  const download = controlledDownload();
+  const reader = (await download.request.stream({ ...operation, signal: caller.signal })).body.getReader();
+  download.source.close();
   assert.equal((await reader.read()).done, true);
   tick(100);
   caller.abort();
-  assert.equal(signed.signal.aborted, false);
+  assert.equal((await download.signed).signal.aborted, false);
 });
 
 test('redacts fetch, source and caller abort errors', async () => {

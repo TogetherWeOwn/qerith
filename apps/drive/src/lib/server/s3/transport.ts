@@ -9,12 +9,9 @@ const viewByteOffset = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byt
 const viewBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!;
 const validateView = typedArrayPrototype.values as (this: Uint8Array) => IterableIterator<number>;
 
-type TransportOptions = {
-  fetch: typeof fetch;
-  timeoutMs: number;
+type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date } & {
   /** For streamed GETs only: timeoutMs then bounds signing and headers, not the body. */
   streamBudget?: { idleMs: number; totalMs: number };
-  now?: () => Date;
 };
 type Operation = {
   method: 'GET' | 'HEAD' | 'PUT' | 'POST' | 'DELETE';
@@ -57,8 +54,8 @@ function cancelResponse(response: Response): void {
 export function createS3Transport(config: S3Config, options: TransportOptions) {
   const settings = validateConfig(config);
   if (new URL(settings.endpoint).protocol !== 'https:') throw new Error('S3 signer requires HTTPS');
-  const { timeoutMs } = options;
-  const streamBudget = options.streamBudget && { ...options.streamBudget };
+  const { timeoutMs, streamBudget: configuredBudget } = options;
+  const streamBudget = configuredBudget && { idleMs: configuredBudget.idleMs, totalMs: configuredBudget.totalMs };
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || (streamBudget &&
     ![timeoutMs, streamBudget.idleMs, streamBudget.totalMs].every((ms) => Number.isInteger(ms) && ms > 0 && ms <= 0x7fffffff))) {
     throw new Error('Invalid S3 timeout');
@@ -164,35 +161,37 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
           },
           async pull(output) {
             try {
+              checkAbort();
+              if (budget) {
+                deadline = performance.now() + budget.idleMs;
+                timer = setTimeout(expire, budget.idleMs);
+              }
               let part: ReadableStreamReadResult<Uint8Array>;
+              let bytes = 0;
               do {
-                checkAbort();
                 if (++chunksSinceYield >= 1024 || performance.now() >= yieldAt) {
                   await abortable(new Promise<void>((resolve) => { yieldTimer = setTimeout(resolve, 0); }), controller.signal);
                   chunksSinceYield = 0;
                   yieldAt = performance.now() + 4;
                   checkAbort();
                 }
-                if (budget && deadline === Infinity) {
-                  deadline = performance.now() + budget.idleMs;
-                  timer = setTimeout(expire, budget.idleMs);
-                }
                 part = reader ? await abortable(reader.read(), controller.signal) : { done: true, value: undefined };
                 checkAbort();
                 if (finished) return;
+                if (!part.done) bytes = budget ? viewByteLength.call(part.value) as number : part.value.byteLength;
                 // Empty chunks neither satisfy demand nor start a new idle window.
-              } while (budget && !part.done && part.value.byteLength === 0);
+              } while (budget && !part.done && bytes === 0);
               if (budget) clearDeadline();
               if (part.done) {
                 finish();
                 output.close();
-              } else if (part.value.byteLength > maxResponseBytes - length) {
+              } else if (bytes > maxResponseBytes - length) {
                 finish();
                 controller.abort();
                 void reader?.cancel().catch(() => {});
                 output.error(new Error('S3 response exceeds limit'));
               } else {
-                length += part.value.byteLength;
+                length += bytes;
                 output.enqueue(part.value);
               }
             } catch {
