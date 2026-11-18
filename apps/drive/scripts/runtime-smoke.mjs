@@ -45,7 +45,7 @@ const asset = `${relative(root, file.parentPath)}/${file.name}`;
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   await exercise(['--config', config], [['/', 503, 'Service unavailable'], [`/${asset}`, 503, 'Service unavailable']]);
 }
-await exercise(['.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.build.jsonc'], [['/', 503, 'Service unavailable']]);
+await exercise(['.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.build.jsonc'], [['/', 503, 'Service unavailable'], [`/${asset}`, 503, 'Service unavailable']]);
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);
