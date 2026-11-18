@@ -8,7 +8,7 @@ interface Statement {
   all<T>(): Promise<{ results: T[] }>;
 }
 interface Session { prepare(sql: string): Statement }
-interface Database extends Session { withSession(constraint: 'first-primary'): Session }
+export interface UploadEvidenceDatabase extends Session { withSession(constraint: 'first-primary'): Session }
 
 interface SealedUpload {
   intent_id: string;
@@ -25,7 +25,7 @@ interface Receipt { evidence_revision: string; etag: string; response_checksums:
 // the signer's exact namespace and exclusive writers; a namespace change requires
 // a different epoch even if the endpoint and bucket are unchanged. The verifier
 // must establish acknowledged ETags and actual byte counts independently of D1.
-interface UploadPublicationVerifier {
+export interface UploadPublicationVerifier {
   isQualified(storageConfigId: string): Promise<boolean>;
   verifyParts(upload: Readonly<{
     storageConfigId: string;
@@ -47,17 +47,23 @@ async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
     (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function operationBytes(value: string): ArrayBuffer {
-  if (typeof value !== 'string' || !value || value.length > 196608 || !value.isWellFormed() || value.includes('\0')) throw new TypeError('Invalid completion operation');
+export function uploadIdentityBytes(value: string, limit = 196608): ArrayBuffer {
+  if (typeof value !== 'string' || !value || value.length > limit || !value.isWellFormed() || value.includes('\0')) {
+    throw new TypeError('Invalid upload identity');
+  }
   const bytes = utf8.encode(value);
-  if (bytes.byteLength > 196608) throw new TypeError('Invalid completion operation');
+  if (bytes.byteLength > limit) throw new TypeError('Invalid upload identity');
   return bytes.buffer;
+}
+
+export function uploadSessionHash(token: string): Promise<string> | null {
+  return typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token) ? digest(utf8.encode(token)) : null;
 }
 
 // D1 TEXT decoding can replace malformed bytes. Fail closed rather than pass a
 // different identity to the verifier or signer; preserve a leading UTF-8 BOM.
 const identityDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-function decodeIdentity(hex: string): string {
+export function decodeUploadIdentity(hex: string): string {
   return identityDecoder.decode(Uint8Array.fromHex(hex));
 }
 
@@ -87,14 +93,18 @@ async function matchesSealedParts(db: Session, operation: ArrayBuffer, upload: S
   return true;
 }
 
-/** Unwired server-only producer; there is no default qualified verifier. */
-export function createUploadCompletionReceipts(db: Database, epoch: string, config: Parameters<typeof createMultipartComplete>[0],
-  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
+export function uploadStorageIdentity(epoch: string, config: Parameters<typeof validateConfig>[0]) {
   if (typeof epoch !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(epoch)) throw new TypeError('Invalid storage epoch');
   const settings = validateConfig(config);
   const { endpoint, bucket } = settings;
   if (endpoint.length > 2048) throw new TypeError('Invalid storage identity');
-  const storageConfigId = JSON.stringify([endpoint, bucket, epoch]);
+  return { settings, endpoint, bucket, storageConfigId: JSON.stringify([endpoint, bucket, epoch]) };
+}
+
+/** Unwired server-only producer; there is no default qualified verifier. */
+export function createUploadCompletionReceipts(db: UploadEvidenceDatabase, epoch: string, config: Parameters<typeof createMultipartComplete>[0],
+  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
+  const { settings, endpoint, bucket, storageConfigId } = uploadStorageIdentity(epoch, config);
   const complete = createMultipartComplete(settings, { ...transport });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
@@ -129,9 +139,10 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   return {
     storageConfigId,
     async complete(token: string, operationId: string): Promise<'recorded' | 'not-admitted' | 'uncertain'> {
-      if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
-      const operation = operationBytes(operationId);
-      const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
+      const hash = verifier && uploadSessionHash(token);
+      if (!verifier || !hash) return 'not-admitted';
+      const operation = uploadIdentityBytes(operationId);
+      const admission = [operation, epoch, endpoint, bucket, await hash] as const;
       const primary = db.withSession('first-primary');
       const upload = await primary.prepare(`SELECT hex(o.intent_id) AS intent_id, hex(o.owner_id) AS owner_id,
         hex(o.object_key) AS object_key, hex(o.upload_id) AS upload_id, o.intent_version, o.part_numbers, o.size_bytes
@@ -139,7 +150,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!upload) return 'not-admitted';
       let intentId: string, ownerId: string, objectKey: string, uploadId: string;
       try {
-        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeIdentity);
+        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeUploadIdentity);
       } catch { return 'not-admitted'; }
       if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
@@ -175,7 +186,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
 
     // Trusted recovery only; there is no request path to this historical fence.
     async quarantineUnresolved(operationId: string): Promise<void> {
-      await quarantine(operationBytes(operationId));
+      await quarantine(uploadIdentityBytes(operationId));
     }
   };
 }

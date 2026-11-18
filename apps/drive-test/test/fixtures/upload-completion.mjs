@@ -25,10 +25,10 @@ export function producer(fetch, verifyParts = async () => parts, db = env.DB, qu
 }
 
 // Seed ledger rows directly so this also covers inherited, non-UTF-8 SQLite TEXT.
-export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}` } = {}) {
-  const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
+export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}`, owner = `owner-${id}` } = {}) {
+  const upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
-  await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
+  await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active') ON CONFLICT(id) DO NOTHING", owner).run();
   await sql("INSERT INTO drive_upload_intents VALUES (CAST(? AS TEXT), ?, ?, NULL, 0, 'created', 0)", intent, owner, key).run();
   if (!legacy) await bindStorage();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = CAST(? AS TEXT)", upload, intent).run();
@@ -65,7 +65,12 @@ export function loseAcknowledgement(table, loseBeforeCommit) {
 }
 
 // The migration replay fixtures must drop children before their ledger parents.
-export const dropCompletionReceiptEvidence = `DROP VIEW IF EXISTS drive_upload_sealed_candidates;
+export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_entries_require_publication;
+  DROP TRIGGER IF EXISTS drive_entries_keep_live_publication;
+  DROP VIEW IF EXISTS drive_upload_publication_refs;
+  DROP VIEW IF EXISTS drive_upload_publishable_receipts;
+  DROP TABLE IF EXISTS drive_upload_publications;
+  DROP VIEW IF EXISTS drive_upload_sealed_candidates;
   DROP TABLE IF EXISTS drive_upload_completion_quarantine;
   DROP TABLE IF EXISTS drive_upload_completion_receipts;
   DROP TABLE IF EXISTS drive_upload_completion_dispatches;
