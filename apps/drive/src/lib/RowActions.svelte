@@ -10,8 +10,8 @@
   export let file = true;
   export let owned = true;
   export let onAction: (action: RowAction) => void;
-  // The listing owns row navigation and dialog/removal focus after selection.
-  export let onTab: (direction: 'next' | 'previous') => void;
+  // Called after the menu closes. Return false to use native tab order from the trigger.
+  export let onTab: (direction: 'next' | 'previous') => boolean | void;
 
   let trigger: HTMLButtonElement;
   let menu: HTMLDivElement;
@@ -85,7 +85,17 @@
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
     let next = -1;
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
-    if (event.key === 'Tab') { event.preventDefault(); close(); onTab(event.shiftKey ? 'previous' : 'next'); return; }
+    if (event.key === 'Tab') {
+      close();
+      let useNativeTab = false;
+      try {
+        useNativeTab = onTab(event.shiftKey ? 'previous' : 'next') === false;
+      } finally {
+        if (!useNativeTab) event.preventDefault();
+      }
+      if (useNativeTab) trigger.focus({ preventScroll: true });
+      return;
+    }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
     else if (event.key === 'ArrowUp') next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
     else if (event.key === 'Home') next = 0;
