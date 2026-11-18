@@ -144,38 +144,42 @@ it('does not dispatch if the generation read leaves too little time on the lease
   expect((await job(id)).completed_at).toBeNull();
 });
 
-it('refreshes the lease after resolving the provider and before dispatch', async () => {
-  const { id, token } = await seedBoundPublication('dispatch-lease');
+it.each(['lease', 'adapter'])('checks the %s remains bound after resolving the provider and before dispatch', async (changed) => {
+  const { id, token } = await seedBoundPublication(`dispatch-${changed}`);
   expect(await remove(token, id)).toBe(true);
-  const deleteIfMatch = vi.fn(async () => 'deleted');
+  const adapter = { storageConfigId: configId, deleteIfMatch: vi.fn(async () => 'deleted') };
   const steps = [];
   const db = interceptStatement('SELECT 1000 * (available_at', async first => {
     steps.push('lease');
-    await sql("UPDATE drive_object_deletion_jobs SET lease_token = 'contender', available_at = unixepoch() + 60 WHERE entry_id = ?", id).run();
+    if (changed === 'adapter') adapter.storageConfigId = JSON.stringify([config.endpoint, config.bucket, 'replacement-epoch']);
+    else await sql("UPDATE drive_object_deletion_jobs SET lease_token = 'contender', available_at = unixepoch() + 60 WHERE entry_id = ?", id).run();
     return first();
   });
-  expect(await reconcilePrivateObjectDeletions(db, () => {
-    steps.push('resolve');
-    return { storageConfigId: configId, deleteIfMatch };
-  })).toBe(0);
+  expect(await reconcilePrivateObjectDeletions(db, () => { steps.push('resolve'); return adapter; })).toBe(0);
   expect(steps).toEqual(['resolve', 'lease']);
-  expect(deleteIfMatch).not.toHaveBeenCalled();
+  expect(adapter.deleteIfMatch).not.toHaveBeenCalled();
   expect((await job(id)).completed_at).toBeNull();
 });
 
-it.each(['before commit', 'after commit'])('recovers a receipt write error %s without repeating the provider delete', async (when) => {
+it.each(['before commit', 'after commit', 'after retry commit', 'without a commit'])('handles a lost receipt acknowledgement %s without another provider delete', async (when) => {
   const { id, token } = await seedBoundPublication(`receipt-${when.replaceAll(' ', '-')}`);
   expect(await remove(token, id)).toBe(true);
-  const write = vi.fn(async first => first()).mockImplementationOnce(async first => {
-    if (when === 'after commit') await first();
+  let attempts = 0;
+  const write = vi.fn(async first => {
+    const retry = ++attempts === 2;
+    if (retry && when === 'without a commit') return null;
+    if (retry && (when === 'before commit' || when === 'after commit')) return first();
+    if (when === 'after commit' || (retry && when === 'after retry commit')) await first();
     throw new Error('receipt write unacknowledged');
   });
   const db = interceptStatement('UPDATE drive_object_deletion_jobs\n      SET lease_token = NULL', write);
   const deleteIfMatch = vi.fn(async () => 'deleted');
-  expect(await reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }))).toBe(1);
+  const pass = reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }));
+  if (when === 'without a commit') await expect(pass).rejects.toThrow('receipt write unacknowledged');
+  else await expect(pass).resolves.toBe(1);
   expect(deleteIfMatch).toHaveBeenCalledTimes(1);
   expect(write).toHaveBeenCalledTimes(2);
-  expect((await job(id)).completed_at).not.toBeNull();
+  expect((await job(id)).completed_at !== null).toBe(when !== 'without a commit');
 });
 
 it('retries only the same generation and never records ambiguous outcomes as completion', async () => {
