@@ -1,6 +1,7 @@
 import type { AuthenticationResponseJSON, WebAuthnCredential } from '@simplewebauthn/server';
 import { BoundChallenges } from './challenges';
 import { createCeremonyVerifier } from './ceremony';
+import { tokenHash } from './sessions';
 
 interface Statement {
   bind(...values: (string | number | number[])[]): Statement;
@@ -18,7 +19,11 @@ interface CredentialRow {
   counter: number;
   transports: string;
   generation: string;
+  status: 'active' | 'revoked';
 }
+
+export class PasskeyDenied extends Error {}
+export class RevokedPasskey extends Error {}
 
 // Context is a trusted server-side pre-authentication transaction, not an identity
 // or request parameter. This service exposes no HTTP endpoint or cookie policy.
@@ -32,28 +37,35 @@ export class PasskeyLogin {
     return new BoundChallenges(this.db).issue(context, 'authentication');
   }
 
-  async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON): Promise<{ token: string; expiresAt: number }> {
+  async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON | null): Promise<{ token: string; expiresAt: number }> {
     // Snapshot membership before consuming so revocation during login cannot be missed.
-    let row: CredentialRow | null;
+    let row: CredentialRow | null = null;
     try {
-      row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation
-        FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
-        JOIN drive_login_generations g ON g.principal_id = p.id
-        WHERE c.id = ? AND p.status = 'active'`).bind(response.id).first<CredentialRow>();
+      if (response) {
+        row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation, p.status
+          FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
+          JOIN drive_login_generations g ON g.principal_id = p.id
+          WHERE c.id = ?`).bind(response.id).first<CredentialRow>();
+      }
     } finally {
       // Even an invalid assertion or an ambiguous write needs a new challenge.
       await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
     }
-    if (!row) throw new Error('Authentication unavailable');
-    const result = await this.#verifier.authentication(response, challenge, {
+    if (!row || !response) throw new PasskeyDenied('Authentication unavailable');
+    const credential: WebAuthnCredential = {
       id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter,
       transports: JSON.parse(row.transports) as WebAuthnCredential['transports'],
+    };
+    const result = await this.#verifier.authentication(response, challenge, credential).catch(() => {
+      throw new PasskeyDenied('Authentication not verified');
     });
-    if (!result.verified || !result.authenticationInfo) throw new Error('Authentication not verified');
+    if (!result.verified || !result.authenticationInfo) throw new PasskeyDenied('Authentication not verified');
+    // Reveal revoked membership only to a holder who proved possession. Never
+    // attempt a session write for a snapshot that was already revoked.
+    if (row.status === 'revoked') throw new RevokedPasskey('Access revoked');
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const token = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
-    const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    const hash = await tokenHash(token);
     const key = Array.from(new Uint8Array(row.public_key));
     const batch = await this.db.batch([
       this.db.prepare(`INSERT INTO drive_sessions (token_hash, principal_id, expires_at)

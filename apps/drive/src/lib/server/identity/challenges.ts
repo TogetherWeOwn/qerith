@@ -6,6 +6,8 @@ interface Statement {
 interface Database { prepare(sql: string): Statement }
 
 export type ChallengePurpose = 'registration' | 'authentication';
+export class CeremonyCapacityReached extends Error {}
+export class ChallengeUnavailable extends Error {}
 
 const lifetimeMs = 5 * 60 * 1000;
 const capacity = 1024;
@@ -27,7 +29,7 @@ export class BoundChallenges {
         OR EXISTS (SELECT 1 FROM drive_bound_ceremonies WHERE context = ? AND purpose = ?)
       ON CONFLICT (context, purpose) DO UPDATE SET challenge = excluded.challenge, expires_at = excluded.expires_at
       RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, context, purpose).first<{ challenge: string }>();
-    if (!inserted) throw new Error('Ceremony capacity reached');
+    if (!inserted) throw new CeremonyCapacityReached('Ceremony capacity reached');
     return inserted.challenge;
   }
 
@@ -43,7 +45,7 @@ export class BoundChallenges {
       WHERE context = ? AND purpose = ? AND challenge = ?
         AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
       RETURNING challenge`).bind(context, purpose, challenge).first<{ challenge: string }>();
-    if (!row) throw new Error('Challenge unavailable');
+    if (!row) throw new ChallengeUnavailable('Challenge unavailable');
   }
 }
 

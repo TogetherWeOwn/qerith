@@ -24,7 +24,7 @@ export function allowsOrigin(request: Request, origin: string): boolean {
   return source === origin || (source === null && (request.method === 'GET' || request.method === 'HEAD'));
 }
 
-function readSessionCookie(request: Request): string | null {
+export function readOpaqueCookie(request: Request, cookieName: string, pattern: RegExp): string | null {
   const header = request.headers.get('cookie');
   // A comma may be a joined Cookie field, never part of a cookie-pair.
   if (header === null || /[^\t\x20-\x7e]|,/.test(header)) return null;
@@ -33,17 +33,17 @@ function readSessionCookie(request: Request): string | null {
     const pair = cookie.trimStart();
     const equals = pair.indexOf('=');
     const name = equals === -1 ? pair : pair.slice(0, equals);
-    if (name.trimEnd() !== sessionCookie) continue;
-    if (name !== sessionCookie || equals === -1 || token !== null) return null;
+    if (name.trimEnd() !== cookieName) continue;
+    if (name !== cookieName || equals === -1 || token !== null) return null;
     const value = pair.slice(equals + 1);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return null;
+    if (!pattern.test(value)) return null;
     token = value;
   }
   return token;
 }
 
 export async function readSession(request: Request, db: NonNullable<DriveAuthEnv['DB']>) {
-  const token = readSessionCookie(request);
+  const token = readOpaqueCookie(request, sessionCookie, /^[A-Za-z0-9_-]{43}$/);
   if (token === null) return null;
   // Use the primary binding and re-read membership on every private request.
   const principal = await new Sessions(db).lookup(token);
