@@ -1185,6 +1185,7 @@ try {
     assert.equal(await facts.count(), 0);
     await longTrigger.and(focus).waitFor();
     await openDetails(longTrigger);
+    await facts.and(focus).waitFor();
     await hide.click();
     assert.equal(await facts.count(), 0);
     await longTrigger.and(focus).waitFor();
