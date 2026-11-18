@@ -1,6 +1,6 @@
-import { validateConfig } from '../s3/config';
 import { createMultipartComplete } from '../s3/multipart-complete';
 import { completionXml, type CompletedPart } from '../s3/multipart-completion';
+import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from './upload-storage-evidence';
 
 interface Statement {
   bind(...values: (string | number | null | ArrayBuffer)[]): Statement;
@@ -49,20 +49,6 @@ async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
     (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function operationBytes(value: string): ArrayBuffer {
-  if (typeof value !== 'string' || !value || value.length > 196608 || !value.isWellFormed() || value.includes('\0')) throw new TypeError('Invalid completion operation');
-  const bytes = utf8.encode(value);
-  if (bytes.byteLength > 196608) throw new TypeError('Invalid completion operation');
-  return bytes.buffer;
-}
-
-// D1 TEXT decoding can replace malformed bytes. Fail closed rather than pass a
-// different identity to the verifier or signer; preserve a leading UTF-8 BOM.
-const identityDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-function decodeIdentity(hex: string): string {
-  return identityDecoder.decode(Uint8Array.fromHex(hex));
-}
-
 // Reported bytes are HTTP opaque bytes, not decoded UTF-8 or parsed digests.
 function tagHex(etag: string): string {
   return Array.from(etag, (char) => char.charCodeAt(0).toString(16).padStart(2, '0')).join('').toUpperCase();
@@ -92,11 +78,8 @@ async function matchesSealedParts(db: Session, operation: ArrayBuffer, upload: S
 /** Unwired server-only producer; there is no default qualified verifier. */
 export function createUploadCompletionReceipts(db: Database, epoch: string, config: Parameters<typeof createMultipartComplete>[0],
   transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
-  if (typeof epoch !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(epoch)) throw new TypeError('Invalid storage epoch');
-  const settings = validateConfig(config);
+  const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  if (endpoint.length > 2048) throw new TypeError('Invalid storage identity');
-  const storageConfigId = JSON.stringify([endpoint, bucket, epoch]);
   const complete = createMultipartComplete(settings, { ...transport });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
@@ -132,7 +115,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
     storageConfigId,
     async complete(token: string, operationId: string): Promise<'recorded' | 'not-admitted' | 'uncertain'> {
       if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
-      const operation = operationBytes(operationId);
+      const operation = uploadIdentityBytes(operationId);
       const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
       const primary = db.withSession('first-primary');
       const upload = await primary.prepare(`SELECT hex(o.intent_id) AS intent_id, hex(o.owner_id) AS owner_id,
@@ -141,7 +124,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!upload) return 'not-admitted';
       let intentId: string, ownerId: string, objectKey: string, uploadId: string;
       try {
-        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeIdentity);
+        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeUploadIdentity);
       } catch { return 'not-admitted'; }
       if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
@@ -177,7 +160,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
 
     // Trusted recovery only; there is no request path to this historical fence.
     async quarantineUnresolved(operationId: string): Promise<void> {
-      await quarantine(operationBytes(operationId));
+      await quarantine(uploadIdentityBytes(operationId));
     }
   };
 }

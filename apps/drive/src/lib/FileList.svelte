@@ -5,18 +5,6 @@
   import FileDetails from './FileDetails.svelte';
   import RowActions, { type RowAction } from './RowActions.svelte';
 
-  let detailsId: string | null = null;
-  async function showDetails(container: HTMLElement, id: string) {
-    detailsId = id;
-    await tick();
-    if (detailsId !== id) return;
-    Array.from(container.querySelectorAll<HTMLElement>('[data-details-id]')).find(element => element.dataset.detailsId === id)?.focus();
-  }
-  function closeDetails(container: HTMLElement, id: string) {
-    detailsId = null;
-    const row = Array.from(container.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === id);
-    row?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')?.focus();
-  }
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
@@ -26,9 +14,40 @@
   const actionTrigger = 'button[aria-haspopup="menu"]';
   let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined;
 
+  let detailsId: string | null = null;
+  const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
+  const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
+    Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
+
+  $: if (detailsId !== null && ((onAction && !inlineDetails) || !items.some(item => item.id === detailsId))) {
+    if (onAction && findRowPart(visibleView(), 'data-details-id', detailsId)?.contains(document.activeElement)) triggerFor(visibleView(), detailsId)?.focus();
+    detailsId = null;
+  }
+  async function selectAction(source: HTMLElement, id: string, action: RowAction) {
+    if (action !== 'Details' || (onAction && !inlineDetails)) { onAction?.(id, action); return; }
+    const sourceTrigger = triggerFor(source, id);
+    detailsId = id;
+    await tick();
+    const active = document.activeElement;
+    const view = visibleView();
+    if (detailsId === id && (active === sourceTrigger || active === triggerFor(view, id))) findRowPart(view, 'data-details-id', id)?.focus();
+  }
+  function closeDetails(view: HTMLElement, id: string) {
+    detailsId = null;
+    triggerFor(view, id)?.focus();
+  }
+  function escapeDetails(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || event.defaultPrevented || detailsId === null || !(event.target instanceof Element)) return;
+    const facts = event.target.closest('[data-details-id]');
+    if (!facts || facts.getAttribute('data-details-id') !== detailsId) return;
+    const view = desktop.contains(facts) ? desktop : mobile.contains(facts) ? mobile : null;
+    if (view) { event.preventDefault(); closeDetails(view, detailsId); }
+  }
+
   function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
     const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
-    if (onAction && (event.button === 2 || controlClick)) action?.openFromContextMenu(event);
+    if (onAction && (event.button === 2 || controlClick) && !(event.target instanceof Element && event.target.closest('[data-details-id]'))) action?.openFromContextMenu(event);
   }
 
   onMount(() => {
@@ -36,7 +55,7 @@
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || desktop.contains(target) || mobile.contains(target)) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row], [data-details-id]')))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (!lastFocused || event.target !== lastFocused) return;
@@ -73,18 +92,15 @@
       }
       if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
+      const facts = focused.closest<HTMLElement>('[data-details-id]');
       if (focused instanceof HTMLAnchorElement) {
-        target = Array.from(to.querySelectorAll<HTMLAnchorElement>('a[data-item-id]')).find(link => link.dataset.itemId === focused.dataset.itemId);
+        target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
+      } else if (facts) {
+        const next = findRowPart(to, 'data-details-id', facts.dataset.detailsId);
+        target = focused === facts ? next : next?.querySelector('button[type="button"]');
       } else {
-        const facts = focused.closest<HTMLElement>('[data-details-id]');
-        if (facts) {
-          const next = Array.from(to.querySelectorAll<HTMLElement>('[data-details-id]')).find(element => element.dataset.detailsId === facts.dataset.detailsId);
-          target = focused === facts ? next : next?.querySelector('button');
-        } else {
-          const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
-          const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(element => element.dataset.actionRow === id);
-          target = row?.querySelector(actionTrigger);
-        }
+        const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+        target = findRowPart(to, 'data-action-row', id)?.querySelector(actionTrigger);
       }
       lastFocused = null;
       target?.focus();
@@ -128,10 +144,11 @@
   $: orderDescription = direction === 'asc' ? 'A to Z' : 'Z to A';
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${orderDescription} (binary order). Times in ${timeZone}.`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
-  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean; owned?: boolean; details?: { modifiedFull: string; uploaded: string; sharedWith?: string[] } }[];
+  export let inlineDetails = false;
+  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
 </script>
 
-<svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element) { const facts = document.activeElement.closest('[data-details-id]'); const container = facts && (desktop.contains(facts) ? desktop : mobile.contains(facts) ? mobile : null); if (container && facts?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(container, detailsId); } } }} />
+<svelte:window on:keydown={escapeDetails} />
 <div class="listing">
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
@@ -146,17 +163,17 @@
       <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        <td data-action-row={item.id} data-row-id={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => { if (action === 'Details') void showDetails(desktop, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></td>
+        <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
       </tr>
-      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
+      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
   </tbody>
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
     <li class="with-actions" on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
-      <div data-action-row={item.id} data-row-id={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => { if (action === 'Details') void showDetails(mobile, item.id); else onAction?.(item.id, action); }} onTab={() => false} /></div>
-      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} modifiedFull={item.details?.modifiedFull || item.modified} onClose={() => closeDetails(mobile, item.id)} />{/if}
+      <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
+      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
   {/each}
 </ul>

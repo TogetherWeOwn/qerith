@@ -88,3 +88,79 @@ it('paginates only entries in the currently authorized folder', async () => {
   await grants.revoke(alice, 'root', 'bob');
   expect(await reads.list(bob, 'root', first.nextCursor)).toBeNull();
 });
+
+function seedListing(count, kind = 'folder') {
+  return env.DB.batch(Array.from({ length: count }, (_, i) => env.DB.prepare(`
+    INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
+    VALUES (?, 'alice', 'root', ?, ?, ?, ?)
+  `).bind(`item-${i}`, `item-${String(i).padStart(3, '0')}`, kind,
+    kind === 'file' ? `item-key-${i}` : null, kind === 'file' ? 0 : null)));
+}
+
+it.each(['asc', 'desc'])('lists folders first, with a binary name seek in %s order', async (direction) => {
+  const { reads, alice } = await setup();
+  await seedListing(205, 'file');
+  await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('z', 'alice', 'root', 'Z', 'folder')").run();
+  const first = await reads.listPage(alice, 'root', null, direction);
+  expect(first).toMatchObject({ total: 207, direction, order: 'binary-name' });
+  expect(first.entries).toHaveLength(200);
+  expect(first.nextCursor).not.toBeNull();
+  expect(first.entries.slice(0, 2).map(entry => entry.name)).toEqual(direction === 'asc' ? ['Z', 'nested'] : ['nested', 'Z']);
+  let explain;
+  const recordingDb = { prepare(sql) { return { bind(...values) {
+    explain = env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values);
+    return env.DB.prepare(sql).bind(...values);
+  } }; } };
+  const second = await new ReadAccess(recordingDb).listPage(alice, 'root', first.nextCursor, direction);
+  const names = Array.from({ length: 205 }, (_, i) => `item-${String(i).padStart(3, '0')}`);
+  if (direction === 'desc') names.reverse();
+  expect([...first.entries.slice(2), ...second.entries].map(entry => entry.name)).toEqual(names);
+  expect(second).toMatchObject({ total: 207, nextCursor: null });
+  const { results } = await explain.all();
+  expect(results.map(row => row.detail).join('\n')).toMatch(new RegExp(`drive_entries_listing_${direction}.*name[<>]\\?`));
+});
+
+it.each(['asc', 'desc'])('keeps the saved boundary and current total after writes in %s order', async (direction) => {
+  const { reads, alice } = await setup();
+  await seedListing(201);
+  await env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
+    VALUES ('receipt', 'alice', 'root', 'receipt', 'file', 'receipt-key', 0)`).run();
+  const first = await reads.listPage(alice, 'root', null, direction);
+  expect(first.total).toBe(203);
+  expect(first.entries).toHaveLength(200);
+  expect(first.entries.every(entry => entry.kind === 'folder')).toBe(true);
+  await env.DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(first.entries.at(-1).id).run();
+  const remaining = direction === 'asc' ? ['item-200', 'nested', 'receipt'] : ['item-001', 'item-000', 'receipt'];
+  const afterDelete = await reads.listPage(alice, 'root', first.nextCursor, direction);
+  expect(afterDelete.total).toBe(202);
+  expect(afterDelete.entries.map(entry => entry.name)).toEqual(remaining);
+  await env.DB.prepare("UPDATE drive_entries SET parent_id = 'elsewhere' WHERE name = ? AND parent_id = 'root'")
+    .bind(remaining[0]).run();
+  const afterMove = await reads.listPage(alice, 'root', first.nextCursor, direction);
+  expect(afterMove).toMatchObject({ total: 201, nextCursor: null });
+  expect(afterMove.entries.map(entry => entry.name)).toEqual(remaining.slice(1));
+  expect((await reads.listPage(alice, 'elsewhere')).total).toBe(1);
+});
+
+it('checks current access before reporting invalid page input', async () => {
+  const { sessions, grants, reads, alice, bob, eve } = await setup();
+  await seedListing(200);
+  await grants.create(alice, 'root', 'bob');
+  const first = await reads.listPage(bob, 'root');
+  expect(first).toMatchObject({ total: 201, direction: 'asc', order: 'binary-name' });
+  expect(first.nextCursor).not.toBeNull();
+  expect(await reads.listPage(bob, 'elsewhere')).toBeNull();
+  expect(await reads.listPage(eve, 'root', first.nextCursor)).toBeNull();
+  expect(await reads.listPage(alice, 'elsewhere')).toEqual({ entries: [], total: 0, direction: 'asc', order: 'binary-name', nextCursor: null });
+  for (const input of ['invalid!', 'x'.repeat(2049)]) {
+    await expect(reads.listPage(bob, 'root', input)).rejects.toThrow(TypeError);
+  }
+  await expect(reads.listPage(bob, 'root', first.nextCursor, 'desc')).rejects.toThrow(TypeError);
+  await expect(reads.listPage(alice, 'elsewhere', first.nextCursor)).rejects.toThrow(TypeError);
+  await grants.revoke(alice, 'root', 'bob');
+  expect(await reads.listPage(bob, 'root', first.nextCursor)).toBeNull();
+  expect(await reads.listPage(bob, 'root', 'invalid!')).toBeNull();
+  await grants.create(alice, 'root', 'bob');
+  await sessions.revoke(bob);
+  expect(await reads.listPage(bob, 'root', first.nextCursor)).toBeNull();
+});
