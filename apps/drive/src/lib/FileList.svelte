@@ -46,7 +46,8 @@
         return;
       }
       const source = active instanceof HTMLElement && from.contains(active) ? active :
-        active === document.body && lastFocused && from.contains(lastFocused) ? lastFocused : null;
+        active === document.body ? (lastFocused && from.contains(lastFocused) ? lastFocused :
+          from.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"][aria-expanded="true"]')) : null;
       if (!source) return;
       let target: HTMLElement | null | undefined;
       if (source instanceof HTMLAnchorElement) target = Array.from(to.querySelectorAll<HTMLAnchorElement>('a[data-item-id]')).find(link => link.dataset.itemId === source.dataset.itemId);
