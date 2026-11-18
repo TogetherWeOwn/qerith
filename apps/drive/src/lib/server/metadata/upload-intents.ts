@@ -16,9 +16,10 @@ export interface UploadIntent {
   state: State;
   completion_acknowledged: number;
   version: number;
+  declared_size: number | null;
 }
 
-const columns = 'id, owner_id, object_key, upload_id, completion_acknowledged, state, version';
+const columns = 'id, owner_id, object_key, upload_id, completion_acknowledged, state, version, declared_size';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
 
 function validateVersion(version: number): void {
@@ -32,13 +33,16 @@ export class UploadIntents {
   constructor(private readonly db: Database) {}
 
   async create(principalId: string): Promise<UploadIntent | null> {
-    return this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state)
-      SELECT ?, ?, ?, 'created' WHERE ${active} RETURNING ${columns}`)
-      .bind(crypto.randomUUID(), principalId, crypto.randomUUID(), principalId).first<UploadIntent>();
+    return this.insert(principalId, null);
   }
 
+  // A declaration is not evidence of the actual uploaded size.
   async createSized(principalId: string, declaredSize: number): Promise<UploadIntent | null> {
-    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) throw new TypeError('Invalid upload size');
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) throw new TypeError('Invalid declared upload size');
+    return this.insert(principalId, declaredSize);
+  }
+
+  private async insert(principalId: string, declaredSize: number | null): Promise<UploadIntent | null> {
     return this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
       SELECT ?, ?, ?, 'created', ? WHERE ${active} RETURNING ${columns}`)
       .bind(crypto.randomUUID(), principalId, crypto.randomUUID(), declaredSize, principalId).first<UploadIntent>();
@@ -59,6 +63,12 @@ export class UploadIntents {
     if (version >= Number.MAX_SAFE_INTEGER - 2) throw new TypeError('Invalid upload version');
     return this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${active}
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_settled_completions WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
+          JOIN drive_upload_completion_dispatches d ON d.operation_id = o.operation_id
+          WHERE o.intent_id = drive_upload_intents.id)
       RETURNING ${columns}`)
       .bind(operation === 'allocation' ? 'initiating' : 'completing', id, principalId,
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
