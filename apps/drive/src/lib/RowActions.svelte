@@ -61,7 +61,9 @@
     }
     open = true;
     await tick();
-    if (!open || !menu || request !== opening || hiddenByParent()) return;
+    if (!open || request !== opening) return;
+    // No layer was shown yet. Clear state even if the trigger reappears before handoff.
+    if (!menu || hiddenByParent()) { close(); return; }
     if (compact) layer.showModal();
     else layer.showPopover();
     const rect = menu.getBoundingClientRect();

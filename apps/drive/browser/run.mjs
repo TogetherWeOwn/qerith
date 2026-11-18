@@ -1203,6 +1203,28 @@ try {
       }, { from, to });
       await waitForMenuClose();
       assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Resize must not restore explicitly blurred focus');
+
+      await setContainerWidth(from);
+      await afterLayout();
+      const trigger = menuTrigger(source);
+      await trigger.evaluate(async (button, { from, to }) => {
+        const container = button.closest('main');
+        button.focus();
+        // Restore before the listing's opening-frame callback, but after the opening tick.
+        const restored = new Promise(resolve => requestAnimationFrame(() => {
+          container.style.width = `${from}px`;
+          resolve();
+        }));
+        button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        container.style.width = `${to}px`;
+        await restored;
+      }, { from, to });
+      await waitForMenuClose();
+      await trigger.press('ArrowDown');
+      await download.waitFor({ timeout: 5000 });
+      await page.keyboard.press('Escape');
+      await waitForMenuClose();
+      console.log(`Listing action menu: aborted ${from}→${to}→${from} opening can reopen`);
     }
     await main.evaluate(el => el.style.removeProperty('width'));
     for (const [width, source, destination, layer] of [[390, table, list, ':popover-open'], [1280, list, table, ':modal']]) {
