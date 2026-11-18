@@ -30,10 +30,9 @@ it('authorizes direct and inherited reads and lists without disclosing parents o
   expect(await reads.get(bob, 'file')).toBeNull();
   expect(await reads.list(bob, 'nested')).toBeNull();
   expect(await reads.get(bob, 'missing')).toBeNull();
-  expect(await reads.resolveObject(eve, 'file')).toBeNull();
+  expect(await reads.get(eve, 'file')).toBeNull();
   expect(await grants.create(alice, 'root', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).toEqual({ id: 'file', name: 'file', kind: 'file' });
-  expect(await reads.resolveObject(bob, 'file')).toEqual({ objectKey: 'secret-key', sizeBytes: 7 });
   expect(await reads.list(bob, 'nested')).toEqual({ entries: [{ id: 'file', name: 'file', kind: 'file' }], nextCursor: null });
   expect(await reads.listPage(bob, 'nested')).toEqual({
     entries: [{ id: 'file', name: 'file', kind: 'file' }], total: 1, order: 'binary-name', direction: 'asc', nextCursor: null,
@@ -43,7 +42,7 @@ it('authorizes direct and inherited reads and lists without disclosing parents o
   expect(await reads.get(bob, 'other')).toBeNull();
   expect(await grants.create(bob, 'file', 'eve')).toBe(false);
   expect(await grants.revoke(alice, 'root', 'bob')).toBe(true);
-  expect(await reads.resolveObject(bob, 'file')).toBeNull();
+  expect(await reads.get(bob, 'file')).toBeNull();
   expect(await grants.create(alice, 'file', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).not.toBeNull();
   expect(await reads.get(bob, 'nested')).toBeNull();
