@@ -772,8 +772,14 @@ try {
     await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
     await greyscale.evaluate(el => el.remove());
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    const motion = await page.evaluate(() => ({ reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length, animatedElements: [...document.querySelectorAll('*')].filter(el => { const style = getComputedStyle(el); return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0); }).length }));
-    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+    const { motion, runningAnimationDetails } = await page.evaluate(() => {
+      const animations = document.getAnimations().filter(animation => animation.playState === 'running');
+      return {
+        motion: { reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, runningAnimations: animations.length, animatedElements: [...document.querySelectorAll('*')].filter(el => { const style = getComputedStyle(el); return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0); }).length },
+        runningAnimationDetails: animations.map(animation => ({ type: animation.constructor.name, name: animation.animationName ?? animation.transitionProperty ?? null, target: animation.effect?.target?.outerHTML?.slice(0, 500) ?? null, pseudoElement: animation.effect?.pseudoElement ?? null, timing: animation.effect?.getComputedTiming() ?? null }))
+      };
+    });
+    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 }, `${prefix}: ${JSON.stringify(runningAnimationDetails)}`);
     await page.screenshot({ path: resolve(output, `${prefix}-reduced-motion.png`) });
     await page.emulateMedia({ forcedColors: 'active' });
     assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
@@ -1003,6 +1009,14 @@ try {
         await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile', { width: after.width, height: 'measured on failure', segmenter: true, mode: `page-zoom-${factor * 100}`, fontRequests });
         await page.screenshot({ path: resolve(output, `listing-unicode-page-zoom-${factor * 100}.png`), fullPage: true });
         await writeFile(resolve(output, `listing-unicode-page-zoom-${factor * 100}.json`), JSON.stringify({ factor: applied, before, after }, null, 2));
+        await page.goto(`${origin}/?listing&actions&inline&unicode`, { waitUntil: 'networkidle' });
+        const name = 'annual-👩🏽‍💻-final-report.pdf';
+        await page.getByRole('button', { name: `Actions for ${name}`, exact: true }).click();
+        await page.getByRole('menuitem', { name: 'Details' }).click();
+        const facts = page.getByRole('group', { name: `Details for ${name}`, exact: true });
+        assert.equal(await facts.locator('dd[dir]').textContent(), name);
+        assert.equal(await page.evaluate(width => innerWidth === width && document.documentElement.scrollWidth <= width, after.width), true);
+        await page.screenshot({ path: resolve(output, `inline-details-page-zoom-${factor * 100}.png`), fullPage: true });
       } finally {
         await context.close();
       }
@@ -1103,6 +1117,71 @@ try {
       assert.equal(await page.locator('[data-details-id]').count(), 0, 'Details belongs to the caller, not an inline panel');
     }
     console.log(`Listing actions at ${width}px: opt-in, native Tab order, and all six actions forwarded`);
+    const inlineUrl = `${origin}/?listing&actions&inline`;
+    const item = name => page.getByRole('menuitem', { name, exact: true });
+    const actionsFor = name => page.getByRole('button', { name: `Actions for ${name}`, exact: true });
+    const detailsFor = name => page.getByRole('group', { name: `Details for ${name}`, exact: true });
+    const openDetails = async button => { await button.press('Enter'); await item('Details').click(); };
+    const name = 'a-very-long-file-name-without-breaks-to-check-reflow.txt';
+    const longTrigger = actionsFor(name);
+    const facts = detailsFor(name);
+    await page.goto(`${inlineUrl}&missing-details`);
+    await longTrigger.press('Enter');
+    assert.equal(await item('Download').count(), 1);
+    await item('Details').click();
+    const rowDate = await page.getByRole('link', { name, exact: true }).evaluate(el => el.closest('tr, li').querySelector('time').textContent);
+    assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', rowDate]);
+    await page.goto(`${inlineUrl}&whitespace`);
+    await openDetails(page.locator('[data-action-row="tab"] button:visible'));
+    assert.equal(await detailsFor('whitespace-only name').locator('dd[dir]').textContent(), '\t');
+
+    await page.goto(inlineUrl);
+    await metadata.click({ button: 'right' });
+    assert.equal(await page.getByRole('menuitem').count(), 1);
+    await item('Details').click();
+    assert.deepEqual(await detailsFor('Archive').locator('dd').allTextContents(), ['Archive', '—', 'Folder', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC', 'Mora, Sam']);
+    await openDetails(longTrigger);
+    assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
+    assert.equal(await page.locator('main > p').textContent(), '');
+    await facts.and(focus).waitFor();
+    await page.evaluate(axe);
+    const audit = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
+    await writeFile(resolve(output, `axe-inline-details-${width}.json`), JSON.stringify(audit, null, 2));
+    assert.equal(audit.violations.length, 0, JSON.stringify(audit.violations));
+    await page.screenshot({ path: resolve(output, `inline-details-${width}.png`), fullPage: true });
+    const outside = page.getByRole('button', { name: 'After listing' });
+    await outside.press('Escape');
+    assert.equal(await outside.and(focus).count(), 1);
+    assert.equal(await facts.count(), 1);
+    await facts.evaluate(el => el.insertAdjacentHTML('afterbegin', `<details><summary>Native summary target</summary></details>
+      <button tabindex="-1">Programmatic</button><button style="visibility:hidden">Hidden</button>
+      <div inert><button>Inert</button></div><fieldset disabled><button>Disabled</button></fieldset>`));
+    const summary = facts.getByText('Native summary target');
+    const hide = facts.getByRole('button', { name: 'Hide details' });
+    for (const [key, target] of [['Tab', summary], ['Tab', hide], ['Shift+Tab', page.getByRole('link', { name, exact: true })]]) {
+      await longTrigger.press('Enter');
+      await page.keyboard.press(key);
+      await target.and(focus).waitFor();
+      if (target === summary) await summary.evaluate(el => el.parentElement.remove());
+    }
+    await facts.press('Tab');
+    await hide.and(focus).waitFor();
+    await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
+    await hide.and(focus).waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await facts.count(), 0);
+    await longTrigger.and(focus).waitFor();
+    await openDetails(longTrigger);
+    await hide.click();
+    assert.equal(await facts.count(), 0);
+    await longTrigger.and(focus).waitFor();
+    for (const action of ['Download', 'Share', 'Rename', 'Move', 'Delete']) {
+      await actionsFor('Résumé 2025.pdf').press('ArrowDown');
+      await item(action).click();
+      assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
+      assert.equal(await page.getByRole('menu').or(page.getByRole('group', { name: /^Details for / })).count(), 0);
+    }
+    console.log(`Inline Details at ${width}px: exact facts, native Tab order, same-row handoff, close, and forwarding`);
     await context.close();
   }
   {
@@ -1111,8 +1190,8 @@ try {
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
     await page.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
-    const setContainerWidth = async width => {
-      await page.locator('main').evaluate((el, width) => { el.style.width = `${width}px`; }, width);
+    const setContainerWidth = async (width, target = page.locator('main')) => {
+      await target.evaluate((el, width) => { el.style.width = `${width}px`; }, width);
       assert.equal(await page.evaluate(() => innerWidth), 1280, 'Container resize must not change viewport width');
     };
     const table = page.getByRole('table');
@@ -1154,17 +1233,36 @@ try {
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
     console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
 
-    await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
+    const inlineUrl = `${origin}/?listing&actions&inline`;
+    await page.goto(`${inlineUrl}&two-lists`);
+    const [first, second] = await page.locator('.listing').all();
+    const archiveDetails = list => list.getByRole('group', { name: 'Details for Archive', exact: true });
+    for (const listing of [first, second]) {
+      await listing.getByRole('button', { name: 'Actions for Archive' }).press('Enter');
+      await page.getByRole('menuitem', { name: 'Details' }).click();
+      await archiveDetails(listing).and(focus).waitFor();
+    }
+    for (const [width, view] of [[1000, 'table.desktop'], [500, 'ul.mobile']]) {
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, width);
+      await second.locator(`${view} [data-details-id="1"]`).and(focus).waitFor();
+    }
+    await page.keyboard.press('Escape');
+    assert.equal(await archiveDetails(first).count(), 1);
+    assert.equal(await archiveDetails(second).count(), 0);
+    await second.getByRole('button', { name: 'Actions for Archive' }).and(focus).waitFor();
     const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
     const download = page.getByRole('menuitem', { name: 'Download', exact: true }).and(focus);
     const waitForMenuClose = () => page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
-    for (const [from, to, source, destination] of [[1000, 500, table, list], [500, 1000, list, table]]) {
+    for (const inline of [true, false]) for (const [from, to, source, destination] of [[1000, 500, table, list], [500, 1000, list, table]]) {
+      if (!inline) await page.goto(`${origin}/?listing&actions`);
+      const resizeTarget = inline ? main.locator(':scope > div').nth(1) : main;
+      const triggerIn = view => inline ? view.and(second.locator('table, ul')).getByRole('button', { name: 'Actions for Archive' }) : menuTrigger(view);
       for (const phase of ['settled', 'opening']) {
-        await setContainerWidth(from);
-        const trigger = menuTrigger(source);
+        await setContainerWidth(from, resizeTarget);
+        const trigger = triggerIn(source);
         await trigger.focus();
         if (phase === 'opening') {
-          await main.evaluate((el, width) => {
+          await resizeTarget.evaluate((el, width) => {
             delete el.dataset.resizedDuringOpening;
             const showPopover = HTMLDialogElement.prototype.showPopover;
             HTMLDialogElement.prototype.showPopover = function () {
@@ -1179,16 +1277,17 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await download.waitFor({ timeout: 5000 });
-          await setContainerWidth(to);
+          await (inline ? page.getByRole('menuitem', { name: 'Details' }).and(focus) : download).waitFor({ timeout: 5000 });
+          await setContainerWidth(to, resizeTarget);
         } else {
-          await main.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
+          await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
         }
-        await menuTrigger(destination).and(focus).waitFor({ timeout: 5000 });
+        await triggerIn(destination).and(focus).waitFor({ timeout: 5000 });
         await waitForMenuClose();
         assert.equal(await page.evaluate(() => innerWidth), 1280);
-        console.log(`Listing action menu: ${phase} ${from}→${to} closed and moved focus to the same row`);
+        console.log(`Listing action menu (${inline ? 'inline' : 'callback'}): ${phase} ${from}→${to} closed and moved focus to the same row`);
       }
+      if (inline) continue;
       // Render the destination, then open and blur in a transient source layout
       // before the next frame. ResizeObserver can coalesce the two width changes.
       for (const duringBlur of [false, true]) {
