@@ -2,13 +2,20 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
-import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
+import { UploadPublication as Publication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
+import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
+
+let sessionToken;
+class UploadPublication extends Publication {
+  constructor(db, complete) { super(db, complete, sessionToken); }
+}
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 import { createCompleteForPublication } from '../../drive/src/lib/server/s3/complete-for-publication.ts';
 
 async function setup(owner) {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.prepare("INSERT INTO drive_principals VALUES (?, 'member', 'active')").bind(owner).run();
+  sessionToken = (await new Sessions(env.DB).issue(owner)).token;
   return new UploadIntents(env.DB);
 }
 
