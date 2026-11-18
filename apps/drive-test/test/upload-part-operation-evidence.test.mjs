@@ -147,7 +147,8 @@ it('resolves lost D1 acknowledgements and records a late report without clearing
   await run("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", op.ownerId);
   await run('DELETE FROM drive_upload_intents WHERE id = ?', op.intentId);
   await expect(lostAck.recordObservation(op, etag)).rejects.toThrow('D1 acknowledgement lost');
-  expect(await rows(`SELECT hex(reported_etag) AS etag FROM ${observations} WHERE kind = 'reported'`))
+  expect(await rows(`SELECT hex(reported_etag) AS etag FROM ${observations}
+    WHERE operation_id = ? AND kind = 'reported'`, op.operationId))
     .toEqual([{ etag: '2280FF22' }]);
   const mismatches = { operationId: 'another-operation', intentId: 'another-intent', ownerId: 'another-owner',
     objectKey: 'another-key', storageEpoch: 'another-epoch', uploadId: 'another-upload', intentVersion: 3,
