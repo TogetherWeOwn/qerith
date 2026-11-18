@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { appendFile } from 'node:fs/promises';
 import guidepup from '@guidepup/guidepup';
-import { normalizeSpeech } from '../scripts/route-evidence-checks.mjs';
+import { normalizeSpeech, unavailableHeadingSpeech } from '../scripts/route-evidence-checks.mjs';
 
 const { nvda, NVDAKeyCodeCommands: commands, WindowsKeyCodes: key, WindowsModifiers: modifier } = guidepup;
 
@@ -49,7 +49,8 @@ export async function captureSpeech(page, path, selfCheck) {
       const { result } = await nvda.capture(() => page.goto(destination).catch(error => error), { capture: true });
       if (result instanceof Error) throw result;
       assert.equal(page.url(), destination);
-    }, /Folder unavailable\W+Drive, document\b/i, /heading\W+level 1\W+This folder isn't available\b/i);
+    }, /Folder unavailable\W+Drive, document\b/i, unavailableHeadingSpeech);
+    if (selfCheck) assert.equal(await page.getByRole('link').count(), 0, `${id}: expected a no-link fixture`);
     return [arrival, await title(id, /Folder unavailable.*Drive/i)];
   }
   const compareUnavailable = async () => {

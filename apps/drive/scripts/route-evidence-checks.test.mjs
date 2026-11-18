@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { normalizeSpeech, unavailableResponse, verifyManifest } from './route-evidence-checks.mjs';
+import { normalizeSpeech, unavailableHeadingSpeech, unavailableResponse, verifyManifest } from './route-evidence-checks.mjs';
 
 const readJson = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
 
@@ -91,4 +91,13 @@ test('speech normalization ignores whitespace but preserves extra phrases', () =
   const reference = normalizeSpeech(['Folder', 'unavailable']);
   assert.equal(normalizeSpeech(['  Folder\n unavailable  ']), reference);
   assert.notEqual(normalizeSpeech(['Folder unavailable', 'Extra phrase']), reference);
+});
+
+test('unavailable arrival requires the exact spoken level-1 heading', () => {
+  const document = 'Folder unavailable Drive, document. main landmark,';
+  const heading = "heading, level 1, This folder isn't available";
+  assert.match(normalizeSpeech([document, `${heading}.`]), unavailableHeadingSpeech);
+  for (const wrong of ['', `${heading} to guest accounts.`, heading.replace('level 1', 'level 2')]) {
+    assert.doesNotMatch(normalizeSpeech([document, wrong]), unavailableHeadingSpeech);
+  }
 });
