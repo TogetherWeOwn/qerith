@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { appendFile } from 'node:fs/promises';
 import guidepup from '@guidepup/guidepup';
+import { normalizeSpeech } from '../scripts/route-evidence-checks.mjs';
 
 const { nvda, NVDAKeyCodeCommands: commands, WindowsKeyCodes: key, WindowsModifiers: modifier } = guidepup;
 
@@ -14,10 +15,11 @@ export async function captureSpeech(page, path, selfCheck) {
       phrases = [...await nvda.spokenPhraseLog()];
       await appendFile(path, JSON.stringify({ step, url: page.url(), phrases }) + '\n');
     }
-    const speech = phrases.join(' ');
-    assert(speech.trim(), `No NVDA speech: ${step}`);
+    const speech = normalizeSpeech(phrases);
+    assert(speech, `No NVDA speech: ${step}`);
     assert.doesNotMatch(speech, /Synthetic title that must not leak/i, step);
     for (const pattern of expected) assert.match(speech, pattern, step);
+    return speech;
   }
   const top = () => perform(key.Home, modifier.Control);
   const heading = (step, label) => hear(`${step}: Control+Home`, top, /heading.*1|level 1.*heading/i, label);
@@ -68,12 +70,15 @@ export async function captureSpeech(page, path, selfCheck) {
     await tab('Past-end', /First page/i);
     await follow('First page', /\/f\/populated\??$/, /Project records/i);
     await heading('First page', /Project records/i);
-    for (const id of ['denied', 'missing']) {
-      await hear(`${id}: direct full navigation`, () => nvda.capture(() => page.goto(`${origin}/f/${id}`), { capture: true }), /Folder unavailable|This folder isn't available/i);
+    async function unavailable(id) {
+      await page.goto(`${origin}/f/populated`);
+      await browse(); await top();
+      const arrival = await hear(`${id}: direct full navigation`, () => nvda.capture(() => page.goto(`${origin}/f/${id}`), { capture: true }), /Folder unavailable|This folder isn't available/i);
       await browse();
-      await title(id, /Folder unavailable.*Drive/i);
-      await heading(id, /This folder isn't available/i);
+      return [arrival, await title(id, /Folder unavailable.*Drive/i), await heading(id, /This folder isn't available/i)];
     }
+    const denied = await unavailable('denied');
+    assert.deepEqual(await unavailable('missing'), denied, 'Unavailable announcements differ');
   } finally {
     await nvda.stop();
   }

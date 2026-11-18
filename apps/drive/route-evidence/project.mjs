@@ -2,15 +2,26 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { verifyLock } from '../scripts/verify-lock-age.mjs';
+import { verifyManifest } from '../scripts/route-evidence-checks.mjs';
 
 const [repo, destination, mode] = process.argv.slice(2);
 const source = resolve(repo, 'apps/drive');
 const output = resolve(destination);
 const route = 'src/routes/f/[folderId]';
 const selfCheck = mode === 'self-check';
-for (const lock of [new URL('./package-lock.json', import.meta.url), join(source, 'package-lock.json')]) {
-  await verifyLock(JSON.parse(await readFile(lock, 'utf8')), async (name) => {
+const json = async (path) => JSON.parse(await readFile(path, 'utf8'));
+const graphs = [];
+for (const dir of [fileURLToPath(new URL('.', import.meta.url)), source]) {
+  assert(!existsSync(join(dir, 'npm-shrinkwrap.json')), 'Shrinkwrap is unsupported in the projection');
+  const manifest = await json(join(dir, 'package.json'));
+  const lock = await json(join(dir, 'package-lock.json'));
+  verifyManifest(manifest, lock);
+  graphs.push({ manifest, lock });
+}
+for (const { lock } of graphs) {
+  await verifyLock(lock, async (name) => {
     const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
       signal: AbortSignal.timeout(10000), redirect: 'error'
     });
@@ -18,10 +29,12 @@ for (const lock of [new URL('./package-lock.json', import.meta.url), join(source
     return response.json();
   });
 }
-assert(!existsSync(join(source, 'npm-shrinkwrap.json')), 'Shrinkwrap is unsupported in the projection');
 await mkdir(output);
+const { manifest, lock } = graphs[1];
+await writeFile(join(output, 'package.json'), JSON.stringify(manifest));
+await writeFile(join(output, 'package-lock.json'), JSON.stringify(lock));
 // Copy no source hooks, Worker or executable build configuration.
-for (const path of ['package.json', 'package-lock.json', 'src/app.html', ...selfCheck ? [] : ['src/lib', route]]) {
+for (const path of ['src/app.html', ...selfCheck ? [] : ['src/lib', route]]) {
   await cp(join(source, path), join(output, path), { recursive: true });
 }
 await cp(new URL('./.npmrc', import.meta.url), join(output, '.npmrc'));

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { firefox } from 'playwright';
 import { captureSpeech } from './speech.mjs';
+import { unavailableResponse } from '../scripts/route-evidence-checks.mjs';
 
 const { EVIDENCE, PROJECTION, FIREFOX_EXE } = process.env;
 const save = (name, data) => writeFile(join(EVIDENCE, `${name}.json`), JSON.stringify(data, null, 2));
@@ -46,18 +47,23 @@ async function inspect(context, page, origin) {
     pastEnd: [next.pathname + next.search, 'Project records', ['First page']],
     denied: ['/f/denied', unavailable, []], missing: ['/f/missing', unavailable, []], signedOut: ['/f/populated', unavailable, []]
   };
+  const denied = new Map();
   for (const [state, [url, heading, tabs]] of Object.entries(states)) {
     if (state === 'signedOut') await context.clearCookies();
     for (const [width, height] of [[390, 844], [1280, 800]]) {
       await page.setViewportSize({ width, height });
-      await page.goto(origin + url);
+      const response = await page.goto(origin + url);
       assert.equal(await page.getByRole('heading', { level: 1 }).textContent(), heading);
       if (state === 'empty') assert.equal(await page.getByRole('heading', { level: 2 }).textContent(), 'This folder is empty.');
       if (state === 'pastEnd') assert(await page.getByText('No more items.').isVisible());
       if (heading === unavailable) {
         assert.equal(await page.title(), 'Folder unavailable · Drive');
         assert.equal((await page.locator('main').innerText()).trim(), unavailable);
+        const outward = await unavailableResponse(response);
         assert(!/Synthetic title that must not leak|Project records/.test(await page.content()));
+        if (state === 'denied') denied.set(width, outward);
+        else assert.deepEqual(outward, denied.get(width), `${state}: unavailable response differs from denied`);
+        await save(`unavailable-${state}-${width}`, outward);
       }
       await page.addScriptTag({ path: fileURLToPath(new URL('./node_modules/axe-core/axe.min.js', import.meta.url)) });
       const axe = await page.evaluate(() => window.axe.run({ runOnly: { type: 'tag', values: [
