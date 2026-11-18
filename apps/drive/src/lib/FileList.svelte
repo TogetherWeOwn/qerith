@@ -15,24 +15,27 @@
   let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined;
 
   let detailsId: string | null = null;
-  $: if (!onAction || !inlineDetails || !items.some(item => item.id === detailsId)) detailsId = null;
+  const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
+  const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
+    Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
 
-  function findRowPart(view: HTMLElement, attribute: string, id: string | null | undefined) {
-    return Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  $: if (detailsId !== null && (!onAction || !inlineDetails || !items.some(item => item.id === detailsId))) {
+    if (onAction && findRowPart(visibleView(), 'data-details-id', detailsId)?.contains(document.activeElement)) triggerFor(visibleView(), detailsId)?.focus();
+    detailsId = null;
   }
-  async function selectAction(id: string, action: RowAction) {
+  async function selectAction(source: HTMLElement, id: string, action: RowAction) {
     if (action !== 'Details' || !inlineDetails) { onAction?.(id, action); return; }
+    const sourceTrigger = triggerFor(source, id);
     detailsId = id;
     await tick();
-    if (detailsId !== id) return;
-    const view = desktop.getClientRects().length ? desktop : mobile;
-    if (findRowPart(view, 'data-action-row', id)?.querySelector(actionTrigger) === document.activeElement) {
-      findRowPart(view, 'data-details-id', id)?.focus();
-    }
+    const active = document.activeElement;
+    const view = visibleView();
+    if (detailsId === id && (active === sourceTrigger || active === triggerFor(view, id))) findRowPart(view, 'data-details-id', id)?.focus();
   }
   function closeDetails(view: HTMLElement, id: string) {
     detailsId = null;
-    findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger)?.focus();
+    triggerFor(view, id)?.focus();
   }
   function escapeDetails(event: KeyboardEvent) {
     if (event.key !== 'Escape' || event.defaultPrevented || detailsId === null || !(event.target instanceof Element)) return;
@@ -44,7 +47,7 @@
 
   function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
     const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
-    if (onAction && (event.button === 2 || controlClick)) action?.openFromContextMenu(event);
+    if (onAction && (event.button === 2 || controlClick) && !(event.target instanceof Element && event.target.closest('[data-details-id]'))) action?.openFromContextMenu(event);
   }
 
   onMount(() => {
@@ -90,14 +93,15 @@
       if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
       const facts = focused.closest<HTMLElement>('[data-details-id]');
-      if (facts) {
+      if (focused instanceof HTMLAnchorElement) {
+        target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
+      } else if (facts) {
         const next = findRowPart(to, 'data-details-id', facts.dataset.detailsId);
-        target = focused === facts ? next : next?.querySelector('button');
-      } else if (focused instanceof HTMLAnchorElement) {
-        target = findRowPart(to, 'data-item-id', focused.dataset.itemId);
+        target = focused === facts ? next : next?.querySelector('button[type="button"]');
       } else {
         const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
-        target = findRowPart(to, 'data-action-row', id)?.querySelector(actionTrigger);
+        const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(row => row.dataset.actionRow === id);
+        target = row?.querySelector(actionTrigger);
       }
       lastFocused = null;
       target?.focus();
@@ -161,10 +165,10 @@
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
         {#if onAction}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(item.id, action)} onTab={() => false} /></td>
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
         {/if}
       </tr>
-      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.details?.sharedWith} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
+      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
   </tbody>
 </table>
@@ -172,9 +176,9 @@
   {#each items as item (item.id)}
     <li class:with-actions={!!onAction} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
       {#if onAction}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(item.id, action)} onTab={() => false} /></div>
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
       {/if}
-      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.details?.sharedWith} onClose={() => closeDetails(mobile, item.id)} />{/if}
+      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
   {/each}
 </ul>

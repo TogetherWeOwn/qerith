@@ -241,6 +241,10 @@ const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).tr
 assert.equal(head, expectedHead, 'Checkout must equal the requested head');
 await mkdir(output, { recursive: true });
 const axe = await readFile(createRequire(import.meta.url).resolve('axe-core/axe.min.js'), 'utf8');
+const openDetails = async trigger => {
+  await trigger.press('Enter');
+  await trigger.page().getByRole('menuitem', { name: 'Details', exact: true }).press('Enter');
+};
 const server = await createServer({
   configFile: false,
   root: resolve(here, 'fixture'),
@@ -1011,8 +1015,7 @@ try {
         await writeFile(resolve(output, `listing-unicode-page-zoom-${factor * 100}.json`), JSON.stringify({ factor: applied, before, after }, null, 2));
         await page.goto(`${origin}/?listing&actions&inline&unicode`, { waitUntil: 'networkidle' });
         const name = 'annual-👩🏽‍💻-final-report.pdf';
-        await page.getByRole('button', { name: `Actions for ${name}`, exact: true }).click();
-        await page.getByRole('menuitem', { name: 'Details' }).click();
+        await openDetails(page.getByRole('button', { name: `Actions for ${name}`, exact: true }));
         const facts = page.getByRole('group', { name: `Details for ${name}`, exact: true });
         assert.equal(await facts.locator('dd[dir]').textContent(), name);
         assert.equal(await page.evaluate(width => innerWidth === width && document.documentElement.scrollWidth <= width, after.width), true);
@@ -1109,7 +1112,10 @@ try {
     await page.keyboard.press('Escape');
     await trigger.and(focus).waitFor({ timeout: 5000 });
     const ownedTrigger = container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
-    for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
+    const inlineUrl = `${origin}/?listing&actions&inline`;
+    for (const inline of [false, true]) for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
+      if (inline && action === 'Download') await page.goto(inlineUrl);
+      if (inline && action === 'Details') continue;
       await ownedTrigger.press('ArrowDown');
       await page.getByRole('menuitem', { name: action, exact: true }).click();
       assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
@@ -1117,11 +1123,9 @@ try {
       assert.equal(await page.locator('[data-details-id]').count(), 0, 'Details belongs to the caller, not an inline panel');
     }
     console.log(`Listing actions at ${width}px: opt-in, native Tab order, and all six actions forwarded`);
-    const inlineUrl = `${origin}/?listing&actions&inline`;
     const item = name => page.getByRole('menuitem', { name, exact: true });
     const actionsFor = name => page.getByRole('button', { name: `Actions for ${name}`, exact: true });
     const detailsFor = name => page.getByRole('group', { name: `Details for ${name}`, exact: true });
-    const openDetails = async button => { await button.press('Enter'); await item('Details').click(); };
     const name = 'a-very-long-file-name-without-breaks-to-check-reflow.txt';
     const longTrigger = actionsFor(name);
     const facts = detailsFor(name);
@@ -1139,9 +1143,10 @@ try {
     await metadata.click({ button: 'right' });
     assert.equal(await page.getByRole('menuitem').count(), 1);
     await item('Details').click();
-    assert.deepEqual(await detailsFor('Archive').locator('dd').allTextContents(), ['Archive', '—', 'Folder', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC', 'Mora, Sam']);
+    assert.deepEqual(await detailsFor('Archive').locator('dd').allTextContents(), ['Archive', '—', 'Folder', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
     await openDetails(longTrigger);
-    assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
+    assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', '12 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
+    assert.equal(await facts.locator('dd[dir]').evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }))), true);
     assert.equal(await page.locator('main > p').textContent(), '');
     await facts.and(focus).waitFor();
     await page.evaluate(axe);
@@ -1175,13 +1180,17 @@ try {
     await hide.click();
     assert.equal(await facts.count(), 0);
     await longTrigger.and(focus).waitFor();
-    for (const action of ['Download', 'Share', 'Rename', 'Move', 'Delete']) {
-      await actionsFor('Résumé 2025.pdf').press('ArrowDown');
-      await item(action).click();
-      assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
-      assert.equal(await page.getByRole('menu').or(page.getByRole('group', { name: /^Details for / })).count(), 0);
-    }
-    console.log(`Inline Details at ${width}px: exact facts, native Tab order, same-row handoff, close, and forwarding`);
+    const resume = 'Résumé 2025.pdf';
+    if (width === 390) await page.addStyleTag({ content: 'main:has([data-details-id]) { width: 500px; }' });
+    await openDetails(actionsFor(resume));
+    const ownedFacts = detailsFor(resume);
+    if (width === 390) await page.locator('ul.mobile').getByRole('group', { name: `Details for ${resume}` }).and(focus).waitFor();
+    assert.deepEqual(await ownedFacts.locator('dd').allTextContents(), [resume, '5.4 MB · 5,400,000 bytes', 'PDF', '13 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC', 'Mora, Sam']);
+    await ownedFacts.getByRole('button', { name: 'Hide details' }).focus();
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-disable-inline')));
+    await actionsFor(resume).and(focus).waitFor();
+    assert.equal(await ownedFacts.count(), 0);
+    console.log(`Inline Details at ${width}px: exact facts, native Tab order, same-row handoff, and close`);
     await context.close();
   }
   {
@@ -1190,8 +1199,9 @@ try {
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
     await page.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
-    const setContainerWidth = async (width, target = page.locator('main')) => {
-      await target.evaluate((el, width) => { el.style.width = `${width}px`; }, width);
+    let resizeTarget = page.locator('main');
+    const setContainerWidth = async width => {
+      await resizeTarget.evaluate((el, width) => { el.style.width = `${width}px`; }, width);
       assert.equal(await page.evaluate(() => innerWidth), 1280, 'Container resize must not change viewport width');
     };
     const table = page.getByRole('table');
@@ -1236,30 +1246,30 @@ try {
     const inlineUrl = `${origin}/?listing&actions&inline`;
     await page.goto(`${inlineUrl}&two-lists`);
     const [first, second] = await page.locator('.listing').all();
-    const archiveDetails = list => list.getByRole('group', { name: 'Details for Archive', exact: true });
+    const rowDetails = list => list.getByRole('group', { name: 'Details for Résumé 2025.pdf', exact: true });
+    const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
     for (const listing of [first, second]) {
-      await listing.getByRole('button', { name: 'Actions for Archive' }).press('Enter');
-      await page.getByRole('menuitem', { name: 'Details' }).click();
-      await archiveDetails(listing).and(focus).waitFor();
+      await openDetails(menuTrigger(listing));
+      await rowDetails(listing).and(focus).waitFor();
     }
-    for (const [width, view] of [[1000, 'table.desktop'], [500, 'ul.mobile']]) {
-      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, width);
-      await second.locator(`${view} [data-details-id="1"]`).and(focus).waitFor();
+    resizeTarget = main.locator(':scope > div').nth(1);
+    for (const [width, role] of [[1000, 'table'], [500, 'list']]) {
+      await setContainerWidth(width);
+      await rowDetails(second.getByRole(role)).and(focus).waitFor();
     }
     await page.keyboard.press('Escape');
-    assert.equal(await archiveDetails(first).count(), 1);
-    assert.equal(await archiveDetails(second).count(), 0);
-    await second.getByRole('button', { name: 'Actions for Archive' }).and(focus).waitFor();
-    const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
+    assert.equal(await rowDetails(first).count(), 1);
+    assert.equal(await rowDetails(second).count(), 0);
+    await menuTrigger(second).and(focus).waitFor();
     const download = page.getByRole('menuitem', { name: 'Download', exact: true }).and(focus);
     const waitForMenuClose = () => page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
-    for (const inline of [true, false]) for (const [from, to, source, destination] of [[1000, 500, table, list], [500, 1000, list, table]]) {
-      if (!inline) await page.goto(`${origin}/?listing&actions`);
-      const resizeTarget = inline ? main.locator(':scope > div').nth(1) : main;
-      const triggerIn = view => inline ? view.and(second.locator('table, ul')).getByRole('button', { name: 'Actions for Archive' }) : menuTrigger(view);
+    for (const inline of [true, false]) for (const [from, to, fromRole, toRole] of [[1000, 500, 'table', 'list'], [500, 1000, 'list', 'table']]) {
+      if (!inline) { await page.goto(`${origin}/?listing&actions`); resizeTarget = main; }
+      const scope = inline ? second : page;
+      const source = scope.getByRole(fromRole), destination = scope.getByRole(toRole);
       for (const phase of ['settled', 'opening']) {
-        await setContainerWidth(from, resizeTarget);
-        const trigger = triggerIn(source);
+        await setContainerWidth(from);
+        const trigger = menuTrigger(source);
         await trigger.focus();
         if (phase === 'opening') {
           await resizeTarget.evaluate((el, width) => {
@@ -1277,15 +1287,15 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await (inline ? page.getByRole('menuitem', { name: 'Details' }).and(focus) : download).waitFor({ timeout: 5000 });
-          await setContainerWidth(to, resizeTarget);
+          await download.waitFor({ timeout: 5000 });
+          await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
         }
-        await triggerIn(destination).and(focus).waitFor({ timeout: 5000 });
+        await menuTrigger(destination).and(focus).waitFor({ timeout: 5000 });
         await waitForMenuClose();
         assert.equal(await page.evaluate(() => innerWidth), 1280);
-        console.log(`Listing action menu (${inline ? 'inline' : 'callback'}): ${phase} ${from}→${to} closed and moved focus to the same row`);
+        console.log(`Listing action menu: ${phase} ${from}→${to} closed and moved focus to the same row`);
       }
       if (inline) continue;
       // Render the destination, then open and blur in a transient source layout

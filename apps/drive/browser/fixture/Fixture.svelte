@@ -68,10 +68,11 @@
     { ...items[1], id: 'only-spaces', name: '   ', href: '#only-spaces' }
   ];
   const params = new URLSearchParams(window.location.search);
-  const inlineDetails = params.has('inline');
-  const inlineItems = (params.has('unicode') ? unicodeItems : params.has('whitespace') ? whitespaceItems : actionItems).map(item => ({
-    ...item,
-    details: params.has('missing-details') ? undefined : { modifiedFull: '14 November 2026, 09:00 UTC', uploaded: '12 November 2026, 09:00 UTC', sharedWith: item.shared ? ['Mora', 'Sam'] : undefined }
+  let inlineDetails = $state(params.has('inline'));
+  window.addEventListener('fixture-disable-inline', () => { inlineDetails = false; });
+  const inlineItems = (params.has('unicode') ? unicodeItems.filter(item => item.id === 'zwj-modifier') : params.has('whitespace') ? whitespaceItems : actionItems).map(item => ({
+    ...item, shared: item.shared || item.id === '2',
+    details: params.has('missing-details') ? undefined : { modifiedFull: `${item.modified.slice(0, 2)} November 2026, 09:00 UTC`, uploaded: '12 November 2026, 09:00 UTC', sharedWith: ['Mora', 'Sam'] }
   }));
   const onAction = (id, action) => { selected = `${id}: ${action}`; };
   // Synthetic pages exercise the controlled list without a route or identity.
