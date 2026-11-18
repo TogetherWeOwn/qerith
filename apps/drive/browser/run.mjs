@@ -1035,11 +1035,15 @@ try {
     await page.getByRole('menuitem', { name: 'Details', exact: true }).click();
     assert.equal(await page.locator('main > p').textContent(), '1: Details');
     await trigger.and(focus).waitFor({ timeout: 5000 });
-    await container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true }).press('ArrowDown');
-    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
-    assert.equal(await page.locator('main > p').textContent(), '2: Rename');
-    assert.equal(await page.getByRole('menu').count(), 0);
-    console.log(`Listing actions at ${width}px: opt-in, native Tab order, caller-owned Details and Rename`);
+    const ownedTrigger = container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
+    for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
+      await ownedTrigger.press('ArrowDown');
+      await page.getByRole('menuitem', { name: action, exact: true }).click();
+      assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
+      assert.equal(await page.getByRole('menu').count(), 0);
+      assert.equal(await page.locator('[data-details-id]').count(), 0, 'Details belongs to the caller, not an inline panel');
+    }
+    console.log(`Listing actions at ${width}px: opt-in, native Tab order, and all six actions forwarded`);
     await context.close();
   }
   {
@@ -1093,6 +1097,8 @@ try {
 
     await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
     const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
+    const download = page.getByRole('menuitem', { name: 'Download', exact: true }).and(focus);
+    const waitForMenuClose = () => page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
     for (const [from, to, source, destination] of [[1000, 500, table, list], [500, 1000, list, table]]) {
       for (const phase of ['settled', 'opening']) {
         await setContainerWidth(from);
@@ -1114,17 +1120,34 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await page.getByRole('menuitem', { name: 'Download' }).and(focus).waitFor({ timeout: 5000 });
+          await download.waitFor({ timeout: 5000 });
           await setContainerWidth(to);
         } else {
           await main.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
         }
         await menuTrigger(destination).and(focus).waitFor({ timeout: 5000 });
-        await page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
+        await waitForMenuClose();
         assert.equal(await page.evaluate(() => innerWidth), 1280);
         console.log(`Listing action menu: ${phase} ${from}→${to} closed and moved focus to the same row`);
       }
+      await setContainerWidth(from);
+      await menuTrigger(source).press('ArrowDown');
+      await download.evaluate(el => el.blur());
+      assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+      await setContainerWidth(to);
+      await waitForMenuClose();
+      assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Resize must not restore explicitly blurred focus');
     }
+    await main.evaluate(el => el.style.removeProperty('width'));
+    for (const [width, source, destination, layer] of [[390, table, list, ':popover-open'], [1280, list, table, ':modal']]) {
+      await menuTrigger(source).press('ArrowDown');
+      await download.waitFor({ timeout: 5000 });
+      assert.equal(await page.locator(`dialog${layer}`).count(), 1);
+      await page.setViewportSize({ width, height: 800 });
+      await menuTrigger(destination).and(focus).waitFor({ timeout: 5000 });
+      await waitForMenuClose();
+    }
+    console.log('Listing action menus preserve deliberate blur and hand off focus between viewport layouts, including the modal sheet');
     await context.close();
   }
   {

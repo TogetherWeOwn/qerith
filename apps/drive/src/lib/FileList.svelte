@@ -20,7 +20,10 @@
       lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row]')))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
-      if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
+      if (!lastFocused || event.target !== lastFocused) return;
+      // A top-layer item can have a box after its listing view becomes hidden.
+      const view = lastFocused.closest('[data-action-row]') ? (desktop.contains(lastFocused) ? desktop : mobile) : lastFocused;
+      if (view.getClientRects().length) lastFocused = null;
     };
     const dismissMenus = (view: HTMLElement, actions: typeof desktopActions) => {
       const expanded = view.querySelectorAll<HTMLButtonElement>(`${actionTrigger}[aria-expanded="true"]`);
@@ -28,7 +31,6 @@
         const id = trigger.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
         if (id !== undefined) actions[id]?.dismiss();
       }
-      return expanded[0];
     };
     const transferFocus = () => {
       const compact = desktop.getClientRects().length === 0;
@@ -37,7 +39,7 @@
       // Closing a top-layer menu can itself change focus, so snapshot it first.
       const active = document.activeElement;
       const focused = active === document.body ? lastFocused : active;
-      const expanded = onAction ? dismissMenus(from, compact ? desktopActions : compactActions) : undefined;
+      if (onAction) dismissMenus(from, compact ? desktopActions : compactActions);
       if (!to.getClientRects().length) {
         if (onAction) dismissMenus(to, compact ? compactActions : desktopActions);
         lastFocused = null;
@@ -50,14 +52,12 @@
         visibleSort?.focus();
         return;
       }
-      const source = focused instanceof HTMLElement && from.contains(focused) ? focused :
-        active === document.body ? expanded : undefined;
-      if (!source) return;
+      if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
-      if (source instanceof HTMLAnchorElement) {
-        target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === source.dataset.itemId);
+      if (focused instanceof HTMLAnchorElement) {
+        target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
       } else {
-        const id = source.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
+        const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
         const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(row => row.dataset.actionRow === id);
         target = row?.querySelector(actionTrigger);
       }
@@ -112,7 +112,7 @@
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
         {#if onAction}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></td>
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} parentHandlesHiddenTrigger onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></td>
         {/if}
       </tr>
     {/each}
@@ -122,7 +122,7 @@
   {#each items as item (item.id)}
     <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
       {#if onAction}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} parentHandlesHiddenTrigger onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
       {/if}
     </li>
   {/each}

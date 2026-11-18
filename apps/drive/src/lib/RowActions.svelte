@@ -9,6 +9,8 @@
   export let name: string;
   export let file = true;
   export let owned = true;
+  // A responsive listing handles dismissal and focus when it hides this trigger.
+  export let parentHandlesHiddenTrigger = false;
   export let onAction: (action: RowAction) => void;
   // Called after the menu closes. Return false to use native tab order from the trigger.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
@@ -34,7 +36,9 @@
     }
   }
 
-  function onResize() { if (open) close(true); }
+  function onResize() {
+    if (open && (!parentHandlesHiddenTrigger || trigger.getClientRects().length)) close(true);
+  }
   let menuLeft = 0;
   let menuTop = 0;
   $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
