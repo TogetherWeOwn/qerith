@@ -1,8 +1,8 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { beforeEach, expect, it } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
-import { evidence, intentRow, migrations, seed, sql } from './fixtures/upload-completion.mjs';
+import { evidence, intentRow, migrations, parts, producer, seed, sql } from './fixtures/upload-completion.mjs';
 
 const intents = new UploadIntents(env.DB);
 const sized = (id) => seed(id, { declaredSize: 7, intent: `intent-${id}` });
@@ -20,7 +20,7 @@ async function dispatch(id) {
 beforeEach(() => applyD1Migrations(env.DB, migrations));
 
 it('keeps cleanup and legacy completion fenced after an attempt and journal reset', async () => {
-  const { intent } = await sized('attempt-first'), owner = 'owner-attempt-first';
+  const { intent, token } = await sized('attempt-first'), owner = 'owner-attempt-first';
   const row = await intentRow(intent);
   expect(row).toMatchObject({ state: 'allocated', version: 2, declared_size: 7 });
   await expect(attempt(row, 1)).rejects.toThrow('upload completion claim is stale');
@@ -44,8 +44,25 @@ it('keeps cleanup and legacy completion fenced after an attempt and journal rese
   // the new fence rather than being rejected for a stale legacy version.
   await sql('UPDATE drive_upload_intents SET version = 2 WHERE id = ?', intent).run();
   await expect(dispatch('attempt-first')).rejects.toThrow('upload completion already attempted');
+  const fetch = vi.fn(), verify = vi.fn(async () => parts);
+  await expect(producer(fetch, verify).complete(token, 'attempt-first')).resolves.toBe('not-admitted');
+  expect(verify).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
   expect(await evidence('dispatches', 'attempt-first')).toBeNull();
   expect(await storedAttempt(intent)).toMatchObject({ version: 2 });
+});
+
+it.each(['revocation', 'tombstone'])('does not record an attempt or fence cleanup after %s', async (veto) => {
+  const { intent } = await sized(veto);
+  if (veto === 'revocation') {
+    await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", `owner-${veto}`).run();
+  } else {
+    await sql('INSERT INTO drive_upload_publication_tombstones VALUES (?)', intent).run();
+  }
+  await expect(attempt(await intentRow(intent))).rejects.toThrow('upload completion claim is stale');
+  expect(await storedAttempt(intent)).toBeNull();
+  expect(await intentRow(intent)).toMatchObject({ state: 'allocated', version: 2 });
+  await cleanup(intent);
 });
 
 it('rolls back the attempt when cleanup claimed first', async () => {

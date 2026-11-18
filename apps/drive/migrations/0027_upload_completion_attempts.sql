@@ -23,7 +23,9 @@ BEGIN
   UPDATE drive_upload_intents SET state = 'completing', version = version + 1
     WHERE id = NEW.intent_id AND object_key = NEW.object_key AND upload_id = NEW.upload_id
       AND state = 'allocated' AND completion_acknowledged = 0 AND version = NEW.version
-      AND version < 9007199254740989 AND declared_size = NEW.declared_size;
+      AND version < 9007199254740989 AND declared_size = NEW.declared_size
+      AND EXISTS (SELECT 1 FROM drive_active_members WHERE id = drive_upload_intents.owner_id)
+      AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = NEW.intent_id);
   SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'upload completion claim is stale') END;
 END;
 
