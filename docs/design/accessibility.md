@@ -52,7 +52,7 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 
 ## 8. Zoom, reflow and text spacing (SC 1.4.4, 1.4.10, 1.4.12)
 
-- At 320 CSS px wide no page scrolls sideways. The only things that may scroll sideways are the K2 and K19 tables, inside their own focusable region named for the table (above 820 px; at 820 px and below they are lists).
+- At 320 CSS px wide no page scrolls sideways. The only things that may scroll sideways are the K2 and K19 tables, inside their own focusable region named for the table (above 820 px; at 820 px and below they are lists). A table never squeezes its Name column to make room: below `breakpoint.list-compact-max` it becomes a list.
 - Every container grows with its text: no fixed heights on anything holding text; rows use `min-height`.
 - With WCAG text-spacing overrides (line height 1.5, letter spacing 0.12 em, word spacing 0.16 em), nothing clips or overlaps. Headings wrap and never truncate.
 

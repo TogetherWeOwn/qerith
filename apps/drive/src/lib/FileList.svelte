@@ -86,38 +86,6 @@
     };
   });
 
-  // Keep the end of the name, including its extension, outside the ellipsized span.
-  function nameParts(name: string): [string, string] {
-    // Without segmentation, split only at boundaries known not to divide a grapheme.
-    if (typeof Intl.Segmenter !== 'function') {
-      if (name.length <= 12) return [name, ''];
-      const dot = name.lastIndexOf('.');
-      if (!/^[\x20-\x7e]+$/.test(name)) {
-        // A printable ASCII character before the dot guarantees a boundary
-        // before it, even when the extension starts with a combining mark.
-        if (dot > 0 && name.length - dot <= 16 && /^[\x20-\x7e]$/.test(name[dot - 1])) {
-          return [name.slice(0, dot), name.slice(dot)];
-        }
-        // An ASCII letter or digit after a dot begins a new grapheme; keep the
-        // dot with the original prefix so unusual Unicode sequences stay intact.
-        if (dot > 0 && /^[A-Za-z0-9]{1,15}$/.test(name.slice(dot + 1))) {
-          return [name.slice(0, dot + 1), name.slice(dot + 1)];
-        }
-        return [name, ''];
-      }
-      const suffixStart = dot > 0 && name.length - dot <= 16 ? dot : name.length;
-      const split = suffixStart - Math.min(6, Math.floor(suffixStart / 2));
-      return [name.slice(0, split), name.slice(split)];
-    }
-    const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(name), part => part.segment);
-    if (characters.length <= 12) return [name, ''];
-    const dot = characters.lastIndexOf('.');
-    const suffixStart = dot > 0 && characters.length - dot <= 16 ? dot : characters.length;
-    const retained = Math.min(6, Math.floor(suffixStart / 2));
-    const split = suffixStart - retained;
-    return [characters.slice(0, split).join(''), characters.slice(split).join('')];
-  }
-
   // The caller supplies authorized URLs and already-sorted display values.
   export let folder: string;
   export let timeZone: string;
@@ -137,6 +105,7 @@
 </script>
 
 <svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element && document.activeElement.closest('[data-details-id]')?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(window.matchMedia('(max-width: 820px)').matches ? mobile : desktop, detailsId); } }} />
+<div class="listing">
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
@@ -148,7 +117,7 @@
   <tbody>
     {#each items as item (item.id)}
       <tr>
-        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}><span class="name-start">{nameParts(item.name)[0]}</span><span class="name-end">{nameParts(item.name)[1]}</span>{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
+        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
         <td><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(desktop, item.id, direction)} /></div></td>
       </tr>
@@ -158,7 +127,7 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}><span class="name-start">{nameParts(item.name)[0]}</span><span class="name-end">{nameParts(item.name)[1]}</span>{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
+    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div><div data-row-id={item.id}><RowActions name={item.name} file={item.bytes !== null} owned={item.owned ?? false} detailsOnly={!onAction} onAction={(action) => { if (action === 'Details') void showDetails(item.id); else onAction?.(item.id, action); }} onTab={(direction) => tabFromMenu(mobile, item.id, direction)} /></div>{#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} {...item.details} onClose={() => closeDetails(mobile, item.id)} />{/if}</li>
   {/each}
 </ul>
 {#if total !== undefined || onMore}
@@ -168,22 +137,23 @@
   </div>
   {#if loadMoreError}<p class="paging-error" role="alert">More items didn't load. Check your connection, then try again.</p>{/if}
 {/if}
+</div>
 
 <style>
+  .listing { container-type: inline-size; }
   table, ul { width: 100%; color: var(--drive-color-text-primary); font-family: var(--drive-font-ui); font-size: var(--drive-font-size-ui); }
   table { border-collapse: collapse; table-layout: fixed; text-align: left; }
   caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   th, td { height: var(--drive-size-row-admin); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
-  td { vertical-align: middle; }
-  th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
+  td { vertical-align: baseline; }
+  th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); } th:nth-child(5) { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
   a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
-  .name { display: inline-flex; align-items: center; gap: var(--drive-space-2); max-width: 100%; }
-  .name a { display: inline-flex; min-width: 0; padding-block: var(--drive-space-2); white-space: break-spaces; }
-  .name-start { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-  .name-end { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+  .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
+  .name :global(svg) { margin-top: var(--drive-space-2); }
+  .name a { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; }
   .folder { font-weight: var(--drive-font-weight-medium); }
   .tag { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; padding: var(--drive-space-inset-tag-y) var(--drive-space-inset-tag-x); border-radius: var(--drive-radius-s); box-shadow: inset 0 0 0 var(--drive-size-line) var(--drive-color-line-hairline-strong); }
   @media (forced-colors: active) { .tag { outline: var(--drive-size-line) solid transparent; outline-offset: calc(-1 * var(--drive-size-line)); } }
@@ -208,4 +178,5 @@
   li { min-height: var(--drive-size-row-dense); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
+  @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
 </style>
