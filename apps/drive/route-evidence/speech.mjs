@@ -23,7 +23,7 @@ export async function captureSpeech(page, path, selfCheck) {
   }
   const top = () => perform(key.Home, modifier.Control);
   const heading = (step, label) => hear(`${step}: Control+Home`, top, /heading.*1|level 1.*heading/i, label);
-  const title = (step, label) => hear(`${step}: report title`, () => nvda.perform(commands.reportTitle), label);
+  const title = (step, label) => hear(`${step}: report title`, () => nvda.perform(commands.reportTitle, { capture: true }), label);
   const tab = (step, label) => hear(`${step}: Tab`, () => perform(key.Tab), /link/i, label);
   async function browse() {
     await page.bringToFront();
@@ -35,7 +35,7 @@ export async function captureSpeech(page, path, selfCheck) {
   }
   async function follow(step, url, announcement) {
     await hear(`${step}: Enter (full document)`, async () => {
-      await nvda.capture(() => Promise.all([page.waitForEvent('domcontentloaded'), page.keyboard.press('Enter')]), { capture: true });
+      await Promise.all([page.waitForEvent('domcontentloaded'), nvda.activate({ capture: true })]);
       assert.match(page.url(), url);
     }, announcement);
   }
@@ -77,8 +77,7 @@ export async function captureSpeech(page, path, selfCheck) {
       await browse();
       return [arrival, await title(id, /Folder unavailable.*Drive/i), await heading(id, /This folder isn't available/i)];
     }
-    const denied = await unavailable('denied');
-    assert.deepEqual(await unavailable('missing'), denied, 'Unavailable announcements differ');
+    assert.deepEqual(await unavailable('denied'), await unavailable('missing'), 'Unavailable announcements differ');
   } finally {
     await nvda.stop();
   }

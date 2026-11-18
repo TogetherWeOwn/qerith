@@ -53,6 +53,8 @@ async function inspect(context, page, origin) {
     for (const [width, height] of [[390, 844], [1280, 800]]) {
       await page.setViewportSize({ width, height });
       const response = await page.goto(origin + url);
+      assert.equal(await response.headerValue('cache-control'), 'private, no-store', state);
+      assert.equal(await response.headerValue('referrer-policy'), 'no-referrer', state);
       assert.equal(await page.getByRole('heading', { level: 1 }).textContent(), heading);
       if (state === 'empty') assert.equal(await page.getByRole('heading', { level: 2 }).textContent(), 'This folder is empty.');
       if (state === 'pastEnd') assert(await page.getByText('No more items.').isVisible());
@@ -80,12 +82,14 @@ async function inspect(context, page, origin) {
     await shot(`${state}-320`);
     await page.addStyleTag({ content: 'html { filter: grayscale(1) }' });
     await shot(`${state}-greyscale`);
-    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+    await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'no-preference' });
     await page.reload();
-    assert(await page.evaluate(() => matchMedia('(forced-colors: active)').matches && matchMedia('(prefers-reduced-motion: reduce)').matches));
+    assert(await page.evaluate(() => matchMedia('(forced-colors: active)').matches));
     await shot(`${state}-forced-colors`);
     await keyboard(`${state}-forced-colors`, tabs);
-    assert(await page.evaluate(() => !window.routeMotionObserved && !document.getAnimations().some(a => a.playState === 'running')), `Motion under reduce: ${state}`);
+    await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'reduce' });
+    await page.reload();
+    assert(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches && !window.routeMotionObserved && !document.getAnimations().some(a => a.playState === 'running')), `Motion under reduce: ${state}`);
     await page.emulateMedia({ forcedColors: null, reducedMotion: null });
   }
 }
