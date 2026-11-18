@@ -30,7 +30,7 @@ export function producer(fetch, verifyParts = async () => parts, db = env.DB, qu
 export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}`, declaredSize } = {}) {
   const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
-  await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", owner).run();
   // The pre-receipt migration test seeds before declared_size exists.
   await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state${declaredSize === undefined ? '' : ', declared_size'})
     VALUES (CAST(? AS TEXT), ?, ?, 'created'${declaredSize === undefined ? '' : ', ?'})`,

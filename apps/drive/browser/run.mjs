@@ -1129,12 +1129,16 @@ try {
     const name = 'a-very-long-file-name-without-breaks-to-check-reflow.txt';
     const longTrigger = actionsFor(name);
     const facts = detailsFor(name);
-    await page.goto(`${inlineUrl}&missing-details`);
-    await longTrigger.press('Enter');
-    assert.equal(await item('Download').count(), 1);
-    await item('Details').click();
-    const rowDate = await page.getByRole('link', { name, exact: true }).evaluate(el => el.closest('tr, li').querySelector('time').textContent);
-    assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', rowDate]);
+    for (const open of [() => longTrigger.press('Enter'), () => longTrigger.click()]) {
+      await page.goto(`${inlineUrl}&missing-details`);
+      await open();
+      assert.equal(await item('Download').count(), 1);
+      await item('Details').click();
+      assert.equal(await facts.count(), 1);
+      const rowDate = await page.getByRole('link', { name, exact: true }).evaluate(el => el.closest('tr, li').querySelector('time').textContent);
+      assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', rowDate]);
+      assert.equal(await facts.getByText('Modified', { exact: true }).locator('..').locator('dd').textContent(), rowDate);
+    }
     await page.goto(`${inlineUrl}&whitespace`);
     await openDetails(page.locator('[data-action-row="tab"] button:visible'));
     assert.equal(await detailsFor('whitespace-only name').locator('dd[dir]').textContent(), '\t');
@@ -1144,8 +1148,10 @@ try {
     assert.equal(await page.getByRole('menuitem').count(), 1);
     await item('Details').click();
     assert.deepEqual(await detailsFor('Archive').locator('dd').allTextContents(), ['Archive', '—', 'Folder', '14 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
-    await openDetails(longTrigger);
+    await longTrigger.press('Enter');
+    await item('Details').click();
     assert.deepEqual(await facts.locator('dd').allTextContents(), [name, '1.0 KB · 1,000 bytes', 'File', '12 November 2026, 09:00 UTC', '12 November 2026, 09:00 UTC']);
+    assert.equal(await facts.getByText('Uploaded', { exact: true }).count(), 1);
     assert.equal(await facts.locator('dd[dir]').evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }))), true);
     assert.equal(await page.locator('main > p').textContent(), '');
     await facts.and(focus).waitFor();
@@ -1155,7 +1161,8 @@ try {
     assert.equal(audit.violations.length, 0, JSON.stringify(audit.violations));
     await page.screenshot({ path: resolve(output, `inline-details-${width}.png`), fullPage: true });
     const outside = page.getByRole('button', { name: 'After listing' });
-    await outside.press('Escape');
+    await outside.focus();
+    await page.keyboard.press('Escape');
     assert.equal(await outside.and(focus).count(), 1);
     assert.equal(await facts.count(), 1);
     await facts.evaluate(el => el.insertAdjacentHTML('afterbegin', `<details><summary>Native summary target</summary></details>
@@ -1172,11 +1179,13 @@ try {
     await facts.press('Tab');
     await hide.and(focus).waitFor();
     await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
-    await hide.and(focus).waitFor();
+    const resizedFocus = page.locator(width > 820 ? 'ul.mobile :focus' : 'table.desktop :focus');
+    await hide.and(resizedFocus).waitFor();
     await page.keyboard.press('Escape');
     assert.equal(await facts.count(), 0);
     await longTrigger.and(focus).waitFor();
     await openDetails(longTrigger);
+    await facts.and(focus).waitFor();
     await hide.click();
     assert.equal(await facts.count(), 0);
     await longTrigger.and(focus).waitFor();

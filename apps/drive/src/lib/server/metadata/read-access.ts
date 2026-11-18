@@ -107,6 +107,36 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
   };
 }
 
+export interface SharedReadPage { entries: ReadEntry[]; nextCursor: string | null }
+const sharedPageSize = 100;
+
+/** Server-only. List explicit grant roots in binary ID order, not inherited descendants. */
+export function createSharedReadAccess(db: { withSession(constraint: 'first-primary'): Database }) {
+  return {
+    async listShared(token: string, afterId: string | null = null): Promise<SharedReadPage> {
+      const hash = await sessionHash(token);
+      if (!hash) return { entries: [], nextCursor: null };
+      if (afterId !== null && typeof afterId !== 'string') throw new TypeError('Invalid shared page cursor');
+      // Bind the stored ID verbatim; it need not be formatted like a UUID.
+      // The cursor is only a seek boundary; every page reads live authorization
+      // on the primary. The recipient index carries entry_id as its PK suffix.
+      const { results } = await db.withSession('first-primary').prepare(`
+        SELECT e.id, e.name, e.kind FROM drive_read_grants g INDEXED BY drive_read_grants_recipient
+        JOIN drive_entries e ON e.id = g.entry_id
+        JOIN drive_principals owner ON owner.id = e.owner_id AND owner.status = 'active'
+        WHERE g.recipient_id = (
+          SELECT reader.id FROM drive_sessions s
+          JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active' AND reader.role = 'member'
+          WHERE s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        ) AND g.entry_id > ? AND e.owner_id != g.recipient_id
+        ORDER BY g.entry_id LIMIT ${sharedPageSize + 1}`)
+        .bind(hash, afterId ?? '').all<ReadEntry>();
+      const entries = results.slice(0, sharedPageSize);
+      return { entries, nextCursor: results.length > sharedPageSize ? entries[sharedPageSize - 1].id : null };
+    }
+  };
+}
+
 // Listing and entry lookup never expose a storage reference.
 export class ReadAccess {
   constructor(private readonly db: Database) {}
