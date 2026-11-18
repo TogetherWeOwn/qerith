@@ -968,6 +968,7 @@ try {
       await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
       await second.locator('button[aria-label="Actions for Archive"]:visible').click();
       assert.equal(await page.getByRole('menu').count(), 1);
+      await page.waitForFunction(() => document.activeElement?.matches('[role="menuitem"]'));
       const beforeResize = await second.evaluate(el => ({
         active: document.activeElement?.outerHTML.slice(0, 500),
         activeInListing: el.contains(document.activeElement),
@@ -990,6 +991,26 @@ try {
         })), { from, to, beforeResize });
         throw error;
       }
+      assert.equal(await page.getByRole('menu').count(), 0);
+    }
+    for (const [from, to, selector] of [[500, 1000, 'table.desktop'], [1000, 500, 'ul.mobile']]) {
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
+      await second.evaluate((el, width) => {
+        delete el.dataset.resizedDuringOpening;
+        const original = HTMLDialogElement.prototype.showPopover;
+        HTMLDialogElement.prototype.showPopover = function () {
+          delete HTMLDialogElement.prototype.showPopover;
+          el.dataset.resizedDuringOpening = 'true';
+          el.parentElement.style.width = `${width}px`;
+          return original.call(this);
+        };
+      }, to);
+      await second.locator('button[aria-label="Actions for Archive"]:visible').click();
+      assert.equal(await second.getAttribute('data-resized-during-opening'), 'true');
+      await page.waitForFunction(({ selector }) => {
+        const active = document.activeElement;
+        return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
+      }, { selector });
       assert.equal(await page.getByRole('menu').count(), 0);
     }
     await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
