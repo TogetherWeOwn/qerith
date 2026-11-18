@@ -1252,6 +1252,24 @@ try {
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
     console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
 
+    await page.addInitScript(() => {
+      const describe = node => {
+        if (!(node instanceof Element)) return node === document ? 'document' : String(node);
+        const name = node.getAttribute('aria-label') || (node.matches('[role="menuitem"]') ? node.textContent.trim() : '');
+        const layout = node.closest('table, ul');
+        return [node.localName, node.getAttribute('role'), name, layout?.className].filter(Boolean).join(' ');
+      };
+      const events = [];
+      window.menuFocusTrace = events;
+      for (const type of ['keydown', 'focusin', 'focusout', 'scroll', 'resize', 'beforetoggle', 'toggle']) {
+        window.addEventListener(type, event => {
+          const detail = event.key ?? event.newState;
+          events.push([Math.round(performance.now()), type, detail, describe(event.target), describe(document.activeElement),
+            type === 'beforetoggle' && detail === 'closed' ? new Error().stack : undefined]);
+          if (events.length > 32) events.shift();
+        }, { capture: true, passive: true });
+      }
+    });
     const inlineUrl = `${origin}/?listing&actions&inline`;
     await page.goto(`${inlineUrl}&two-lists`);
     const [first, second] = await page.locator('.listing').all();
@@ -1296,7 +1314,12 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await download.waitFor({ timeout: 5000 });
+          try {
+            await download.waitFor({ timeout: 5000 });
+          } catch (error) {
+            console.error('Listing menu focus trace:', { inline, from, to, events: await page.evaluate(() => window.menuFocusTrace) });
+            throw error;
+          }
           await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
