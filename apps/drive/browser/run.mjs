@@ -1048,7 +1048,7 @@ try {
       assert.equal(await page.getByRole('menu').count(), 0);
     }
     await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
-    await page.locator('[data-row-id="tab"] button:visible').click();
+    await page.locator('[data-action-row="tab"] button:visible').click();
     await page.getByRole('menuitem', { name: 'Details' }).click();
     assert.equal(await page.getByRole('group', { name: 'Details for whitespace-only name' }).count(), 1);
     await context.close();
