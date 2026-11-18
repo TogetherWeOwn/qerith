@@ -68,9 +68,11 @@
 
   function close(restore = false) {
     ++opening;
-    window.removeEventListener('scroll', onScroll, true);
-    window.removeEventListener('pointerdown', outside);
-    window.removeEventListener('resize', onResize);
+    if (open) {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('pointerdown', outside);
+      window.removeEventListener('resize', onResize);
+    }
     if (layer?.open) layer.close();
     else if (layer?.matches(':popover-open')) layer.hidePopover();
     open = false;
@@ -100,7 +102,7 @@
   }
 
   function outside(event: PointerEvent) {
-    if (open && !layer.contains(event.target as Node) && !trigger.contains(event.target as Node)) close();
+    if (open && layer && !layer.contains(event.target as Node) && !trigger.contains(event.target as Node)) close();
   }
 
   function backdropClick(event: MouseEvent) {
