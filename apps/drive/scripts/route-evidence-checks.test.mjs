@@ -22,6 +22,11 @@ test('rejects drift and non-registry specs without resolving dependencies', () =
   }];
   const [manifest, lock] = fixture('1.2.3');
   verifyManifest(manifest, lock);
+  const [unversioned, unversionedLock] = fixture('1.2.3');
+  delete unversioned.version;
+  delete unversionedLock.packages[''].version;
+  verifyManifest({ ...unversioned, private: true }, unversionedLock);
+  assert.throws(() => verifyManifest(unversioned, lock), /Manifest\/lock drift: version/);
   assert.throws(() => verifyManifest({ ...manifest, dependencies: { fixturedep: '2.0.0' } }, lock), /Manifest\/lock drift/);
   assert.throws(() => verifyManifest({ ...manifest, overrides: {} }, lock), /Unsupported projection/);
   assert.throws(() => verifyManifest({}, { lockfileVersion: 1, packages: { '': [] } }), /Unsupported projection/);

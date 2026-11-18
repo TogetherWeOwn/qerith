@@ -8,7 +8,8 @@ const isRecord = (value) => value !== null && typeof value === 'object' && !Arra
 export function verifyManifest(manifest, lock) {
   const root = lock?.packages?.[''];
   assert(lock?.lockfileVersion === 3 && isRecord(lock.packages) && isRecord(root) && isRecord(manifest) &&
-    typeof root.name === 'string' && root.name && typeof root.version === 'string' && root.version &&
+    typeof root.name === 'string' && root.name &&
+    (root.version === undefined || (typeof root.version === 'string' && root.version)) &&
     Object.keys(root).every((key) => lockedFields.includes(key)) &&
     Object.keys(manifest).every((key) => manifestFields.includes(key)),
     'Unsupported projection manifest or lock root');
