@@ -22,20 +22,27 @@ const buildAdapter = {
     writeFileSync(configPath, JSON.stringify(config));
     try {
       await cloudflare.adapt(builder);
-      // Worker-first still lets the adapter serve assets before the app hook.
-      // Deny its request-time asset fetches until asset access is integrated.
+      // Both the adapter and SvelteKit can answer asset requests before the app hook.
+      // Deny the generated namespace (including env.js) and direct asset fetches.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
 
-const unavailableAssets = {
-  fetch: () => new Response('Service unavailable', {
-    status: 503,
-    headers: { 'cache-control': 'no-store' }
-  })
-};
+const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
+const unavailable = () => new Response('Service unavailable', {
+  status: 503,
+  headers: { 'cache-control': 'no-store' }
+});
+const unavailableAssets = { fetch: unavailable };
 
 export default {
   fetch(request, env, ctx) {
+    let pathname;
+    try {
+      pathname = decodeURIComponent(new URL(request.url).pathname);
+    } catch {
+      return unavailable();
+    }
+    if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
     return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
   }
 };

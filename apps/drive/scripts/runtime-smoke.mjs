@@ -46,8 +46,11 @@ const unavailable = [['/', 503, 'Service unavailable'], [asset, 503, 'Service un
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   await exercise(['--config', config], unavailable);
 }
-await exercise([`${root}/_worker.js`, '--config', 'wrangler.build.jsonc'], unavailable);
-console.log(`Generated Worker: / and ${asset} returned 503 with Cache-Control: no-store`);
+const generatedUnavailable = [...unavailable, ...['/_app/env.js', '/_app/%65nv.js'].map(
+  (path) => [path, 503, 'Service unavailable']
+)];
+await exercise([`${root}/_worker.js`, '--config', 'wrangler.build.jsonc'], generatedUnavailable);
+console.log(`Generated Worker: ${generatedUnavailable.map(([path]) => path).join(', ')} returned 503 with Cache-Control: no-store`);
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);
