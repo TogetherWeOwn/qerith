@@ -25,8 +25,11 @@ export function allowsOrigin(request: Request, origin: string): boolean {
 }
 
 function readSessionCookie(request: Request): string | null {
+  const header = request.headers.get('cookie');
+  // A comma may be a joined Cookie field, never part of a cookie-pair.
+  if (header === null || /[^\t\x20-\x7e]|,/.test(header)) return null;
   let token: string | null = null;
-  for (const cookie of (request.headers.get('cookie') ?? '').split(';')) {
+  for (const cookie of header.split(';')) {
     const pair = cookie.trimStart();
     const equals = pair.indexOf('=');
     const name = equals === -1 ? pair : pair.slice(0, equals);

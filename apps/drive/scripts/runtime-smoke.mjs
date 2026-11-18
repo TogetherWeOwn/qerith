@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 
 async function exercise(args, assertions) {
@@ -43,12 +43,17 @@ async function exercise(args, assertions) {
 async function exercisePrivateBoundary(main) {
   const origin = 'https://drive.example.test';
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
-  const harness = createTestHarness({ workers: [{ config: {
-    ...config, main,
-    vars: { DRIVE_ORIGIN: origin },
+  await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
+  const configPath = resolve(join(fixture.path, 'wrangler.json'));
+  await writeFile(configPath, JSON.stringify({
+    ...config,
+    main: resolve(main),
+    assets: { ...config.assets, directory: resolve(config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'drive-smoke', database_id: '00000000-0000-4000-8000-000000000001' }]
-  } }] });
+  }));
+  const harness = createTestHarness({ workers: [{ configPath, vars: { DRIVE_ORIGIN: origin } }] });
   try {
+    await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
     for (const name of ['0001_identity.sql', '0009_sessions.sql']) {
@@ -71,7 +76,7 @@ async function exercisePrivateBoundary(main) {
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
   } finally {
-    await harness.dispose();
+    await harness.close();
   }
 }
 

@@ -6,12 +6,12 @@ const origin = 'https://example.test';
 const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
-function request(url: string, init?: RequestInit, configuredOrigin = origin, broken = false) {
+function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable') {
   let lookups = 0;
   let resolved = false;
-  const env = { DRIVE_ORIGIN: configuredOrigin, DB: { prepare: () => {
+  const env = { DRIVE_ORIGIN: configuredOrigin, DB: fault === 'unbound' ? undefined : { prepare: () => {
     lookups++;
-    if (broken) throw new Error('database unavailable');
+    if (fault === 'unavailable') throw new Error('database unavailable');
     return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
   } } };
   const event = { request: new Request(url, init), locals: {} };
@@ -54,7 +54,8 @@ test('wrong destination and unsafe methods without the exact Origin are denied b
 test('absent, malformed and ambiguous session cookies never resolve a route', async () => {
   const spaced = `__Host-drive-session \t= ${token}`;
   for (const value of ['', `${cookie}%00`, `${cookie}; ${cookie}`, `${cookie}; ${spaced}`,
-    `${spaced}; ${cookie}`, spaced, `drive-session=${token}`]) {
+    `${spaced}; ${cookie}`, spaced, `drive-session=${token}`, `${cookie}; pref=1, ${cookie}`,
+    `pref=1;\xA0${cookie}`]) {
     const result = await request(`${origin}/private`, { headers: { cookie: value } });
     assert.equal(result.response.status, 401);
     assert.equal(result.lookups, 0);
@@ -75,8 +76,15 @@ test('same-origin authenticated requests resolve with a private, non-cacheable r
   }
 });
 
+test('missing database binding fails closed even with a valid configured origin', async () => {
+  const result = await request(`${origin}/private`, { headers: { cookie } }, origin, 'unbound');
+  assert.equal(result.response.status, 503);
+  assert.equal(result.lookups, 0);
+  assert.equal(result.resolved, false);
+});
+
 test('database failure is unavailable and never reaches the private route', async () => {
-  const result = await request(`${origin}/private`, { headers: { cookie } }, origin, true);
+  const result = await request(`${origin}/private`, { headers: { cookie } }, origin, 'unavailable');
   assert.equal(result.response.status, 503);
   assert.equal(await result.response.text(), '');
   assert.equal(result.resolved, false);
