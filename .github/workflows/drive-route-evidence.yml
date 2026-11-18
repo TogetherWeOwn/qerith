@@ -28,10 +28,12 @@ jobs:
     env:
       HARNESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       SOURCE_SHA: ${{ inputs.source_sha }}
-      EVIDENCE: ${{ runner.temp }}/drive-route-evidence
-      GUIDEPUP_SCREEN_READERS_PATH: ${{ runner.temp }}/guidepup
-      FIREFOX_EXE: ${{ runner.temp }}/pw-firefox/firefox/firefox.exe
     steps:
+      - name: Set ephemeral job paths
+        run: |
+          "EVIDENCE=$env:RUNNER_TEMP/drive-route-evidence" >> $env:GITHUB_ENV
+          "GUIDEPUP_SCREEN_READERS_PATH=$env:RUNNER_TEMP/guidepup" >> $env:GITHUB_ENV
+          "FIREFOX_EXE=$env:RUNNER_TEMP/pw-firefox/firefox/firefox.exe" >> $env:GITHUB_ENV
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.HARNESS_SHA }}
