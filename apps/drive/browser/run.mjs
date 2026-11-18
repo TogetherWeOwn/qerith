@@ -680,7 +680,7 @@ try {
       const folder = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Archive' }) });
       assert.equal((await folder.locator('.details').textContent()).trim(), 'Folder · 14 Nov');
       const row = container.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Résumé 2025.pdf' }) });
-      assert.match(await row.locator('.details').textContent(), /^PDF\s*·/);
+      assert.equal((await row.locator('.details').textContent()).trim(), 'PDF · 5.4 MB · 13 Nov');
     }
     assert.equal(await container.locator('data').count(), 2);
     assert.equal(await container.locator('data[value="1000"]').textContent(), '1.0 KB');
@@ -717,6 +717,11 @@ try {
       await page.screenshot({ path: resolve(output, `${size}-reduced-motion.png`) });
       await page.emulateMedia({ forcedColors: 'active' });
       assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+      const glyphColours = await container.locator('.name svg').first().evaluate(el => ({
+        stroke: getComputedStyle(el).stroke,
+        canvasText: getComputedStyle(document.body).color
+      }));
+      assert.equal(glyphColours.stroke, glyphColours.canvasText, `Forced-colours glyph stroke at ${size}`);
       const link = container.getByRole('link', { name: 'Archive' });
       await link.focus();
       assert.equal(await link.evaluate(el => el === document.activeElement), true);
