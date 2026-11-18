@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,165 @@ import { chromium } from 'playwright';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
+
+const filenameCases = [
+  ['unicode', 'áááááááááááá👩‍👩‍👧‍👦.txt'],
+  ['rtl', 'تقرير-الميزانية-السنوية-النهائية.pdf'],
+  ['invoice', 'invoice-february.pdf'],
+  ['accented-long', 'Résumé-budget-annuel-version-finale.pdf'],
+  ['emoji-modifier', 'annual-budget-👍🏽-final-report.pdf'],
+  ['emoji-flag', 'annual-budget-🇺🇸-final-report.pdf'],
+  ['accented-terminal', 'budget-annuel-résumé.pdf'],
+  ['emoji-terminal', 'annual-budget-👍🏽.pdf'],
+  ['decomposed', 'Résumé-café-final-report.pdf'],
+  ['accented-terminal-long', 'budget-annuel-version-finale-résumé.pdf'],
+  ['emoji-terminal-long', 'annual-budget-version-final-report-👍🏽.pdf'],
+  ['decomposed-long', 'Résumé-café-version-finale-annual-report.pdf'],
+  ['tatweel', 'ب'.repeat(10) + 'ـ' + 'ب'.repeat(5) + '.pdf'],
+  ['mixed-bidi', 'تقرير-annual-budget.pdf'],
+  ['bidi-control', 'annual-' + String.fromCodePoint(0x202e) + 'budget-report.pdf'],
+  ['bidi-digits', 'annual-١٢٣٤٥٦٧٨٩-report.pdf'],
+  ['bidi-punctuation', 'annual-־budget-report.pdf'],
+  ['bidi-suffix', 'report.' + 'ב'.repeat(20)],
+  ['khmer', 'ក'.repeat(10) + 'ក្' + 'ក'.repeat(5) + '.pdf'],
+  ['kannada', 'ಕ'.repeat(10) + 'ಕ್' + 'ಕ'.repeat(5) + '.pdf'],
+  ['wide-suffix', 'abcdefghijklmnop.' + '界'.repeat(15)],
+  ['zwj-modifier', 'annual-👩🏽‍💻-final-report.pdf'],
+  ['accent-dot', 'resume-café.pdf'],
+  ['ascii-255', 'a'.repeat(251) + '.txt'],
+  ['cjk', '年度予算報告書'.repeat(4) + '.pdf'],
+  ['edge-spaces', '  leading  and trailing  '],
+  ['only-spaces', '   ']
+];
+
+async function assertWhitespaceName(link, name) {
+  const nodes = await link.evaluate(el => ({
+    firstType: el.firstChild?.nodeType,
+    firstText: el.firstChild?.textContent,
+    annotation: el.querySelector('span')?.textContent
+  }));
+  assert.equal(nodes.firstType, 3, 'Stored filename must be a text node');
+  assert.equal(nodes.firstText, name, 'Stored filename must be preserved exactly');
+  assert.equal(nodes.annotation, '(Whitespace-only name)');
+  assert.equal(await link.textContent(), name + '(Whitespace-only name)');
+}
+
+function observeFontRequests(page) {
+  const requests = [];
+  page.on('response', response => {
+    if (response.request().resourceType() === 'font' && requests.length < 32) requests.push({ url: response.url(), status: response.status() });
+  });
+  page.on('requestfailed', request => {
+    if (request.resourceType() === 'font' && requests.length < 32) requests.push({ url: request.url(), failure: request.failure()?.errorText });
+  });
+  return requests;
+}
+
+async function captureVisibilityFailure(page, link, context) {
+  const layout = await link.evaluate(el => {
+    const rect = r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height });
+    const describe = node => {
+      const s = getComputedStyle(node);
+      return { tag: node.tagName, className: typeof node.className === 'string' ? node.className : '', bounds: rect(node.getBoundingClientRect()),
+        overflowX: s.overflowX, overflowY: s.overflowY, clipPath: s.clipPath, lineClamp: s.webkitLineClamp,
+        whiteSpace: s.whiteSpace, overflowWrap: s.overflowWrap, wordBreak: s.wordBreak, unicodeBidi: s.unicodeBidi,
+        textOverflow: s.textOverflow, fontFamily: s.fontFamily, fontSize: s.fontSize, fontWeight: s.fontWeight,
+        fontStretch: s.fontStretch, lineHeight: s.lineHeight, zoom: s.zoom, transform: s.transform };
+    };
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const rects = [...range.getClientRects()].map(rect);
+    const anchor = describe(el);
+    const row = describe(el.closest('li, tr'));
+    const chain = [];
+    for (let node = el.parentElement; node; node = node.parentElement) chain.push(describe(node));
+    const deltas = (r, box) => ({ left: r.left - box.left, right: box.right - r.right, top: r.top - box.top, bottom: box.bottom - r.bottom });
+    const fails = edges => Object.fromEntries(Object.entries(edges).map(([edge, delta]) => [edge, delta < -1]));
+    const checks = rects.map(r => ({ anchor: { edges: deltas(r, anchor.bounds), failed: fails(deltas(r, anchor.bounds)) },
+      row: { edges: deltas(r, row.bounds), failed: fails(deltas(r, row.bounds)) },
+      ancestors: chain.map(node => {
+        const edges = deltas(r, node.bounds);
+        const clipped = ['hidden', 'clip', 'auto', 'scroll'];
+        return { tag: node.tag, className: node.className, edges,
+          failed: { left: clipped.includes(node.overflowX) && edges.left < -1, right: clipped.includes(node.overflowX) && edges.right < -1,
+            top: clipped.includes(node.overflowY) && edges.top < -1, bottom: clipped.includes(node.overflowY) && edges.bottom < -1,
+            clipPath: node.clipPath !== 'none', lineClamp: !['none', ''].includes(node.lineClamp) } };
+      }) }));
+    const cssExpected = { whiteSpace: 'break-spaces', overflowWrap: 'anywhere', wordBreak: 'normal', unicodeBidi: 'plaintext',
+      textOverflow: 'clip', overflowX: 'visible', overflowY: 'visible' };
+    const failedCss = Object.fromEntries(Object.entries(cssExpected).filter(([key, value]) => anchor[key] !== value));
+    const text = el.textContent;
+    return { nodeType: el.firstChild?.nodeType, text, codePoints: [...text].map(c => `U+${c.codePointAt(0).toString(16).toUpperCase()}`),
+      anchor, row, chain, rects, checks, failedCss, failedNodeType: el.firstChild?.nodeType !== Node.TEXT_NODE,
+      failedLineClamp: !['none', ''].includes(anchor.lineClamp), failedEmptyRange: !rects.length, tolerance: 1,
+      viewport: { innerWidth, innerHeight, clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
+        dpr: devicePixelRatio, visualScale: visualViewport?.scale },
+      fonts: [...document.fonts].map(f => ({ family: f.family, style: f.style, weight: f.weight, stretch: f.stretch, unicodeRange: f.unicodeRange, display: f.display, status: f.status })) };
+  });
+  const fonts = {};
+  let session;
+  try {
+    session = await page.context().newCDPSession(page);
+    await session.send('DOM.enable');
+    await session.send('CSS.enable');
+    const { root } = await session.send('DOM.getDocument');
+    const anchorSelector = `${context.selector} a[data-item-id="${context.id}"]`;
+    const rowSelector = `${context.selector} ${context.selector === 'table.desktop' ? 'tr' : 'li'}:has(a[data-item-id="${context.id}"])`;
+    for (const [label, selector] of Object.entries({ anchor: anchorSelector, row: rowSelector, header: `${context.selector} th`, data: `${rowSelector} td:not(:first-child)` })) {
+      try {
+        const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+        fonts[label] = nodeId ? await session.send('CSS.getPlatformFontsForNode', { nodeId }) : { unavailable: 'node not found' };
+      } catch (error) { fonts[label] = { unavailable: String(error) }; }
+    }
+  } catch (error) { fonts.unavailable = String(error); }
+  finally { if (session) await session.detach().catch(() => {}); }
+  console.error('VISIBILITY_DIAGNOSTIC', JSON.stringify({ context, layout, fonts, fontStateTiming: 'post-failure; font selection may race' }));
+}
+
+async function assertFullFilenames(page, selector, context = {}) {
+  for (const [id, name] of filenameCases) {
+    const link = page.locator(`${selector} a[data-item-id="${id}"]`);
+    const label = name.trim() ? name : name + ' (Whitespace-only name)';
+    assert.equal(await link.getAttribute('aria-label'), label);
+    assert.equal(await page.getByRole('link', { name: label, exact: true }).count(), 1, `${selector} ${id}: computed accessible name`);
+    assert.equal(await link.getAttribute('href'), `#${id}`);
+    if (name.trim()) assert.equal(await link.textContent(), name);
+    else await assertWhitespaceName(link, name);
+    try {
+      assert.equal(await link.evaluate(el => {
+      const nameNode = el.firstChild;
+      if (nameNode?.nodeType !== Node.TEXT_NODE) return false;
+      const style = getComputedStyle(el);
+      if (style.whiteSpace !== 'break-spaces' || style.overflowWrap !== 'anywhere' ||
+          style.wordBreak !== 'normal' || style.unicodeBidi !== 'plaintext' ||
+          style.textOverflow !== 'clip' || style.overflowX !== 'visible' || style.overflowY !== 'visible' ||
+          !['none', ''].includes(style.webkitLineClamp)) return false;
+      const bounds = el.getBoundingClientRect();
+      const row = el.closest('li, tr').getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rects = [...range.getClientRects()];
+      if (!rects.length) return false;
+      return rects.every(rect => {
+        if (rect.left < bounds.left - 1 || rect.right > bounds.right + 1 || rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1 ||
+            rect.left < row.left - 1 || rect.right > row.right + 1 || rect.top < row.top - 1 || rect.bottom > row.bottom + 1) return false;
+        for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const clip = ancestor.getBoundingClientRect();
+          if (style.clipPath !== 'none' || !['none', ''].includes(style.webkitLineClamp)) return false;
+          if (['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowX) && (rect.left < clip.left - 1 || rect.right > clip.right + 1)) return false;
+          if (['hidden', 'clip', 'auto', 'scroll'].includes(style.overflowY) && (rect.top < clip.top - 1 || rect.bottom > clip.bottom + 1)) return false;
+        }
+        return true;
+      });
+      }), true, `${selector} ${id}: full text must remain visible in one text run`);
+    } catch (error) {
+      try { await captureVisibilityFailure(page, link, { ...context, selector, id, expectedText: name }); }
+      catch (diagnosticError) { console.error('VISIBILITY_DIAGNOSTIC_UNAVAILABLE', String(diagnosticError)); }
+      throw error;
+    }
+  }
+}
 
 async function assertListingFonts(page, responses, origin) {
   const faces = await page.evaluate(async () => (await window.fixtureFonts).map(({ url, face }) => ({
@@ -499,6 +659,9 @@ try {
     assert.equal(await container.getByRole('link').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).getAttribute('href'), '#archive');
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).getAttribute('href'), '#resume');
+    const longName = container.getByRole('link', { name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt' });
+    assert.equal(await longName.textContent(), 'a-very-long-file-name-without-breaks-to-check-reflow.txt');
+    assert.equal(await longName.evaluate(el => getComputedStyle(el).textOverflow), 'clip');
     assert.equal(await container.locator('time').count(), 3);
     assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
@@ -562,6 +725,134 @@ try {
     }
     await context.close();
   }
+  for (const width of [1280, 390, 320]) for (const segmenter of [true, false]) {
+    const height = width === 1280 ? 800 : 844;
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    if (!segmenter) await context.addInitScript(() => { Intl.Segmenter = undefined; });
+    const page = await context.newPage();
+    const fontRequests = observeFontRequests(page);
+    await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+    const selector = width > 820 ? 'table.desktop' : 'ul.mobile';
+    await assertFullFilenames(page, selector, { width, height, segmenter, mode: 'baseline', fontRequests });
+    assert.equal(await page.locator(`${selector} a[data-item-id="rtl"]`).evaluate(el => getComputedStyle(el).direction), 'rtl');
+    const alignment = await page.locator(`${selector} a[data-item-id="ascii-255"]`).evaluate(el => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const first = range.getClientRects()[0];
+      const glyph = el.parentElement.querySelector('svg').getBoundingClientRect();
+      const row = el.closest('li, tr');
+      const cells = [...row.querySelectorAll(':scope > td:not(:first-child)')].map(cell => {
+        const text = document.createRange();
+        text.selectNodeContents(cell);
+        return text.getClientRects()[0];
+      });
+      return {
+        glyphDelta: Math.abs((glyph.top + glyph.bottom - first.top - first.bottom) / 2),
+        cellDeltas: cells.map(rect => Math.abs((rect.top + rect.bottom - first.top - first.bottom) / 2)),
+        lines: range.getClientRects().length,
+        rowHeight: row.getBoundingClientRect().height,
+        linkHeight: el.getBoundingClientRect().height
+      };
+    });
+    assert(alignment.lines > 1 && alignment.rowHeight >= alignment.linkHeight, `Long name must expand its row: ${JSON.stringify(alignment)}`);
+    assert(alignment.glyphDelta <= 6 && alignment.cellDeltas.every(delta => delta <= 8), `First-line alignment: ${JSON.stringify(alignment)}`);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${segmenter ? 'segmenter' : 'fallback'}.png`), fullPage: true });
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-unicode-${width}-${segmenter ? 'segmenter' : 'fallback'}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for unicode ${width}: ${JSON.stringify(results.violations)}`);
+    if (segmenter) {
+      for (const [mode, css] of [
+        ['css-zoom-200', 'html { zoom: 2; }'],
+        ['css-zoom-400', 'html { zoom: 4; }'],
+        ['text-spacing', '* { line-height: 1.5 !important; letter-spacing: .12em !important; word-spacing: .16em !important; }'],
+        ['font-fallback', '* { font-family: sans-serif !important; }']
+      ]) {
+        const override = await page.addStyleTag({ content: css });
+        await page.evaluate(() => document.fonts.ready);
+        const layout = await page.evaluate(() => ({
+          listingWidth: document.querySelector('.listing').getBoundingClientRect().width,
+          table: getComputedStyle(document.querySelector('table.desktop')).display,
+          list: getComputedStyle(document.querySelector('ul.mobile')).display,
+        }));
+        if (width === 1280) {
+          const compact = mode.startsWith('css-zoom-');
+          assert.equal(layout.table === 'none' && layout.list !== 'none', compact, `${mode}: unexpected listing layout ${JSON.stringify(layout)}`);
+          if (!compact) assert(layout.table !== 'none' && layout.list === 'none', `${mode}: desktop table required ${JSON.stringify(layout)}`);
+          if (compact) {
+            const sortedPage = await context.newPage();
+            try {
+              await sortedPage.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
+              await sortedPage.addStyleTag({ content: css });
+              const sortedLayout = await sortedPage.evaluate(() => ({
+                listingWidth: document.querySelector('.listing').getBoundingClientRect().width,
+                table: getComputedStyle(document.querySelector('table.desktop')).display,
+                list: getComputedStyle(document.querySelector('ul.mobile')).display,
+                sort: getComputedStyle(document.querySelector('.compact-sort')).display
+              }));
+              assert(sortedLayout.table === 'none' && sortedLayout.list !== 'none' && sortedLayout.sort !== 'none', `${mode}: compact sort missing ${JSON.stringify(sortedLayout)}`);
+            } finally { await sortedPage.close(); }
+          }
+        }
+        const displayedSelector = layout.table === 'none' ? 'ul.mobile' : 'table.desktop';
+        await assertFullFilenames(page, displayedSelector, { width, height, segmenter, mode, fontRequests, layout });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${mode}: horizontal page overflow`);
+        await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${mode}.png`), fullPage: true });
+        await override.evaluate(el => el.remove());
+      }
+    }
+    await context.close();
+  }
+  // Chrome's tabs API changes page zoom, unlike CSS zoom or pinch scaling.
+  const zoomTemp = await mkdtemp(resolve(tmpdir(), 'drive-page-zoom-'));
+  try {
+    const extension = resolve(zoomTemp, 'extension');
+    await mkdir(extension);
+    await writeFile(resolve(extension, 'manifest.json'), JSON.stringify({
+      manifest_version: 3, name: 'Page zoom evidence', version: '1.0',
+      permissions: ['tabs'], background: { service_worker: 'worker.js' }
+    }));
+    await writeFile(resolve(extension, 'worker.js'), 'chrome.runtime.onInstalled.addListener(() => {});');
+    for (const factor of [2, 4]) {
+      const context = await chromium.launchPersistentContext(resolve(zoomTemp, `profile-${factor}`), {
+        channel: 'chromium', headless: true, viewport: null,
+        args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--window-size=1280,800']
+      });
+      try {
+        await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+        await context.routeWebSocket('**/*', socket => socket.close());
+        const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
+        const page = await context.newPage();
+        const fontRequests = observeFontRequests(page);
+        await page.goto(`${origin}/?listing&unicode`, { waitUntil: 'networkidle' });
+        const before = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio }));
+        const applied = await worker.evaluate(async ({ url, factor }) => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find(item => item.url === url);
+          if (!tab) throw new Error('Fixture tab not found');
+          await chrome.tabs.setZoom(tab.id, factor);
+          return chrome.tabs.getZoom(tab.id);
+        }, { url: `${origin}/?listing&unicode`, factor });
+        await page.waitForFunction(({ width, factor }) => Math.abs(innerWidth * factor - width) <= factor * 2, { width: before.width, factor });
+        await page.evaluate(() => document.fonts.ready);
+        const after = await page.evaluate(() => ({ width: innerWidth, dpr: devicePixelRatio, scrollWidth: document.documentElement.scrollWidth }));
+        assert(Math.abs(applied - factor) < 1e-6, `Page zoom factor: requested ${factor}, reported ${applied}`);
+        assert(Math.abs(after.dpr / before.dpr - factor) < 0.01, `Page zoom DPR: ${JSON.stringify({ before, after })}`);
+        assert(after.scrollWidth <= after.width, `Page zoom horizontal overflow: ${JSON.stringify(after)}`);
+        await assertFullFilenames(page, after.width > 820 ? 'table.desktop' : 'ul.mobile', { width: after.width, height: 'measured on failure', segmenter: true, mode: `page-zoom-${factor * 100}`, fontRequests });
+        await page.screenshot({ path: resolve(output, `listing-unicode-page-zoom-${factor * 100}.png`), fullPage: true });
+        await writeFile(resolve(output, `listing-unicode-page-zoom-${factor * 100}.json`), JSON.stringify({ factor: applied, before, after }, null, 2));
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await rm(zoomTemp, { recursive: true, force: true });
+  }
   for (const width of [1280, 390]) {
     const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
@@ -573,7 +864,7 @@ try {
     const tab = container.locator('a[data-item-id="tab"]');
     assert.equal(await spaces.textContent(), 'report  final.txt');
     assert.equal(await spaces.evaluate(el => getComputedStyle(el).whiteSpace), 'break-spaces');
-    assert.equal(await tab.textContent(), '\t(Whitespace-only name)');
+    await assertWhitespaceName(tab, '\t');
     assert.equal(await container.getByRole('link', { name: '(Whitespace-only name)', exact: true }).count(), 1);
     const hit = await spaces.evaluate(el => {
       const style = getComputedStyle(el);

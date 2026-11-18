@@ -155,7 +155,7 @@ Where [components.md](components.md) gives a text size in px (15 px, 14 px, 13 p
 
 **Rules:**
 - **12 px floor.** No text is smaller.
-- **Headings** wrap with `text-wrap: balance` and never truncate. File names in rows truncate in the middle (components.md, "Sizes and numbers").
+- **Headings** wrap with `text-wrap: balance` and never truncate. File names in rows wrap in full and never truncate (components.md, "Sizes and numbers").
 - **Mono is data:** sizes, times, counts and labels. Uppercase only for labels of three words or fewer.
 - **Numbers that update or compare are tabular** (`font-variant-numeric: tabular-nums`).
 - **Sentence case** everywhere: headings, buttons, tags.
@@ -209,9 +209,10 @@ No drop shadows. Elevation is one ground step plus a hairline. Order: canvas →
 | `layout.rail.max` | 420px (upload tray width, K17 page width) |
 | `layout.measure.lede` / `reading` | 52 / 62 (used as `ch`: ledes, dialog width) |
 | `breakpoint.compact-max` | 820px: the one layout switch |
+| `breakpoint.list-compact-max` | 740px: the K2/K19 listing's own width at or below which it is a list (= `compact-max` − 2 × `gutter.wide`; never fires in the Drive shell above 820 px) |
 | `breakpoint.review-mobile` / `review-desktop` | 390 × 844 and 1280 × 800: the two screenshot sizes |
 
-Mobile first in CSS, desktop first in design. **One layout switch** at 820 px. No page scrolls sideways at any width from 320 px up.
+Mobile first in CSS, desktop first in design. **One layout switch** at 820 px. Listings also switch when their own width is ≤ 740 px, so a table never leaves Name without room. No page scrolls sideways at any width from 320 px up.
 
 ## 6. Motion
 
