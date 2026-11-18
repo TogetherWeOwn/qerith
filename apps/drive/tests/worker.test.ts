@@ -7,6 +7,7 @@ for (const file of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   test(`${file} routes assets through the fail-closed entrypoint`, () => {
     const config = JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'));
     assert.equal(config.main, 'src/worker.ts');
+    assert.equal(config.assets.binding, 'ASSETS');
     assert.equal(config.assets.run_worker_first, true);
   });
 }

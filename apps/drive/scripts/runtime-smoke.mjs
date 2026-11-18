@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { access } from 'node:fs/promises';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -27,6 +26,9 @@ async function exercise(args, assertions) {
       if (response.status !== status || (body && text !== body)) {
         throw new Error(`${path}: expected ${status} ${body}, got ${response.status} ${text.slice(0, 200)}`);
       }
+      if (status === 503 && response.headers.get('cache-control') !== 'no-store') {
+        throw new Error(`${path}: unavailable response must not be cached`);
+      }
     }
   } catch (error) {
     console.error(output);
@@ -38,14 +40,14 @@ async function exercise(args, assertions) {
 }
 
 const root = '.svelte-kit/cloudflare';
-const files = await readdir(root, { recursive: true, withFileTypes: true });
-const file = files.find((entry) => entry.isFile() && relative(root, entry.parentPath).startsWith('_app'));
-if (!file) throw new Error('No generated app asset found');
-const asset = `${relative(root, file.parentPath)}/${file.name}`;
+const asset = '/_app/version.json';
+await access(`${root}${asset}`);
+const unavailable = [['/', 503, 'Service unavailable'], [asset, 503, 'Service unavailable']];
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
-  await exercise(['--config', config], [['/', 503, 'Service unavailable'], [`/${asset}`, 503, 'Service unavailable']]);
+  await exercise(['--config', config], unavailable);
 }
-await exercise(['.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.build.jsonc'], [['/', 503, 'Service unavailable']]);
+await exercise([`${root}/_worker.js`, '--config', 'wrangler.build.jsonc'], unavailable);
+console.log(`Generated Worker: / and ${asset} returned 503 with Cache-Control: no-store`);
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);
