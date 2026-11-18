@@ -459,7 +459,7 @@ try {
       assert.equal(await longName.locator('.name-start').evaluate(el => getComputedStyle(el).textOverflow), 'ellipsis');
     }
     assert.equal(await container.locator('time').count(), 3);
-    assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
+    assert.equal(await container.locator('.name svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
     const tag = container.getByText('Shared', { exact: true });
@@ -622,9 +622,9 @@ try {
     const sort = width > 820 ? page.getByRole('button', { name: 'Name' }) : page.getByLabel('Sort', { exact: true });
     await sort.focus();
     await page.setViewportSize({ width: width > 820 ? 390 : 1280, height: 844 });
-    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.waitForFunction(() => document.activeElement?.matches('select[aria-label="Sort"], button.sort-button') && document.activeElement.getClientRects().length > 0);
     await page.setViewportSize({ width, height: 844 });
-    await page.waitForFunction(() => document.activeElement?.matches('select#listing-sort, button.sort-button') && document.activeElement.getClientRects().length > 0);
+    await page.waitForFunction(() => document.activeElement?.matches('select[aria-label="Sort"], button.sort-button') && document.activeElement.getClientRects().length > 0);
     await page.screenshot({ path: resolve(output, `listing-paged-${width}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] } }));
