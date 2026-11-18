@@ -14,8 +14,9 @@ export const synthetic = {
     },
     async list(_token: string, id: string, after: { name: string } | null) {
       if (id === 'denied') return null;
-      if (id !== 'populated' || after) return { entries: [], nextCursor: null };
       const file = { id: 'report', name: 'Quarterly report.pdf', kind: 'file' as const };
+      if (id !== 'populated' || after?.name === file.name) return { entries: [], nextCursor: null };
+      if (after) return null;
       return {
         entries: [{ id: 'archive', name: 'Archive notes', kind: 'folder' as const }, file],
         nextCursor: { id: file.id, name: file.name }

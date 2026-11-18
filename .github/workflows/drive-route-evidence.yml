@@ -78,6 +78,9 @@ jobs:
           if (!$profiles -or ($profiles | Where-Object { $_.Enabled -ne 'True' -or $_.DefaultInboundAction -eq 'Allow' })) {
             throw 'NVDA relay requires the hosted runner default inbound firewall protection'
           }
+          $relayAllow = Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound -Action Allow |
+            Get-NetFirewallPortFilter | Where-Object { $_.LocalPort -contains '6837' }
+          if ($relayAllow) { throw 'Explicit inbound allow rule on the NVDA fixture relay port' }
           $archives = @(
             @{ Name = 'nvda'; URL = 'https://github.com/guidepup/nvda/releases/download/0.2.1-2026.3/guidepup-nvda-0.2.1-2026.3.zip';
                SHA = '508ba38e9a48f4534bfc7fb1fa2f08f2ae10550983a53f1272abbeb50b2d2e19';
@@ -95,18 +98,18 @@ jobs:
           $nvda = Get-Item "$env:GUIDEPUP_SCREEN_READERS_PATH/nvda/all/0.2.1-2026.3/extracted/nvda.exe"
           @{ NVDA = $nvda.VersionInfo.ProductVersion; firefox = (Get-Item $env:FIREFOX_EXE).VersionInfo.ProductVersion;
              nvdaSHA256 = $archives[0].SHA; firefoxSHA256 = $archives[1].SHA } | ConvertTo-Json > "$env:EVIDENCE/tools.json"
-      - name: Install locked harness dependencies without lifecycle hooks
-        working-directory: harness/apps/drive/route-evidence
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Prepare the separate route build
-        if: github.event_name == 'workflow_dispatch'
+      - name: Verify locks and prepare the separate SvelteKit build
         working-directory: harness/apps/drive/route-evidence
         run: |
           $projection = "$env:RUNNER_TEMP/folder-route-build"
-          node project.mjs "$env:GITHUB_WORKSPACE/source" $projection
-          if ($LASTEXITCODE -ne 0) { throw 'Could not project the admitted route' }
+          $source = if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { 'harness' } else { 'source' }
+          $mode = if ($source -eq 'harness') { 'self-check' } else { 'exact-head' }
+          node project.mjs "$env:GITHUB_WORKSPACE/$source" $projection $mode
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the route projection' }
           npm ci --prefix $projection --ignore-scripts --no-audit --no-fund
-          if ($LASTEXITCODE -ne 0) { throw 'Could not install the admitted route lock' }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the verified projection lock' }
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the verified harness lock' }
           "PROJECTION=$projection" >> $env:GITHUB_ENV
       - name: Capture speech and applicable route checks
         working-directory: harness/apps/drive/route-evidence
