@@ -1,6 +1,7 @@
 export const rpID = 'example.test';
 export const origin = `https://${rpID}`;
 export const challenge = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+export const userHandle = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE';
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 const decode = (value: string) => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0));
 const join = (...parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((part) => Array.from(part)));
@@ -39,6 +40,6 @@ export async function fixture(kind: 'registration' | 'authentication', options: 
     bytes(0xa3), cborText('fmt'), cborText('packed'), cborText('authData'), cborBytes(authData),
     cborText('attStmt'), bytes(0xa2), cborText('alg'), bytes(0x26), cborText('sig'), cborBytes(signature),
   )) } };
-  const authentication = { ...common, response: { clientDataJSON: encode(clientData), authenticatorData: encode(authData), signature: encode(signature) } };
+  const authentication = { ...common, response: { clientDataJSON: encode(clientData), authenticatorData: encode(authData), signature: encode(signature), userHandle } };
   return { registration, authentication, credential: { id: encode(id), publicKey: cose, counter: 0 } };
 }

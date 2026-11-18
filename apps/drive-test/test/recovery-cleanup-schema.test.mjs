@@ -4,7 +4,7 @@ import { expect, it } from 'vitest';
 
 it('cleans old invalid recovery ceremonies and replays the full migration directory', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0012_recovery_challenge_cleanup.sql'));
-  await env.DB.exec(`INSERT INTO drive_principals VALUES ('member', 'member', 'active');
+  await env.DB.exec(`INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active');
     INSERT INTO drive_recovery_tokens VALUES ('active', 'member', printf('%064x', 1), 9999999999999, NULL, NULL);
     INSERT INTO drive_recovery_tokens VALUES ('cancelled', 'member', printf('%064x', 2), 9999999999999, 1, NULL);
     INSERT INTO drive_recovery_tokens VALUES ('expired', 'member', printf('%064x', 3), 1, NULL, NULL);

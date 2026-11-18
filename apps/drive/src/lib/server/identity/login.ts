@@ -1,5 +1,5 @@
 import type { AuthenticationResponseJSON, WebAuthnCredential } from '@simplewebauthn/server';
-import { BoundChallenges, ChallengeUnavailable } from './challenges';
+import { BoundChallenges } from './challenges';
 import { createCeremonyVerifier } from './ceremony';
 import { tokenHash } from './sessions';
 
@@ -20,7 +20,12 @@ interface CredentialRow {
   transports: string;
   generation: string;
   status: 'active' | 'revoked';
+  credential_handle: string | null;
+  principal_handle: string | null;
 }
+
+// For 32 unpadded bytes, the final base64url character has two unused bits.
+const userHandlePattern = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 
 export class PasskeyDenied extends Error {}
 export class RevokedPasskey extends Error {}
@@ -33,14 +38,8 @@ export class PasskeyLogin {
     this.#verifier = createCeremonyVerifier(rpID, origin);
   }
 
-  async issueChallenge(context: string, previous?: { context: string; challenge: string }): Promise<string> {
-    const challenges = new BoundChallenges(this.db);
-    if (previous) {
-      await challenges.consume(previous.context, 'authentication', previous.challenge).catch(error => {
-        if (!(error instanceof ChallengeUnavailable)) throw error;
-      });
-    }
-    return challenges.issue(context, 'authentication');
+  async issueChallenge(context: string, expectedChallenge?: string): Promise<string> {
+    return new BoundChallenges(this.db).issue(context, 'authentication', expectedChallenge);
   }
 
   async authenticate(context: string, challenge: string, response: AuthenticationResponseJSON | null): Promise<{ token: string; expiresAt: number }> {
@@ -48,7 +47,8 @@ export class PasskeyLogin {
     let row: CredentialRow | null = null;
     try {
       if (response) {
-        row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation, p.status
+        row = await this.db.prepare(`SELECT c.id, c.principal_id, c.public_key, c.counter, c.transports, g.generation, p.status,
+          c.webauthn_user_handle AS credential_handle, p.webauthn_user_handle AS principal_handle
           FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
           JOIN drive_login_generations g ON g.principal_id = p.id
           WHERE c.id = ?`).bind(response.id).first<CredentialRow>();
@@ -57,7 +57,11 @@ export class PasskeyLogin {
       // Even an invalid assertion or an ambiguous write needs a new challenge.
       await new BoundChallenges(this.db).consume(context, 'authentication', challenge);
     }
-    if (!row || !response) throw new PasskeyDenied('Authentication unavailable');
+    const handle = response?.response?.userHandle;
+    if (!row || !response || typeof handle !== 'string' || !userHandlePattern.test(handle) ||
+        handle !== row.credential_handle || handle !== row.principal_handle) {
+      throw new PasskeyDenied('Authentication unavailable');
+    }
     const credential: WebAuthnCredential = {
       id: row.id, publicKey: new Uint8Array(row.public_key), counter: row.counter,
       transports: JSON.parse(row.transports) as WebAuthnCredential['transports'],
@@ -79,8 +83,8 @@ export class PasskeyLogin {
         FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
         JOIN drive_login_generations g ON g.principal_id = p.id
         WHERE c.id = ? AND c.principal_id = ? AND c.public_key = ? AND c.counter = ?
-          AND p.status = 'active' AND g.generation = ?`)
-        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter, row.generation),
+          AND c.webauthn_user_handle = ? AND p.webauthn_user_handle = ? AND p.status = 'active' AND g.generation = ?`)
+        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter, handle, handle, row.generation),
       this.db.prepare(`UPDATE drive_credentials SET counter = ? WHERE id = ?
         AND EXISTS (SELECT 1 FROM drive_sessions WHERE token_hash = ?)`)
         .bind(result.authenticationInfo.newCounter, row.id, hash),

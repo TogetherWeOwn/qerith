@@ -1,10 +1,12 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
+import { BoundChallenges } from '../../drive/src/lib/server/identity/challenges.ts';
 import { readSession } from '../../drive/src/lib/server/request-auth.ts';
 import { signIn } from '../../drive/src/lib/server/sign-in.ts';
-import { fixture, origin, rpID } from '../../drive/tests/ceremony-fixture.ts';
+import { fixture, origin, rpID, userHandle } from '../../drive/tests/ceremony-fixture.ts';
 
+const otherHandle = 'A'.repeat(43);
 const authEnv = () => ({ DRIVE_ORIGIN: origin, DB: env.DB });
 const post = (step, headers = {}, body) => signIn(new Request(`${origin}/api/sign-in/${step}`, {
   method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers }, body,
@@ -17,12 +19,14 @@ async function begin(options = {}, status = 'active') {
   expect(response.status).toBe(200);
   const transaction = response.headers.get('set-cookie');
   expect(transaction).toMatch(/^__Host-drive-login=[\w.-]+; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=300$/);
-  const { challenge, rpId } = await response.json();
+  const { challenge, rpId, allowCredentials } = await response.json();
   expect(rpId).toBe(rpID);
+  expect(allowCredentials).toBeUndefined();
   const signed = await fixture('authentication', { challenge, ...options });
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('owner', 'owner', ?)").bind(status).run();
-  await env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
-    .bind(signed.credential.id, 'owner', Array.from(signed.credential.publicKey), 0, '[]').run();
+  await env.DB.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
+    VALUES ('owner', 'owner', ?, ?)`).bind(status, userHandle).run();
+  await env.DB.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
+    VALUES (?, 'owner', ?, 0, '[]', ?)`).bind(signed.credential.id, Array.from(signed.credential.publicKey), userHandle).run();
   return { cookie: transaction.split(';')[0], body: JSON.stringify(signed.authentication) };
 }
 
@@ -54,13 +58,53 @@ it('requires the browser transaction cookie and issues a hardened session only o
 
 it('replaces a live challenge without retaining its slot or clearing the replacement on verification', async () => {
   const { cookie, body } = await begin();
-  expect((await post('challenge', { cookie })).status).toBe(200);
+  const replacements = await Promise.all([post('challenge', { cookie }), post('challenge', { cookie })]);
+  expect(replacements.map(response => response.status).sort()).toEqual([200, 401]);
+  const winner = replacements.find(response => response.status === 200);
+  const loser = replacements.find(response => response.status === 401);
+  expect(loser.headers.getSetCookie()).toEqual([]);
   const denied = await post('verify', { cookie }, body);
   expect(denied.status).toBe(401);
   expect(denied.headers.getSetCookie()).toEqual([]);
   const row = await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all();
-  expect(row.results).toHaveLength(1);
+  expect(row.results).toEqual([{ challenge: (await winner.json()).challenge }]);
   expect(cookie).not.toContain(row.results[0].challenge);
+});
+
+it('reserves ceremony capacity for registration when authentication is full', async () => {
+  await begin();
+  await env.DB.prepare(`WITH RECURSIVE slots(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM slots WHERE n < 511)
+    INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
+    SELECT 'slot-' || n, 'authentication', printf('%043d', n), ? FROM slots`).bind(Date.now() + 300_000).run();
+  const refused = await post('challenge');
+  expect(refused.status).toBe(429);
+  expect(refused.headers.getSetCookie()).toEqual([]);
+  await expect(new BoundChallenges(env.DB).issue('registration-test', 'registration')).resolves.toMatch(/^[\w-]{43}$/);
+});
+
+it.each(['missing', 'malformed', 'other account', 'legacy', 'replacement'])('denies a %s user binding without revealing revocation', async state => {
+  const { cookie, body } = await begin({}, 'revoked');
+  const assertion = JSON.parse(body);
+  if (state === 'missing') delete assertion.response.userHandle;
+  if (state === 'malformed') {
+    const malformed = `${userHandle.slice(0, -1)}F`; // Nonzero padding bits.
+    await env.DB.batch(['drive_principals', 'drive_credentials'].map(table =>
+      env.DB.prepare(`UPDATE ${table} SET webauthn_user_handle = ?`).bind(malformed)));
+    assertion.response.userHandle = malformed;
+  }
+  if (state === 'other account') {
+    await env.DB.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
+      VALUES ('other', 'member', 'active', ?)`).bind(otherHandle).run();
+    assertion.response.userHandle = otherHandle;
+  }
+  if (state === 'legacy') await env.DB.exec('UPDATE drive_principals SET webauthn_user_handle = NULL');
+  if (state === 'legacy' || state === 'replacement') await env.DB.exec('UPDATE drive_credentials SET webauthn_user_handle = NULL');
+  const denied = await post('verify', { cookie }, JSON.stringify(assertion));
+  expect(denied.status).toBe(401);
+  expect(await denied.json()).toEqual({ code: 'denied' });
+  expect(denied.headers.getSetCookie()).toEqual([]);
+  expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(0);
+  expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
 });
 
 it('consumes denied attempts and distinguishes revoked proof from generic denial', async () => {

@@ -69,8 +69,8 @@ export async function signIn(
     const [context, challenge] = cookie?.split('.') ?? [];
     if (step === 'challenge') {
       const bytes = crypto.getRandomValues(new Uint8Array(32));
-      const nextContext = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-      const nextChallenge = await login.issueChallenge(nextContext, cookie ? { context, challenge } : undefined);
+      const nextContext = context ?? btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      const nextChallenge = await login.issueChallenge(nextContext, challenge);
       headers.append('set-cookie', hostCookie(transactionCookie, `${nextContext}.${nextChallenge}`, 300, 'Strict'));
       return Response.json({ challenge: nextChallenge, rpId: origin.hostname, userVerification: 'required', timeout: 300_000 }, { headers });
     }

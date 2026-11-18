@@ -12,7 +12,7 @@ async function setup() {
     DELETE FROM drive_credentials;
     DELETE FROM drive_invitations;
     DELETE FROM drive_principals;
-    INSERT INTO drive_principals VALUES ('owner', 'owner', 'active');`);
+    INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active');`);
   return { invitations: new Invitations(env.DB), enrollment: new InvitationEnrollment(env.DB, rpID, origin) };
 }
 

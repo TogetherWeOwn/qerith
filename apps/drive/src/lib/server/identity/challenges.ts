@@ -11,25 +11,33 @@ export class ChallengeUnavailable extends Error {}
 
 const lifetimeMs = 5 * 60 * 1000;
 const capacity = 1024;
+const authenticationCapacity = 512; // Reserve the remaining slots for registration.
 
 // Context must be a stable server-authenticated principal or pre-authentication
 // transaction identifier, never a request parameter or unverified identity.
 export class BoundChallenges {
   constructor(private readonly db: Database) {}
 
-  async issue(context: string, purpose: ChallengePurpose): Promise<string> {
+  async issue(context: string, purpose: ChallengePurpose, expectedChallenge?: string): Promise<string> {
     this.validate(context, purpose);
+    if (expectedChallenge !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(expectedChallenge)) throw new TypeError('Invalid challenge');
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const challenge = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
     await this.db.prepare(`DELETE FROM drive_bound_ceremonies
       WHERE expires_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)`).run();
     const inserted = await this.db.prepare(`INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
       SELECT ?, ?, ?, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?
-      WHERE (SELECT count(*) FROM drive_bound_ceremonies) < ?
+      WHERE ((SELECT count(*) FROM drive_bound_ceremonies) < ? AND
+        (? = 'registration' OR (SELECT count(*) FROM drive_bound_ceremonies WHERE purpose = 'authentication') < ?))
         OR EXISTS (SELECT 1 FROM drive_bound_ceremonies WHERE context = ? AND purpose = ?)
       ON CONFLICT (context, purpose) DO UPDATE SET challenge = excluded.challenge, expires_at = excluded.expires_at
-      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, context, purpose).first<{ challenge: string }>();
-    if (!inserted) throw new CeremonyCapacityReached('Ceremony capacity reached');
+        WHERE ? = '' OR drive_bound_ceremonies.challenge = ?
+      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, purpose, authenticationCapacity,
+        context, purpose, expectedChallenge ?? '', expectedChallenge ?? '').first<{ challenge: string }>();
+    if (!inserted) {
+      if (expectedChallenge !== undefined) throw new ChallengeUnavailable('Challenge unavailable');
+      throw new CeremonyCapacityReached('Ceremony capacity reached');
+    }
     return inserted.challenge;
   }
 
