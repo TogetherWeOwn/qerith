@@ -46,9 +46,11 @@ export class UploadPublication {
           JOIN drive_upload_completion_dispatches d ON d.operation_id = o.operation_id
           WHERE o.intent_id = drive_upload_intents.id)
         AND declared_size = ? AND upload_id IS NOT NULL
+        AND (? IS NULL OR EXISTS (SELECT 1 FROM drive_entries p WHERE p.id = ?
+          AND p.owner_id = drive_upload_intents.owner_id AND p.kind = 'folder'))
       ON CONFLICT DO NOTHING
       RETURNING object_key, upload_id, version, declared_size`)
-      .bind(intentId, principalId, version, session, principalId, intentId, size)
+      .bind(intentId, principalId, version, session, principalId, intentId, size, parentId, parentId)
       .first<{ object_key: string; upload_id: string; version: number; declared_size: number }>();
     if (!claim) return null;
     claim.version += 1;
