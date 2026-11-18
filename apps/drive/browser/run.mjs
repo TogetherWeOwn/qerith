@@ -1180,66 +1180,77 @@ try {
       }
       // Render the destination, then open and blur in a transient source layout
       // before the next frame. ResizeObserver can coalesce the two width changes.
-      await afterLayout();
-      await main.evaluate(async (el, { from, to }) => {
-        el.style.width = `${from}px`;
-        const selector = from > 740 ? 'table.desktop' : 'ul.mobile';
-        const trigger = el.querySelector(`${selector} button[aria-label="Actions for Résumé 2025.pdf"]`);
-        trigger.focus();
-        const item = await new Promise((resolve, reject) => {
-          const controller = new AbortController();
-          const timer = setTimeout(() => { controller.abort(); reject(new Error('Menu item never focused')); }, 5000);
-          el.addEventListener('focusin', event => {
-            if (!event.target.matches('[role="menuitem"]')) return;
-            clearTimeout(timer);
-            controller.abort();
-            resolve(event.target);
-          }, { signal: controller.signal });
-          trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-        });
-        item.blur();
-        if (document.activeElement !== document.body) throw new Error('Menu item did not blur to the body');
-        el.style.width = `${to}px`;
-      }, { from, to });
-      await waitForMenuClose();
-      assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Resize must not restore explicitly blurred focus');
+      for (const duringBlur of [false, true]) {
+        await afterLayout();
+        await main.evaluate(async (el, { from, to, duringBlur }) => {
+          el.style.width = `${from}px`;
+          const selector = from > 740 ? 'table.desktop' : 'ul.mobile';
+          const trigger = el.querySelector(`${selector} button[aria-label="Actions for Résumé 2025.pdf"]`);
+          trigger.focus();
+          const item = await new Promise((resolve, reject) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => { controller.abort(); reject(new Error('Menu item never focused')); }, 5000);
+            el.addEventListener('focusin', event => {
+              if (!event.target.matches('[role="menuitem"]')) return;
+              clearTimeout(timer);
+              controller.abort();
+              resolve(event.target);
+            }, { signal: controller.signal });
+            trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+          });
+          const resize = () => { el.style.width = `${to}px`; };
+          if (duringBlur) item.addEventListener('blur', resize, { once: true });
+          item.blur();
+          if (document.activeElement !== document.body) throw new Error('Menu item did not blur to the body');
+          if (!duringBlur) resize();
+        }, { from, to, duringBlur });
+        await waitForMenuClose();
+        await afterLayout();
+        assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Resize must not restore explicitly blurred focus');
+        console.log(`Listing action menu: ${from}→${to} resize ${duringBlur ? 'inside' : 'after'} blur leaves focus on the body`);
+      }
 
       await setContainerWidth(from);
       await afterLayout();
       const trigger = menuTrigger(source);
-      for (const layerShown of [false, true]) {
-        await trigger.evaluate(async (button, { from, to, layerShown }) => {
+      for (const interruption of ['before layer', 'after layer', 'after layer with microtask restoration']) {
+        await trigger.evaluate(async (button, { from, to, interruption }) => {
           const container = button.closest('main');
           const hideTrigger = () => { container.style.width = `${to}px`; };
+          const restoreTrigger = () => { container.style.width = `${from}px`; };
+          const afterShow = interruption !== 'before layer';
+          const microtaskRestore = interruption === 'after layer with microtask restoration';
           const showPopover = HTMLDialogElement.prototype.showPopover;
           let shown = false;
-          if (layerShown) HTMLDialogElement.prototype.showPopover = function () {
+          if (afterShow) HTMLDialogElement.prototype.showPopover = function () {
             showPopover.call(this);
             shown = this.matches(':popover-open');
             hideTrigger();
+            if (microtaskRestore) queueMicrotask(restoreTrigger);
           };
           button.focus();
-          // Restore before the listing's opening-frame callback, but after the opening ticks.
+          // Register before the listing's opening frame; the microtask variant
+          // restores sooner, before the positioning update has flushed.
           const restored = new Promise(resolve => requestAnimationFrame(() => {
-            container.style.width = `${from}px`;
+            if (!microtaskRestore) restoreTrigger();
             resolve();
           }));
           try {
             button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-            if (!layerShown) hideTrigger();
+            if (!afterShow) hideTrigger();
             await restored;
-            if (layerShown && !shown) throw new Error('Expected an open layer before the resize');
+            if (afterShow && !shown) throw new Error('Expected an open layer before the resize');
           } finally {
-            if (layerShown) delete HTMLDialogElement.prototype.showPopover;
+            if (afterShow) delete HTMLDialogElement.prototype.showPopover;
           }
-        }, { from, to, layerShown });
+        }, { from, to, interruption });
         await waitForMenuClose();
-        if (layerShown) await trigger.and(focus).waitFor({ timeout: 5000 });
+        if (interruption !== 'before layer') await trigger.and(focus).waitFor({ timeout: 5000 });
         await trigger.press('ArrowDown');
         await download.waitFor({ timeout: 5000 });
         await page.keyboard.press('Escape');
         await waitForMenuClose();
-        console.log(`Listing action menu: aborted ${from}→${to}→${from} opening ${layerShown ? 'after' : 'before'} showing the layer can reopen`);
+        console.log(`Listing action menu: aborted ${from}→${to}→${from} opening (${interruption}) can reopen`);
       }
     }
     await main.evaluate(el => el.style.removeProperty('width'));

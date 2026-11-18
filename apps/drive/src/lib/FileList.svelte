@@ -78,7 +78,8 @@
       openingFrame = requestAnimationFrame(transferFocus);
     };
     document.addEventListener('focusin', rememberFocus);
-    document.addEventListener('focusout', forgetFocus);
+    // Observe focus loss before a target blur handler can change the layout.
+    document.addEventListener('blur', forgetFocus, true);
     // Keep viewport handoff timing; observe both views for container-only changes.
     compactViewport.addEventListener('change', transferFocus);
     const observer = new ResizeObserver(transferFocus);
@@ -86,7 +87,7 @@
     observer.observe(mobile);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
-      document.removeEventListener('focusout', forgetFocus);
+      document.removeEventListener('blur', forgetFocus, true);
       compactViewport.removeEventListener('change', transferFocus);
       cancelAnimationFrame(openingFrame);
       observer.disconnect();

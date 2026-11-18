@@ -66,6 +66,9 @@
     if (!menu || hiddenByParent()) { close(); return; }
     if (compact) layer.showModal();
     else layer.showPopover();
+    if (!open || request !== opening) return;
+    // Showing a layer can run focus handlers that hide its trigger synchronously.
+    if (hiddenByParent()) { checkLayoutOnOpen?.('now'); return; }
     const rect = menu.getBoundingClientRect();
     const anchor = trigger.getBoundingClientRect();
     menuLeft = Math.max(0, Math.min(anchor.left, window.innerWidth - rect.width));
