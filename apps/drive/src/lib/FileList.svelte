@@ -8,9 +8,13 @@
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
   let desktopSort: HTMLButtonElement;
-  const desktopActions: Record<string, { dismiss(): void } | undefined> = Object.create(null);
+  const desktopActions: Record<string, { dismiss(): void; openFromContextMenu(event: MouseEvent): void } | undefined> = Object.create(null);
   const compactActions: typeof desktopActions = Object.create(null);
   const actionTrigger = 'button[aria-haspopup="menu"]';
+
+  function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
+    if (onAction && event.button === 2) action?.openFromContextMenu(event);
+  }
 
   onMount(() => {
     const compactViewport = window.matchMedia('(max-width: 820px)');
@@ -108,7 +112,7 @@
   <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th>{#if onAction}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
-      <tr>
+      <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
         {#if onAction}
@@ -120,7 +124,7 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
+    <li class:with-actions={!!onAction} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
       {#if onAction}
         <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} parentHandlesHiddenTrigger onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
       {/if}
@@ -174,6 +178,9 @@
   button:focus-visible, select:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .mobile { display: none; margin: 0; padding: 0; list-style: none; }
   li { min-height: var(--drive-size-row-dense); padding: var(--drive-space-2); border-bottom: var(--drive-size-line) solid var(--drive-color-line-hairline); overflow-wrap: anywhere; }
+  li.with-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  li.with-actions > [data-action-row] { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin-inline-start: var(--drive-space-2); }
+  tbody tr:has([data-action-row] :global(button[aria-expanded='true'])), li:has([data-action-row] :global(button[aria-expanded='true'])) { background-color: var(--drive-color-bg-raised); }
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }

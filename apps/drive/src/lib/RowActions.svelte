@@ -27,9 +27,13 @@
     return () => close();
   });
 
+  function hiddenByParent() {
+    return parentHandlesHiddenTrigger && !trigger.getClientRects().length;
+  }
+
   function onScroll(event: Event) {
     const target = event.target;
-    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
+    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target))) && !hiddenByParent()) {
       const restore = menu.contains(document.activeElement);
       close();
       if (restore) trigger.focus({ preventScroll: true });
@@ -37,7 +41,7 @@
   }
 
   function onResize() {
-    if (open && (!parentHandlesHiddenTrigger || trigger.getClientRects().length)) close(true);
+    if (open && !hiddenByParent()) close(true);
   }
   let menuLeft = 0;
   let menuTop = 0;
@@ -56,7 +60,7 @@
     }
     open = true;
     await tick();
-    if (!open || !menu || request !== opening) return;
+    if (!open || !menu || request !== opening || hiddenByParent()) return;
     if (compact) layer.showModal();
     else layer.showPopover();
     const rect = menu.getBoundingClientRect();
@@ -66,7 +70,8 @@
     const above = anchor.top;
     menuTop = Math.max(0, Math.min(below >= rect.height || below >= above ? anchor.bottom : anchor.top - rect.height, window.innerHeight - rect.height));
     await tick();
-    if (!open || request !== opening) return;
+    // Opening can span a layout switch; leave handoff to the listing.
+    if (!open || request !== opening || hiddenByParent()) return;
     const items = menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
     items[last ? items.length - 1 : 0]?.focus();
   }
@@ -125,7 +130,10 @@
   // A parent row can call this for its pointer-only context menu.
   export function openFromContextMenu(event: MouseEvent) {
     event.preventDefault();
-    void show();
+    if (!open) {
+      trigger.focus({ preventScroll: true });
+      void show();
+    }
   }
 </script>
 

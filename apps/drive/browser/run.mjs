@@ -1016,6 +1016,7 @@ try {
     });
     assert.deepEqual(hit, { top: 8, bottom: 8, above: true, below: true });
     assert.equal(await page.locator('button[aria-haspopup="menu"], th.actions').count(), 0);
+    assert.equal(await spaces.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }))), true);
 
     await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
     assert.equal(await container.getByRole('button', { name: /^Actions for / }).count(), 3);
@@ -1031,7 +1032,27 @@ try {
       await container.locator(`a[data-item-id="${row}"]`).and(focus).waitFor({ timeout: 5000 });
       assert.equal(await page.getByRole('menu').count(), 0);
     }
-    await trigger.press('ArrowDown');
+    const archive = container.locator('tr, li').filter({ has: page.getByRole('link', { name: 'Archive', exact: true }) });
+    if (width <= 820) {
+      const name = await archive.getByRole('link').boundingBox();
+      const button = await trigger.boundingBox();
+      const metadata = await archive.locator('.details').boundingBox();
+      assert.ok(button.x >= name.x + name.width && button.y < metadata.y + metadata.height);
+    }
+    const metadata = archive.locator(width > 820 ? 'td:nth-child(4)' : '.details');
+    await metadata.click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'Details', exact: true }).and(focus).waitFor({ timeout: 5000 });
+    await archive.evaluate(el => {
+      const probe = document.createElement('span');
+      probe.style.color = getComputedStyle(el).getPropertyValue('--drive-color-bg-raised');
+      document.body.append(probe);
+      el.dataset.expectedOpenColor = getComputedStyle(probe).color;
+      probe.remove();
+    });
+    await page.waitForFunction(() => {
+      const row = document.querySelector('[data-expected-open-color]');
+      return getComputedStyle(row).backgroundColor === row.dataset.expectedOpenColor;
+    }, null, { timeout: 5000 });
     await page.getByRole('menuitem', { name: 'Details', exact: true }).click();
     assert.equal(await page.locator('main > p').textContent(), '1: Details');
     await trigger.and(focus).waitFor({ timeout: 5000 });
