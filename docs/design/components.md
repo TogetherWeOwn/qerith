@@ -171,7 +171,7 @@ Components for the file screens. They follow every rule above.
 **Sizes and numbers in every K component.**
 - **Bytes** are decimal; KB and larger show one decimal place below 100 units (a trailing ".0" included) and none from 100 up: "0 bytes", "1 byte", "980 bytes", "1.2 KB", "4.7 MB", "18.2 GB", "41.0 GB", "214 GB" (1 KB = 1,000 bytes). Wherever a size is shown, its `<data value="5368709120">` carries the exact byte count, and the details line (K3) prints it in full ("5,368,709,120 bytes").
 - **Times** are viewer-local: "09:12" today, "Yesterday 18:40", "14 Nov" this year, "14 Nov 2025" before. The list caption names the zone once ("Times in Europe/London"); each time is a `<time datetime>` with the full instant.
-- **File names are user data.** Render them as text, never HTML; keep every character, including Unicode and emoji, with `unicode-bidi: plaintext` so a right-to-left name can't reorder the row. A long name is truncated in the middle with an ellipsis so the extension stays visible ("Quarterly-report-final…v3.pdf"); the full name is the row's accessible name and is shown in the details line.
+- **File names are user data.** Render them as text, never HTML, as one run exactly as stored: keep every character, including Unicode, emoji and spaces, and never split, shorten or ellipsize a name. Isolate it with `dir="auto"` and `unicode-bidi: plaintext` so a right-to-left name can't reorder the row. A long name wraps onto as many lines as it needs inside its cell (`white-space: break-spaces; overflow-wrap: anywhere`), so the whole name, extension included, is always visible; the row grows to fit, and the other cells align to the name's first line. The full name is the row's accessible name and is shown in the details line.
 
 
 ### K1. Breadcrumb
@@ -190,7 +190,7 @@ Components for the file screens. They follow every rule above.
 
 **Anatomy:** a J13 table (`<table>` with a visually hidden caption "Contents of {folder}, sorted by name, A to Z. Times in Europe/London."). Columns at 1280: **Name** (fills; K3 name cell) · **Size** (`size.column.size`, right, tabular; "—" for folders) · **Modified** (`size.column.modified`) · **Kind** (`size.column.kind`, words: "Folder", "PDF", "MP4 video", "JPEG image", "File") · **Actions** (`size.column.actions`, the K5 menu button). Folders first, then files, in every sort. Rows `size.row.admin`, hairlines between, hover `bg.surface`, the row whose menu is open `bg.raised`.
 
-**At ≤ 820 px:** the table becomes a `role="list"` of two-line rows, `size.row.dense` minimum: line 1 the name cell; line 2 mono `text.tertiary` "5.4 GB · 14 Nov" (folders: "Folder · 14 Nov"); the K5 button on the right. Sorting moves to the "Sort" select in the K4 action row.
+**At ≤ 820 px, or whenever the listing itself is ≤ 740 px wide (`breakpoint.list-compact-max`):** the table becomes a `role="list"` of two-line rows, `size.row.dense` minimum: line 1 the name cell; line 2 mono `text.tertiary` kind, size and time: "PDF · 5.4 GB · 14 Nov" (folders: "Folder · 14 Nov"); the K5 button on the right. Sorting moves to the "Sort" select in the K4 action row.
 
 **Sort:** each sortable column header is a `<button>` inside the `<th>`, with `aria-sort` on the `<th>` and an up or down icon beside the label for the active one. Default: Name, A to Z. Clicking the active header reverses it. Name sorts by locale with numbers in order ("file 2" before "file 10"). Sort is a URL query (`?sort=size&dir=desc`) and is done on the server over the whole folder, never only over the rows on screen. The status region announces "Sorted by size, largest first".
 
@@ -336,7 +336,7 @@ K7, title "Share "{name}"". Body in this order:
 
 ### K15. Upload item
 
-**Anatomy:** a row in the tray: kind glyph · name (middle truncation) · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (`size.progress-row`) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
+**Anatomy:** a row in the tray: kind glyph · name (in full, wrapping; see "File names are user data") · mono `text.tertiary` line: progress and destination ("1.2 of 5.4 GB · 22 % · to Taxes") · A15 progress bar (`size.progress-row`) · one or two icon or `sm` ghost actions on the right. The progress text and bar update at most once a second, by text swap.
 
 | State | Line | Bar | Actions |
 |---|---|---|---|
@@ -391,7 +391,7 @@ J13 for the owner's Users and invites screen. **People columns:** Name (avatar +
 
 **Revoke** confirms in a K7: title "Revoke Sam's access?" · "Sam is signed out everywhere within a minute and can't sign in. Their files are kept, and you can restore access later." · I1 destructive button "Revoke access" · ghost "Cancel", focused first. **Restore** acts at once, with status "Sam's access is back". **Sign-in link** opens K7 "Sign-in link for Sam" with K18 and "Use this if Sam lost their passkey or device. It works once and expires in 7 days."
 
-At ≤ 820 px each table becomes a `role="list"` of cards: name + status tag on line 1, mono facts on line 2, actions as full-width ghost buttons under a K5 "Actions for Sam" menu.
+At ≤ 820 px, or whenever the listing itself is ≤ 740 px wide (`breakpoint.list-compact-max`), each table becomes a `role="list"` of cards: name + status tag on line 1, mono facts on line 2, actions as full-width ghost buttons under a K5 "Actions for Sam" menu.
 
 ### K20. Check box
 

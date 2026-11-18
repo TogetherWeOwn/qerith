@@ -50,6 +50,51 @@ it('rejects expiry and revocation without affecting another member', async () =>
   expect(await sessions.lookup(unaffected.token)).toEqual({ id: 'member', role: 'member' });
 });
 
+it('deletes expiry at the database clock boundary but not after it', async () => {
+  await setup();
+  await env.DB.prepare(`INSERT INTO drive_sessions VALUES
+    (?, 'owner', 999), (?, 'owner', 1000), (?, 'owner', 1001)`)
+    .bind('a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)).run();
+  // Pin only the database clock expression so the actual cleanup SQL runs on D1.
+  const clock = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
+  const sessions = new Sessions({ prepare: (sql) => {
+    expect(sql).toContain(clock);
+    return env.DB.prepare(sql.replace(clock, '1000'));
+  } });
+  expect(await sessions.cleanupExpired()).toBe(2);
+  const rows = await env.DB.prepare('SELECT expires_at FROM drive_sessions').all();
+  expect(rows.results).toEqual([{ expires_at: 1001 }]);
+});
+
+it('cleans bounded batches of expired sessions without removing live sessions', async () => {
+  const sessions = await setup();
+  const live = await sessions.issue('member');
+  // Includes an expiry at the database clock boundary and a clearly expired backlog.
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 205)
+    INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
+    SELECT printf('%064x', x), 'owner', CASE WHEN x = 205
+      THEN CAST(unixepoch('subsec') * 1000 AS INTEGER) ELSE 1 END FROM n`).run();
+  expect(await sessions.cleanupExpired()).toBe(100);
+  expect(await sessions.cleanupExpired()).toBe(100);
+  expect(await sessions.cleanupExpired()).toBe(5);
+  expect(await sessions.cleanupExpired()).toBe(0);
+  expect(await sessions.lookup(live.token)).toEqual({ id: 'member', role: 'member' });
+});
+
+it('keeps concurrent cleanup calls bounded and preserves live membership checks', async () => {
+  const sessions = await setup();
+  const live = await sessions.issue('member');
+  await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 150)
+    INSERT INTO drive_sessions (token_hash, principal_id, expires_at)
+    SELECT printf('%064x', x), 'owner', 1 FROM n`).run();
+  const counts = await Promise.all([sessions.cleanupExpired(), sessions.cleanupExpired()]);
+  expect(counts.every((count) => count <= 100)).toBe(true);
+  expect(counts.reduce((a, b) => a + b, 0)).toBe(150);
+  expect(await sessions.lookup(live.token)).toEqual({ id: 'member', role: 'member' });
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
+  expect(await sessions.lookup(live.token)).toBeNull();
+});
+
 it('permanently invalidates sessions when a member is disabled and later re-enabled', async () => {
   const sessions = await setup();
   const old = await sessions.issue('member');

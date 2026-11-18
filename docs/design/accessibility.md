@@ -52,7 +52,7 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 
 ## 8. Zoom, reflow and text spacing (SC 1.4.4, 1.4.10, 1.4.12)
 
-- At 320 CSS px wide no page scrolls sideways. The only things that may scroll sideways are the K2 and K19 tables, inside their own focusable region named for the table (above 820 px; at 820 px and below they are lists).
+- At 320 CSS px wide no page scrolls sideways. The only things that may scroll sideways are the K2 and K19 tables, inside their own focusable region named for the table (above 820 px; at 820 px and below they are lists). A table never squeezes its Name column to make room: below `breakpoint.list-compact-max` it becomes a list.
 - Every container grows with its text: no fixed heights on anything holding text; rows use `min-height`.
 - With WCAG text-spacing overrides (line height 1.5, letter spacing 0.12 em, word spacing 0.16 em), nothing clips or overlaps. Headings wrap and never truncate.
 
@@ -74,11 +74,13 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 | Automated | axe-core with the WCAG 2.0–2.2 A and AA tags on each changed route at 390 and 1280, signed out and signed in | 0 violations |
 | Contrast | every colour pair used is in [tokens.md](tokens.md) §1.7 | no new pair, or a new pair measured and added |
 | Keyboard | Tab through the page at both widths: every control reachable, visible ring, nothing hidden under the header or the tray bar, dialogs and sheets trap and release | written in the PR |
-| Screen reader | One pass with NVDA or VoiceOver on the changed component: names, roles, the announcements in §6 | written in the PR |
+| Screen reader | One pass with NVDA or VoiceOver on the changed component, on the route that renders it: names, roles, the announcements in §6 | written in the PR, or "carried" (below) |
 | Reduced motion | Emulate `reduce`; nothing moves | screenshot or note |
 | Greyscale | Screenshot in greyscale; states still readable | screenshot |
 | Reflow | 320 px wide; no sideways page scroll | screenshot |
 | Forced colours | Emulate `forced-colors: active`; tags, icons, focus and buttons visible | screenshot |
+
+**A component no route renders yet.** A PR may add or change a component that only a test fixture renders: no route, page or layout imports it. Run every other check above on the fixture at both widths. The screen-reader pass is **carried**, not passed: the PR says "Screen reader: carried", names the component, and records no result. The PR that first renders the component on a route runs the pass on that route, covering every carried component by name, and cannot merge without it. A carried component never reaches a person before that pass.
 
 ## 12. Design QA checklist
 
@@ -113,4 +115,5 @@ The author fills this in the body of every Drive UI PR; design QA (the UX Design
 - [ ] axe: 0 violations on each changed route, both widths.
 - [ ] Keyboard pass: visible focus ring everywhere, nothing hidden under the header or tray bar, dialogs and sheets trap and release focus.
 - [ ] One polite status region; announces results and milestones only (§6).
+- [ ] Screen-reader pass (§11) written in the PR, naming every component this PR first renders on a route, including any carried from a fixture-only PR. A fixture-only PR says "carried" and imports the component from no route.
 - [ ] Reduced motion: nothing moves. Forced colours: tags, icons, focus and buttons visible.
