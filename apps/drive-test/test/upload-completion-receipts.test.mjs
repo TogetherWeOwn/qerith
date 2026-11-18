@@ -1,109 +1,103 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
-import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
-import { UploadOperationEvidence } from '../../drive/src/lib/server/metadata/upload-operation-evidence.ts';
-import { UploadPartOperationEvidence } from '../../drive/src/lib/server/metadata/upload-part-operation-evidence.ts';
-import { UploadSealedEvidence } from '../../drive/src/lib/server/metadata/upload-sealed-evidence.ts';
+import { config, epoch, parts, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 
-const migration = '0022_upload_publication_receipts.sql';
-const migrate = (limit = migration) => applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name <= limit));
-const statement = (sql, ...args) => env.DB.prepare(sql).bind(...args);
-const sessions = new Sessions(env.DB);
-const operations = new UploadOperationEvidence(env.DB);
-const ledger = new UploadPartOperationEvidence(env.DB);
-const sealed = new UploadSealedEvidence(env.DB);
-const config = { endpoint: 'https://storage.example', bucket: 'drive-test', region: 'auto', accessKeyId: 'fixture', secretAccessKey: 'fixture' };
-const parts = [{ partNumber: 2, etag: '"part-&-ÿ"', size: 7 }];
-const response = (key) => new Response(`<CompleteMultipartUploadResult><Bucket>drive-test</Bucket><Key>${key}</Key><ETag>"final-opaque"</ETag><ChecksumSHA256>example-checksum</ChecksumSHA256><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>`);
-const receipt = (op) => statement('SELECT * FROM drive_upload_completion_receipts WHERE operation_id = ?', op.operationId).first();
+const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
+const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
 
-async function seed(id) {
-  const op = { operationId: `complete-${id}`, intentId: `intent-${id}`, ownerId: `owner-${id}`, objectKey: `key-${id}`,
-    uploadId: 'upload/+id', storageEpoch: 'epoch-1', intentVersion: 2 };
-  await statement("INSERT INTO drive_principals VALUES (?, 'member', 'active')", op.ownerId).run();
-  await statement("INSERT INTO drive_upload_intents VALUES (?, ?, ?, ?, 0, 'allocated', 2)", op.intentId, op.ownerId, op.objectKey, op.uploadId).run();
-  await operations.recordOperation(op);
-  const part = { ...op, operationId: `part-${id}`, partNumber: 2, sizeBytes: 7 };
-  await ledger.recordAdmission(part);
-  await ledger.recordObservation(part, Uint8Array.from(parts[0].etag, (char) => char.charCodeAt(0)));
-  await sealed.recordSnapshot({ operation: op, partNumbers: [2], sizeBytes: 7 });
-  return { op, part, token: (await sessions.issue(op.ownerId)).token };
+function producer(fetch, verifyParts = vi.fn(async () => parts), db = env.DB) {
+  const options = { fetch, timeoutMs: 5000 };
+  const service = createUploadCompletionReceipts(db, epoch, config, options, { isQualified: async () => true, verifyParts });
+  options.fetch = vi.fn(() => { throw new Error('replacement transport'); });
+  return service;
 }
 
-function producer(fetch, verified = parts, db = env.DB) {
-  const verifier = { isQualified: vi.fn(async (id) => id === '["https://storage.example","drive-test","epoch-1"]'),
-    verifyParts: vi.fn(async () => verified) };
-  return { ...createUploadCompletionReceipts(db, 'epoch-1', config, { fetch, timeoutMs: 5000 }, verifier), verifier };
-}
-
-it('upgrades sealed observations without backfilling trusted dispatches or receipts', async () => {
-  await migrate('0021_upload_sealed_evidence.sql');
-  const { op, token } = await seed('legacy');
-  await operations.storeUnverifiedReceipt(op, new Uint8Array([1, 2]));
-  await statement("UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1 WHERE id = ?", op.intentId).run();
-  await migrate();
-  await expect(producer(vi.fn()).complete(token, op.operationId)).resolves.toBe('not-admitted');
-  expect(await receipt(op)).toBeNull();
-  expect(await statement('SELECT * FROM drive_upload_completion_dispatches WHERE operation_id = ?', op.operationId).first()).toBeNull();
+it('rejects an eligible legacy seal without backfilling storage authority', async () => {
+  await applyD1Migrations(env.DB, migrations.slice(0, -1));
+  const { token, bindStorage } = await seed('legacy', { legacy: true });
+  await applyD1Migrations(env.DB, migrations);
+  await expect(bindStorage()).rejects.toThrow('storage binding must precede allocation');
+  await expect(producer(vi.fn()).complete(token, 'legacy')).resolves.toBe('not-admitted');
+  expect(await evidence('dispatches', 'legacy')).toBeNull();
 });
 
-it('admits a single signed create-only completion and reconciles a lost receipt acknowledgement', async () => {
-  await migrate();
-  const { op, token } = await seed('signed');
+it.each(['claim', 'receipt'])('loses the %s acknowledgement without redispatch', async (lost) => {
+  await applyD1Migrations(env.DB, migrations);
+  const id = `lost-${lost}`, { token, key, intent } = await seed(id);
   const fetch = vi.fn(async (request) => {
     expect(request.method).toBe('POST');
-    expect(request.url).toBe(`https://storage.example/drive-test/${op.objectKey}?uploadId=upload%2F%2Bid`);
+    expect(request.url).toBe(`${config.endpoint}/${config.bucket}/${key}?uploadId=upload%2F%2Bid`);
     expect(request.headers.get('if-none-match')).toBe('*');
     expect(request.headers.get('authorization')).toMatch(/signedheaders=[^,]*if-none-match/i);
     expect(await request.text()).toContain('<PartNumber>2</PartNumber><ETag>"part-&amp;-ÿ"</ETag>');
-    return response(op.objectKey);
+    return response(key);
   });
-  const db = { withSession: vi.fn((mode) => env.DB.withSession(mode)), prepare: (sql) => sql.includes('INSERT INTO drive_upload_completion_receipts')
-    ? { bind: (...args) => ({ async first() { await statement(sql, ...args).first(); throw new Error('lost acknowledgement'); } }) }
-    : env.DB.prepare(sql) };
-  const first = producer(fetch, parts, db);
-  const results = await Promise.all([first.complete(token, op.operationId), first.complete(token, op.operationId)]);
-  expect(results.sort()).toEqual(['not-admitted', 'recorded']);
-  expect(db.withSession).toHaveBeenCalledTimes(3);
-  expect(fetch).toHaveBeenCalledTimes(1);
-  const durable = await receipt(op);
-  expect(durable).toMatchObject({ operation_id: op.operationId, etag: '"final-opaque"' });
-  expect(JSON.parse(durable.response_checksums)).toEqual({ ChecksumSHA256: 'example-checksum', ChecksumType: 'COMPOSITE' });
-  await expect(producer(fetch).complete(token, op.operationId)).resolves.toBe('not-admitted');
-  expect(await receipt(op)).toEqual(durable);
-  expect(fetch).toHaveBeenCalledTimes(1);
+  const table = lost === 'claim' ? 'dispatches' : 'receipts';
+  const db = { withSession: vi.fn((mode) => env.DB.withSession(mode)), prepare: (query) => query.startsWith(`INSERT INTO drive_upload_completion_${table}`)
+    ? { bind: (...args) => ({ async first() {
+      if (await sql(query, ...args).first()) throw new Error('lost acknowledgement');
+      return null;
+    } }) } : env.DB.prepare(query) };
+  const verify = vi.fn(async () => parts), first = producer(fetch, verify, db);
+  const results = await Promise.all([first.complete(token, id), first.complete(token, id)]);
+  expect(results.sort()).toEqual(['not-admitted', lost === 'claim' ? 'uncertain' : 'recorded']);
+  expect(verify).toHaveBeenCalledWith(expect.objectContaining({ operationId: id, intentId: intent, objectKey: key, uploadId: 'upload/+id' }));
+  expect(await evidence('dispatches', id)).toMatchObject({ endpoint: config.endpoint, bucket: config.bucket, claim_version: 3 });
+  const durable = await evidence('receipts', id);
+  if (lost === 'claim') expect(durable).toBeNull();
+  else {
+    expect(db.withSession).toHaveBeenCalledTimes(3);
+    expect(durable).toMatchObject({ etag: '"final-opaque"', response_checksums: '{"ChecksumSHA256":"example-checksum","ChecksumType":"COMPOSITE"}' });
+  }
+  expect(await evidence('quarantine', id)).toBeNull();
+  await expect(producer(fetch).complete(token, id)).resolves.toBe('not-admitted');
+  expect(await evidence('receipts', id)).toEqual(durable);
+  expect(fetch).toHaveBeenCalledTimes(lost === 'claim' ? 0 : 1);
 });
 
-it('fails closed for unqualified, foreign, revoked, and mismatched part evidence', async () => {
-  await migrate();
-  const { op, part, token } = await seed('negative');
-  await statement("INSERT INTO drive_principals VALUES ('other', 'member', 'active')").run();
-  const fetch = vi.fn();
-  const unqualified = createUploadCompletionReceipts(env.DB, 'epoch-1', config, { fetch, timeoutMs: 5000 });
-  await expect(unqualified.complete(token, op.operationId)).resolves.toBe('not-admitted');
-  await expect(producer(fetch).complete((await sessions.issue('other')).token, op.operationId)).resolves.toBe('not-admitted');
-  await expect(producer(fetch, [{ ...parts[0], etag: '"different"' }]).complete(token, op.operationId)).resolves.toBe('not-admitted');
-  const pending = producer(fetch);
-  pending.verifier.verifyParts.mockImplementation(async () => { await ledger.recordObservation(part, null); return parts; });
-  await expect(pending.complete(token, op.operationId)).resolves.toBe('not-admitted');
-  await sessions.revoke(token);
-  await expect(producer(fetch).complete(token, op.operationId)).resolves.toBe('not-admitted');
-  expect(await receipt(op)).toBeNull();
+it.each([{ endpoint: 'https://other.example' }, { key: 'key/../object' }, { intent: new Uint8Array([255]).buffer }])(
+  'denies a different namespace or malformed identity before verification: %j', async (options) => {
+    await applyD1Migrations(env.DB, migrations);
+    const id = `reject-${Object.keys(options)[0]}`, { token } = await seed(id, options);
+    const fetch = vi.fn(), verify = vi.fn();
+    await expect(producer(fetch, verify).complete(token, id)).resolves.toBe('not-admitted');
+    expect(await evidence('dispatches', id)).toBeNull();
+    expect(verify).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  }
+);
+
+it('denies unqualified, foreign, mismatched, uncertain and revoked completions', async () => {
+  await applyD1Migrations(env.DB, migrations);
+  const a = await seed('negative'), b = await seed('revoked'), fetch = vi.fn();
+  const complete = (verify) => producer(fetch, verify).complete(a.token, 'negative');
+  const unqualified = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000 });
+  await expect(unqualified.complete(a.token, 'negative')).resolves.toBe('not-admitted');
+  await expect(producer(fetch).complete(b.token, 'negative')).resolves.toBe('not-admitted');
+  await expect(complete(async () => [{ ...parts[0], etag: '"different"' }])).resolves.toBe('not-admitted');
+  await expect(complete(async () => {
+    await sql("INSERT INTO drive_upload_part_observations VALUES (?, 'uncertain', NULL)", a.part).run();
+    return parts;
+  })).resolves.toBe('not-admitted');
+  const revoke = vi.fn(async () => { await sessions.revoke(b.token); return parts; });
+  await expect(producer(fetch, revoke).complete(b.token, 'revoked')).resolves.toBe('not-admitted');
+  expect(revoke).toHaveBeenCalledOnce();
+  expect(await evidence('dispatches', 'revoked')).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each(['malformed', 'mismatched', 'lost'])('quarantines a %s provider response without dispatching again', async (failure) => {
-  await migrate();
-  const { op, token } = await seed(failure);
+it.each(['malformed', 'mismatched', 'lost'])('quarantines a %s provider response without dispatching again', async (id) => {
+  await applyD1Migrations(env.DB, migrations);
+  const { token } = await seed(id);
   const fetch = vi.fn(async () => {
-    if (failure === 'lost') throw new Error('lost provider acknowledgement');
-    return failure === 'mismatched' ? response('another-key') : new Response('<CompleteMultipartUploadResult />');
+    if (id === 'lost') throw new Error('lost provider acknowledgement');
+    return id === 'mismatched' ? response('another-key') : new Response('<CompleteMultipartUploadResult />');
   });
-  await expect(producer(fetch).complete(token, op.operationId)).resolves.toBe('uncertain');
-  await expect(producer(fetch).complete(token, op.operationId)).resolves.toBe('not-admitted');
-  expect(await statement('SELECT operation_id FROM drive_upload_completion_quarantine WHERE operation_id = ?', op.operationId).first()).toEqual({ operation_id: op.operationId });
-  expect(await receipt(op)).toBeNull();
+  await expect(producer(fetch).complete(token, id)).resolves.toBe('uncertain');
+  await expect(producer(fetch).complete(token, id)).resolves.toBe('not-admitted');
+  expect(await evidence('quarantine', id)).toEqual({ operation_id: id });
+  expect(await evidence('receipts', id)).toBeNull();
   expect(fetch).toHaveBeenCalledTimes(1);
 });
