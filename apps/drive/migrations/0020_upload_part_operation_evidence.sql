@@ -7,7 +7,8 @@ CREATE TABLE drive_upload_part_operations (
   object_key TEXT NOT NULL,
   storage_epoch TEXT NOT NULL CHECK (length(storage_epoch) BETWEEN 1 AND 128
     AND length(storage_epoch) = length(CAST(storage_epoch AS BLOB)) AND storage_epoch NOT GLOB '*[^A-Za-z0-9._:-]*'),
-  upload_id TEXT NOT NULL CHECK (length(CAST(upload_id AS BLOB)) BETWEEN 1 AND 65536),
+  -- Match the allocation journal's 65536 UTF-16 code units, at up to 3 UTF-8 bytes per unit.
+  upload_id TEXT NOT NULL CHECK (length(CAST(upload_id AS BLOB)) BETWEEN 1 AND 196608),
   intent_version INTEGER NOT NULL CHECK (intent_version BETWEEN 0 AND 9007199254740991),
   part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 10000),
   size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 0 AND 16777216),

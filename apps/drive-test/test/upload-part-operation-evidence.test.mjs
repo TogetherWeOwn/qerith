@@ -55,6 +55,30 @@ it('records evidence only for a live exact allocation and does not fence existin
     .rejects.toThrow('invalid or duplicate');
 });
 
+it('admits and reconciles the maximum UTF-8 width of a journal upload ID', async () => {
+  await migrate();
+  const ownerId = 'owner-wide-upload-id';
+  await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", ownerId);
+  const intents = new UploadIntents(env.DB);
+  const created = await intents.create(ownerId);
+  const claim = await intents.claim(ownerId, created.id, created.version, 'allocation');
+  const uploadId = String.fromCodePoint(0x0800).repeat(65536);
+  await expect(intents.recordSuccess(ownerId, claim.id, claim.version, { kind: 'allocation', uploadId }))
+    .resolves.toBe(true);
+
+  const op = { ...operation('wide-upload-id'), intentId: claim.id, ownerId, objectKey: claim.object_key,
+    intentVersion: claim.version + 1, uploadId };
+  const wrong = { ...op, uploadId: uploadId.slice(0, -1) + String.fromCodePoint(0x0801) };
+  await expect(ledger().recordAdmission(wrong)).rejects.toThrow('invalid or duplicate');
+  await ledger().recordAdmission(op);
+  expect(await rows(`SELECT length(CAST(o.upload_id AS BLOB)) AS bytes,
+    CAST(o.upload_id AS BLOB) = CAST(i.upload_id AS BLOB) AS matches
+    FROM ${operations} o JOIN drive_upload_intents i ON i.id = o.intent_id WHERE o.operation_id = ?`, op.operationId))
+    .toEqual([{ bytes: 196608, matches: 1 }]);
+  await expect(ledger().reconcileAdmissionWrite(op)).resolves.toBe('recorded');
+  await expect(ledger().reconcileAdmissionWrite(wrong)).resolves.toBe('unknown');
+});
+
 it('matches inherited SQLite text by its exact bytes without changing legacy writers', async () => {
   const op = { ...operation('legacy-bytes'), intentId: new Uint8Array([0x61, 0, 0x80]),
     ownerId: new Uint8Array([0x62, 0x81]), objectKey: new Uint8Array([0x63, 0x82]),
