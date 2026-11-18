@@ -23,7 +23,7 @@ test('checks live authorization on each request before resolving generation', as
   let authorized = true;
   let resolutions = 0;
   const sameRequest = request();
-  const outside = request({ range: 'bytes=9-' });
+  const outside = request({ range: 'bytes=9223372036854775807-' });
   const handle = (input: Request) => downloadFile(input, fileId, {
     ...deps, authorize: async () => authorized ? fileId : null,
     resolveGeneration: async (access, id) => { assert.equal(access, id); resolutions++; return generation; }
@@ -44,21 +44,23 @@ test('checks live authorization on each request before resolving generation', as
   assert.equal(deps.reads.length, 1);
 });
 
-test('streams full and suffix responses with the stored validator and allowlisted headers', async () => {
-  for (const ranged of [false, true]) {
+test('streams full and single-range responses with the stored validator and allowlisted headers', async () => {
+  for (const range of [null, 'bytes=-2', 'bytes=2-9223372036854775807']) {
     let pulls = 0;
-    const contentRange = 'bytes 2-3/4';
+    const ranged = range !== null;
     const length = ranged ? '2' : '4';
     const deps = setup(() => new Response(new ReadableStream<Uint8Array>({ pull(controller) {
       if (pulls++ === 0) controller.enqueue(new TextEncoder().encode(ranged ? 'ta' : 'data'));
       else controller.close();
     } }, { highWaterMark: 0 }), { status: ranged ? 206 : 200, headers: {
       etag: generation.etag, 'x-storage-key': generation.key,
-      ...(ranged ? { 'content-range': contentRange } : { 'content-length': length })
+      ...(ranged ? { 'content-range': 'Bytes 02-03/04' } : { 'content-length': length })
     } }));
-    const response = await downloadFile(request(ranged ? { range: 'bytes=-2', 'if-range': generation.etag } : { 'if-match': '*' }), fileId, deps);
+    const response = await downloadFile(request(range === null ? { 'if-match': '*' } : {
+      range, 'if-range': generation.etag, 'if-match': `W/"old", "tag,with,commas", ${generation.etag}`
+    }), fileId, deps);
     assert.equal(response.status, ranged ? 206 : 200);
-    assert.equal(response.headers.get('content-range'), ranged ? contentRange : null);
+    assert.equal(response.headers.get('content-range'), ranged ? 'bytes 2-3/4' : null);
     assert.equal(response.headers.get('content-length'), length);
     assert.equal(response.headers.get('cache-control'), 'private, no-store');
     assert.equal(response.headers.get('content-disposition'), 'attachment');
@@ -67,7 +69,7 @@ test('streams full and suffix responses with the stored validator and allowliste
     assert.equal(await response.text(), ranged ? 'ta' : 'data');
     assert.equal(deps.reads.length, 1);
     assert.equal(deps.reads[0].headers.get('if-match'), generation.etag);
-    assert.equal(deps.reads[0].headers.get('range'), ranged ? 'bytes=-2' : null);
+    assert.equal(deps.reads[0].headers.get('range'), ranged ? 'bytes=2-3' : null);
     assert.equal(deps.reads[0].headers.get('if-range'), null);
   }
 });
@@ -77,7 +79,9 @@ test('does not read without trusted evidence or downgrade a conditional range', 
   for (const value of [null, { ...generation, etag: 'W/"weak"' }, { ...generation, storageConfigId: 'unknown' }]) {
     assert.equal((await downloadFile(request(), fileId, { ...deps, resolveGeneration: async () => value })).status, 404);
   }
-  assert.equal((await downloadFile(request({ 'if-match': '"stale"' }), fileId, deps)).status, 412);
+  for (const ifMatch of ['"stale"', `W/${generation.etag}`, `${generation.etag}, invalid`]) {
+    assert.equal((await downloadFile(request({ 'if-match': ifMatch }), fileId, deps)).status, 412);
+  }
   assert.equal((await downloadFile(request({ range: 'bytes=1-', 'if-range': '"stale"' }), fileId, deps)).status, 412);
   assert.equal((await downloadFile(request({ range: 'bytes=-0' }), fileId, deps)).status, 416);
   assert.equal((await downloadFile(request({ range: 'bytes=0-0,2-3' }), fileId, deps)).status, 400);
