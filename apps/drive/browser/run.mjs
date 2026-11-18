@@ -736,17 +736,34 @@ try {
     assert.equal(await page.evaluate(() => window.scrollY), 50);
     await context.close();
   }
-  for (const width of [320, 390, 1280]) {
+  for (const listing of [false, true]) for (const width of [320, 390, 1280]) {
     const height = width === 1280 ? 800 : 844;
-    const prefix = `menu-modes-${width}x${height}`;
+    const prefix = `${listing ? 'listing-action-' : ''}menu-modes-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
-    await page.goto(`${origin}/?menu=file${width === 1280 ? '' : '&longName'}`, { waitUntil: 'networkidle' });
-    const name = width === 1280 ? 'Sample file' : 'a'.repeat(200);
-    await page.getByRole('button', { name: `Actions for ${name}` }).click();
+    await page.goto(`${origin}/?${listing ? 'listing&actions' : `menu=file${width === 1280 ? '' : '&longName'}`}`, { waitUntil: 'networkidle' });
+    const name = listing ? 'Résumé 2025.pdf' : width === 1280 ? 'Sample file' : 'a'.repeat(200);
+    const trigger = page.getByRole('button', { name: `Actions for ${name}`, exact: true });
+    const scan = async state => {
+      const results = await page.evaluate(() => window.axe.run(document, {
+        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+      }));
+      await writeFile(resolve(output, `axe-${prefix}-${state}.json`), JSON.stringify(results, null, 2));
+      assert.equal(results.violations.length, 0, `axe violations for ${prefix} ${state}: ${JSON.stringify(results.violations)}`);
+    };
+    if (listing) {
+      await page.evaluate(axe);
+      await scan('closed');
+      await page.screenshot({ path: resolve(output, `${prefix}-closed.png`), fullPage: true });
+    }
+    await trigger.click();
     const menu = page.getByRole('menu', { name: `Actions for ${name}` });
+    if (listing) {
+      await menu.waitFor({ timeout: 5000 });
+      await scan('open');
+    }
     const reflow = await menu.evaluate(el => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth, menu: el.clientWidth, content: el.scrollWidth }));
     assert(reflow.page <= reflow.viewport && reflow.content <= reflow.menu, `Horizontal overflow: ${JSON.stringify(reflow)}`);
     await page.screenshot({ path: resolve(output, `${prefix}.png`) });
@@ -1056,6 +1073,16 @@ try {
     await page.getByRole('menuitem', { name: 'Details', exact: true }).click();
     assert.equal(await page.locator('main > p').textContent(), '1: Details');
     await trigger.and(focus).waitFor({ timeout: 5000 });
+    // Linux Chromium cannot generate a macOS Control-click; dispatch its pointer event shape.
+    const dispatchContextMenu = pointerType => metadata.evaluate((el, pointerType) => el.dispatchEvent(
+      new PointerEvent('contextmenu', { bubbles: true, cancelable: true, button: 0, ctrlKey: true, pointerType })
+    ), pointerType);
+    assert.equal(await dispatchContextMenu(''), true, 'Keyboard-style context menu must not be intercepted');
+    assert.equal(await page.getByRole('menu').count(), 0);
+    assert.equal(await dispatchContextMenu('mouse'), false, 'Pointer Control-click should open row actions');
+    await page.getByRole('menuitem', { name: 'Details', exact: true }).and(focus).waitFor({ timeout: 5000 });
+    await page.keyboard.press('Escape');
+    await trigger.and(focus).waitFor({ timeout: 5000 });
     const ownedTrigger = container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
     for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
       await ownedTrigger.press('ArrowDown');
@@ -1151,11 +1178,29 @@ try {
         assert.equal(await page.evaluate(() => innerWidth), 1280);
         console.log(`Listing action menu: ${phase} ${from}→${to} closed and moved focus to the same row`);
       }
-      await setContainerWidth(from);
-      await menuTrigger(source).press('ArrowDown');
-      await download.evaluate(el => el.blur());
-      assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
-      await setContainerWidth(to);
+      // Render the destination, then open and blur in a transient source layout
+      // before the next frame. ResizeObserver can coalesce the two width changes.
+      await afterLayout();
+      await main.evaluate(async (el, { from, to }) => {
+        el.style.width = `${from}px`;
+        const selector = from > 740 ? 'table.desktop' : 'ul.mobile';
+        const trigger = el.querySelector(`${selector} button[aria-label="Actions for Résumé 2025.pdf"]`);
+        trigger.focus();
+        const item = await new Promise((resolve, reject) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => { controller.abort(); reject(new Error('Menu item never focused')); }, 5000);
+          el.addEventListener('focusin', event => {
+            if (!event.target.matches('[role="menuitem"]')) return;
+            clearTimeout(timer);
+            controller.abort();
+            resolve(event.target);
+          }, { signal: controller.signal });
+          trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        });
+        item.blur();
+        if (document.activeElement !== document.body) throw new Error('Menu item did not blur to the body');
+        el.style.width = `${to}px`;
+      }, { from, to });
       await waitForMenuClose();
       assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Resize must not restore explicitly blurred focus');
     }

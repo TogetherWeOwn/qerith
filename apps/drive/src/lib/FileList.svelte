@@ -11,9 +11,11 @@
   const desktopActions: Record<string, { dismiss(): void; openFromContextMenu(event: MouseEvent): void } | undefined> = Object.create(null);
   const compactActions: typeof desktopActions = Object.create(null);
   const actionTrigger = 'button[aria-haspopup="menu"]';
+  let checkLayoutOnOpen: (() => void) | undefined;
 
   function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
-    if (onAction && event.button === 2) action?.openFromContextMenu(event);
+    const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
+    if (onAction && (event.button === 2 || controlClick)) action?.openFromContextMenu(event);
   }
 
   onMount(() => {
@@ -68,6 +70,12 @@
       lastFocused = null;
       target?.focus();
     };
+    let openingFrame = 0;
+    // A menu can open in a transient layout that ResizeObserver never reports.
+    checkLayoutOnOpen = () => {
+      cancelAnimationFrame(openingFrame);
+      openingFrame = requestAnimationFrame(transferFocus);
+    };
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);
     // Keep viewport handoff timing; observe both views for container-only changes.
@@ -79,6 +87,7 @@
       document.removeEventListener('focusin', rememberFocus);
       document.removeEventListener('focusout', forgetFocus);
       compactViewport.removeEventListener('change', transferFocus);
+      cancelAnimationFrame(openingFrame);
       observer.disconnect();
     };
   });
@@ -116,7 +125,7 @@
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
         {#if onAction}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} parentHandlesHiddenTrigger onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></td>
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></td>
         {/if}
       </tr>
     {/each}
@@ -126,7 +135,7 @@
   {#each items as item (item.id)}
     <li class:with-actions={!!onAction} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
       {#if onAction}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} parentHandlesHiddenTrigger onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => onAction?.(item.id, action)} onTab={() => false} /></div>
       {/if}
     </li>
   {/each}

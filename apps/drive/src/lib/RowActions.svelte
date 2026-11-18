@@ -9,8 +9,8 @@
   export let name: string;
   export let file = true;
   export let owned = true;
-  // A responsive listing handles dismissal and focus when it hides this trigger.
-  export let parentHandlesHiddenTrigger = false;
+  // A responsive listing checks layout on open and owns dismissal of hidden triggers.
+  export let checkLayoutOnOpen: (() => void) | undefined = undefined;
   export let onAction: (action: RowAction) => void;
   // Called after the menu closes. Return false to use native tab order from the trigger.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
@@ -28,7 +28,7 @@
   });
 
   function hiddenByParent() {
-    return parentHandlesHiddenTrigger && !trigger.getClientRects().length;
+    return !!checkLayoutOnOpen && !trigger.getClientRects().length;
   }
 
   function onScroll(event: Event) {
@@ -54,6 +54,7 @@
     const request = ++opening;
     compact = window.matchMedia('(max-width: 820px)').matches;
     if (!open) {
+      checkLayoutOnOpen?.();
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('pointerdown', outside);
       window.addEventListener('resize', onResize);
