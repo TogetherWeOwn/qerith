@@ -22,7 +22,7 @@ export async function setup(operation, options = {}) {
 export async function seedBoundPublication(label, { key, service = publisher(headOk) } = {}) {
   const { complete, publish, token, key: objectKey, intent } = await setup(label, { key });
   expect(await complete()).toBe('recorded');
-  const { id } = await publish(service);
   const { evidence_revision: evidenceRevision } = await evidence('receipts', label);
+  const { id } = await publish(service);
   return { id, token, key: objectKey, intent, evidenceRevision };
 }

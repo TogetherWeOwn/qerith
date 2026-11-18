@@ -8,18 +8,19 @@ import { createTrustedUploadPublication } from '../../drive/src/lib/server/metad
 import { config, epoch, evidence, intentRow, migrations, parts, preGenerationMigrations, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, headOk, publisher, qualified, seedBoundPublication, setup } from './fixtures/upload-publication-generation.mjs';
 
-const generationFor = (intent) => sql('SELECT * FROM drive_published_generations WHERE intent_id = CAST(? AS TEXT)', intent).first();
+const generationsFor = (intent) => sql('SELECT * FROM drive_published_generations WHERE intent_id = CAST(? AS TEXT)', intent).all().then(({ results }) => results);
 
 // Exercise the upgrade before another test in this file applies 0030.
 it('does not infer or retrofit a storage generation on a legacy publication', async () => {
   await applyD1Migrations(env.DB, preGenerationMigrations);
+  expect(await sql("SELECT name FROM sqlite_master WHERE name = 'drive_published_generations'").first()).toBeNull();
   const operation = 'legacy-publication', { token, intent } = await seed(operation, { declaredSize: 7 });
   const legacy = new UploadPublication(env.DB, async () => ({ etag, size: 7 }), token);
   const { id } = await legacy.completeAndPublish(`owner-${operation}`, intent, 2, null, 'legacy', parts);
   await applyD1Migrations(env.DB, migrations);
   expect(await sql('SELECT completion_operation_id, evidence_revision FROM drive_upload_publications WHERE entry_id = ?', id).first())
     .toEqual({ completion_operation_id: null, evidence_revision: null });
-  expect(await generationFor(intent)).toBeNull();
+  expect(await generationsFor(intent)).toEqual([]);
 });
 
 it('publishes the signed, conditionally verified receipt and retains the generation after entry and intent removal', async () => {
@@ -40,12 +41,12 @@ it('publishes the signed, conditionally verified receipt and retains the generat
     .toEqual({ completion_operation_id: operation, evidence_revision: evidenceRevision });
   const generation = { entry_id: id, intent_id: intent, owner_id: owner, object_key: key,
     endpoint: config.endpoint, bucket: config.bucket, storage_epoch: epoch, etag, size_bytes: 7, evidence_revision: evidenceRevision };
-  expect(await generationFor(intent)).toEqual(generation);
+  expect(await generationsFor(intent)).toEqual([generation]);
   expect(await service.publish(token, owner, intent, 3, operation, null, 'file')).toBeNull();
   expect(head).toHaveBeenCalledTimes(1);
   expect(await new PrivateDeletion(env.DB).delete(token, id)).toBe(true);
   await sql('DELETE FROM drive_upload_intents WHERE id = CAST(? AS TEXT)', intent).run();
-  expect(await generationFor(intent)).toEqual(generation);
+  expect(await generationsFor(intent)).toEqual([generation]);
   expect(await evidence('receipts', operation)).toEqual(receipt);
 });
 
@@ -61,7 +62,7 @@ it('denies missing qualification, qualification for another provider, and each s
     expect(await publish(publisher(head, async () => true, s3, version))).toBeNull();
   }
   expect(head).not.toHaveBeenCalled();
-  expect(await generationFor(intent)).toBeNull();
+  expect(await generationsFor(intent)).toEqual([]);
 });
 
 it('rejects a stale version and a valid session from another principal before HEAD', async () => {
@@ -73,7 +74,7 @@ it('rejects a stale version and a valid session from another principal before HE
   expect(await publish(service, 2)).toBeNull();
   expect(await publish(service, 3, other.token)).toBeNull();
   expect(head).not.toHaveBeenCalled();
-  expect(await generationFor(intent)).toBeNull();
+  expect(await generationsFor(intent)).toEqual([]);
 });
 
 it('rejects a bare seal, an unresolved dispatch and a late receipt on a quarantined dispatch', async () => {
@@ -92,7 +93,7 @@ it('rejects a bare seal, an unresolved dispatch and a late receipt on a quaranti
   expect(await evidence('quarantine', operation)).not.toBeNull();
   expect(await publish(service)).toBeNull();
   expect(head).not.toHaveBeenCalled();
-  expect(await generationFor(intent)).toBeNull();
+  expect(await generationsFor(intent)).toEqual([]);
 });
 
 it.each([['status', 412, etag, '7'], ['etag', 200, '"different"', '7'], ['size', 200, etag, '8'], ['missing-size', 200, etag, null]])(
@@ -103,7 +104,7 @@ it.each([['status', 412, etag, '7'], ['etag', 200, '"different"', '7'], ['size',
     const head = vi.fn(() => new Response(null, { status, headers }));
     expect(await publish(publisher(head))).toBeNull();
     expect(head).toHaveBeenCalledTimes(1);
-    expect(await generationFor(intent)).toBeNull();
+    expect(await generationsFor(intent)).toEqual([]);
   });
 
 it.each([
@@ -119,7 +120,7 @@ it.each([
   const head = vi.fn(async () => { await race(fixture); return headOk(); });
   expect(await fixture.publish(publisher(head))).toBeNull();
   expect(head).toHaveBeenCalledTimes(1);
-  expect(await generationFor(fixture.intent)).toBeNull();
+  expect(await generationsFor(fixture.intent)).toEqual([]);
   expect(await sql('SELECT id FROM drive_entries WHERE owner_id = ?', fixture.owner).first()).toBeNull();
 });
 
@@ -137,7 +138,7 @@ it('keeps legacy recovery from settling a trusted dispatch between HEAD and publ
     return headOk();
   };
   const { id } = await publish(publisher(head));
-  expect(await generationFor(intent)).toMatchObject({ entry_id: id });
+  expect(await generationsFor(intent)).toMatchObject([{ entry_id: id }]);
 });
 
 it('requires the exact durable revision even when the rest of the insert matches', async () => {
@@ -148,5 +149,5 @@ it('requires the exact durable revision even when the rest of the insert matches
     (intent_id, intent_version, entry_id, owner_id, object_key, name, size_bytes, object_etag, completion_operation_id, evidence_revision)
     VALUES (CAST(? AS TEXT), 3, 'entry', ?, ?, 'file', 7, ?, ?, ?)`, intent, owner, key, etag, operation, crypto.randomUUID()).run())
     .rejects.toThrow(/publication not admitted/);
-  expect(await generationFor(intent)).toBeNull();
+  expect(await generationsFor(intent)).toEqual([]);
 });
