@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
-import { ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
+import { createSharedReadAccess, ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 
 async function setup() {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
@@ -91,6 +91,73 @@ it('paginates only entries in the currently authorized folder', async () => {
   expect(new Set([...first.entries, ...second.entries].map((entry) => entry.id)).size).toBe(103);
   await grants.revoke(alice, 'root', 'bob');
   expect(await reads.list(bob, 'root', first.nextCursor)).toBeNull();
+});
+
+it('discovers only explicit file and folder grant roots for an invited recipient', async () => {
+  const { sessions, grants, reads, alice, bob, eve } = await setup();
+  const admin = (await sessions.issue('owner')).token;
+  const { listShared } = createSharedReadAccess(env.DB);
+  const empty = { entries: [], nextCursor: null };
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  expect(await grants.create(alice, 'file', 'bob')).toBe(true);
+  expect(await grants.create(alice, 'root', 'owner')).toBe(false);
+  expect(await listShared(bob)).toEqual({ entries: [
+    { id: 'file', name: 'file', kind: 'file' }, { id: 'root', name: 'root', kind: 'folder' },
+  ], nextCursor: null });
+  for (const token of [alice, eve, admin, 'invalid']) expect(await listShared(token)).toEqual(empty);
+
+  expect(await grants.revoke(alice, 'file', 'bob')).toBe(true);
+  expect(await listShared(bob)).toEqual({ entries: [{ id: 'root', name: 'root', kind: 'folder' }], nextCursor: null });
+  expect(await reads.get(bob, 'file')).not.toBeNull(); // Still inherited, not discoverable as a root.
+  expect(await grants.revoke(alice, 'root', 'bob')).toBe(true);
+  expect(await listShared(bob)).toEqual(empty);
+});
+
+it('rechecks session and both memberships before discovering grant roots', async () => {
+  const { sessions, grants, alice, bob } = await setup();
+  const { listShared } = createSharedReadAccess(env.DB);
+  const empty = { entries: [], nextCursor: null };
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  expect((await listShared(bob)).entries).toHaveLength(1);
+  await sessions.revoke(bob);
+  expect(await listShared(bob)).toEqual(empty);
+  const expired = (await sessions.issue('bob')).token;
+  await env.DB.prepare("UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = 'bob'").run();
+  expect(await listShared(expired)).toEqual(empty);
+  const current = (await sessions.issue('bob')).token;
+  expect((await listShared(current)).entries).toHaveLength(1);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
+  expect(await listShared(current)).toEqual(empty);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'alice'").run();
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  expect((await listShared(current)).entries).toHaveLength(1);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'bob'").run();
+  expect(await listShared(current)).toEqual(empty);
+});
+
+it('seeks a bounded shared page with the recipient index after the boundary grant is removed', async () => {
+  const { grants, alice, bob } = await setup();
+  const ids = Array.from({ length: 102 }, (_, i) => `shared-${String(i).padStart(3, '0')}`);
+  await env.DB.batch(ids.map(id => listingEntry(id, id)));
+  await env.DB.batch(ids.map(id => env.DB.prepare("INSERT INTO drive_read_grants VALUES (?, 'bob')").bind(id)));
+  let explain;
+  const primary = env.DB.withSession('first-primary');
+  const { listShared } = createSharedReadAccess({ withSession(constraint) {
+    expect(constraint).toBe('first-primary');
+    return { prepare(sql) { return { bind(...values) {
+      explain = primary.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values);
+      return primary.prepare(sql).bind(...values);
+    } }; } };
+  } });
+  const first = await listShared(bob);
+  expect(first.entries.map(entry => entry.id)).toEqual(ids.slice(0, 100));
+  expect(first.nextCursor).toBe(ids[99]);
+  expect(await grants.revoke(alice, ids[99], 'bob')).toBe(true);
+  const second = await listShared(bob, first.nextCursor);
+  expect(second.entries.map(entry => entry.id)).toEqual(ids.slice(100));
+  expect(second.nextCursor).toBeNull();
+  const { results } = await explain.all();
+  expect(results.map(row => row.detail).join('\n')).toMatch(/drive_read_grants_recipient.*recipient_id=\?.*entry_id>\?/);
 });
 
 function listingEntry(id, name, { folderId = 'root', kind = 'folder' } = {}) {
