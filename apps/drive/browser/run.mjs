@@ -776,6 +776,13 @@ try {
     await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
     await greyscale.evaluate(el => el.remove());
     await page.emulateMedia({ reducedMotion: 'reduce' });
+    // Allow the media-query change to reach rendering before exercising hover again.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const triggerBox = await trigger.boundingBox();
+    assert(triggerBox, 'Action trigger must remain visible');
+    await page.mouse.move(0, 0);
+    await page.mouse.move(triggerBox.x + triggerBox.width / 2, triggerBox.y + triggerBox.height / 2);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const { motion, runningAnimationDetails } = await page.evaluate(() => {
       const animations = document.getAnimations().filter(animation => animation.playState === 'running');
       return {
