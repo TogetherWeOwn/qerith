@@ -116,9 +116,8 @@ export function createSharedReadAccess(db: { withSession(constraint: 'first-prim
     async listShared(token: string, afterId: string | null = null): Promise<SharedReadPage> {
       const hash = await sessionHash(token);
       if (!hash) return { entries: [], nextCursor: null };
-      if (afterId !== null && (typeof afterId !== 'string' || !afterId || !afterId.isWellFormed() || afterId.includes('\0'))) {
-        throw new TypeError('Invalid shared page cursor');
-      }
+      if (afterId !== null && typeof afterId !== 'string') throw new TypeError('Invalid shared page cursor');
+      // Bind the stored ID verbatim; it need not be formatted like a UUID.
       // The cursor is only a seek boundary; every page reads live authorization
       // on the primary. The recipient index carries entry_id as its PK suffix.
       const { results } = await db.withSession('first-primary').prepare(`

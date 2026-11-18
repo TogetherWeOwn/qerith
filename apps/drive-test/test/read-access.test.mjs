@@ -1,7 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
-import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
+import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { createSharedReadAccess, ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 
@@ -129,16 +129,33 @@ it('rechecks session and both memberships before discovering grant roots', async
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
   expect(await listShared(current)).toEqual(empty);
   await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'alice'").run();
-  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  const restoredAlice = (await sessions.issue('alice')).token;
+  expect(await grants.create(restoredAlice, 'root', 'bob')).toBe(true);
   expect((await listShared(current)).entries).toHaveLength(1);
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'bob'").run();
   expect(await listShared(current)).toEqual(empty);
 });
 
+it.each([
+  ['revoked sharer', 'alice', 'bob'], ['revoked recipient', 'bob', 'bob'], ['admin recipient', null, 'owner'],
+])('denies a persisted grant with a %s', async (_label, revokedId, recipientId) => {
+  const { sessions } = await setup();
+  const { token, expiresAt } = await sessions.issue(recipientId);
+  if (revokedId) await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(revokedId).run();
+  // Model inconsistent rows independently of the grant and session lifecycle triggers.
+  await env.DB.prepare("INSERT INTO drive_read_grants VALUES ('root', ?)").bind(recipientId).run();
+  if (revokedId === recipientId) {
+    await env.DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
+      .bind(await tokenHash(token), recipientId, expiresAt).run();
+  }
+  expect(await createSharedReadAccess(env.DB).listShared(token)).toEqual({ entries: [], nextCursor: null });
+});
+
 it('seeks a bounded shared page with the recipient index after the boundary grant is removed', async () => {
   const { grants, alice, bob } = await setup();
   const ids = Array.from({ length: 102 }, (_, i) => `shared-${String(i).padStart(3, '0')}`);
-  await env.DB.batch(ids.map(id => listingEntry(id, id)));
+  ids[99] += '\0suffix';
+  await env.DB.batch(ids.map((id, index) => listingEntry(id, `name-${102 - index}`)));
   await env.DB.batch(ids.map(id => env.DB.prepare("INSERT INTO drive_read_grants VALUES (?, 'bob')").bind(id)));
   let explain;
   const primary = env.DB.withSession('first-primary');
@@ -152,6 +169,7 @@ it('seeks a bounded shared page with the recipient index after the boundary gran
   const first = await listShared(bob);
   expect(first.entries.map(entry => entry.id)).toEqual(ids.slice(0, 100));
   expect(first.nextCursor).toBe(ids[99]);
+  expect((await listShared(bob, first.nextCursor)).entries.map(entry => entry.id)).toEqual(ids.slice(100));
   expect(await grants.revoke(alice, ids[99], 'bob')).toBe(true);
   const second = await listShared(bob, first.nextCursor);
   expect(second.entries.map(entry => entry.id)).toEqual(ids.slice(100));
