@@ -11,7 +11,6 @@ interface Session { prepare(sql: string): Statement }
 interface Database extends Session { withSession(constraint: 'first-primary'): Session }
 
 interface SealedUpload {
-  operation_id: string;
   intent_id: string;
   owner_id: string;
   object_key: string;
@@ -122,10 +121,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
           (operation_id, evidence_revision, etag, response_checksums) VALUES (CAST(? AS TEXT), ?, ?, ?) RETURNING operation_id`)
           .bind(operation, evidence_revision, etag, response_checksums).first();
         if (written) return true;
-      } catch {
-        // The acknowledgement can be lost after commit. Reuse only the exact
-        // immutable result, or retry persisting the response still in memory.
-      }
+      } catch { /* Reconcile a potentially committed write before retrying it. */ }
       const current = await db.withSession('first-primary').prepare(`SELECT evidence_revision, etag, response_checksums
         FROM drive_upload_completion_receipts WHERE operation_id = CAST(? AS TEXT)`).bind(operation).first<Receipt>();
       if (current) return current.evidence_revision === evidence_revision && current.etag === etag &&
@@ -141,13 +137,13 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!hash || !verifier) return 'not-admitted';
       const operation = boundedText(operationId);
       const primary = db.withSession('first-primary');
-      const upload = await primary.prepare(`SELECT o.operation_id, o.intent_id, o.owner_id, o.object_key, o.upload_id,
+      const upload = await primary.prepare(`SELECT o.intent_id, o.owner_id, o.object_key, o.upload_id,
         o.intent_version, o.part_numbers, o.size_bytes ${allocated}`).bind(operation, epoch, hash).first<SealedUpload>();
       if (!upload || !await verifier.isQualified(storageConfigId)) return 'not-admitted';
       const key = boundedText(upload.object_key);
       const uploadId = boundedText(upload.upload_id);
-      const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId: upload.operation_id,
-        intentId: upload.intent_id, ownerId: upload.owner_id, objectKey: upload.object_key,
+      const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId: upload.intent_id,
+        ownerId: upload.owner_id, objectKey: upload.object_key,
         uploadId: upload.upload_id, intentVersion: upload.intent_version }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
       const parts = verified.map(({ partNumber, etag, size }) => ({ partNumber, etag, size }));
@@ -171,10 +167,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
         const receipt = { etag: response.etag, response_checksums: JSON.stringify(response.checksums ?? {}),
           evidence_revision: crypto.randomUUID() };
         if (await persistReceipt(operation, receipt)) return 'recorded';
-      } catch {
-        // In particular, a malformed, interrupted or failed provider response
-        // is not permission to infer provenance or try another Complete.
-      }
+      } catch { /* Neither a failed response nor a lost write permits redispatch. */ }
       try { await quarantine(operation); } catch { /* no receipt remains non-publishable */ }
       return 'uncertain';
     },

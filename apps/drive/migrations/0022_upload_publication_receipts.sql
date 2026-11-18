@@ -29,15 +29,11 @@ CREATE TABLE drive_upload_publication_tombstones (
   intent_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_upload_intent_reservations (intent_id)
 ) STRICT, WITHOUT ROWID;
 
--- Parts and reports are immutable, but an uncertainty report or a new slot may
--- arrive after the application compared the sealed manifest. Recheck under the
--- write transaction. No legacy acknowledgement participates in this view.
+-- Recheck slots and uncertainty in the write transaction. Operation evidence
+-- already references the immutable reservation and binds the owner/key to it.
 CREATE VIEW drive_upload_sealed_candidates AS
 SELECT o.*, s.part_numbers, s.size_bytes
-FROM drive_upload_completion_operations o
-JOIN drive_upload_sealed_snapshots s USING (operation_id)
-JOIN drive_upload_intent_reservations r ON r.intent_id = o.intent_id
-  AND r.owner_id = o.owner_id AND r.object_key = o.object_key
+FROM drive_upload_completion_operations o JOIN drive_upload_sealed_snapshots s USING (operation_id)
 WHERE NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones t WHERE t.intent_id = o.intent_id)
   AND json_array_length(s.part_numbers) = (SELECT count(*) FROM drive_upload_part_operations p WHERE p.intent_id = o.intent_id)
   AND NOT EXISTS (
