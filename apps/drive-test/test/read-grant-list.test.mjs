@@ -1,7 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
-import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
+import { expect, it, vi } from 'vitest';
+import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 
 async function setup() {
@@ -18,7 +18,7 @@ async function setup() {
     env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES
       ('folder', 'alice', 'folder', 'folder'), ('admin-folder', 'admin', 'admin-folder', 'folder')`),
     env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
-      VALUES ('file', 'alice', 'folder', 'file', 'key', 1)`),
+      VALUES ('file', 'alice', 'folder', 'file', 'file', 'key', 1)`),
   ]);
   const sessions = new Sessions(env.DB);
   const token = async id => (await sessions.issue(id)).token;
@@ -40,6 +40,20 @@ it('lists only explicit grant recipient IDs for the requested entry owner', asyn
   expect(await grants.listPage('alice', 'folder')).toBeNull();
 });
 
+it('authorizes and lists grants in one primary D1 statement', async () => {
+  const { grants, alice } = await setup();
+  expect(await grants.create(alice, 'folder', 'bob')).toBe(true);
+  const all = vi.fn(statement => statement.all());
+  const withSession = vi.fn(constraint => {
+    const db = env.DB.withSession(constraint);
+    return { prepare: sql => ({ bind: (...values) => ({ all: () => all(db.prepare(sql).bind(...values)) }) }) };
+  });
+  const read = new ReadGrants({ withSession });
+  expect(await read.listPage(alice, 'folder')).toEqual({ recipients: [{ recipientId: 'bob' }], nextCursor: null });
+  expect(withSession.mock.calls).toEqual([['first-primary']]);
+  expect(all).toHaveBeenCalledTimes(1);
+});
+
 it('rechecks live sessions and memberships and reflects removed grants on the next read', async () => {
   const { grants, sessions, alice } = await setup();
   expect(await grants.create(alice, 'folder', 'bob')).toBe(true);
@@ -57,9 +71,12 @@ it('rechecks live sessions and memberships and reflects removed grants on the ne
   const expired = (await sessions.issue('alice')).token;
   await env.DB.prepare("UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = 'alice'").run();
   expect(await grants.listPage(expired, 'folder')).toBeNull();
-  const live = (await sessions.issue('alice')).token;
+  const live = await sessions.issue('alice');
   await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'alice'").run();
-  expect(await grants.listPage(live, 'folder')).toBeNull();
+  // Restore the live row only in the fixture to test membership separately from session cleanup.
+  await env.DB.prepare("INSERT INTO drive_sessions VALUES (?, 'alice', ?)")
+    .bind(await tokenHash(live.token), live.expiresAt).run();
+  expect(await grants.listPage(live.token, 'folder')).toBeNull();
 });
 
 it('omits persisted rows for ineligible recipients', async () => {
