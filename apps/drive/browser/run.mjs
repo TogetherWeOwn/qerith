@@ -719,11 +719,11 @@ try {
       await page.screenshot({ path: resolve(output, `${size}-reduced-motion.png`) });
       await page.emulateMedia({ forcedColors: 'active' });
       assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
-      const glyphColours = await container.locator('svg').first().evaluate(el => ({
+      const glyphColours = await container.locator('.name svg').first().evaluate(el => ({
         stroke: getComputedStyle(el).stroke,
         canvasText: getComputedStyle(document.body).color
       }));
-      assert.equal(glyphColours.stroke, glyphColours.canvasText);
+      assert.equal(glyphColours.stroke, glyphColours.canvasText, `Forced-colours glyph stroke at ${size}`);
       const link = container.getByRole('link', { name: 'Archive' });
       await link.focus();
       assert.equal(await link.evaluate(el => el === document.activeElement), true);
