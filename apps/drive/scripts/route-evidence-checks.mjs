@@ -28,12 +28,14 @@ export function verifyManifest(manifest, lock) {
     assert(isRecord(specs), `Expected a dependency map: ${group}`);
     for (const [name, version] of Object.entries(specs)) {
       const entry = lock.packages[`node_modules/${name}`];
-      assert(/^(?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+$/.test(name) && isExactVersion(version) && entry?.version === version,
-        `Expected a locked exact registry version: ${name}`);
+      assert(name.length <= 214 && name === name.trim() &&
+        /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/.test(name) &&
+        isExactVersion(version) && entry?.version === version, `Expected a locked exact registry version: ${name}`);
       // This is the direct preflight. verify-lock-age still checks the full graph and registry metadata.
       const tarball = `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
+      // SHA-512 is 64 bytes; only two bits of the last Base64 character may be nonzero.
       assert(!entry.link && entry.resolved === tarball && typeof entry.integrity === 'string' &&
-        entry.integrity.length === 95 && /^sha512-[A-Za-z0-9+/]{86}==$/.test(entry.integrity),
+        entry.integrity.length === 95 && /^sha512-[A-Za-z0-9+/]{85}[AQgw]==$/.test(entry.integrity),
         `Expected registry source and integrity: ${name}`);
     }
   }
@@ -47,11 +49,13 @@ export async function unavailableResponse(response) {
   const status = response.status();
   // The synthetic route renders the generic state as a normal page, not an error response.
   assert.equal(status, 200, 'Expected the generic unavailable document status');
-  const { date, ...headers } = await response.allHeaders();
-  assert.match(headers['content-type'] ?? '', /^text\/html(?:\s*;|$)/i, 'Expected an unavailable HTML document');
-  const body = await response.text();
-  for (const value of [body, ...Object.entries(headers).flat()]) {
+  const allHeaders = await response.allHeaders();
+  assert.match(allHeaders['content-type'] ?? '', /^text\/html(?:\s*;|$)/i, 'Expected an unavailable HTML document');
+  const body = await response.body();
+  for (const value of [body.toString('utf8'), ...Object.entries(allHeaders).flat()]) {
     assert.doesNotMatch(value, /Synthetic title that must not leak|Project records/, 'Unavailable document contains a private fixture marker');
   }
+  // Date is ignored for equality, not for the marker scan. Compare body bytes, not decoded text.
+  const { date, ...headers } = allHeaders;
   return { status, headers, body };
 }

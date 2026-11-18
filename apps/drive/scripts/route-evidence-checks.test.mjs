@@ -10,12 +10,12 @@ test('accepts the current Drive manifest and lock root', () => {
 });
 
 test('rejects drift and non-registry specs without resolving dependencies', () => {
-  const fixture = (spec) => [{ name: 'fixture', version: '1.0.0', dependencies: { fixturedep: spec } }, {
+  const fixture = (spec, name = 'fixturedep') => [{ name: 'fixture', version: '1.0.0', dependencies: { [name]: spec } }, {
     lockfileVersion: 3,
     packages: {
-      '': { name: 'fixture', version: '1.0.0', dependencies: { fixturedep: spec } },
-      'node_modules/fixturedep': {
-        version: spec, resolved: `https://registry.npmjs.org/fixturedep/-/fixturedep-${spec}.tgz`,
+      '': { name: 'fixture', version: '1.0.0', dependencies: { [name]: spec } },
+      [`node_modules/${name}`]: {
+        version: spec, resolved: `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${spec}.tgz`,
         integrity: `sha512-${'A'.repeat(86)}==`,
       },
     },
@@ -33,11 +33,15 @@ test('rejects drift and non-registry specs without resolving dependencies', () =
   const entry = lock.packages['node_modules/fixturedep'];
   lock.packages['node_modules/fixturedep'] = { ...entry, version: '2.0.0' };
   assert.throws(() => verifyManifest(manifest, lock), /Expected a locked exact registry version/);
-  for (const bad of [{ resolved: 'https://example.invalid/fixture.tgz' }, { integrity: undefined }, { link: true }]) {
+  for (const bad of [
+    { resolved: 'https://example.invalid/fixture.tgz' }, { integrity: undefined },
+    { integrity: `sha512-${'A'.repeat(85)}B==` }, { link: true },
+  ]) {
     lock.packages['node_modules/fixturedep'] = { ...entry, ...bad };
     assert.throws(() => verifyManifest(manifest, lock), /Expected registry source and integrity/);
   }
-  verifyManifest(...fixture('1.2.3-preview.0'));
+  verifyManifest(...fixture('1.2.3-preview.0', '@scope/fixturedep'));
+  assert.throws(() => verifyManifest(...fixture('1.2.3', '@scope/..')), /Expected a locked exact registry version/);
   for (const spec of [
     'file:./fixture', 'git+https://example.invalid/fixture', 'https://example.invalid/fixture.tgz', 'npm:fixture@1.2.3', '^1.2.3',
     '1.2.3-preview_build', '01.2.3', '1.2.3-preview..1', '1.2.3-preview.01', '9007199254740992.2.3',
@@ -52,7 +56,7 @@ function mockResponse({ status = 200, extra = {}, body = generic, date = 'first'
     request: () => ({ redirectedFrom: () => redirect }),
     status: () => status,
     allHeaders: async () => ({ 'content-type': 'text/html', date, ...extra }),
-    text: async () => body,
+    body: async () => Buffer.from(body),
   };
 }
 
@@ -70,7 +74,14 @@ test('unavailable responses match across dates but not status, headers or body',
   for (const marker of ['Synthetic title that must not leak', 'Project records']) {
     await assert.rejects(unavailableResponse(mockResponse({ body: marker })), /contains a private fixture marker/);
     await assert.rejects(unavailableResponse(mockResponse({ extra: { 'x-fixture': marker } })), /contains a private fixture marker/);
+    await assert.rejects(unavailableResponse(mockResponse({ date: marker })), /contains a private fixture marker/);
   }
+});
+
+test('unavailable response compares body bytes even when the decoded text matches', async () => {
+  const [one, two] = await Promise.all([0x93, 0x94].map((byte) =>
+    unavailableResponse(mockResponse({ body: Buffer.concat([Buffer.from(generic), Buffer.from([byte])]) }))));
+  assert.notDeepEqual(one, two);
 });
 
 test('speech normalization ignores whitespace but preserves extra phrases', () => {
