@@ -11,7 +11,7 @@
   export let owned = true;
   export let detailsOnly = false;
   export let onAction: (action: RowAction) => void;
-  // The listing owns row navigation and dialog/removal focus after selection.
+  // Called after the menu closes. Return false to use native tab order from the trigger.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
 
   let trigger: HTMLButtonElement;
@@ -86,8 +86,13 @@
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
     if (event.key === 'Tab') {
       close();
-      if (onTab(event.shiftKey ? 'previous' : 'next') === false) trigger.focus();
-      else event.preventDefault();
+      let useNativeTab = false;
+      try {
+        useNativeTab = onTab(event.shiftKey ? 'previous' : 'next') === false;
+      } finally {
+        if (!useNativeTab) event.preventDefault();
+      }
+      if (useNativeTab) trigger.focus({ preventScroll: true });
       return;
     }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
