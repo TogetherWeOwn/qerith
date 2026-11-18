@@ -69,7 +69,9 @@ export function loseAcknowledgement(table, loseBeforeCommit) {
 }
 
 // The migration replay fixtures must drop children before their ledger parents.
-export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_upload_publication_attempts_cleanup_fence;
+export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_upload_publications_cleanup_fence;
+  DROP TABLE IF EXISTS drive_upload_publications;
+  DROP TRIGGER IF EXISTS drive_upload_publication_attempts_cleanup_fence;
   DROP TRIGGER IF EXISTS drive_upload_publication_attempts_dispatch_fence;
   DROP TABLE IF EXISTS drive_upload_publication_attempts;
   DROP TRIGGER IF EXISTS drive_upload_intents_cleanup_fence;
