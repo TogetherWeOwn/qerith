@@ -51,37 +51,40 @@ test('rejects drift and non-registry specs without resolving dependencies', () =
 });
 
 const generic = '<main>Folder unavailable</main>';
-function mockResponse({ status = 200, extra = {}, body = generic, date = 'first', redirect = null } = {}) {
-  return {
+function responseEvidence({ status = 200, headers = [], contentType = 'text/html', body = generic, date = 'first', redirect = null } = {}) {
+  return unavailableResponse({
     request: () => ({ redirectedFrom: () => redirect }),
     status: () => status,
-    allHeaders: async () => ({ 'content-type': 'text/html', date, ...extra }),
+    headersArray: async () => [['Content-Type', contentType], ['Date', date], ...headers].map(([name, value]) => ({ name, value })),
     body: async () => Buffer.from(body),
-  };
+  });
 }
 
-test('unavailable responses match across dates but not status, headers or body', async () => {
-  const reference = await unavailableResponse(mockResponse());
-  assert.deepEqual(await unavailableResponse(mockResponse({ date: 'second' })), reference);
-  for (const status of [403, 500]) {
-    await assert.rejects(unavailableResponse(mockResponse({ status })), /generic unavailable document status/);
-  }
-  for (const variant of [{ extra: { 'cache-control': 'no-store' } }, { body: `${generic} extra` }]) {
-    assert.notDeepEqual(await unavailableResponse(mockResponse(variant)), reference);
-  }
-  await assert.rejects(unavailableResponse(mockResponse({ redirect: {} })), /Expected a direct/);
-  await assert.rejects(unavailableResponse(mockResponse({ extra: { 'content-type': 'application/json' } })), /HTML document/);
+test('unavailable responses ignore dates and name casing, not repeated header values, order or body', async () => {
+  const headers = [['X-Fixture', 'a'], ['x-fixture', 'b']];
+  const reference = await responseEvidence({ headers });
+  assert.deepEqual(await responseEvidence({ date: 'second', headers: [['x-fixture', 'a'], ['X-FIXTURE', 'b']] }), reference);
+  assert.notDeepEqual(await responseEvidence({ headers: [['x-fixture', 'a, b']] }), reference);
+  assert.notDeepEqual(await responseEvidence({ headers: headers.toReversed() }), reference);
+  assert.notDeepEqual(await responseEvidence({ headers, body: `${generic} extra` }), reference);
+  for (const [variant, error] of [
+    [{ status: 403 }, /generic unavailable document status/], [{ redirect: {} }, /Expected a direct/],
+    [{ contentType: 'application/json' }, /HTML document/], [{ headers: [['content-type', 'text/html']] }, /HTML document/],
+  ]) await assert.rejects(responseEvidence(variant), error);
   for (const marker of ['Synthetic title that must not leak', 'Project records']) {
-    await assert.rejects(unavailableResponse(mockResponse({ body: marker })), /contains a private fixture marker/);
-    await assert.rejects(unavailableResponse(mockResponse({ extra: { 'x-fixture': marker } })), /contains a private fixture marker/);
-    await assert.rejects(unavailableResponse(mockResponse({ date: marker })), /contains a private fixture marker/);
+    for (const variant of [{ body: marker }, { headers: [['x-fixture', marker]] }, { date: marker }]) {
+      await assert.rejects(responseEvidence(variant), /contains a private fixture marker/);
+    }
   }
 });
 
-test('unavailable response compares body bytes even when the decoded text matches', async () => {
-  const [one, two] = await Promise.all([0x93, 0x94].map((byte) =>
-    unavailableResponse(mockResponse({ body: Buffer.concat([Buffer.from(generic), Buffer.from([byte])]) }))));
-  assert.notDeepEqual(one, two);
+test('unavailable responses require UTF-8 but compare body bytes, not decoded text', async () => {
+  const body = Buffer.from('<main>Project records</main>', 'utf16le');
+  await assert.rejects(responseEvidence({ body, contentType: 'text/html; charset=UTF-16LE' }), /UTF-8/i);
+  await assert.rejects(responseEvidence({ body: Buffer.concat([Buffer.from([0xff, 0xfe]), body]) }), /UTF-8/i);
+  await assert.rejects(responseEvidence({ body }), /without NUL/);
+  const contentType = 'Text/HTML; charset="UTF-8"';
+  assert.notDeepEqual(await responseEvidence({ contentType, body: String.fromCharCode(0xfeff) + generic }), await responseEvidence({ contentType }));
 });
 
 test('speech normalization ignores whitespace but preserves extra phrases', () => {

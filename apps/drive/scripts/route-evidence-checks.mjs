@@ -49,10 +49,17 @@ export async function unavailableResponse(response) {
   const status = response.status();
   // The synthetic route renders the generic state as a normal page, not an error response.
   assert.equal(status, 200, 'Expected the generic unavailable document status');
-  const allHeaders = await response.allHeaders();
-  assert.match(allHeaders['content-type'] ?? '', /^text\/html(?:\s*;|$)/i, 'Expected an unavailable HTML document');
+  const fields = await response.headersArray();
+  const allHeaders = Object.create(null);
+  for (const { name, value } of fields) (allHeaders[name.toLowerCase()] ??= []).push(value);
+  const [contentType, ...duplicates] = allHeaders['content-type'] ?? [];
+  // Drive declares UTF-8 in its template when SvelteKit sends bare text/html.
+  assert(!duplicates.length && /^text\/html(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:utf-8|"utf-8"))?$/i.test(contentType?.trim()),
+    'Expected one unavailable UTF-8 HTML document content type');
   const body = await response.body();
-  for (const value of [body.toString('utf8'), ...Object.entries(allHeaders).flat()]) {
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(body);
+  assert.doesNotMatch(text, /[\0\x1b]/, 'Expected UTF-8 HTML without NUL or encoding escape bytes');
+  for (const value of [text, ...fields.flatMap(({ name, value }) => [name, value])]) {
     assert.doesNotMatch(value, /Synthetic title that must not leak|Project records/, 'Unavailable document contains a private fixture marker');
   }
   // Date is ignored for equality, not for the marker scan. Compare body bytes, not decoded text.
