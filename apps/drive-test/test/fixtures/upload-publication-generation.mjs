@@ -38,7 +38,7 @@ export async function expectPublicationRaceRejected(fixture, race) {
   expect(result).toBeNull();
 }
 
-export async function seedBoundPublication(label, { key, service = publisher(headOk), schema } = {}) {
+export async function seedBoundPublication(label, { key, service = publisher(async () => headOk()), schema } = {}) {
   const { complete, publish, token, key: objectKey, intent } = await setup(label, { key }, schema);
   expect(await complete()).toBe('recorded');
   const { evidence_revision: evidenceRevision } = await evidence('receipts', label);

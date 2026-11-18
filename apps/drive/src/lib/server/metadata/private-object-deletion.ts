@@ -15,6 +15,7 @@ interface GenerationRow {
   etag: string;
   size_bytes: number;
   evidence_revision: string;
+  lease_remaining_ms: number;
 }
 
 interface DeleteTarget {
@@ -26,7 +27,8 @@ interface DeleteTarget {
 
 // Composition root only: resolve the exact qualified historical configuration.
 // Qualification must establish exclusive mutation, non-versioned permanent
-// deletion and atomic If-Match. No HEAD-then-delete or unconditional fallback.
+// deletion and atomic If-Match. Only a reply that distinguishes removal from
+// an already-absent object may count as deleted. No HEAD-then-delete fallback.
 export type ResolveObjectDeleter = (storageConfigId: string) => {
   storageConfigId: string;
   deleteIfMatch(target: Readonly<DeleteTarget>, signal: AbortSignal): Promise<'deleted' | 'unconfirmed'>;
@@ -37,7 +39,7 @@ const leaseSeconds = 60;
 const retrySeconds = 300;
 const requestMs = 5000;
 
-async function remove(row: GenerationRow, resolve: ResolveObjectDeleter): Promise<boolean> {
+async function remove(row: GenerationRow, resolve: ResolveObjectDeleter, leaseDeadline: number): Promise<boolean> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -48,12 +50,14 @@ async function remove(row: GenerationRow, resolve: ResolveObjectDeleter): Promis
     const storageConfigId = JSON.stringify([endpoint, bucket, storage_epoch]);
     const provider = resolve(storageConfigId);
     if (provider?.storageConfigId !== storageConfigId) return false;
+    const target = Object.freeze({ key, etag, sizeBytes: size_bytes, evidenceRevision: evidence_revision });
+    const requestDeadline = performance.now() + requestMs;
+    if (requestDeadline >= leaseDeadline) return false;
     const deadline = new Promise<'unconfirmed'>((done) => {
       timer = setTimeout(() => { controller.abort(); done('unconfirmed'); }, requestMs);
     });
-    const target = Object.freeze({ key, etag, sizeBytes: size_bytes, evidenceRevision: evidence_revision });
     const outcome = await Promise.race([provider.deleteIfMatch(target, controller.signal), deadline]);
-    return !controller.signal.aborted && outcome === 'deleted';
+    return !controller.signal.aborted && performance.now() < requestDeadline && outcome === 'deleted';
   } catch {
     return false;
   } finally {
@@ -75,21 +79,30 @@ export async function reconcilePrivateObjectDeletions(db: Database, resolve?: Re
         ORDER BY available_at, entry_id LIMIT 1)
       RETURNING entry_id`).bind(token, leaseSeconds).first<{ entry_id: string }>();
     if (!claim) break;
+    const readStarted = performance.now();
     const row = await session.prepare(`SELECT g.endpoint, g.bucket, g.storage_epoch, hex(g.object_key) AS key_hex,
-        g.etag, g.size_bytes, g.evidence_revision
+        g.etag, g.size_bytes, g.evidence_revision, 1000 * (j.available_at - unixepoch('subsec')) AS lease_remaining_ms
       FROM drive_object_deletion_jobs j JOIN drive_deleted_entries t USING (entry_id)
       JOIN drive_published_generations g ON g.entry_id = t.entry_id AND g.owner_id = t.owner_id AND g.object_key = t.object_key
       JOIN drive_upload_publication_tombstones f USING (intent_id)
       WHERE j.entry_id = ? AND j.lease_token = ? AND j.available_at > unixepoch() AND j.completed_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM drive_entries e WHERE e.id = j.entry_id OR e.object_key = g.object_key)`)
       .bind(claim.entry_id, token).first<GenerationRow>();
-    const deleted = row !== null && await remove(row, resolve);
-    // A provider request might outlive its Worker or lease. Only the current
-    // lease can settle the job; a repeated request still targets the same generation.
-    const settled = await session.prepare(`UPDATE drive_object_deletion_jobs
+    // Charge the whole D1 round trip against the lease without comparing the
+    // Worker's wall clock with D1's. A stale read must not start a provider call.
+    const leaseDeadline = readStarted + (row?.lease_remaining_ms ?? 0);
+    const deleted = row !== null && await remove(row, resolve, leaseDeadline);
+    // Only the current lease can settle, even if an issued request outlives it.
+    const settle = () => session.prepare(`UPDATE drive_object_deletion_jobs
       SET lease_token = NULL, available_at = unixepoch() + ?, completed_at = CASE WHEN ? THEN unixepoch() ELSE NULL END
       WHERE entry_id = ? AND lease_token = ? AND available_at > unixepoch() AND completed_at IS NULL
       RETURNING completed_at`).bind(retrySeconds, Number(deleted), claim.entry_id, token).first<{ completed_at: number | null }>();
+    const settled = await settle().catch(error => {
+      // Retry the fenced D1 write once while the positive reply is still in
+      // memory. If the first write committed, the second cannot change it.
+      if (deleted && performance.now() < leaseDeadline) return settle();
+      throw error;
+    });
     if (settled?.completed_at != null) completed++;
   }
   return completed;

@@ -16,6 +16,25 @@ const run = (deleteIfMatch) => reconcilePrivateObjectDeletions(env.DB, (id) =>
   id === configId ? { storageConfigId: configId, deleteIfMatch } : null);
 const tombstone = (intent) => sql('SELECT intent_id FROM drive_upload_publication_tombstones WHERE intent_id = ?', intent).first();
 
+// Start at the pre-queue schema before other cases apply the full set.
+it('does not backfill earlier deletions or infer authority from a missing entry', async () => {
+  const schema = migrations.filter(({ name }) => name < '0031_private_object_deletion_jobs.sql');
+  const removed = await seedBoundPublication('before-migration', { schema });
+  const missing = await seedBoundPublication('metadata-only', { schema });
+  expect(await sql("SELECT name FROM sqlite_master WHERE name = 'drive_object_deletion_jobs'").first()).toBeNull();
+  expect(await remove(removed.token, removed.id)).toBe(true);
+  await applyD1Migrations(env.DB, migrations);
+  await sql('DELETE FROM drive_entries WHERE id = ?', missing.id).run();
+  const deleteIfMatch = vi.fn(async () => 'deleted');
+  expect(await run(deleteIfMatch)).toBe(0);
+  expect(deleteIfMatch).not.toHaveBeenCalled();
+  for (const { id, intent } of [removed, missing]) {
+    expect(await job(id)).toBeNull();
+    expect(await tombstone(intent)).toBeNull();
+    expect(await sql('SELECT entry_id FROM drive_published_generations WHERE entry_id = ?', id).first()).not.toBeNull();
+  }
+});
+
 it('journals only authorized removal of a bound object, never revocation or an unresolved upload', async () => {
   const { id, token, key, intent, evidenceRevision } = await seedBoundPublication('authorized', { key: `${String.fromCodePoint(0xFEFF)}folder/é+%` });
   const unresolved = await seed('unresolved');
@@ -59,35 +78,22 @@ it('journals only authorized removal of a bound object, never revocation or an u
   await expect(sql('DELETE FROM drive_object_deletion_jobs WHERE entry_id = ?', id).run()).rejects.toThrow(/permanent/);
 });
 
-it('does not backfill earlier deletions or infer authority from a missing entry', async () => {
-  const schema = migrations.filter(({ name }) => name < '0031_private_object_deletion_jobs.sql');
-  const removed = await seedBoundPublication('before-migration', { schema });
-  const missing = await seedBoundPublication('metadata-only', { schema });
-  expect(await remove(removed.token, removed.id)).toBe(true);
-  await applyD1Migrations(env.DB, migrations);
-  await sql('DELETE FROM drive_entries WHERE id = ?', missing.id).run();
-  const deleteIfMatch = vi.fn(async () => 'deleted');
-  expect(await run(deleteIfMatch)).toBe(0);
-  expect(deleteIfMatch).not.toHaveBeenCalled();
-  for (const { id, intent } of [removed, missing]) {
-    expect(await job(id)).toBeNull();
-    expect(await tombstone(intent)).toBeNull();
-    expect(await sql('SELECT entry_id FROM drive_published_generations WHERE entry_id = ?', id).first()).not.toBeNull();
-  }
-});
-
 it('rolls back the subtree deletion and both tombstones when the job cannot be written', async () => {
   const { id, token, intent } = await seedBoundPublication('tree');
   await sql("INSERT INTO drive_entries VALUES ('tree-root', 'owner-tree', NULL, 'root', 'folder', NULL, NULL)").run();
   await new PrivateMetadata(env.DB).move('owner-tree', id, 'tree-root', 'file');
   await sql(`CREATE TRIGGER test_enqueue_failure BEFORE INSERT ON drive_object_deletion_jobs
     BEGIN SELECT RAISE(ABORT, 'test enqueue failure'); END`).run();
-  await expect(remove(token, 'tree-root')).rejects.toThrow(/test enqueue failure/);
-  expect(await sql("SELECT id FROM drive_entries WHERE id = ? AND parent_id = 'tree-root'", id).first()).toEqual({ id });
-  expect(await sql('SELECT entry_id FROM drive_deleted_entries LIMIT 1').first()).toBeNull();
-  expect(await tombstone(intent)).toBeNull();
+  try {
+    await expect(remove(token, 'tree-root')).rejects.toThrow(/test enqueue failure/);
+    expect(await sql("SELECT id FROM drive_entries WHERE id = ? AND parent_id = 'tree-root'", id).first()).toEqual({ id });
+    expect(await sql("SELECT entry_id FROM drive_deleted_entries WHERE entry_id IN (?, 'tree-root')", id).first()).toBeNull();
+    expect(await tombstone(intent)).toBeNull();
+    expect(await job(id)).toBeNull();
+  } finally { await sql('DROP TRIGGER test_enqueue_failure').run(); }
+  // A prior intent fence is not deletion authority and must not prevent it.
+  await sql('INSERT INTO drive_upload_publication_tombstones VALUES (?)', intent).run();
   expect(await job(id)).toBeNull();
-  await sql('DROP TRIGGER test_enqueue_failure').run();
   expect(await remove(token, 'tree-root')).toBe(true);
   expect(await tombstone(intent)).not.toBeNull();
   expect(await job('tree-root')).toBeNull();
@@ -106,17 +112,49 @@ it('leaves the ninth due job for another pass', async () => {
   expect(new Set(deleteIfMatch.mock.calls.map(([target]) => target.key)).size).toBe(9);
 }, 20_000);
 
-it('ignores a positive provider reply delivered on timeout', async () => {
-  const { id, token } = await seedBoundPublication('timeout');
+it.each(['late reply', 'ignores abort'])('times out without settlement when the provider %s', async (mode) => {
+  const { id, token } = await seedBoundPublication(`timeout-${mode.replaceAll(' ', '-')}`);
   expect(await remove(token, id)).toBe(true);
   const provider = vi.fn((_target, signal) => new Promise(resolve => {
-    signal.addEventListener('abort', () => resolve('deleted'), { once: true });
+    if (mode === 'late reply') signal.addEventListener('abort', () => resolve('deleted'), { once: true });
   }));
   expect(await run(provider)).toBe(0);
   expect(provider).toHaveBeenCalledTimes(1);
   expect(provider.mock.calls[0][1].aborted).toBe(true);
   expect((await job(id)).completed_at).toBeNull();
 }, 20_000);
+
+function interceptStatement(prefix, intercept) {
+  return { withSession(mode) {
+    const session = env.DB.withSession(mode);
+    return { prepare(query) {
+      if (!query.startsWith(prefix)) return session.prepare(query);
+      return { bind: (...args) => ({ first: () => intercept(() => session.prepare(query).bind(...args).first()) }) };
+    } };
+  } };
+}
+
+it('does not dispatch if the generation read leaves too little time on the lease', async () => {
+  const { id, token } = await seedBoundPublication('short-lease');
+  expect(await remove(token, id)).toBe(true);
+  const db = interceptStatement('SELECT g.endpoint', async first => ({ ...await first(), lease_remaining_ms: 1000 }));
+  const deleteIfMatch = vi.fn(async () => 'deleted');
+  expect(await reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }))).toBe(0);
+  expect(deleteIfMatch).not.toHaveBeenCalled();
+  expect((await job(id)).completed_at).toBeNull();
+});
+
+it('retries a failed receipt write without repeating the provider delete', async () => {
+  const { id, token } = await seedBoundPublication('receipt-retry');
+  expect(await remove(token, id)).toBe(true);
+  const write = vi.fn(async first => first()).mockRejectedValueOnce(new Error('receipt write unavailable'));
+  const db = interceptStatement('UPDATE drive_object_deletion_jobs\n      SET lease_token = NULL', write);
+  const deleteIfMatch = vi.fn(async () => 'deleted');
+  expect(await reconcilePrivateObjectDeletions(db, () => ({ storageConfigId: configId, deleteIfMatch }))).toBe(1);
+  expect(deleteIfMatch).toHaveBeenCalledTimes(1);
+  expect(write).toHaveBeenCalledTimes(2);
+  expect((await job(id)).completed_at).not.toBeNull();
+});
 
 it('retries only the same generation and never records ambiguous outcomes as completion', async () => {
   const { id, token } = await seedBoundPublication('retry');

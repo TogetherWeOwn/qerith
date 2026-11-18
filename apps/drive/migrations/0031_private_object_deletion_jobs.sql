@@ -16,7 +16,8 @@ WHEN OLD.kind = 'file' AND EXISTS (SELECT 1 FROM drive_deleted_entries t
 BEGIN
   INSERT INTO drive_upload_publication_tombstones (intent_id)
     SELECT intent_id FROM drive_published_generations
-    WHERE entry_id = OLD.id AND owner_id = OLD.owner_id AND object_key = OLD.object_key;
+    WHERE entry_id = OLD.id AND owner_id = OLD.owner_id AND object_key = OLD.object_key
+    ON CONFLICT (intent_id) DO NOTHING;
   INSERT INTO drive_object_deletion_jobs (entry_id)
     SELECT entry_id FROM drive_published_generations
     WHERE entry_id = OLD.id AND owner_id = OLD.owner_id AND object_key = OLD.object_key;
