@@ -21,6 +21,9 @@ export interface UploadIntent {
 
 const columns = 'id, owner_id, object_key, upload_id, completion_acknowledged, state, version, declared_size';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
+// Trusted dispatch recovery uses the receipt/quarantine ledger, not legacy journal transitions.
+const noTrustedDispatch = `NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
+  JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.intent_id = drive_upload_intents.id)`;
 
 function validateVersion(version: number): void {
   // Reserve a version for recording an uncertain outcome and one for late evidence.
@@ -66,9 +69,7 @@ export class UploadIntents {
         AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = drive_upload_intents.id)
-        AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
-          JOIN drive_upload_completion_dispatches d ON d.operation_id = o.operation_id
-          WHERE o.intent_id = drive_upload_intents.id)
+        AND ${noTrustedDispatch}
       RETURNING ${columns}`)
       .bind(operation === 'allocation' ? 'initiating' : 'completing', id, principalId,
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
@@ -82,7 +83,7 @@ export class UploadIntents {
   async listInFlight(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
-      WHERE state IN ('initiating', 'completing') AND id > ? ORDER BY id LIMIT ?`)
+      WHERE state IN ('initiating', 'completing') AND id > ? AND ${noTrustedDispatch} ORDER BY id LIMIT ?`)
       .bind(afterId, limit).all<UploadIntent>();
     return page.results;
   }
@@ -93,7 +94,7 @@ export class UploadIntents {
   async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
-      WHERE state = 'uncertain' AND id > ? ORDER BY id LIMIT ?`)
+      WHERE state = 'uncertain' AND id > ? AND ${noTrustedDispatch} ORDER BY id LIMIT ?`)
       .bind(afterId, limit).all<UploadIntent>();
     return page.results;
   }
@@ -106,7 +107,7 @@ export class UploadIntents {
     validateVersion(version);
     if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
     const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = 'uncertain', version = version + 1
-      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? RETURNING id`)
+      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${noTrustedDispatch} RETURNING id`)
       .bind(id, ownerId, operation === 'allocation' ? 'initiating' : 'completing', version).first<{ id: string }>();
     return row !== null;
   }
@@ -136,6 +137,7 @@ export class UploadIntents {
     const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
       WHERE id = ? AND owner_id = ?
         AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${noTrustedDispatch}
         AND ${operation === 'allocation' ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
       RETURNING id`)
       .bind(operation === 'allocation' ? 'created' : 'allocated', id, ownerId,
@@ -159,6 +161,7 @@ export class UploadIntents {
         version = version + 1
       WHERE id = ? AND owner_id = ? AND version < 9007199254740991
         AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${noTrustedDispatch}
         AND ${allocation ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
       RETURNING id`)
       .bind(allocation ? 'allocated' : 'acknowledged', allocation ? result.uploadId : null,

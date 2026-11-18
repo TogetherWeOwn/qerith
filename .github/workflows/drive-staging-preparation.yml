@@ -12,27 +12,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Verify dispatch source
+        shell: bash
+        run: |
+          # Actions expression comparisons ignore case; this check does not.
+          if [[ "$GITHUB_REPOSITORY" != TogetherWeOwn/qerith ||
+                "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            printf '%s\n' 'unexpected dispatch source' >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' 'invalid source SHA' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify source context and checked-out commit
-        env:
-          SOURCE_REPOSITORY: ${{ github.repository }}
-          SOURCE_EVENT: ${{ github.event_name }}
-          SOURCE_REF: ${{ github.ref }}
-          SOURCE_SHA: ${{ github.sha }}
+      - name: Verify checked-out commit
+        shell: bash
         run: |
-          export CHECKOUT_SHA="$(git rev-parse HEAD)"
-          node --input-type=module <<'NODE'
-          import { assertStagingSource } from './apps/drive/scripts/staging-source.mjs';
-          assertStagingSource({
-            repository: process.env.SOURCE_REPOSITORY,
-            event: process.env.SOURCE_EVENT,
-            ref: process.env.SOURCE_REF,
-            sha: process.env.SOURCE_SHA,
-            checkoutSha: process.env.CHECKOUT_SHA,
-          });
-          NODE
+          if ! checkout_sha="$(git rev-parse --verify HEAD)"; then
+            printf '%s\n' 'could not resolve checkout HEAD' >&2
+            exit 1
+          fi
+          if [[ "$checkout_sha" != "$GITHUB_SHA" ]]; then
+            printf '%s\n' 'checkout SHA mismatch' >&2
+            exit 1
+          fi
       - name: Test closed-admission metadata
         run: node --test apps/drive/scripts/staging-manifest.test.mjs
