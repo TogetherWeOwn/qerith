@@ -30,16 +30,19 @@ it('authorizes direct and inherited reads and lists without disclosing parents o
   expect(await reads.get(bob, 'file')).toBeNull();
   expect(await reads.list(bob, 'nested')).toBeNull();
   expect(await reads.get(bob, 'missing')).toBeNull();
-  expect(await reads.resolveObject(eve, 'file')).toBeNull();
+  expect(await reads.get(eve, 'file')).toBeNull();
   expect(await grants.create(alice, 'root', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).toEqual({ id: 'file', name: 'file', kind: 'file' });
-  expect(await reads.resolveObject(bob, 'file')).toEqual({ objectKey: 'secret-key', sizeBytes: 7 });
   expect(await reads.list(bob, 'nested')).toEqual({ entries: [{ id: 'file', name: 'file', kind: 'file' }], nextCursor: null });
+  expect(await reads.listPage(bob, 'nested')).toEqual({
+    entries: [{ id: 'file', name: 'file', kind: 'file' }], total: 1, order: 'binary-name', direction: 'asc', nextCursor: null,
+  });
   expect(await reads.list(bob, 'file')).toBeNull();
+  expect(await reads.listPage(bob, 'file')).toBeNull();
   expect(await reads.get(bob, 'other')).toBeNull();
   expect(await grants.create(bob, 'file', 'eve')).toBe(false);
   expect(await grants.revoke(alice, 'root', 'bob')).toBe(true);
-  expect(await reads.resolveObject(bob, 'file')).toBeNull();
+  expect(await reads.get(bob, 'file')).toBeNull();
   expect(await grants.create(alice, 'file', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).not.toBeNull();
   expect(await reads.get(bob, 'nested')).toBeNull();
@@ -50,6 +53,7 @@ it('re-evaluates inheritance on additions, moves, session and membership changes
   await grants.create(alice, 'root', 'bob');
   await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('new', 'alice', 'root', 'new', 'folder')").run();
   expect(await reads.list(bob, 'new')).toEqual({ entries: [], nextCursor: null });
+  expect(await reads.listPage(bob, 'new')).toEqual({ entries: [], total: 0, order: 'binary-name', direction: 'asc', nextCursor: null });
   await env.DB.prepare("UPDATE drive_entries SET parent_id = 'elsewhere' WHERE id = 'nested'").run();
   expect(await reads.get(bob, 'file')).toBeNull();
   await env.DB.prepare("UPDATE drive_entries SET parent_id = 'root' WHERE id = 'nested'").run();
@@ -89,12 +93,26 @@ it('paginates only entries in the currently authorized folder', async () => {
   expect(await reads.list(bob, 'root', first.nextCursor)).toBeNull();
 });
 
-function seedListing(count, kind = 'folder') {
-  return env.DB.batch(Array.from({ length: count }, (_, i) => env.DB.prepare(`
-    INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
-    VALUES (?, 'alice', 'root', ?, ?, ?, ?)
-  `).bind(`item-${i}`, `item-${String(i).padStart(3, '0')}`, kind,
-    kind === 'file' ? `item-key-${i}` : null, kind === 'file' ? 0 : null)));
+function listingEntry(id, name, { folderId = 'root', kind = 'folder' } = {}) {
+  return env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
+    VALUES (?, 'alice', ?, ?, ?, ?, ?)`)
+    .bind(id, folderId, name, kind, kind === 'file' ? `${id}-key` : null, kind === 'file' ? 0 : null);
+}
+
+function seedListing(count, kind = 'folder', { folderId = 'root', prefix = 'item-', idSuffix = '' } = {}) {
+  return env.DB.batch(Array.from({ length: count }, (_, i) =>
+    listingEntry(`${prefix}${i}${idSuffix}`, `${prefix}${String(i).padStart(3, '0')}`, { folderId, kind })));
+}
+
+async function explainPage(token, cursor, direction) {
+  let explain;
+  const recordingDb = { prepare(sql) { return { bind(...values) {
+    explain = env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values);
+    return env.DB.prepare(sql).bind(...values);
+  } }; } };
+  const page = await new ReadAccess(recordingDb).listPage(token, 'root', cursor, direction);
+  const { results } = await explain.all();
+  return { page, details: results.map(row => row.detail).join('\n') };
 }
 
 it.each(['asc', 'desc'])('lists folders first, with a binary name seek in %s order', async (direction) => {
@@ -106,18 +124,14 @@ it.each(['asc', 'desc'])('lists folders first, with a binary name seek in %s ord
   expect(first.entries).toHaveLength(200);
   expect(first.nextCursor).not.toBeNull();
   expect(first.entries.slice(0, 2).map(entry => entry.name)).toEqual(direction === 'asc' ? ['Z', 'nested'] : ['nested', 'Z']);
-  let explain;
-  const recordingDb = { prepare(sql) { return { bind(...values) {
-    explain = env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values);
-    return env.DB.prepare(sql).bind(...values);
-  } }; } };
-  const second = await new ReadAccess(recordingDb).listPage(alice, 'root', first.nextCursor, direction);
+  const { page: second, details } = await explainPage(alice, first.nextCursor, direction);
   const names = Array.from({ length: 205 }, (_, i) => `item-${String(i).padStart(3, '0')}`);
   if (direction === 'desc') names.reverse();
+  expect(second.entries).toHaveLength(7);
   expect([...first.entries.slice(2), ...second.entries].map(entry => entry.name)).toEqual(names);
+  expect(new Set([...first.entries, ...second.entries].map(entry => entry.id)).size).toBe(207);
   expect(second).toMatchObject({ total: 207, nextCursor: null });
-  const { results } = await explain.all();
-  expect(results.map(row => row.detail).join('\n')).toMatch(new RegExp(`drive_entries_listing_${direction}.*name[<>]\\?`));
+  expect(details).toMatch(new RegExp(`drive_entries_listing_${direction}.*name[<>]\\?`));
 });
 
 it.each(['asc', 'desc'])('keeps the saved boundary and current total after writes in %s order', async (direction) => {
@@ -144,23 +158,138 @@ it.each(['asc', 'desc'])('keeps the saved boundary and current total after write
 
 it('checks current access before reporting invalid page input', async () => {
   const { sessions, grants, reads, alice, bob, eve } = await setup();
-  await seedListing(200);
+  await seedListing(202);
   await grants.create(alice, 'root', 'bob');
   const first = await reads.listPage(bob, 'root');
-  expect(first).toMatchObject({ total: 201, direction: 'asc', order: 'binary-name' });
+  expect(first).toMatchObject({ total: 203, direction: 'asc', order: 'binary-name' });
+  expect(first.entries).toHaveLength(200);
   expect(first.nextCursor).not.toBeNull();
+  const cursor = first.nextCursor;
+  const second = await reads.listPage(bob, 'root', cursor);
+  expect(second).toMatchObject({ total: 203, nextCursor: null });
+  expect(second.entries).toHaveLength(3);
+  expect(new Set([...first.entries, ...second.entries].map(entry => entry.id)).size).toBe(203);
   expect(await reads.listPage(bob, 'elsewhere')).toBeNull();
   expect(await reads.listPage(eve, 'root', first.nextCursor)).toBeNull();
   expect(await reads.listPage(alice, 'elsewhere')).toEqual({ entries: [], total: 0, direction: 'asc', order: 'binary-name', nextCursor: null });
-  for (const input of ['invalid!', 'x'.repeat(2049)]) {
-    await expect(reads.listPage(bob, 'root', input)).rejects.toThrow(TypeError);
-  }
+  const envelope = JSON.parse(atob(cursor.replaceAll('-', '+').replaceAll('_', '/')));
+  const encode = value => btoa(JSON.stringify(value)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+  const invalid = [
+    '', 'invalid!', `${cursor}=`, 'x'.repeat(2049),
+    ...[{ v: 1 }, { o: 'locale' }, { k: 'other' }, { extra: true },
+      { n: '_w' }, { n: 'YQ==' }, { n: '' }, { n: 'Lw' }].map(change => encode({ ...envelope, ...change })),
+  ];
+  for (const token of invalid) await expect(reads.listPage(bob, 'root', token)).rejects.toThrow(TypeError);
+  await expect(reads.listPage(bob, 'nested', cursor)).rejects.toThrow(TypeError);
   await expect(reads.listPage(bob, 'root', first.nextCursor, 'desc')).rejects.toThrow(TypeError);
   await expect(reads.listPage(alice, 'elsewhere', first.nextCursor)).rejects.toThrow(TypeError);
+  await expect(reads.listPage(bob, 'root', null, 'invalid')).rejects.toThrow(TypeError);
   await grants.revoke(alice, 'root', 'bob');
   expect(await reads.listPage(bob, 'root', first.nextCursor)).toBeNull();
-  expect(await reads.listPage(bob, 'root', 'invalid!')).toBeNull();
-  await grants.create(alice, 'root', 'bob');
+  for (const token of invalid) expect(await reads.listPage(bob, 'root', token)).toBeNull();
+  expect(await reads.listPage(bob, 'root', null, 'invalid')).toBeNull();
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
   await sessions.revoke(bob);
   expect(await reads.listPage(bob, 'root', first.nextCursor)).toBeNull();
+  expect(await reads.listPage(bob, 'root', invalid[0])).toBeNull();
+  const expired = (await sessions.issue('bob')).token;
+  await expect(reads.listPage(expired, 'root', invalid[0])).rejects.toThrow(TypeError);
+  await env.DB.prepare("UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = 'bob'").run();
+  expect(await reads.listPage(expired, 'root', invalid[0])).toBeNull();
+});
+
+it.each([0, 199, 200, 201])('reports the exact total and page boundary for %i children', async (count) => {
+  const { reads, alice } = await setup();
+  if (count) await seedListing(count, 'folder', { folderId: 'elsewhere' });
+  const first = await reads.listPage(alice, 'elsewhere');
+  expect(first.total).toBe(count);
+  expect(first.entries).toHaveLength(Math.min(count, 200));
+  expect(first.nextCursor === null).toBe(count <= 200);
+  if (count > 200) {
+    const second = await reads.listPage(alice, 'elsewhere', first.nextCursor);
+    expect(second).toMatchObject({ total: count, nextCursor: null });
+    expect(second.entries.map(entry => entry.id)).toEqual(['item-200']);
+  }
+});
+
+it('continues a bounded cursor for multi-kilobyte folder and child IDs', async () => {
+  const { reads, alice } = await setup();
+  const folderId = 'parent-'.repeat(400);
+  const idSuffix = 'x'.repeat(3000);
+  await listingEntry(folderId, 'long-id-parent').run();
+  await seedListing(201, 'folder', { folderId, idSuffix });
+  const first = await reads.listPage(alice, folderId);
+  expect(first.entries.at(-1).id).toBe(`item-199${idSuffix}`);
+  expect(first.nextCursor.length).toBeLessThanOrEqual(2048);
+  const second = await reads.listPage(alice, folderId, first.nextCursor);
+  expect(second).toMatchObject({ total: 201, nextCursor: null });
+  expect(second.entries.map(entry => entry.id)).toEqual([`item-200${idSuffix}`]);
+});
+
+it.each([
+  ['255-byte multibyte', 'é'.repeat(127) + 'x'],
+  ['255-byte escape-heavy', '\\"'.repeat(127) + 'x'],
+  ['standalone BOM', String.fromCodePoint(0xfeff)], ['leading BOM', `${String.fromCodePoint(0xfeff)}name`],
+])('round-trips a %s boundary and rejects a duplicate sibling', async (_label, name) => {
+  const { reads, alice } = await setup();
+  await seedListing(199, 'folder', { folderId: 'elsewhere', prefix: '!' });
+  await env.DB.batch([
+    listingEntry('max-name', name, { folderId: 'elsewhere' }),
+    listingEntry('last-file', 'last', { folderId: 'elsewhere', kind: 'file' }),
+  ]);
+  const first = await reads.listPage(alice, 'elsewhere');
+  expect(first.entries.at(-1).name).toBe(name);
+  expect(first.nextCursor.length).toBeLessThanOrEqual(595);
+  expect((await reads.listPage(alice, 'elsewhere', first.nextCursor)).entries.map(entry => entry.id)).toEqual(['last-file']);
+  await expect(listingEntry('duplicate', name, { folderId: 'elsewhere' }).run()).rejects.toThrow(/conflicting metadata/);
+});
+
+it.each(['asc', 'desc'])('seeks from an all-folder page into the first file in %s order', async (direction) => {
+  const { reads, alice } = await setup();
+  await seedListing(199);
+  await listingEntry('root-file', 'a-file', { kind: 'file' }).run();
+  const first = await reads.listPage(alice, 'root', null, direction);
+  expect(first.total).toBe(201);
+  expect(first.entries).toHaveLength(200);
+  expect(first.entries.every(entry => entry.kind === 'folder')).toBe(true);
+  expect(first.nextCursor).not.toBeNull();
+  const { page: second, details } = await explainPage(alice, first.nextCursor, direction);
+  expect(second).toMatchObject({ total: 201, nextCursor: null });
+  expect(second.entries).toEqual([{ id: 'root-file', name: 'a-file', kind: 'file' }]);
+  expect(details).toMatch(new RegExp(`drive_entries_listing_${direction}.*name[<>]\\?`));
+});
+
+it.each(['asc', 'desc'])('uses the saved cursor after renaming the boundary in %s order', async (direction) => {
+  const { reads, alice } = await setup();
+  await seedListing(201, 'folder', { prefix: 'rename-' });
+  const first = await reads.listPage(alice, 'root', null, direction);
+  const boundaryId = first.entries.at(-1).id;
+  await env.DB.prepare('UPDATE drive_entries SET name = ? WHERE id = ?')
+    .bind(direction === 'asc' ? '!renamed' : 'z-renamed', boundaryId).run();
+  const second = await reads.listPage(alice, 'root', first.nextCursor, direction);
+  expect(second).toMatchObject({ total: 202, nextCursor: null });
+  expect(second.entries.map(entry => entry.name)).toEqual(direction === 'asc'
+    ? ['rename-199', 'rename-200'] : ['rename-000', 'nested']);
+  expect(second.entries.some(entry => entry.id === boundaryId)).toBe(false);
+});
+
+it.each(['asc', 'desc'])('counts insertions on both sides of the boundary in %s order', async (direction) => {
+  const { reads, alice } = await setup();
+  await seedListing(201);
+  const first = await reads.listPage(alice, 'root', null, direction);
+  await env.DB.batch(['!new', 'z-new'].map(name => listingEntry(name, name)));
+  const second = await reads.listPage(alice, 'root', first.nextCursor, direction);
+  expect(second).toMatchObject({ total: 204, nextCursor: null });
+  expect(second.entries.map(entry => entry.name)).toEqual(direction === 'asc'
+    ? ['item-200', 'nested', 'z-new'] : ['item-001', 'item-000', '!new']);
+});
+
+it('keeps binary rather than numeric name order within each kind', async () => {
+  const { reads, alice } = await setup();
+  await env.DB.batch([
+    listingEntry('zdir', 'z'),
+    ...['file 10', 'file 2', 'A'].map(name => listingEntry(name, name, { kind: 'file' })),
+  ]);
+  expect((await reads.listPage(alice, 'root')).entries.map(entry => entry.name)).toEqual(['nested', 'z', 'A', 'file 10', 'file 2']);
+  expect((await reads.listPage(alice, 'root', null, 'desc')).entries.map(entry => entry.name)).toEqual(['z', 'nested', 'file 2', 'file 10', 'A']);
 });
