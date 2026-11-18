@@ -1271,24 +1271,36 @@ try {
       }
     });
     const inlineUrl = `${origin}/?listing&actions&inline`;
-    await page.goto(`${inlineUrl}&two-lists`);
-    const [first, second] = await page.locator('.listing').all();
     const rowDetails = list => list.getByRole('group', { name: 'Details for Résumé 2025.pdf', exact: true });
     const menuTrigger = layout => layout.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
-    for (const listing of [first, second]) {
-      await openDetails(menuTrigger(listing));
-      await rowDetails(listing).and(focus).waitFor();
-    }
-    resizeTarget = main.locator(':scope > div').nth(1);
-    for (const [width, role] of [[1000, 'table'], [500, 'list']]) {
-      await setContainerWidth(width);
-      await rowDetails(second.getByRole(role)).and(focus).waitFor();
-    }
-    await page.keyboard.press('Escape');
-    assert.equal(await rowDetails(first).count(), 1);
-    assert.equal(await rowDetails(second).count(), 0);
-    await menuTrigger(second).and(focus).waitFor();
+    const prepareInlineListing = async () => {
+      await page.goto(`${inlineUrl}&two-lists`);
+      const [first, second] = await page.locator('.listing').all();
+      for (const listing of [first, second]) {
+        await openDetails(menuTrigger(listing));
+        await rowDetails(listing).and(focus).waitFor();
+      }
+      resizeTarget = main.locator(':scope > div').nth(1);
+      for (const [width, role] of [[1000, 'table'], [500, 'list']]) {
+        await setContainerWidth(width);
+        await rowDetails(second.getByRole(role)).and(focus).waitFor();
+      }
+      await page.keyboard.press('Escape');
+      assert.equal(await rowDetails(first).count(), 1);
+      assert.equal(await rowDetails(second).count(), 0);
+      await menuTrigger(second).and(focus).waitFor();
+      return second;
+    };
+    const second = await prepareInlineListing();
     const download = page.getByRole('menuitem', { name: 'Download', exact: true }).and(focus);
+    const waitForSettledDownload = async scenario => {
+      try {
+        await download.waitFor({ timeout: 5000 });
+      } catch (error) {
+        console.error('Listing menu focus trace:', JSON.stringify({ ...scenario, events: await page.evaluate(() => window.menuFocusTrace) }));
+        throw error;
+      }
+    };
     const waitForMenuClose = () => page.waitForFunction(() => !document.querySelector('dialog:popover-open, dialog:modal, [aria-expanded="true"]'), null, { timeout: 5000 });
     for (const inline of [true, false]) for (const [from, to, fromRole, toRole] of [[1000, 500, 'table', 'list'], [500, 1000, 'list', 'table']]) {
       if (!inline) { await page.goto(`${origin}/?listing&actions`); resizeTarget = main; }
@@ -1314,12 +1326,7 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          try {
-            await download.waitFor({ timeout: 5000 });
-          } catch (error) {
-            console.error('Listing menu focus trace:', { inline, from, to, events: await page.evaluate(() => window.menuFocusTrace) });
-            throw error;
-          }
+          await waitForSettledDownload({ inline, from, to });
           await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
@@ -1415,6 +1422,17 @@ try {
       await waitForMenuClose();
     }
     console.log('Listing action menus preserve deliberate blur and hand off focus between viewport layouts, including the modal sheet');
+    // Reload the fixture for each sample and replay the first settled case's setup.
+    // A failed sample still fails the job; this does not retry any assertion.
+    const replayCount = 32;
+    for (let sample = 1; sample <= replayCount; sample++) {
+      const listing = await prepareInlineListing();
+      await setContainerWidth(1000);
+      await menuTrigger(listing.getByRole('table')).focus();
+      await page.keyboard.press('ArrowDown');
+      await waitForSettledDownload({ inline: true, from: 1000, to: 500, sample });
+    }
+    console.log(`Listing action menu: Download took keyboard focus in ${replayCount} first-case replays`);
     await context.close();
   }
   {
