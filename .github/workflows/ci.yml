@@ -334,6 +334,9 @@ jobs:
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
       - name: Test staging preparation metadata
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-manifest.test.mjs
+      - name: Test migration source ledger
+        if: hashFiles('apps/drive/scripts/staging-migrations.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migrations.test.mjs
       # An exact PR head can predate the guard even when the merge ref has this CI step.
       - name: Test staging source guard
         if: hashFiles('.github/workflows/drive-staging-preparation.yml', 'apps/drive/scripts/staging-source.test.mjs') != ''
