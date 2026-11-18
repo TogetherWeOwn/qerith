@@ -11,7 +11,7 @@
   const desktopActions: Record<string, { dismiss(): void; openFromContextMenu(event: MouseEvent): void } | undefined> = Object.create(null);
   const compactActions: typeof desktopActions = Object.create(null);
   const actionTrigger = 'button[aria-haspopup="menu"]';
-  let checkLayoutOnOpen: (() => void) | undefined;
+  let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined;
 
   function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
     const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
@@ -72,7 +72,8 @@
     };
     let openingFrame = 0;
     // A menu can open in a transient layout that ResizeObserver never reports.
-    checkLayoutOnOpen = () => {
+    checkLayoutOnOpen = (when) => {
+      if (when === 'now') { transferFocus(); return; }
       cancelAnimationFrame(openingFrame);
       openingFrame = requestAnimationFrame(transferFocus);
     };

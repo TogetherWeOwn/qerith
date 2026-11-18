@@ -1207,24 +1207,40 @@ try {
       await setContainerWidth(from);
       await afterLayout();
       const trigger = menuTrigger(source);
-      await trigger.evaluate(async (button, { from, to }) => {
-        const container = button.closest('main');
-        button.focus();
-        // Restore before the listing's opening-frame callback, but after the opening tick.
-        const restored = new Promise(resolve => requestAnimationFrame(() => {
-          container.style.width = `${from}px`;
-          resolve();
-        }));
-        button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-        container.style.width = `${to}px`;
-        await restored;
-      }, { from, to });
-      await waitForMenuClose();
-      await trigger.press('ArrowDown');
-      await download.waitFor({ timeout: 5000 });
-      await page.keyboard.press('Escape');
-      await waitForMenuClose();
-      console.log(`Listing action menu: aborted ${from}→${to}→${from} opening can reopen`);
+      for (const layerShown of [false, true]) {
+        await trigger.evaluate(async (button, { from, to, layerShown }) => {
+          const container = button.closest('main');
+          const hideTrigger = () => { container.style.width = `${to}px`; };
+          const showPopover = HTMLDialogElement.prototype.showPopover;
+          let shown = false;
+          if (layerShown) HTMLDialogElement.prototype.showPopover = function () {
+            showPopover.call(this);
+            shown = this.matches(':popover-open');
+            hideTrigger();
+          };
+          button.focus();
+          // Restore before the listing's opening-frame callback, but after the opening ticks.
+          const restored = new Promise(resolve => requestAnimationFrame(() => {
+            container.style.width = `${from}px`;
+            resolve();
+          }));
+          try {
+            button.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+            if (!layerShown) hideTrigger();
+            await restored;
+            if (layerShown && !shown) throw new Error('Expected an open layer before the resize');
+          } finally {
+            if (layerShown) delete HTMLDialogElement.prototype.showPopover;
+          }
+        }, { from, to, layerShown });
+        await waitForMenuClose();
+        if (layerShown) await trigger.and(focus).waitFor({ timeout: 5000 });
+        await trigger.press('ArrowDown');
+        await download.waitFor({ timeout: 5000 });
+        await page.keyboard.press('Escape');
+        await waitForMenuClose();
+        console.log(`Listing action menu: aborted ${from}→${to}→${from} opening ${layerShown ? 'after' : 'before'} showing the layer can reopen`);
+      }
     }
     await main.evaluate(el => el.style.removeProperty('width'));
     for (const [width, source, destination, layer] of [[390, table, list, ':popover-open'], [1280, list, table, ':modal']]) {

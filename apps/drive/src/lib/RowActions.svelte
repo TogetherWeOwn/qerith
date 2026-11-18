@@ -10,7 +10,7 @@
   export let file = true;
   export let owned = true;
   // A responsive listing checks layout on open and owns dismissal of hidden triggers.
-  export let checkLayoutOnOpen: (() => void) | undefined = undefined;
+  export let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined = undefined;
   export let onAction: (action: RowAction) => void;
   // Called after the menu closes. Return false to use native tab order from the trigger.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
@@ -54,7 +54,7 @@
     const request = ++opening;
     compact = window.matchMedia('(max-width: 820px)').matches;
     if (!open) {
-      checkLayoutOnOpen?.();
+      checkLayoutOnOpen?.('next-frame');
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('pointerdown', outside);
       window.addEventListener('resize', onResize);
@@ -73,8 +73,9 @@
     const above = anchor.top;
     menuTop = Math.max(0, Math.min(below >= rect.height || below >= above ? anchor.bottom : anchor.top - rect.height, window.innerHeight - rect.height));
     await tick();
-    // Opening can span a layout switch; leave handoff to the listing.
-    if (!open || request !== opening || hiddenByParent()) return;
+    if (!open || request !== opening) return;
+    // Hand off before the source layout can reappear with an open, unfocused layer.
+    if (hiddenByParent()) { checkLayoutOnOpen?.('now'); return; }
     const items = menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
     items[last ? items.length - 1 : 0]?.focus();
   }
