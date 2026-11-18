@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { handle } from '../src/hooks.server';
+import { privateRequests } from '../src/lib/server/request-auth';
 
 const origin = 'https://example.test';
 const token = 'A'.repeat(43);
@@ -14,10 +14,16 @@ function request(url: string, init?: RequestInit, configuredOrigin = origin, bro
     if (broken) throw new Error('database unavailable');
     return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
   } } };
-  const event = { request: new Request(url, init), locals: {}, platform: { env } };
+  const event = { request: new Request(url, init), locals: {} };
+  const handle = privateRequests(env);
   return handle({ event, resolve: async () => {
     resolved = true;
-    return new Response('resolved', { headers: { 'cache-control': 'public, max-age=60' } });
+    return new Response('resolved', { headers: {
+      'cache-control': 'public, max-age=60',
+      'cdn-cache-control': 'public, max-age=120',
+      'cloudflare-cdn-cache-control': 'public, max-age=180',
+      'surrogate-control': 'max-age=240'
+    } });
   } } as unknown as Parameters<typeof handle>[0]).then((response) => ({ response, lookups, resolved, event }));
 }
 
@@ -46,7 +52,9 @@ test('wrong destination and unsafe methods without the exact Origin are denied b
 });
 
 test('absent, malformed and ambiguous session cookies never resolve a route', async () => {
-  for (const value of ['', `${cookie}%00`, `${cookie}; ${cookie}`, `drive-session=${token}`]) {
+  const spaced = `__Host-drive-session \t= ${token}`;
+  for (const value of ['', `${cookie}%00`, `${cookie}; ${cookie}`, `${cookie}; ${spaced}`,
+    `${spaced}; ${cookie}`, spaced, `drive-session=${token}`]) {
     const result = await request(`${origin}/private`, { headers: { cookie: value } });
     assert.equal(result.response.status, 401);
     assert.equal(result.lookups, 0);
@@ -59,6 +67,9 @@ test('same-origin authenticated requests resolve with a private, non-cacheable r
     const result = await request(`${origin}/private`, { method, headers: { origin, cookie } });
     assert.equal(result.response.status, 200);
     assert.equal(result.response.headers.get('cache-control'), 'private, no-store');
+    for (const name of ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control']) {
+      assert.equal(result.response.headers.get(name), null);
+    }
     assert.equal(result.lookups, 1);
     assert.deepEqual(result.event.locals, { driveSession: { token, principal: { id: 'member', role: 'member' } } });
   }

@@ -1,7 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
-import { handle } from '../../drive/src/hooks.server.ts';
+import { privateRequests } from '../../drive/src/lib/server/request-auth.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 
 it('resolves only the session principal and rechecks revocation and expiry on the next request', async () => {
@@ -12,11 +12,11 @@ it('resolves only the session principal and rechecks revocation and expiry on th
   const owner = await sessions.issue('owner');
   const member = await sessions.issue('member');
   const origin = 'https://drive.example.test';
+  const handle = privateRequests({ DRIVE_ORIGIN: origin, DB: env.DB });
   const access = (token) => handle({
     event: {
       request: new Request(`${origin}/private?principal=owner`, { headers: { cookie: `__Host-drive-session=${token}` } }),
-      locals: {},
-      platform: { env: { DRIVE_ORIGIN: origin, DB: env.DB } }
+      locals: {}
     },
     resolve: async ({ locals }) => Response.json(locals.driveSession.principal)
   });
