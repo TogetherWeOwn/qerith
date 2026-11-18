@@ -2,17 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
-import { config, epoch, loseAcknowledgement, parts, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
-
-const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
-const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
-
-function producer(fetch, verifyParts = vi.fn(async () => parts), db = env.DB) {
-  const options = { fetch, timeoutMs: 5000 };
-  const service = createUploadCompletionReceipts(db, epoch, config, options, { isQualified: async () => true, verifyParts });
-  options.fetch = vi.fn(() => { throw new Error('replacement transport'); });
-  return service;
-}
+import { config, epoch, evidence, intentRow, loseAcknowledgement, migrations, parts, producer, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 
 it('rejects an eligible legacy seal without backfilling storage authority', async () => {
   await applyD1Migrations(env.DB, migrations.slice(0, -1));
@@ -27,15 +17,21 @@ it('rejects an eligible legacy seal without backfilling storage authority', asyn
 it.each(['claim', 'receipt', 'receipt-write-read'])('recovers from lost %s D1 results without redispatch', async (lost) => {
   await applyD1Migrations(env.DB, migrations);
   const id = `lost-${lost}`, { token, key, intent } = await seed(id);
+  const late = lost === 'receipt-write-read';
+  let inFlightIntent;
   const fetch = vi.fn(async (request) => {
     expect(request.method).toBe('POST');
     expect(request.url).toBe(`${config.endpoint}/${config.bucket}/${key}?uploadId=upload%2F%2Bid`);
     expect(request.headers.get('if-none-match')).toBe('*');
     expect(request.headers.get('authorization')).toMatch(/signedheaders=[^,]*if-none-match/i);
     expect(await request.text()).toContain('<PartNumber>2</PartNumber><ETag>"part-&amp;-ÿ"</ETag>');
+    if (late) {
+      inFlightIntent = await intentRow(intent);
+      await first.quarantineUnresolved(id);
+    }
     return response(key);
   });
-  const db = loseAcknowledgement(lost === 'claim' ? 'dispatches' : 'receipts', lost === 'receipt-write-read');
+  const db = loseAcknowledgement(lost === 'claim' ? 'dispatches' : 'receipts', late);
   const withSession = vi.spyOn(db, 'withSession');
   const verify = vi.fn(async () => parts), first = producer(fetch, verify, db);
   const results = await Promise.all([first.complete(token, id), first.complete(token, id)]);
@@ -48,18 +44,22 @@ it.each(['claim', 'receipt', 'receipt-write-read'])('recovers from lost %s D1 re
     expect(withSession).toHaveBeenCalledTimes(3);
     expect(durable).toMatchObject({ etag: '"final-opaque"', response_checksums: '{"ChecksumSHA256":"example-checksum","ChecksumType":"COMPOSITE"}' });
   }
-  expect(await evidence('quarantine', id)).toBeNull();
+  expect(await evidence('quarantine', id)).toEqual(late ? { operation_id: id } : null);
+  if (late) {
+    expect(inFlightIntent).toMatchObject({ state: 'completing', version: 3 });
+    expect(await intentRow(intent)).toEqual(inFlightIntent);
+  }
   await expect(producer(fetch).complete(token, id)).resolves.toBe('not-admitted');
   expect(await evidence('receipts', id)).toEqual(durable);
   expect(fetch).toHaveBeenCalledTimes(lost === 'claim' ? 0 : 1);
 });
 
-it.each([{ endpoint: 'https://other.example' }, { key: 'key/../object' }, { intent: new Uint8Array([255]).buffer }])(
-  'denies a different namespace or malformed identity before verification: %j', async (options) => {
+it.each([{ endpoint: 'https://other.example' }, { key: 'key/../object' }, { intent: new Uint8Array([255]).buffer }, { qualified: false }])(
+  'denies a different namespace, malformed identity or unqualified provider before part verification: %j', async (options) => {
     await applyD1Migrations(env.DB, migrations);
     const id = `reject-${Object.keys(options)[0]}`, { token } = await seed(id, options);
     const fetch = vi.fn(), verify = vi.fn();
-    await expect(producer(fetch, verify).complete(token, id)).resolves.toBe('not-admitted');
+    await expect(producer(fetch, verify, env.DB, options.qualified).complete(token, id)).resolves.toBe('not-admitted');
     expect(await evidence('dispatches', id)).toBeNull();
     expect(verify).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();

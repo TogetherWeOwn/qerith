@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { Sessions } from '../../../drive/src/lib/server/identity/sessions.ts';
+import { createUploadCompletionReceipts } from '../../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 
 export const sql = (query, ...args) => env.DB.prepare(query).bind(...args);
 export const sessions = new Sessions(env.DB);
@@ -7,6 +8,16 @@ export const config = { endpoint: 'https://storage.example', bucket: 'drive-test
 export const epoch = 'epoch-1';
 export const parts = [{ partNumber: 2, etag: '"part-&-ÿ"', size: 7 }];
 export const response = (key) => new Response(`<CompleteMultipartUploadResult><Bucket>drive-test</Bucket><Key>${key}</Key><ETag>"final-opaque"</ETag><ChecksumSHA256>example-checksum</ChecksumSHA256><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>`);
+export const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
+export const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
+export const intentRow = (id) => sql('SELECT * FROM drive_upload_intents WHERE id = CAST(? AS TEXT)', id).first();
+
+export function producer(fetch, verifyParts = async () => parts, db = env.DB, qualified = true) {
+  const options = { fetch, timeoutMs: 5000 };
+  const service = createUploadCompletionReceipts(db, epoch, config, options, { isQualified: async () => qualified, verifyParts });
+  options.fetch = () => { throw new Error('replacement transport'); };
+  return service;
+}
 
 // Seed ledger rows directly so this also covers inherited, non-UTF-8 SQLite TEXT.
 export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}` } = {}) {
