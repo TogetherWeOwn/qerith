@@ -9,7 +9,7 @@
   let desktopSort: HTMLButtonElement;
 
   onMount(() => {
-    const compact = window.matchMedia('(max-width: 820px)');
+    const compactViewport = window.matchMedia('(max-width: 820px)');
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
@@ -19,11 +19,16 @@
       if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
     };
     const transferFocus = () => {
-      const from = compact.matches ? desktop : mobile;
-      const to = compact.matches ? mobile : desktop;
+      const compact = desktop.getClientRects().length === 0;
+      const from = compact ? desktop : mobile;
+      const to = compact ? mobile : desktop;
+      if (!to.getClientRects().length) {
+        lastFocused = null;
+        return;
+      }
       const active = document.activeElement;
-      const hiddenSort = compact.matches ? desktopSort : compactSort;
-      const visibleSort = compact.matches ? compactSort : desktopSort;
+      const hiddenSort = compact ? desktopSort : compactSort;
+      const visibleSort = compact ? compactSort : desktopSort;
       if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
         lastFocused = null;
         visibleSort?.focus();
@@ -38,11 +43,16 @@
     };
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);
-    compact.addEventListener('change', transferFocus);
+    // Keep viewport handoff timing; observe both views for container-only changes.
+    compactViewport.addEventListener('change', transferFocus);
+    const observer = new ResizeObserver(transferFocus);
+    observer.observe(desktop);
+    observer.observe(mobile);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
       document.removeEventListener('focusout', forgetFocus);
-      compact.removeEventListener('change', transferFocus);
+      compactViewport.removeEventListener('change', transferFocus);
+      observer.disconnect();
     };
   });
 
