@@ -772,8 +772,14 @@ try {
     await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`) });
     await greyscale.evaluate(el => el.remove());
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    const motion = await page.evaluate(() => ({ reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, runningAnimations: document.getAnimations().filter(animation => animation.playState === 'running').length, animatedElements: [...document.querySelectorAll('*')].filter(el => { const style = getComputedStyle(el); return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0); }).length }));
-    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 });
+    const { motion, runningAnimationDetails } = await page.evaluate(() => {
+      const animations = document.getAnimations().filter(animation => animation.playState === 'running');
+      return {
+        motion: { reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, runningAnimations: animations.length, animatedElements: [...document.querySelectorAll('*')].filter(el => { const style = getComputedStyle(el); return style.animationName !== 'none' || style.transitionDuration.split(',').some(duration => parseFloat(duration) > 0); }).length },
+        runningAnimationDetails: animations.map(animation => ({ type: animation.constructor.name, name: animation.animationName ?? animation.transitionProperty ?? null, target: animation.effect?.target?.outerHTML?.slice(0, 500) ?? null, pseudoElement: animation.effect?.pseudoElement ?? null, timing: animation.effect?.getComputedTiming() ?? null }))
+      };
+    });
+    assert.deepEqual(motion, { reduced: true, runningAnimations: 0, animatedElements: 0 }, `${prefix}: ${JSON.stringify(runningAnimationDetails)}`);
     await page.screenshot({ path: resolve(output, `${prefix}-reduced-motion.png`) });
     await page.emulateMedia({ forcedColors: 'active' });
     assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
