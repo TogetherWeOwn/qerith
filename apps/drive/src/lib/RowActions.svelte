@@ -10,8 +10,8 @@
   export let file = true;
   export let owned = true;
   export let onAction: (action: RowAction) => void;
-  // The listing owns row navigation and dialog/removal focus after selection.
-  export let onTab: (direction: 'next' | 'previous') => void;
+  // Called after the menu closes. Return false to use native tab order from the trigger.
+  export let onTab: (direction: 'next' | 'previous') => boolean | void;
 
   let trigger: HTMLButtonElement;
   let menu: HTMLDivElement;
@@ -22,17 +22,19 @@
   let menuId = '';
   onMount(() => {
     menuId = `row-actions-menu-${++nextMenuId}`;
-    const onScroll = (event: Event) => {
-      const target = event.target;
-      if (open && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
-        const restore = menu.contains(document.activeElement);
-        close();
-        if (restore) trigger.focus({ preventScroll: true });
-      }
-    };
-    window.addEventListener('scroll', onScroll, true);
-    return () => { close(); window.removeEventListener('scroll', onScroll, true); };
+    return () => close();
   });
+
+  function onScroll(event: Event) {
+    const target = event.target;
+    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
+      const restore = menu.contains(document.activeElement);
+      close();
+      if (restore) trigger.focus({ preventScroll: true });
+    }
+  }
+
+  function onResize() { if (open) close(true); }
   let menuLeft = 0;
   let menuTop = 0;
   $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
@@ -43,6 +45,11 @@
   async function show(last = false) {
     const request = ++opening;
     compact = window.matchMedia('(max-width: 820px)').matches;
+    if (!open) {
+      window.addEventListener('scroll', onScroll, true);
+      window.addEventListener('pointerdown', outside);
+      window.addEventListener('resize', onResize);
+    }
     open = true;
     await tick();
     if (!open || !menu || request !== opening) return;
@@ -62,6 +69,11 @@
 
   function close(restore = false) {
     ++opening;
+    if (open) {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('pointerdown', outside);
+      window.removeEventListener('resize', onResize);
+    }
     if (layer?.open) layer.close();
     else if (layer?.matches(':popover-open')) layer.hidePopover();
     open = false;
@@ -73,7 +85,17 @@
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
     let next = -1;
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
-    if (event.key === 'Tab') { event.preventDefault(); close(); onTab(event.shiftKey ? 'previous' : 'next'); return; }
+    if (event.key === 'Tab') {
+      close();
+      let useNativeTab = false;
+      try {
+        useNativeTab = onTab(event.shiftKey ? 'previous' : 'next') === false;
+      } finally {
+        if (!useNativeTab) event.preventDefault();
+      }
+      if (useNativeTab) trigger.focus({ preventScroll: true });
+      return;
+    }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;
     else if (event.key === 'ArrowUp') next = index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length;
     else if (event.key === 'Home') next = 0;
@@ -86,7 +108,7 @@
   }
 
   function outside(event: PointerEvent) {
-    if (open && !layer.contains(event.target as Node) && !trigger.contains(event.target as Node)) close();
+    if (open && layer && !layer.contains(event.target as Node) && !trigger.contains(event.target as Node)) close();
   }
 
   function backdropClick(event: MouseEvent) {
@@ -100,7 +122,6 @@
   }
 </script>
 
-<svelte:window onpointerdown={outside} onresize={() => { if (open) close(true); }} />
 <div class="anchor">
   <button class="trigger" type="button" bind:this={trigger} aria-label={`Actions for ${displayName}`} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} onclick={() => open ? close(true) : show()} onkeydown={(event) => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); void show(event.key === 'ArrowUp'); } }}>
     <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="13" cy="8" r="1.2"/></svg>

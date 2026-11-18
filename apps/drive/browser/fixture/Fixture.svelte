@@ -3,6 +3,7 @@
   import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
   import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
+  import DetailsFixture from './DetailsFixture.svelte';
   import FolderView from '../../src/routes/f/[folderId]/+page.svelte';
   const folderState = new URLSearchParams(window.location.search).get('state')?.match(/^folder-view-(.+)$/)?.[1];
   const folderView = folderState === 'unavailable' ? { status: 'unavailable' } : { status: 'ok', folder: {
@@ -11,6 +12,7 @@
     nextPage: folderState === 'list' ? 'opaque-cursor' : null
   } };
 
+  const details = new URLSearchParams(window.location.search).get('details');
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
   const rowName = new URLSearchParams(window.location.search).get('name') ?? (new URLSearchParams(window.location.search).has('longName') ? 'a'.repeat(200) : 'Sample file');
   let firstName;
@@ -19,6 +21,17 @@
   let selected = $state('');
   let mounted = $state(true); window.addEventListener('fixture-unmount-menu', () => { mounted = false; });
   const recordBoundary = callback => { document.body.dataset[callback] = String(!!document.querySelector('dialog:modal')); };
+  function tabFromMenu(direction) {
+    recordBoundary('tabModal');
+    document.body.dataset.tabDirection = direction;
+    if (new URLSearchParams(window.location.search).has('native-tab')) {
+      document.body.dataset.tabLayerOpen = String(!!document.querySelector('dialog:modal, dialog:popover-open'));
+      return false;
+    }
+    if (menuFixture === 'throw') throw new Error('Fixture onTab error');
+    (direction === 'next' ? nextName : firstName).focus();
+    if (menuFixture === 'file') return true;
+  }
 
   const listing = new URLSearchParams(window.location.search).has('listing');
   const items = [
@@ -92,12 +105,14 @@
 
 {#if folderState}
   <FolderView data={{ result: folderView }} />
+{:else if details === 'full' || details === 'missing' || details === 'zero' || details === 'one'}
+  <main><DetailsFixture variant={details} /></main>
 {:else if menuFixture}
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
       <button bind:this={firstName}>Sample file</button>
       {#if mounted}
-        <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => { recordBoundary('actionModal'); selected = action; }} onTab={(direction) => { recordBoundary('tabModal'); (direction === 'next' ? nextName : firstName).focus(); }} />
+        <RowActions bind:this={menu} name={rowName} file={menuFixture !== 'folder'} owned={menuFixture !== 'shared'} onAction={(action) => { recordBoundary('actionModal'); selected = action; }} onTab={tabFromMenu} />
       {/if}
     </div>
     <button bind:this={nextName}>Next file</button>

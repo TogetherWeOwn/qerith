@@ -1,0 +1,88 @@
+name: Drive folder route evidence
+on:
+  pull_request:
+    paths:
+      - .github/workflows/drive-route-evidence.yml
+      - 'apps/drive/route-evidence/**'
+      - 'apps/drive/scripts/route-evidence-*'
+      - apps/drive/scripts/verify-lock-age.mjs
+      - apps/drive/src/app.html
+      - apps/drive/package.json
+      - apps/drive/package-lock.json
+      - apps/drive/npm-shrinkwrap.json
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full current head SHA of the same-repository Drive folder route PR (#139)
+        required: true
+        type: string
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  evidence:
+    if: >-
+      github.repository == 'TogetherWeOwn/qerith' &&
+      ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork && github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      HARNESS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HARNESS_SHA }}
+          path: harness
+          persist-credentials: false
+      - name: Admit exact same-repository source head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected full lowercase SHA' }
+          $pr = gh api repos/TogetherWeOwn/qerith/pulls/139 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $pr.state -ne 'open' -or $pr.base.ref -ne 'main' -or
+              $pr.head.repo.full_name -cne 'TogetherWeOwn/qerith' -or $pr.head.repo.fork -or
+              $pr.head.sha -cne $env:SOURCE_SHA) { throw 'SHA is not the current admitted PR head' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Set ephemeral paths and record checkout provenance
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Initialize
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Acquire digest-pinned portable NVDA and Playwright Firefox
+        timeout-minutes: 4
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Acquire
+      - name: Verify locks and prepare the separate SvelteKit build
+        timeout-minutes: 4
+        working-directory: harness/apps/drive/route-evidence
+        run: |
+          $projection = "$env:RUNNER_TEMP/folder-route-build"
+          node project.mjs "$env:GITHUB_WORKSPACE/${{ github.event_name == 'pull_request' && 'harness' || 'source' }}" $projection
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the route projection' }
+          foreach ($dir in @($projection, $PWD.Path)) {
+            npm ci --prefix $dir --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ --allow-directory=none --allow-file=none --allow-git=none --allow-remote=none
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install a verified route evidence lock' }
+          }
+          "PROJECTION=$projection" >> $env:GITHUB_ENV
+      - name: Contain the relay and capture route evidence
+        timeout-minutes: 6
+        working-directory: harness/apps/drive/route-evidence
+        run: |
+          ../scripts/route-evidence-tools.ps1 -Phase Protect
+          node run.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: drive-folder-route-${{ env.SOURCE_SHA || 'self-check' }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7

@@ -256,6 +256,75 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
+  for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
+    const size = `${width}x${height}`;
+    const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    const name = '  تقرير  ' + 'a'.repeat(180) + '.pdf  ';
+    await page.goto(`${origin}/?details=full`, { waitUntil: 'networkidle' });
+    const details = page.getByRole('group', { name: /^Details for تقرير/ });
+    assert.equal(await details.getAttribute('data-details-id'), 'sample');
+    assert.deepEqual(await details.locator('dt').allTextContents(), ['Name', 'Size', 'Kind', 'Modified', 'Uploaded', 'Shared with']);
+    assert.deepEqual(await details.locator('dd').allTextContents(), [name, '5.4 GB · 5,368,709,120 bytes', 'PDF', '14 Nov 2026, 09:00 UTC', '12 Nov 2026, 09:00 UTC', 'Mora, Sam']);
+    assert.equal(await details.locator('data').getAttribute('value'), '5368709120');
+    const filename = details.locator('dd[dir="auto"]');
+    assert.deepEqual(await filename.evaluate(el => {
+      const { whiteSpace, unicodeBidi, textAlign } = getComputedStyle(el);
+      const wrapsWithinCell = el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight;
+      return { whiteSpace, unicodeBidi, textAlign, wrapsWithinCell };
+    }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', textAlign: 'right', wrapsWithinCell: true });
+    assert.equal(await details.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+    await page.screenshot({ path: resolve(output, `details-${size}.png`), fullPage: true });
+    if (width === 320) {
+      await context.close();
+      continue;
+    }
+    await page.evaluate(axe);
+    const results = await page.evaluate(() => window.axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
+    }));
+    await writeFile(resolve(output, `axe-details-${size}.json`), JSON.stringify(results, null, 2));
+    assert.equal(results.violations.length, 0, `axe violations for details-${size}: ${JSON.stringify(results.violations)}`);
+
+    const close = details.getByRole('button', { name: 'Hide details' });
+    assert((await close.boundingBox())?.height >= 36, 'Hide details must meet the Drive minimum control height');
+    await page.keyboard.press('Tab');
+    const hasFocusRing = el => el === document.activeElement && el.matches(':focus-visible') && getComputedStyle(el).outlineStyle === 'solid';
+    assert.equal(await close.evaluate(hasFocusRing), true);
+    const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+    await page.screenshot({ path: resolve(output, `details-${size}-greyscale.png`) });
+    await greyscale.evaluate(el => el.remove());
+    await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
+    assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches && document.getAnimations().length === 0), true);
+    assert.equal(await page.evaluate(() => matchMedia('(forced-colors: active)').matches), true);
+    assert.equal(await close.evaluate(hasFocusRing), true);
+    await page.screenshot({ path: resolve(output, `details-${size}-forced-colours-focus.png`) });
+    await page.emulateMedia({ reducedMotion: null, forcedColors: null });
+    if (width === 390) await close.click();
+    else await page.keyboard.press('Enter');
+    await details.waitFor({ state: 'detached' });
+
+    await page.goto(`${origin}/?details=missing`, { waitUntil: 'networkidle' });
+    const missing = page.getByRole('group', { name: 'Details for whitespace-only name', exact: true });
+    assert.deepEqual(await missing.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+    assert.deepEqual(await missing.locator('dd').allTextContents(), [' \t ', '—', 'Folder']);
+    assert.equal(await missing.locator('data').count(), 0);
+    await page.screenshot({ path: resolve(output, `details-missing-${size}.png`), fullPage: true });
+
+    for (const [variant, filename, bytes, sizeText] of [['zero', 'Empty.txt', '0', '0 bytes'], ['one', 'Tiny.txt', '1', '1 byte']]) {
+      await page.goto(`${origin}/?details=${variant}`, { waitUntil: 'networkidle' });
+      const small = page.getByRole('group', { name: `Details for ${filename}`, exact: true });
+      assert.deepEqual(await small.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+      assert.deepEqual(await small.locator('dd').allTextContents(), [filename, sizeText, 'File']);
+      assert.equal(await small.locator('data').getAttribute('value'), bytes);
+      await page.screenshot({ path: resolve(output, `details-${variant}-${size}.png`), fullPage: true });
+    }
+    await context.close();
+    console.log(`FileDetails facts, filenames, close and axe passed at ${size}`);
+  }
   const folders = {
     'folder-view-list': ['Imported folder', ['Archive', 'Next page'], ['/f/archive', '?page=opaque-cursor']],
     'folder-view-empty': ['This folder is empty.', [], []], 'folder-view-end': ['No more items.', ['First page'], ['?']],
@@ -446,16 +515,20 @@ try {
       await ax.detach();
       assert(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), 'Closing the modal must restore background to the accessibility tree');
     }
+    const nextFile = page.getByRole('button', { name: 'Next file' });
+    const rowName = page.getByRole('button', { name: 'Sample file', exact: true });
+    // Only the callback can reach these destinations during Tab navigation.
+    for (const target of [rowName, nextFile]) await target.evaluate(el => { el.tabIndex = -1; });
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
-    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    assert.equal(await nextFile.evaluate(el => el === document.activeElement), true);
     await trigger.click();
     await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
-    assert.equal(await page.getByRole('button', { name: 'Sample file', exact: true }).evaluate(el => el === document.activeElement), true);
-    await page.getByRole('button', { name: 'Sample file', exact: true }).click({ button: 'right' });
+    assert.equal(await rowName.evaluate(el => el === document.activeElement), true);
+    await rowName.click({ button: 'right' });
     await menu.waitFor();
     await page.getByRole('menuitem', { name: 'Details' }).focus();
     await page.keyboard.press('Space');
@@ -478,6 +551,45 @@ try {
       assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
     }
     await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ expected, escape: 'trigger', tab: 'next row', shiftTab: 'row name', contextMenu: true, activated: 'Details', focusAfterActivation: 'trigger' }, null, 2));
+    await context.close();
+  }
+  for (const [width, height] of [[1280, 800], [390, 844]]) {
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?menu=shared&native-tab`, { waitUntil: 'networkidle' });
+    const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
+    const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
+    const rowName = page.getByRole('button', { name: 'Sample file', exact: true });
+    for (const [tabKey, item, direction, target] of [
+      ['Tab', 'Details', 'next', 'Next file'],
+      ['Shift+Tab', 'Download', 'previous', 'Sample file']
+    ]) {
+      // Open with focus on the row name, so closing the layer cannot restore it to the trigger.
+      await rowName.focus();
+      await rowName.click({ button: 'right' });
+      await menu.waitFor();
+      if (direction === 'next') await page.keyboard.press('End');
+      assert.equal(await menu.getByRole('menuitem', { name: item }).evaluate(el => el === document.activeElement), true);
+      await page.keyboard.press(tabKey);
+      await menu.waitFor({ state: 'hidden' });
+      const { tabDirection, tabLayerOpen } = await page.evaluate(() => ({ ...document.body.dataset }));
+      assert.equal(tabDirection, direction);
+      assert.equal(tabLayerOpen, 'false');
+      assert.equal(await page.getByRole('button', { name: target, exact: true }).evaluate(el => el === document.activeElement), true, `${tabKey} must follow native tab order at ${width}px`);
+    }
+    await page.goto(`${origin}/?menu=throw`, { waitUntil: 'networkidle' });
+    await trigger.click();
+    await menu.waitFor();
+    await page.evaluate(() => {
+      window.addEventListener('keydown', event => { document.body.dataset.tabPrevented = String(event.defaultPrevented); }, { once: true });
+    });
+    const [error] = await Promise.all([page.waitForEvent('pageerror'), page.keyboard.press('Tab')]);
+    assert.match(error.message, /Fixture onTab error/);
+    assert.equal(await page.evaluate(() => document.body.dataset.tabPrevented), 'true');
+    assert.equal(await menu.count(), 0);
+    console.log(`Row menu native Tab, Shift+Tab and callback-error handling passed at ${width}x${height}`);
     await context.close();
   }
   for (const [width, height] of [[1280, 180], [390, 240], [1280, 800]]) {
@@ -548,15 +660,38 @@ try {
     const page = await context.newPage();
     await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
     const trigger = page.locator('button[aria-haspopup="menu"]');
+    const nextFile = page.getByRole('button', { name: 'Next file' });
+    // Locator waits avoid injecting Playwright's own main-world pointerdown listener.
+    const closedTrigger = trigger.and(page.locator('[aria-expanded="false"]'));
+    const cdp = await context.newCDPSession(page);
+    const { result: { objectId } } = await cdp.send('Runtime.evaluate', { expression: 'window' });
+    const listenerTypes = async () => {
+      const { listeners } = await cdp.send('DOMDebugger.getEventListeners', { objectId });
+      return listeners.map(listener => listener.type).filter(type => ['pointerdown', 'resize', 'scroll'].includes(type)).sort();
+    };
+    const openListeners = ['pointerdown', 'resize', 'scroll'];
+    assert.deepEqual(await listenerTypes(), [], 'Closed menu must not register window listeners');
     await trigger.click();
+    assert.deepEqual(await listenerTypes(), openListeners, 'Opening must register one listener per event');
+    if (width === 1280) {
+      await nextFile.click();
+      await closedTrigger.waitFor();
+      assert.deepEqual(await listenerTypes(), [], 'Outside pointer dismissal must remove all three listeners');
+      await trigger.click();
+    }
     await page.setViewportSize({ width: width === 390 ? 1280 : 390, height: 800 });
-    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    await closedTrigger.waitFor();
     assert.equal(await page.locator('dialog:modal').count(), 0, 'Resize must release modal');
+    assert.deepEqual(await listenerTypes(), [], 'Closing must remove all three listeners');
     await trigger.click();
-    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu'))); await page.waitForFunction(() => !document.querySelector('[aria-haspopup=menu]'));
+    await page.locator(width === 390 ? 'dialog:popover-open' : 'dialog:modal').waitFor({ state: 'attached' });
+    assert.deepEqual(await listenerTypes(), openListeners, 'Reopening must register exactly one listener per event');
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu')));
+    await trigger.waitFor({ state: 'detached' });
     assert.equal(await page.locator('dialog:modal').count(), 0, 'Unmount must release modal');
-    await page.getByRole('button', { name: 'Next file' }).focus();
-    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    assert.deepEqual(await listenerTypes(), [], 'Unmounting an open menu must remove all three listeners');
+    await nextFile.focus();
+    assert.equal(await nextFile.evaluate(el => el === document.activeElement), true);
     await context.close();
   }
   for (const source of ['document', 'ancestor', 'menu']) {
@@ -1006,7 +1141,7 @@ try {
     await context.close();
   }
   await writeFile(resolve(output, 'head.txt'), `${head}\n`);
-  for (const name of ['head.txt', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
+  for (const name of ['head.txt', 'details-1280x800.png', 'details-390x844.png', ...[1280, 390].flatMap(width => [`listing-footer-default-${width}.png`, `listing-footer-error-${width}.png`]), ...states.flatMap(state => [1280, 390].flatMap((width, i) => {
     const size = `${state}-${width}x${[800, 844][i]}`;
     return [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`];
   }))]) assert((await stat(resolve(output, name))).size > 0, `Missing evidence: ${name}`);
