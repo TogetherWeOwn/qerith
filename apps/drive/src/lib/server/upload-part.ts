@@ -1,0 +1,78 @@
+import type { createMultipartUpload } from './s3/multipart-upload';
+
+const maxPartBytes = 16 * 1024 * 1024;
+type SendPart = ReturnType<typeof createMultipartUpload>;
+type PartReceipt = Awaited<ReturnType<SendPart>>;
+
+interface PartAttempt {
+  objectKey: string;
+  uploadId: string;
+  // Null preserves uncertainty; neither result grants permission to send again.
+  record(receipt: PartReceipt | null): Promise<void>;
+}
+
+export interface UploadPartDependencies {
+  authorize(request: Request, intentId: string): Promise<{
+    // Atomically recheck live authority and claim this slot. Only a fresh,
+    // acknowledged claim grants a send; an existing evidence row never does.
+    claim(partNumber: number, size: number): Promise<PartAttempt | null>;
+  } | null>;
+  send: SendPart;
+}
+
+const reply = (status: number, body: string | null = null) =>
+  new Response(body, { status, headers: { 'cache-control': 'no-store' } });
+
+async function readPart(request: Request, size: number): Promise<Uint8Array | null> {
+  const bytes = new Uint8Array(size);
+  if (!request.body) return size === 0 ? bytes : null;
+  const reader = request.body.getReader();
+  let offset = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return offset === size ? bytes : null;
+      if (value.byteLength > size - offset) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      bytes.set(value, offset);
+      offset += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function uploadPart(request: Request, intentId: string, part: string, deps?: UploadPartDependencies): Promise<Response> {
+  if (!deps) return reply(503, 'Service unavailable');
+  if (request.method !== 'PUT') return reply(405);
+  if (request.headers.get('origin') !== new URL(request.url).origin) return reply(403);
+  const partNumber = Number(part);
+  if (intentId.length !== 36 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(intentId) ||
+      !Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || String(partNumber) !== part) return reply(400);
+
+  let access;
+  try { access = await deps.authorize(request, intentId); } catch { return reply(404); }
+  if (!access) return reply(404);
+  const length = request.headers.get('content-length');
+  if (length === null) return reply(411);
+  if (!/^[0-9]+$/.test(length)) return reply(400);
+  const size = Number(length);
+  if (size > maxPartBytes) return reply(413);
+  const bytes = await readPart(request, size).catch(() => null);
+  if (!bytes) return reply(400);
+
+  try {
+    const attempt = await access.claim(partNumber, size);
+    if (!attempt) return reply(404);
+    let receipt: PartReceipt | null = null;
+    try { receipt = await deps.send(attempt.objectKey, attempt.uploadId, partNumber, bytes, request.signal); }
+    catch { /* No provider response is trusted after a send failure. */ }
+    await attempt.record(receipt);
+    if (receipt !== null) return reply(204);
+  } catch {
+    // A lost claim, provider response or receipt acknowledgment is not retry permission.
+  }
+  return reply(409, 'Upload part outcome unknown');
+}

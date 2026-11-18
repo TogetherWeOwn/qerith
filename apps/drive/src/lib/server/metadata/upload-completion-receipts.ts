@@ -22,9 +22,9 @@ interface SealedUpload {
 interface Receipt { evidence_revision: string; etag: string; response_checksums: string }
 
 // A composition-root dependency, not request input. Qualification must cover
-// this exact immutable namespace and exclusive writers. The part verifier must
-// independently establish acknowledged ETags and actual byte counts for this
-// admitted upload; sealed observation rows alone do not establish either.
+// the signer's exact namespace and exclusive writers; a namespace change requires
+// a different epoch even if the endpoint and bucket are unchanged. The verifier
+// must establish acknowledged ETags and actual byte counts independently of D1.
 interface UploadPublicationVerifier {
   isQualified(storageConfigId: string): Promise<boolean>;
   verifyParts(upload: Readonly<{
@@ -39,32 +39,26 @@ interface UploadPublicationVerifier {
 }
 
 const utf8 = new TextEncoder();
-const liveSession = `auth.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
 const allocated = `FROM drive_upload_sealed_candidates o
-  JOIN drive_upload_intents i ON i.id = o.intent_id AND i.owner_id = o.owner_id AND i.object_key = o.object_key
-  JOIN drive_active_members m ON m.id = i.owner_id
-  JOIN drive_sessions auth ON auth.principal_id = i.owner_id AND ${liveSession}
-  WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND auth.token_hash = ?
-    AND i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.version = o.intent_version
-    AND i.upload_id = o.upload_id
-    AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_dispatches d WHERE d.operation_id = o.operation_id)`;
+  WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?`;
 
 async function digest(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
     (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function sessionHash(token: string): Promise<string | null> {
-  return typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token) ? digest(utf8.encode(token)) : null;
+function operationBytes(value: string): ArrayBuffer {
+  if (typeof value !== 'string' || !value || value.length > 196608 || !value.isWellFormed() || value.includes('\0')) throw new TypeError('Invalid completion operation');
+  const bytes = utf8.encode(value);
+  if (bytes.byteLength > 196608) throw new TypeError('Invalid completion operation');
+  return bytes.buffer;
 }
 
-function boundedText(value: string, limit = 196608): ArrayBuffer {
-  if (typeof value !== 'string' || value.length < 1 || value.length > limit || /[\uD800-\uDFFF\0]/u.test(value)) {
-    throw new TypeError('Invalid upload publication identity');
-  }
-  const bytes = utf8.encode(value);
-  if (bytes.byteLength > limit) throw new TypeError('Invalid upload publication identity');
-  return bytes.buffer;
+// D1 TEXT decoding can replace malformed bytes. Fail closed rather than pass a
+// different identity to the verifier or signer; preserve a leading UTF-8 BOM.
+const identityDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+function decodeIdentity(hex: string): string {
+  return identityDecoder.decode(Uint8Array.fromHex(hex));
 }
 
 // Reported bytes are HTTP opaque bytes, not decoded UTF-8 or parsed digests.
@@ -72,7 +66,7 @@ function tagHex(etag: string): string {
   return Array.from(etag, (char) => char.charCodeAt(0).toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
-async function matchesSealedParts(db: Session, upload: SealedUpload, parts: readonly CompletedPart[]): Promise<boolean> {
+async function matchesSealedParts(db: Session, operation: ArrayBuffer, upload: SealedUpload, parts: readonly CompletedPart[]): Promise<boolean> {
   if (JSON.stringify(parts.map((part) => part.partNumber)) !== upload.part_numbers ||
     parts.reduce((total, part) => total + part.size, 0) !== upload.size_bytes) return false;
 
@@ -80,10 +74,10 @@ async function matchesSealedParts(db: Session, upload: SealedUpload, parts: read
   // so the 10,000-slot limit does not imply an unbounded D1 result body.
   for (let offset = 0; offset < parts.length; offset += 64) {
     const { results } = await db.prepare(`SELECT p.part_number, p.size_bytes, hex(r.reported_etag) AS etag
-      FROM drive_upload_part_operations p JOIN drive_upload_part_observations r USING (operation_id)
-      WHERE p.intent_id = CAST(? AS TEXT) AND p.part_number > ? AND r.kind = 'reported'
-      ORDER BY p.part_number LIMIT 64`)
-      .bind(boundedText(upload.intent_id), parts[offset - 1]?.partNumber ?? 0)
+      FROM drive_upload_completion_operations o JOIN drive_upload_part_operations p ON p.intent_id = o.intent_id
+      JOIN drive_upload_part_observations r ON r.operation_id = p.operation_id AND r.kind = 'reported'
+      WHERE o.operation_id = CAST(? AS TEXT) AND p.part_number > ? ORDER BY p.part_number LIMIT 64`)
+      .bind(operation, parts[offset - 1]?.partNumber ?? 0)
       .all<{ part_number: number; size_bytes: number; etag: string }>();
     if (results.length !== Math.min(64, parts.length - offset) || results.some((row, index) => {
       const part = parts[offset + index];
@@ -101,7 +95,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const { endpoint, bucket } = settings;
   if (endpoint.length > 2048) throw new TypeError('Invalid storage identity');
   const storageConfigId = JSON.stringify([endpoint, bucket, epoch]);
-  const complete = createMultipartComplete(settings, transport);
+  const complete = createMultipartComplete(settings, { ...transport });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
@@ -122,10 +116,12 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
           .bind(operation, evidence_revision, etag, response_checksums).first();
         if (written) return true;
       } catch { /* Reconcile a potentially committed write before retrying it. */ }
-      const current = await db.withSession('first-primary').prepare(`SELECT evidence_revision, etag, response_checksums
-        FROM drive_upload_completion_receipts WHERE operation_id = CAST(? AS TEXT)`).bind(operation).first<Receipt>();
-      if (current) return current.evidence_revision === evidence_revision && current.etag === etag &&
-        current.response_checksums === response_checksums;
+      try {
+        const current = await db.withSession('first-primary').prepare(`SELECT evidence_revision, etag, response_checksums
+          FROM drive_upload_completion_receipts WHERE operation_id = CAST(? AS TEXT)`).bind(operation).first<Receipt>();
+        if (current) return current.evidence_revision === evidence_revision && current.etag === etag &&
+          current.response_checksums === response_checksums;
+      } catch { /* Only the same immutable receipt insert may be retried. */ }
     }
     return false;
   }
@@ -133,37 +129,42 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   return {
     storageConfigId,
     async complete(token: string, operationId: string): Promise<'recorded' | 'not-admitted' | 'uncertain'> {
-      const hash = await sessionHash(token);
-      if (!hash || !verifier) return 'not-admitted';
-      const operation = boundedText(operationId);
+      if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
+      const operation = operationBytes(operationId);
+      const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
       const primary = db.withSession('first-primary');
-      const upload = await primary.prepare(`SELECT o.intent_id, o.owner_id, o.object_key, o.upload_id,
-        o.intent_version, o.part_numbers, o.size_bytes ${allocated}`).bind(operation, epoch, hash).first<SealedUpload>();
-      if (!upload || !await verifier.isQualified(storageConfigId)) return 'not-admitted';
-      const key = boundedText(upload.object_key);
-      const uploadId = boundedText(upload.upload_id);
-      const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId: upload.intent_id,
-        ownerId: upload.owner_id, objectKey: upload.object_key,
-        uploadId: upload.upload_id, intentVersion: upload.intent_version }));
+      const upload = await primary.prepare(`SELECT hex(o.intent_id) AS intent_id, hex(o.owner_id) AS owner_id,
+        hex(o.object_key) AS object_key, hex(o.upload_id) AS upload_id, o.intent_version, o.part_numbers, o.size_bytes
+        ${allocated}`).bind(...admission).first<SealedUpload>();
+      if (!upload) return 'not-admitted';
+      let intentId: string, ownerId: string, objectKey: string, uploadId: string;
+      try {
+        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeIdentity);
+      } catch { return 'not-admitted'; }
+      if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
+        objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
+        !await verifier.isQualified(storageConfigId)) return 'not-admitted';
+      const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
+        objectKey, uploadId, intentVersion: upload.intent_version }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
       const parts = verified.map(({ partNumber, etag, size }) => ({ partNumber, etag, size }));
-      const manifestDigest = await digest(new Uint8Array(completionXml(parts)));
-      if (!await matchesSealedParts(primary, upload, parts)) return 'not-admitted';
+      let manifest: Uint8Array<ArrayBuffer>;
+      try { manifest = new Uint8Array(completionXml(parts)); } catch { return 'not-admitted'; }
+      if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
+      const manifestDigest = await digest(manifest);
 
-      // Only the acknowledged first insert authorizes dispatch. A primary read
-      // of a committed claim never hands a restarted worker a dispatch permit.
+      // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {
         const claim = await db.prepare(`INSERT INTO drive_upload_completion_dispatches
           (operation_id, endpoint, bucket, claim_version, manifest_digest, session_hash)
-          SELECT o.operation_id, ?, ?, o.intent_version + 1, ?, auth.token_hash ${allocated}
-            AND CAST(o.object_key AS BLOB) = ? AND CAST(o.upload_id AS BLOB) = ?
-            AND o.intent_version < 9007199254740990 RETURNING operation_id`)
-          .bind(endpoint, bucket, manifestDigest, operation, epoch, hash, key, uploadId).first();
+          SELECT o.operation_id, o.endpoint, o.bucket, o.intent_version + 1, ?, o.session_hash ${allocated}
+          RETURNING operation_id`)
+          .bind(manifestDigest, ...admission).first();
         if (!claim) return 'not-admitted';
-      } catch { return 'uncertain'; }
+      } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {
-        const response = await complete(upload.object_key, upload.upload_id, parts);
+        const response = await complete(objectKey, uploadId, parts);
         const receipt = { etag: response.etag, response_checksums: JSON.stringify(response.checksums ?? {}),
           evidence_revision: crypto.randomUUID() };
         if (await persistReceipt(operation, receipt)) return 'recorded';
@@ -174,7 +175,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
 
     // Trusted recovery only; there is no request path to this historical fence.
     async quarantineUnresolved(operationId: string): Promise<void> {
-      await quarantine(boundedText(operationId));
+      await quarantine(operationBytes(operationId));
     }
   };
 }
