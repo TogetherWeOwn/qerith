@@ -30,7 +30,8 @@ export async function seed(id, { legacy = false, endpoint = config.endpoint, key
   const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
-  await sql("INSERT INTO drive_upload_intents VALUES (CAST(? AS TEXT), ?, ?, NULL, 0, 'created', 0)", intent, owner, key).run();
+  await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state)
+    VALUES (CAST(? AS TEXT), ?, ?, 'created')`, intent, owner, key).run();
   if (!legacy) await bindStorage();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = CAST(? AS TEXT)", upload, intent).run();
   await sql('INSERT INTO drive_upload_completion_operations VALUES (?, CAST(? AS TEXT), ?, ?, ?, ?, 2)', id, intent, owner, key, epoch, upload).run();

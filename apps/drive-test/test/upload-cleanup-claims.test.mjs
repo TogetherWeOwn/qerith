@@ -49,7 +49,7 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
   const service = producer(fetch);
   await expect(service.complete(token, id)).resolves.toBe(outcome === 'receipt' ? 'recorded' : 'uncertain');
   expect(await evidence(outcome === 'receipt' ? 'receipts' : 'quarantine', id)).not.toBeNull();
-  await intents.recordUncertain(`owner-${id}`, intent, 3, 'completion');
+  expect(await intents.recordUncertain(`owner-${id}`, intent, 3, 'completion')).toBe(true);
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
   // Even a journal acknowledgement cannot remove the durable dispatch fence.
   expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(true);
