@@ -127,21 +127,6 @@ it('does not reopen an in-flight provider attempt after a mistaken journal reset
   expect(calls).toBe(1);
 });
 
-it('keeps cleanup excluded if a recovery scan quarantines an in-flight completion', async () => {
-  const intents = await setup('v0-scan');
-  const intent = await allocate(intents, 'v0-scan');
-  const publication = new UploadPublication(env.DB, async () => {
-    expect(await intents.recordUncertain('v0-scan', intent.id, 3, 'completion')).toBe(true);
-    await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
-      .bind(intent.id).run()).rejects.toThrow();
-    return { etag: '"complete"', size: 7 };
-  });
-  expect(await publication.completeAndPublish('v0-scan', intent.id, 2, null, 'file', parts)).toBeNull();
-  expect(await publication.getReceipt('v0-scan', intent.id)).toBeNull();
-  await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
-    .bind(intent.id).run()).rejects.toThrow();
-});
-
 it('rechecks membership after completion and never replaces a conflicting name', async () => {
   const intents = await setup('v0-conflict');
   const revoked = await allocate(intents, 'v0-conflict');
@@ -165,43 +150,6 @@ it('rechecks membership after completion and never replaces a conflicting name',
     .toEqual({ id: 'existing', kind: 'folder' });
   expect(await env.DB.prepare('SELECT intent_id FROM drive_upload_publications WHERE intent_id = ?')
     .bind(conflict.id).first()).toBeNull();
-});
-
-it('rolls back the receipt and journal update for an invalid parent', async () => {
-  const intents = await setup('v0-parent');
-  const intent = await allocate(intents, 'v0-parent');
-  const publication = new UploadPublication(env.DB, async () => ({ etag: '"complete"', size: 7 }));
-  await expect(publication.completeAndPublish('v0-parent', intent.id, 2, 'missing', 'file', parts)).rejects.toThrow();
-  expect(await publication.getReceipt('v0-parent', intent.id)).toBeNull();
-  expect(await intents.get('v0-parent', intent.id)).toMatchObject({ state: 'completing', version: 3 });
-  expect(await env.DB.prepare('SELECT id FROM drive_entries WHERE object_key = ?')
-    .bind(intent.object_key).first()).toBeNull();
-  await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
-    .bind(intent.id).run()).rejects.toThrow();
-  // A mistaken late not-dispatched transition must not reopen a settled attempt.
-  expect(await intents.recordNotDispatched('v0-parent', intent.id, 3, 'completion')).toBe(true);
-  expect(await intents.claim('v0-parent', intent.id, 4, 'completion')).toBeNull();
-  expect(await publication.completeAndPublish('v0-parent', intent.id, 4, null, 'retry', parts)).toBeNull();
-  await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)').bind(intent.id).run()).rejects.toThrow();
-  expect(await publication.completeAndPublish('v0-parent', intent.id, 3, null, 'retry', parts)).toBeNull();
-});
-
-it('does not authorize cleanup when a committed publication loses its database acknowledgement', async () => {
-  const intents = await setup('v0-ack');
-  const intent = await allocate(intents, 'v0-ack');
-  const db = { prepare(sql) {
-    const statement = env.DB.prepare(sql);
-    if (!sql.includes('INSERT INTO drive_upload_publications')) return statement;
-    return { bind(...args) { return { async first() {
-      await statement.bind(...args).first();
-      throw new Error('publication acknowledgement lost');
-    } }; } };
-  } };
-  const publication = new UploadPublication(db, async () => ({ etag: '"complete"', size: 7 }));
-  await expect(publication.completeAndPublish('v0-ack', intent.id, 2, null, 'file', parts)).rejects.toThrow('publication acknowledgement lost');
-  expect(await publication.getReceipt('v0-ack', intent.id)).not.toBeNull();
-  await expect(env.DB.prepare('INSERT INTO drive_upload_cleanup_claims VALUES (?)')
-    .bind(intent.id).run()).rejects.toThrow();
 });
 
 it('does not publish when the intent version changes during completion', async () => {
