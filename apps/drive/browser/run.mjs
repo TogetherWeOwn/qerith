@@ -256,38 +256,15 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
-  for (const [width, height] of [[1280, 800], [390, 844]]) {
-    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
-    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    await context.routeWebSocket('**/*', socket => socket.close());
-    const page = await context.newPage();
-    for (const [state, text, links] of [
-      ['list', 'Résumé.pdf', ['Archive', 'Next page']], ['empty', 'This folder is empty.', []],
-      ['end', 'No more items.', ['First page']], ['unavailable', "This folder isn't available.", []]
-    ]) {
-      const size = `folder-view-${state}-${width}x${height}`;
-      await page.goto(`${origin}/?folder-view=${state}`, { waitUntil: 'networkidle' });
-      await page.getByText(text, { exact: true }).waitFor();
-      assert.deepEqual(await page.getByRole('link').allTextContents(), links);
-      assert.deepEqual(await page.getByRole('link').evaluateAll(elements => elements.map(el => el.getAttribute('href'))),
-        state === 'list' ? ['/f/archive', '?page=file'] : state === 'end' ? ['?'] : []);
-      for (const name of links) {
-        await page.keyboard.press('Tab');
-        assert.equal(await page.getByRole('link', { name, exact: true }).evaluate(el => el === document.activeElement), true);
-      }
-      await page.screenshot({ path: resolve(output, `${size}.png`) });
-      await page.evaluate(axe);
-      const results = await page.evaluate(() => window.axe.run(document, {
-        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
-      }));
-      assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
-      await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
-      await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focus: links, tree: await page.getByRole('main').ariaSnapshot() }));
-    }
-    await context.close();
-  }
-  for (const [width, height] of [[1280, 800], [390, 844]]) for (const state of states) {
-    const size = `${state}-${width}x${height}`;
+  const folders = {
+    list: ['Résumé.pdf', ['Archive', 'Next page'], ['/f/archive', '?page=opaque-cursor']],
+    empty: ['This folder is empty.', [], []], end: ['No more items.', ['First page'], ['?']],
+    unavailable: ["This folder isn't available.", [], []]
+  };
+  const fixtures = [...states.map(state => ['state', state]), ...Object.keys(folders).map(state => ['folder-view', state])];
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const [fixture, state] of fixtures) {
+    const folder = fixture === 'folder-view' ? folders[state] : null;
+    const size = `${folder ? 'folder-view-' : ''}${state}-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
@@ -295,8 +272,9 @@ try {
     page.on('pageerror', error => console.error('Browser page error:', error));
     page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
     page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
-    await page.goto(`${origin}/?state=${state}`, { waitUntil: 'networkidle' });
-    await waitForFixture(page, state);
+    await page.goto(`${origin}/?${fixture}=${state}`, { waitUntil: 'networkidle' });
+    if (folder) await page.getByText(folder[0], { exact: true }).waitFor();
+    else await waitForFixture(page, state);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
     await page.evaluate(axe);
     const results = await page.evaluate(() => window.axe.run(document, {
@@ -304,7 +282,16 @@ try {
     }));
     await writeFile(resolve(output, `axe-${size}.json`), JSON.stringify(results, null, 2));
     assert.equal(results.violations.length, 0, `axe violations for ${size}: ${JSON.stringify(results.violations)}`);
-    const keyboard = await exerciseKeyboard(page, state);
+    let keyboard;
+    if (folder) {
+      const [, focus, hrefs] = folder;
+      assert.deepEqual(await page.getByRole('link').evaluateAll(links => links.map(link => link.getAttribute('href'))), hrefs);
+      for (const name of focus) {
+        await page.keyboard.press('Tab');
+        assert(await page.getByRole('link', { name, exact: true }).evaluate(el => el === document.activeElement));
+      }
+      keyboard = { focus, tree: await page.getByRole('main').ariaSnapshot() };
+    } else keyboard = await exerciseKeyboard(page, state);
     const keyboardJson = JSON.stringify(keyboard, null, 2);
     const recordedKeyboard = keyboardJson && JSON.parse(keyboardJson);
     assert(recordedKeyboard && typeof recordedKeyboard === 'object' && Object.keys(recordedKeyboard).length, 'Keyboard evidence is required');

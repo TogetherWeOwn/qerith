@@ -3,13 +3,13 @@
   import EmptyFolder from '../../src/lib/EmptyFolder.svelte';
   import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
-  import FolderView from '../../src/lib/FolderView.svelte';
+  import FolderView from '../../src/routes/f/[folderId]/+page.svelte';
 
   const folderState = new URLSearchParams(window.location.search).get('folder-view');
   const folderView = folderState === 'unavailable' ? { status: 'unavailable' } : { status: 'ok', folder: {
     name: 'Receipts', paged: folderState === 'end',
     entries: folderState === 'list' ? [{ id: 'archive', name: 'Archive', kind: 'folder' }, { id: 'file', name: 'Résumé.pdf', kind: 'file' }] : [],
-    nextPage: folderState === 'list' ? 'file' : null
+    nextPage: folderState === 'list' ? 'opaque-cursor' : null
   } };
 
   const menuFixture = new URLSearchParams(window.location.search).get('menu');
@@ -92,7 +92,7 @@
 </script>
 
 {#if folderState}
-  <FolderView result={folderView} />
+  <FolderView data={{ result: folderView }} />
 {:else if menuFixture}
   <main>
     <div class:clipped={new URLSearchParams(window.location.search).has('clipped')} oncontextmenu={(event) => menu.openFromContextMenu(event)} role="presentation">
