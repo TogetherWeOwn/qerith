@@ -67,6 +67,14 @@
     { ...items[1], id: 'edge-spaces', name: '  leading  and trailing  ', href: '#edge-spaces' },
     { ...items[1], id: 'only-spaces', name: '   ', href: '#only-spaces' }
   ];
+  const params = new URLSearchParams(window.location.search);
+  let inlineDetails = $state(params.has('inline'));
+  window.addEventListener('fixture-disable-inline', () => { inlineDetails = false; });
+  const inlineItems = (params.has('unicode') ? unicodeItems.filter(item => item.id === 'zwj-modifier') : params.has('whitespace') ? whitespaceItems : actionItems).map(item => ({
+    ...item, shared: item.shared || item.id === '2',
+    details: params.has('missing-details') ? undefined : { modifiedFull: `${item.modified.slice(0, 2)} November 2026, 09:00 UTC`, uploaded: '12 November 2026, 09:00 UTC', sharedWith: ['Mora', 'Sam'] }
+  }));
+  const onAction = (id, action) => { selected = `${id}: ${action}`; };
   // Synthetic pages exercise the controlled list without a route or identity.
   const paged = new URLSearchParams(window.location.search).has('paged');
   const pagedItems = Array.from({ length: 401 }, (_, index) => ({
@@ -113,8 +121,15 @@
   </main>
 {:else if listing && listingActions}
   <main>
-    <FileList folder="My Drive" timeZone="UTC" items={actionItems} onAction={(id, action) => { selected = `${id}: ${action}`; }} />
+    {#if inlineDetails && params.has('two-lists')}
+      {#each ['First', 'Second'] as folder}
+        <div style="width: 500px"><FileList {folder} timeZone="UTC" items={inlineItems} {inlineDetails} {onAction} /></div>
+      {/each}
+    {:else}
+      <FileList folder="My Drive" timeZone="UTC" items={inlineDetails ? inlineItems : actionItems} {inlineDetails} {onAction} />
+    {/if}
     <p aria-live="polite">{selected}</p>
+    {#if inlineDetails}<button>After listing</button>{/if}
   </main>
 {:else if listing}
   <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>

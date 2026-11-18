@@ -45,7 +45,7 @@ it('requires a live session belonging to the entry owner, not a recipient or adm
   await sql("UPDATE drive_principals SET status = 'active' WHERE id = ?", owner).run();
   const restored = (await sessions().issue(owner)).token;
   expect(await deleteEntry.delete(restored, 'private-file')).toBe(true);
-  expect(await read.resolveObject(restored, 'private-file')).toBeNull();
+  expect(await read.get(restored, 'private-file')).toBeNull();
 });
 
 it('atomically deletes a recursive tree, denies shared reads and retains non-reusable evidence', async () => {
@@ -63,11 +63,11 @@ it('atomically deletes a recursive tree, denies shared reads and retains non-reu
   const read = new ReadAccess(env.DB);
   await metadata.move(owner, 'tree-survivor', 'tree-parent', 'moved');
   expect(await grants.create(token, 'tree-b', 'tree-recipient')).toBe(true);
-  expect(await read.resolveObject(recipient, 'tree-file')).not.toBeNull();
+  expect(await read.get(recipient, 'tree-file')).not.toBeNull();
   const outcomes = await Promise.all([1, 2].map(() => new PrivateDeletion(env.DB).delete(token, 'tree-a')));
   expect(outcomes.sort()).toEqual([false, true]);
   expect(await read.list(recipient, 'tree-b')).toBeNull();
-  expect(await read.resolveObject(recipient, 'tree-file')).toBeNull();
+  expect(await read.get(recipient, 'tree-file')).toBeNull();
   expect(await grants.create(token, 'tree-b', 'tree-recipient')).toBe(false);
   expect(await metadata.list(owner, 'tree-parent')).toMatchObject({ entries: [{ id: 'tree-survivor' }] });
   expect(await metadata.list(owner, null)).toMatchObject({ entries: [{ id: 'tree-parent', item_count: 1 }] });
