@@ -1,3 +1,4 @@
+import { completionXml, type CompletedPart } from '../s3/multipart-completion';
 import { validateName } from './private';
 import { UploadIntents, type UploadIntent } from './upload-intents';
 
@@ -8,17 +9,49 @@ interface Statement {
 }
 interface Database { prepare(sql: string): Statement }
 
-// This is a trusted server-side verifier, not a request-supplied assertion.
-// It must verify the exact completed generation against independently retained
-// upload evidence, including the final byte count. A HEAD alone is insufficient.
-export type VerifyCompletedObject = (intent: UploadIntent) => Promise<{
-  objectKey: string;
-  sizeBytes: number;
-  etag: string;
-} | null>;
+// The completion function is a trusted server-side create-only provider adapter.
+export type CompleteUpload = (key: string, uploadId: string, parts: readonly CompletedPart[]) => Promise<{ etag: string }>;
 
 export class UploadPublication {
-  constructor(private readonly db: Database, private readonly verify: VerifyCompletedObject) {}
+  constructor(private readonly db: Database, private readonly complete: CompleteUpload) {}
+
+  async completeAndPublish(principalId: string, intentId: string, version: number,
+    parentId: string | null, name: string, parts: readonly CompletedPart[]): Promise<{ id: string } | null> {
+    validateName(name);
+    if (!Number.isSafeInteger(version) || version < 0 || version >= Number.MAX_SAFE_INTEGER - 2) {
+      throw new TypeError('Invalid upload version');
+    }
+    const snapshot = Array.from(parts, part => ({ ...part }));
+    completionXml(snapshot);
+    const size = snapshot.reduce((total, part) => total + part.size, 0);
+    if (!Number.isSafeInteger(size)) throw new TypeError('Invalid upload size');
+    const claim = await this.db.prepare(`UPDATE drive_upload_intents SET state = 'completing', version = version + 1
+      WHERE id = ? AND owner_id = ? AND state = 'allocated' AND version = ?
+        AND EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = ?)
+      RETURNING id, owner_id, object_key, upload_id, state, completion_acknowledged, version`)
+      .bind(intentId, principalId, version, principalId, intentId).first<UploadIntent>();
+    if (!claim || !claim.upload_id) return null;
+    let result: { etag: string };
+    try {
+      result = await this.complete(claim.object_key, claim.upload_id, snapshot);
+      if (!result || typeof result.etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(result.etag)) {
+        throw new Error('Invalid completion ETag');
+      }
+    } catch (error) {
+      await new UploadIntents(this.db).recordUncertain(principalId, intentId, claim.version, 'completion');
+      throw error;
+    }
+    const id = crypto.randomUUID();
+    return this.db.prepare(`INSERT INTO drive_upload_publications
+      (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag)
+      SELECT i.id, i.version, ?, i.owner_id, i.object_key, ?, ?, ?, ? FROM drive_upload_intents i
+      WHERE i.id = ? AND i.owner_id = ? AND i.state = 'completing' AND i.version = ?
+        AND EXISTS (SELECT 1 FROM drive_active_members WHERE id = i.owner_id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = i.id)
+      RETURNING entry_id AS id`)
+      .bind(id, parentId, name, size, result.etag, intentId, principalId, claim.version).first<{ id: string }>();
+  }
 
   // Resolve a lost publication response without re-publishing or exposing the key.
   async getReceipt(principalId: string, intentId: string): Promise<{ id: string } | null> {
@@ -28,26 +61,13 @@ export class UploadPublication {
       .bind(intentId, principalId, principalId).first<{ id: string }>();
   }
 
-  async publish(principalId: string, intentId: string, version: number,
-    parentId: string | null, name: string): Promise<{ id: string } | null> {
+  async publish(_principalId: string, _intentId: string, version: number,
+    _parentId: string | null, name: string): Promise<{ id: string } | null> {
     if (!Number.isSafeInteger(version) || version < 0) throw new TypeError('Invalid upload version');
     validateName(name);
-    const intent = await new UploadIntents(this.db).get(principalId, intentId);
-    if (!intent || intent.version !== version || intent.state !== 'acknowledged' || intent.completion_acknowledged !== 1) return null;
-    const objectKey = intent.object_key;
-    const evidence = await this.verify({ ...intent });
-    if (!evidence || evidence.objectKey !== objectKey || !Number.isSafeInteger(evidence.sizeBytes)
-      || evidence.sizeBytes < 0 || typeof evidence.etag !== 'string' || evidence.etag.length === 0) return null;
-    // The conditional insert rechecks authorization and fencing after verification.
-    // A conflict aborts the entire statement, including the receipt and accounting.
-    return this.db.prepare(`INSERT INTO drive_upload_publications
-      (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag)
-      SELECT id, version, ?, owner_id, object_key, ?, ?, ?, ? FROM drive_upload_intents
-      WHERE id = ? AND owner_id = ? AND version = ? AND object_key = ?
-        AND state = 'acknowledged' AND completion_acknowledged = 1
-        AND EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)
-        AND NOT EXISTS (SELECT 1 FROM drive_upload_publications WHERE intent_id = ?)
-      RETURNING entry_id AS id`).bind(crypto.randomUUID(), parentId, name, evidence.sizeBytes, evidence.etag,
-      intentId, principalId, version, intent.object_key, principalId, intentId).first<{ id: string }>();
+    // A callback alone cannot prove durable completion or guard subsequent reads.
+    // Publication stays closed until the generation-bound adapter, journal
+    // evidence and conditional-read path are wired together.
+    return null;
   }
 }
