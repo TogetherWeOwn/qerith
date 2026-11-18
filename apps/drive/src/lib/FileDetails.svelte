@@ -15,7 +15,7 @@
 <div class="facts" data-details-id={id} tabindex="-1" role="group" aria-label={name.trim() ? `Details for ${name}` : 'Details for whitespace-only name'}>
   <dl>
     <div><dt>Name</dt><dd dir="auto">{name}</dd></div>
-    <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{#if bytes >= 1000}{size} · {/if}<data value={bytes}>{bytes.toLocaleString()} {bytes === 1 ? 'byte' : 'bytes'}</data>{/if}</dd></div>
+    <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{#if bytes >= 1000}{`${size} · `}{/if}<data value={bytes}>{bytes.toLocaleString()} {bytes === 1 ? 'byte' : 'bytes'}</data>{/if}</dd></div>
     <div><dt>Kind</dt><dd>{kind}</dd></div>
     {#if modifiedFull}<div><dt>Modified</dt><dd>{modifiedFull}</dd></div>{/if}
     {#if uploaded}<div><dt>Uploaded</dt><dd>{uploaded}</dd></div>{/if}
