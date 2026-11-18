@@ -96,7 +96,7 @@
   window.addEventListener('fixture-state', event => { signInState = event.detail; });
 </script>
 
-{#if details === 'full' || details === 'missing' || details === 'zero'}
+{#if details === 'full' || details === 'missing' || details === 'zero' || details === 'one'}
   <main><DetailsFixture variant={details} /></main>
 {:else if menuFixture}
   <main>

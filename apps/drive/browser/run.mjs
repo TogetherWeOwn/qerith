@@ -271,11 +271,13 @@ try {
     const filename = details.locator('dd[dir="auto"]');
     assert.deepEqual(await filename.evaluate(el => {
       const { whiteSpace, unicodeBidi } = getComputedStyle(el);
-      return { whiteSpace, unicodeBidi, wrapsWithinCell: el.scrollWidth <= el.clientWidth };
+      const wrapsWithinCell = el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight;
+      return { whiteSpace, unicodeBidi, wrapsWithinCell };
     }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', wrapsWithinCell: true });
     assert.equal(await details.evaluate(el => el.scrollWidth <= el.clientWidth), true);
     await page.screenshot({ path: resolve(output, `details-${width}x${height}.png`) });
     const close = details.getByRole('button', { name: 'Hide details' });
+    assert((await close.boundingBox())?.height >= 36, 'Hide details must meet the Drive minimum control height');
     if (width === 390) await close.click();
     else {
       await page.keyboard.press('Tab');
@@ -290,11 +292,13 @@ try {
     assert.deepEqual(await missing.locator('dd').allTextContents(), [' \t ', '—', 'Folder']);
     assert.equal(await missing.locator('data').count(), 0);
 
-    await page.goto(`${origin}/?details=zero`, { waitUntil: 'networkidle' });
-    const zero = page.getByRole('group', { name: 'Details for Empty.txt', exact: true });
-    assert.deepEqual(await zero.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
-    assert.equal(await zero.locator('data').getAttribute('value'), '0');
-    assert.equal(await zero.locator('data').textContent(), '0 bytes');
+    for (const [variant, filename, bytes, size] of [['zero', 'Empty.txt', '0', '0 bytes'], ['one', 'Tiny.txt', '1', '1 byte']]) {
+      await page.goto(`${origin}/?details=${variant}`, { waitUntil: 'networkidle' });
+      const small = page.getByRole('group', { name: `Details for ${filename}`, exact: true });
+      assert.deepEqual(await small.locator('dt').allTextContents(), ['Name', 'Size', 'Kind']);
+      assert.deepEqual(await small.locator('dd').allTextContents(), [filename, size, 'File']);
+      assert.equal(await small.locator('data').getAttribute('value'), bytes);
+    }
     await context.close();
     console.log(`FileDetails facts, filenames and close passed at ${width}x${height}`);
   }

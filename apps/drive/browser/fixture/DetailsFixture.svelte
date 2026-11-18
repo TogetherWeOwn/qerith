@@ -14,7 +14,8 @@
       sharedWith: ['Mora', 'Sam']
     },
     missing: { name: ' \t ', size: '—', bytes: null, kind: 'Folder' },
-    zero: { name: 'Empty.txt', size: '0 bytes', bytes: 0, kind: 'File', sharedWith: [] }
+    zero: { name: 'Empty.txt', size: '0 bytes', bytes: 0, kind: 'File', sharedWith: [] },
+    one: { name: 'Tiny.txt', size: '1 byte', bytes: 1, kind: 'File' }
   };
 </script>
 

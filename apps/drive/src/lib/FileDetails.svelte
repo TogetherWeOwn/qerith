@@ -1,4 +1,6 @@
 <script lang="ts">
+  import './tokens.css';
+
   export let id: string;
   export let name: string;
   export let size: string;
@@ -13,7 +15,7 @@
 <div class="facts" data-details-id={id} tabindex="-1" role="group" aria-label={name.trim() ? `Details for ${name}` : 'Details for whitespace-only name'}>
   <dl>
     <div><dt>Name</dt><dd dir="auto">{name}</dd></div>
-    <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{size} · <data value={bytes}>{bytes.toLocaleString()} bytes</data>{/if}</dd></div>
+    <div><dt>Size</dt><dd>{#if bytes === null}—{:else}{#if bytes >= 1000}{size} · {/if}<data value={bytes}>{bytes.toLocaleString()} {bytes === 1 ? 'byte' : 'bytes'}</data>{/if}</dd></div>
     <div><dt>Kind</dt><dd>{kind}</dd></div>
     {#if modifiedFull}<div><dt>Modified</dt><dd>{modifiedFull}</dd></div>{/if}
     {#if uploaded}<div><dt>Uploaded</dt><dd>{uploaded}</dd></div>{/if}
@@ -29,5 +31,6 @@
   dt { min-width: 8em; color: var(--drive-color-text-secondary); }
   dd { margin: 0; white-space: break-spaces; }
   dd[dir] { unicode-bidi: plaintext; }
+  button { min-height: var(--drive-size-control-sm); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
 </style>
