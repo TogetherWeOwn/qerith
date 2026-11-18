@@ -530,6 +530,9 @@ try {
     const page = await context.newPage();
     await page.goto(`${origin}/?menu=file`, { waitUntil: 'networkidle' });
     const trigger = page.locator('button[aria-haspopup="menu"]');
+    const nextFile = page.getByRole('button', { name: 'Next file' });
+    // Locator waits avoid injecting Playwright's own main-world pointerdown listener.
+    const closedTrigger = trigger.and(page.locator('[aria-expanded="false"]'));
     const cdp = await context.newCDPSession(page);
     const { result: { objectId } } = await cdp.send('Runtime.evaluate', { expression: 'window' });
     const listenerTypes = async () => {
@@ -540,17 +543,25 @@ try {
     assert.deepEqual(await listenerTypes(), [], 'Closed menu must not register window listeners');
     await trigger.click();
     assert.deepEqual(await listenerTypes(), openListeners, 'Opening must register one listener per event');
+    if (width === 1280) {
+      await nextFile.click();
+      await closedTrigger.waitFor();
+      assert.deepEqual(await listenerTypes(), [], 'Outside pointer dismissal must remove all three listeners');
+      await trigger.click();
+    }
     await page.setViewportSize({ width: width === 390 ? 1280 : 390, height: 800 });
-    await page.waitForFunction(() => document.querySelector('[aria-haspopup=menu]').getAttribute('aria-expanded') === 'false');
+    await closedTrigger.waitFor();
     assert.equal(await page.locator('dialog:modal').count(), 0, 'Resize must release modal');
     assert.deepEqual(await listenerTypes(), [], 'Closing must remove all three listeners');
     await trigger.click();
+    await page.locator(width === 390 ? 'dialog:popover-open' : 'dialog:modal').waitFor({ state: 'attached' });
     assert.deepEqual(await listenerTypes(), openListeners, 'Reopening must register exactly one listener per event');
-    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu'))); await page.waitForFunction(() => !document.querySelector('[aria-haspopup=menu]'));
+    await page.evaluate(() => window.dispatchEvent(new Event('fixture-unmount-menu')));
+    await trigger.waitFor({ state: 'detached' });
     assert.equal(await page.locator('dialog:modal').count(), 0, 'Unmount must release modal');
     assert.deepEqual(await listenerTypes(), [], 'Unmounting an open menu must remove all three listeners');
-    await page.getByRole('button', { name: 'Next file' }).focus();
-    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    await nextFile.focus();
+    assert.equal(await nextFile.evaluate(el => el === document.activeElement), true);
     await context.close();
   }
   for (const source of ['document', 'ancestor', 'menu']) {
