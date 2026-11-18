@@ -12,13 +12,23 @@ test('reads provider size with a conditional HEAD after create-only completion',
     const request = input as Request;
     calls.push(request);
     return request.method === 'POST' ? new Response(completed) :
-      new Response(null, { headers: { etag: '"complete"', 'content-length': '7' } });
+      new Response(null, { headers: { etag: '"complete"', 'content-length': '9' } });
   } });
-  assert.deepEqual(await complete('key', 'upload', parts), { etag: '"complete"', size: 7 });
+  assert.deepEqual(await complete('key', 'upload', parts), { etag: '"complete"', size: 9 });
   assert.deepEqual(calls.map(call => call.method), ['POST', 'HEAD']);
   assert.equal(calls[0].headers.get('if-none-match'), '*');
   assert.equal(calls[1].headers.get('if-match'), '"complete"');
   assert.equal(new URL(calls[1].url).pathname, new URL(calls[0].url).pathname);
+});
+
+test('does not read or retry when create-only completion is rejected', async () => {
+  const methods: string[] = [];
+  const complete = createCompleteForPublication(config, { timeoutMs: 1000, fetch: async input => {
+    methods.push((input as Request).method);
+    return new Response(null, { status: 412 });
+  } });
+  await assert.rejects(complete('key', 'upload', parts), /status 412/);
+  assert.deepEqual(methods, ['POST']);
 });
 
 test('refuses missing, invalid, or mismatched HEAD evidence without retrying', async () => {
@@ -26,7 +36,9 @@ test('refuses missing, invalid, or mismatched HEAD evidence without retrying', a
     () => new Response(null, { status: 404 }),
     () => new Response(null, { status: 412 }),
     () => new Response(null, { headers: { etag: '"other"', 'content-length': '7' } }),
+    () => new Response(null, { headers: { 'content-length': '7' } }),
     () => new Response(null, { headers: { etag: '"complete"' } }),
+    () => new Response(null, { headers: { etag: '"complete"', 'content-length': '-1' } }),
     () => new Response(null, { headers: { etag: '"complete"', 'content-length': '9007199254740992' } }),
     () => { throw new Error('provider unavailable'); },
   ];

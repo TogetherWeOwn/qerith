@@ -2,6 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, expect, it } from 'vitest';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
+import { dropCompletionReceiptEvidence } from './fixtures/upload-completion.mjs';
 
 const run = (sql, ...args) => env.DB.prepare(sql).bind(...args).run();
 const rows = async (sql) => (await env.DB.prepare(sql).all()).results;
@@ -14,6 +15,7 @@ const snapshot = async () => ({ entries: await rows('SELECT * FROM drive_entries
 
 beforeEach(async () => {
   // D1 state is shared between tests in this file; reset the migration ledger too.
+  await env.DB.exec(dropCompletionReceiptEvidence);
   await env.DB.exec(`DROP TABLE IF EXISTS drive_upload_publications;
     DROP TABLE IF EXISTS drive_upload_cleanup_claims;
     DROP TABLE IF EXISTS drive_upload_sealed_reports;
