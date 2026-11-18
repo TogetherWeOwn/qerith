@@ -1,25 +1,26 @@
 <script lang="ts">
   import EmptyFolder from '../../../lib/EmptyFolder.svelte';
   import KindGlyph from '../../../lib/KindGlyph.svelte';
+  import { isFolderId } from '../../../lib/folder-id';
   import type { FolderPage } from '../../../lib/server/folder-page';
 
   export let data: { result: FolderPage };
+  const label = (name: string) => name.trim() ? name : `${name} (Whitespace-only name)`;
 </script>
 
-<svelte:head><title>{data.result.status === 'ok' ? `${data.result.folder.name} · Drive` : 'Folder unavailable · Drive'}</title></svelte:head>
+<svelte:head><title>{data.result.status === 'ok' ? `${label(data.result.folder.name)} · Drive` : 'Folder unavailable · Drive'}</title></svelte:head>
 
 <main data-sveltekit-reload>
   {#if data.result.status === 'ok'}
     {@const folder = data.result.folder}
-    <h1 dir="auto">{folder.name}</h1>
+    <h1 dir="auto">{label(folder.name)}</h1>
     {#if folder.entries.length}
       <ul role="list">
         {#each folder.entries as entry (entry.id)}
-          {@const name = entry.name.trim() ? entry.name : `${entry.name} (Whitespace-only name)`}
           <li>
             <KindGlyph kind={entry.kind} />
-            {#if entry.kind === 'folder' && !['.', '..'].includes(entry.id)}<a href={'/f/' + encodeURIComponent(entry.id)} dir="auto">{name}</a>
-            {:else}<span dir="auto">{name}</span>{/if}
+            {#if entry.kind === 'folder' && isFolderId(entry.id)}<a href={'/f/' + encodeURIComponent(entry.id)} dir="auto">{label(entry.name)}</a>
+            {:else}<span dir="auto">{label(entry.name)}</span>{/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
           </li>
         {/each}

@@ -4,11 +4,10 @@
   import RowActions from '../../src/lib/RowActions.svelte';
   import FileList from '../../src/lib/FileList.svelte';
   import FolderView from '../../src/routes/f/[folderId]/+page.svelte';
-
-  const folderState = new URLSearchParams(window.location.search).get('folder-view');
+  const folderState = new URLSearchParams(window.location.search).get('state')?.match(/^folder-view-(.+)$/)?.[1];
   const folderView = folderState === 'unavailable' ? { status: 'unavailable' } : { status: 'ok', folder: {
-    name: 'Receipts', paged: folderState === 'end',
-    entries: folderState === 'list' ? [{ id: 'archive', name: 'Archive', kind: 'folder' }, { id: 'file', name: 'Résumé.pdf', kind: 'file' }] : [],
+    name: folderState === 'end' ? '\t' : 'Receipts', paged: folderState === 'end',
+    entries: folderState === 'list' ? [{ id: 'archive', name: 'Archive', kind: 'folder' }, { id: 'x'.repeat(129), name: 'Imported folder', kind: 'folder' }, { id: 'file', name: 'Résumé.pdf', kind: 'file' }] : [],
     nextPage: folderState === 'list' ? 'opaque-cursor' : null
   } };
 

@@ -257,14 +257,13 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
   const folders = {
-    list: ['Résumé.pdf', ['Archive', 'Next page'], ['/f/archive', '?page=opaque-cursor']],
-    empty: ['This folder is empty.', [], []], end: ['No more items.', ['First page'], ['?']],
-    unavailable: ["This folder isn't available.", [], []]
+    'folder-view-list': ['Imported folder', ['Archive', 'Next page'], ['/f/archive', '?page=opaque-cursor']],
+    'folder-view-empty': ['This folder is empty.', [], []], 'folder-view-end': ['No more items.', ['First page'], ['?']],
+    'folder-view-unavailable': ["This folder isn't available.", [], []]
   };
-  const fixtures = [...states.map(state => ['state', state]), ...Object.keys(folders).map(state => ['folder-view', state])];
-  for (const [width, height] of [[1280, 800], [390, 844]]) for (const [fixture, state] of fixtures) {
-    const folder = fixture === 'folder-view' ? folders[state] : null;
-    const size = `${folder ? 'folder-view-' : ''}${state}-${width}x${height}`;
+  for (const [width, height] of [[1280, 800], [390, 844]]) for (const state of [...states, ...Object.keys(folders)]) {
+    const folder = folders[state];
+    const size = `${state}-${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
@@ -272,7 +271,7 @@ try {
     page.on('pageerror', error => console.error('Browser page error:', error));
     page.on('console', message => { if (message.type() === 'error') console.error('Browser console:', message.text()); });
     page.on('response', response => { if (response.status() >= 400) console.error('Browser response:', response.status(), response.url()); });
-    await page.goto(`${origin}/?${fixture}=${state}`, { waitUntil: 'networkidle' });
+    await page.goto(`${origin}/?state=${state}`, { waitUntil: 'networkidle' });
     if (folder) await page.getByText(folder[0], { exact: true }).waitFor();
     else await waitForFixture(page, state);
     await page.screenshot({ path: resolve(output, `${size}.png`) });
@@ -285,6 +284,8 @@ try {
     let keyboard;
     if (folder) {
       const [, focus, hrefs] = folder;
+      if (state === 'folder-view-end') await page.getByRole('heading', { name: '(Whitespace-only name)', exact: true }).waitFor();
+      if (state === 'folder-view-end') assert.equal((await page.title()).trim(), '(Whitespace-only name) · Drive');
       assert.deepEqual(await page.getByRole('link').evaluateAll(links => links.map(link => link.getAttribute('href'))), hrefs);
       for (const name of focus) {
         await page.keyboard.press('Tab');
