@@ -26,12 +26,14 @@ export function producer(fetch, verifyParts = async () => parts, db = env.DB, qu
 }
 
 // Seed ledger rows directly so this also covers inherited, non-UTF-8 SQLite TEXT.
-export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}` } = {}) {
+export async function seed(id, { legacy = false, endpoint = config.endpoint, key = `key-${id}`, intent = `${String.fromCodePoint(0xFEFF)}intent-${id}`, declaredSize } = {}) {
   const owner = `owner-${id}`, upload = 'upload/+id', part = `part-${id}`;
   const bindStorage = () => sql('INSERT INTO drive_upload_storage_bindings VALUES (CAST(? AS TEXT), ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner).run();
-  await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state)
-    VALUES (CAST(? AS TEXT), ?, ?, 'created')`, intent, owner, key).run();
+  // The pre-receipt migration test seeds before declared_size exists.
+  await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state${declaredSize === undefined ? '' : ', declared_size'})
+    VALUES (CAST(? AS TEXT), ?, ?, 'created'${declaredSize === undefined ? '' : ', ?'})`,
+    intent, owner, key, ...(declaredSize === undefined ? [] : [declaredSize])).run();
   if (!legacy) await bindStorage();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = CAST(? AS TEXT)", upload, intent).run();
   await sql('INSERT INTO drive_upload_completion_operations VALUES (?, CAST(? AS TEXT), ?, ?, ?, ?, 2)', id, intent, owner, key, epoch, upload).run();
