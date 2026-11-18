@@ -8,7 +8,7 @@ interface Database { prepare(sql: string): Statement }
 const lifetimeMs = 12 * 60 * 60 * 1000;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
 
-async function tokenHash(token: string): Promise<string> {
+export async function tokenHash(token: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

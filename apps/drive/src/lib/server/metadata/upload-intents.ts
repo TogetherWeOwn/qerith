@@ -65,6 +65,10 @@ export class UploadIntents {
       WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${active}
         AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
+          JOIN drive_upload_completion_dispatches d ON d.operation_id = o.operation_id
+          WHERE o.intent_id = drive_upload_intents.id)
       RETURNING ${columns}`)
       .bind(operation === 'allocation' ? 'initiating' : 'completing', id, principalId,
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
