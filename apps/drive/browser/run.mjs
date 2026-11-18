@@ -271,10 +271,10 @@ try {
     assert.equal(await details.locator('data').getAttribute('value'), '5368709120');
     const filename = details.locator('dd[dir="auto"]');
     assert.deepEqual(await filename.evaluate(el => {
-      const { whiteSpace, unicodeBidi } = getComputedStyle(el);
+      const { whiteSpace, unicodeBidi, textAlign } = getComputedStyle(el);
       const wrapsWithinCell = el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight;
-      return { whiteSpace, unicodeBidi, wrapsWithinCell };
-    }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', wrapsWithinCell: true });
+      return { whiteSpace, unicodeBidi, textAlign, wrapsWithinCell };
+    }), { whiteSpace: 'break-spaces', unicodeBidi: 'plaintext', textAlign: 'right', wrapsWithinCell: true });
     assert.equal(await details.evaluate(el => el.scrollWidth <= el.clientWidth), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
     await page.screenshot({ path: resolve(output, `details-${size}.png`), fullPage: true });

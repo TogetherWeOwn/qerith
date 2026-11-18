@@ -25,12 +25,14 @@
 </div>
 
 <style>
-  .facts { padding: var(--drive-space-3); background: var(--drive-color-bg-surface); overflow-wrap: anywhere; }
+  .facts { padding: var(--drive-space-2) var(--drive-space-inset-card); background: var(--drive-color-bg-surface); color: var(--drive-color-text-primary); font-family: var(--drive-font-ui); font-size: var(--drive-font-size-ui); overflow-wrap: anywhere; }
   dl { margin: 0; }
-  dl div { display: flex; gap: var(--drive-space-3); }
-  dt { min-width: 8em; color: var(--drive-color-text-secondary); }
-  dd { margin: 0; white-space: break-spaces; }
+  dl div { display: flex; justify-content: space-between; gap: var(--drive-space-3); }
+  dl div + div { border-top: var(--drive-size-line) solid var(--drive-color-line-hairline); }
+  dt { flex-shrink: 0; color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); }
+  dd { min-width: 0; margin: 0; text-align: right; white-space: break-spaces; }
   dd[dir] { unicode-bidi: plaintext; }
-  button { min-height: var(--drive-size-control-sm); }
+  button { margin-top: var(--drive-space-2); min-height: var(--drive-size-control-sm); padding: 0 var(--drive-space-inset-room); border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-pill); background: transparent; color: var(--drive-color-text-primary); font: inherit; font-size: var(--drive-font-size-small); font-weight: var(--drive-font-weight-semibold); font-stretch: var(--drive-font-width-button); cursor: pointer; }
+  button:hover { background: var(--drive-color-bg-raised); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
 </style>
