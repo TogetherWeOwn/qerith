@@ -40,8 +40,27 @@ export async function captureSpeech(page, path, selfCheck) {
     }, announcement);
   }
   const origin = new URL(page.url()).origin;
+  async function unavailable(id) {
+    await page.goto(`${origin}/f/populated`);
+    await browse(); await top();
+    const destination = `${origin}/f/${id}`;
+    // Arrival already reads the sole heading. Control+Home can be silent when NVDA is already there.
+    const arrival = await hear(`${id}: direct full navigation`, async () => {
+      const { result } = await nvda.capture(() => page.goto(destination).catch(error => error), { capture: true });
+      if (result instanceof Error) throw result;
+      assert.equal(page.url(), destination);
+    }, /Folder unavailable\W+Drive, document\b/i, /heading\W+level 1\W+This folder isn't available\b/i);
+    return [arrival, await title(id, /Folder unavailable.*Drive/i)];
+  }
+  const compareUnavailable = async () => {
+    assert.deepEqual(await unavailable('denied'), await unavailable('missing'), 'Unavailable announcements differ');
+  };
   await nvda.start({ capture: 'initial', restoreUserScreenReader: false });
   try {
+    if (selfCheck) {
+      await compareUnavailable();
+      await page.goto(`${origin}/f/populated`);
+    }
     await browse();
     if (selfCheck) {
       await heading('Self-check', /Route evidence self-check/i);
@@ -70,17 +89,7 @@ export async function captureSpeech(page, path, selfCheck) {
     await tab('Past-end', /First page/i);
     await follow('First page', /\/f\/populated\??$/, /Project records\W*Drive, document\b/i);
     await heading('First page', /Project records/i);
-    async function unavailable(id) {
-      await page.goto(`${origin}/f/populated`);
-      await browse(); await top();
-      const arrival = await hear(`${id}: direct full navigation`, async () => {
-        const { result } = await nvda.capture(() => page.goto(`${origin}/f/${id}`).catch(error => error), { capture: true });
-        if (result instanceof Error) throw result;
-      }, /Folder unavailable|This folder isn't available/i);
-      await browse();
-      return [arrival, await title(id, /Folder unavailable.*Drive/i), await heading(id, /This folder isn't available/i)];
-    }
-    assert.deepEqual(await unavailable('denied'), await unavailable('missing'), 'Unavailable announcements differ');
+    await compareUnavailable();
   } finally {
     await nvda.stop();
   }
