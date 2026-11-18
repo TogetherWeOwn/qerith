@@ -25,7 +25,7 @@ const ledger = () => new UploadPartOperationEvidence(env.DB);
 
 it('records evidence only for a live exact allocation and does not fence existing writers', async () => {
   const op = operation('admission');
-  await migrate();
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await seed(op);
   for (const [key, value] of Object.entries({ intentId: 'missing', ownerId: 'other',
     objectKey: 'wrong-key', uploadId: 'other-upload', intentVersion: 1 })) {
@@ -56,7 +56,7 @@ it('records evidence only for a live exact allocation and does not fence existin
 });
 
 it('admits and reconciles the maximum UTF-8 width of a journal upload ID', async () => {
-  await migrate();
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const ownerId = 'owner-wide-upload-id';
   await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", ownerId);
   const intents = new UploadIntents(env.DB);
