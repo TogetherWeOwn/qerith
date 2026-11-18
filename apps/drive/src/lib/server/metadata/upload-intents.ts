@@ -63,6 +63,7 @@ export class UploadIntents {
     if (version >= Number.MAX_SAFE_INTEGER - 2) throw new TypeError('Invalid upload version');
     return this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
       WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${active}
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
       RETURNING ${columns}`)
       .bind(operation === 'allocation' ? 'initiating' : 'completing', id, principalId,
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();

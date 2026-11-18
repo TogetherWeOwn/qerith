@@ -9,7 +9,8 @@ export const config = { endpoint: 'https://storage.example', bucket: 'drive-test
 export const epoch = 'epoch-1';
 export const parts = [{ partNumber: 2, etag: '"part-&-ÿ"', size: 7 }];
 export const response = (key) => new Response(`<CompleteMultipartUploadResult><Bucket>drive-test</Bucket><Key>${key}</Key><ETag>"final-opaque"</ETag><ChecksumSHA256>example-checksum</ChecksumSHA256><ChecksumType>COMPOSITE</ChecksumType></CompleteMultipartUploadResult>`);
-export const migrations = env.DRIVE_MIGRATIONS.filter(({ name }) => name <= '0022_upload_publication_receipts.sql');
+export const migrations = env.DRIVE_MIGRATIONS;
+export const preReceiptMigrations = migrations.filter(({ name }) => name < '0022_upload_publication_receipts.sql');
 export const evidence = (kind, op) => sql(`SELECT * FROM drive_upload_completion_${kind} WHERE operation_id = ?`, op).first();
 export const intentRow = (id) => sql('SELECT * FROM drive_upload_intents WHERE id = CAST(? AS TEXT)', id).first();
 
@@ -65,7 +66,10 @@ export function loseAcknowledgement(table, loseBeforeCommit) {
 }
 
 // The migration replay fixtures must drop children before their ledger parents.
-export const dropCompletionReceiptEvidence = `DROP VIEW IF EXISTS drive_upload_sealed_candidates;
+export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_upload_intents_cleanup_fence;
+  DROP TRIGGER IF EXISTS drive_upload_dispatch_cleanup_fence;
+  DROP TABLE IF EXISTS drive_upload_cleanup_claims;
+  DROP VIEW IF EXISTS drive_upload_sealed_candidates;
   DROP TABLE IF EXISTS drive_upload_completion_quarantine;
   DROP TABLE IF EXISTS drive_upload_completion_receipts;
   DROP TABLE IF EXISTS drive_upload_completion_dispatches;
