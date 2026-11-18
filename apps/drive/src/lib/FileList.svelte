@@ -17,14 +17,13 @@
     const row = Array.from(container.querySelectorAll<HTMLElement>('[data-row-id]')).find(element => element.dataset.rowId === id);
     row?.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')?.focus();
   }
-  let listing: HTMLDivElement;
   let desktop: HTMLTableElement;
   let mobile: HTMLUListElement;
   let compactSort: HTMLSelectElement;
   let desktopSort: HTMLButtonElement;
 
   onMount(() => {
-    const compact = window.matchMedia('(max-width: 820px)');
+    const compactViewport = window.matchMedia('(max-width: 820px)');
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
@@ -34,12 +33,16 @@
       if (event.target === lastFocused && lastFocused?.getClientRects().length) lastFocused = null;
     };
     const transferFocus = () => {
-      const isCompact = desktop.getClientRects().length === 0;
-      const from = isCompact ? desktop : mobile;
-      const to = isCompact ? mobile : desktop;
+      const compact = desktop.getClientRects().length === 0;
+      const from = compact ? desktop : mobile;
+      const to = compact ? mobile : desktop;
+      if (!to.getClientRects().length) {
+        lastFocused = null;
+        return;
+      }
       const active = document.activeElement;
-      const hiddenSort = isCompact ? desktopSort : compactSort;
-      const visibleSort = isCompact ? compactSort : desktopSort;
+      const hiddenSort = compact ? desktopSort : compactSort;
+      const visibleSort = compact ? compactSort : desktopSort;
       if (hiddenSort && (active === hiddenSort || (active === document.body && lastFocused === hiddenSort))) {
         lastFocused = null;
         visibleSort?.focus();
@@ -68,13 +71,15 @@
     };
     document.addEventListener('focusin', rememberFocus);
     document.addEventListener('focusout', forgetFocus);
-    compact.addEventListener('change', transferFocus);
+    // Keep viewport handoff timing; observe both views for container-only changes.
+    compactViewport.addEventListener('change', transferFocus);
     const observer = new ResizeObserver(transferFocus);
-    observer.observe(listing);
+    observer.observe(desktop);
+    observer.observe(mobile);
     return () => {
       document.removeEventListener('focusin', rememberFocus);
       document.removeEventListener('focusout', forgetFocus);
-      compact.removeEventListener('change', transferFocus);
+      compactViewport.removeEventListener('change', transferFocus);
       observer.disconnect();
     };
   });
@@ -98,7 +103,7 @@
 </script>
 
 <svelte:window on:keydown={(event) => { if (event.key === 'Escape' && !event.defaultPrevented && detailsId && document.activeElement instanceof Element) { const facts = document.activeElement.closest('[data-details-id]'); const container = facts && (desktop.contains(facts) ? desktop : mobile.contains(facts) ? mobile : null); if (container && facts?.getAttribute('data-details-id') === detailsId) { event.preventDefault(); closeDetails(container, detailsId); } } }} />
-<div class="listing" bind:this={listing}>
+<div class="listing">
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>

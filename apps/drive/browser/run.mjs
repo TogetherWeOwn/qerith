@@ -1183,6 +1183,56 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
     const page = await context.newPage();
+    await page.goto(`${origin}/?listing&paged`, { waitUntil: 'networkidle' });
+    const setContainerWidth = async width => {
+      await page.locator('main').evaluate((el, width) => { el.style.width = `${width}px`; }, width);
+      assert.equal(await page.evaluate(() => innerWidth), 1280, 'Container resize must not change viewport width');
+    };
+    const table = page.getByRole('table');
+    const list = page.getByRole('list');
+    const link = { name: 'File 003.txt', exact: true };
+    const focus = page.locator(':focus');
+    for (const [desktop, compact] of [
+      [page.getByRole('button', { name: 'Name', exact: true }), page.getByRole('combobox', { name: 'Sort', exact: true })],
+      [table.getByRole('link', link), list.getByRole('link', link)]
+    ]) {
+      await desktop.focus();
+      await desktop.and(focus).waitFor({ timeout: 5000 });
+      await setContainerWidth(740);
+      await compact.and(focus).waitFor({ timeout: 5000 });
+      await setContainerWidth(741);
+      await desktop.and(focus).waitFor({ timeout: 5000 });
+    }
+    const paging = page.getByRole('button', { name: 'Show 200 more' });
+    const afterLayout = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await paging.focus();
+    for (const [width, layout] of [[740, list], [741, table]]) {
+      await setContainerWidth(width);
+      await layout.waitFor({ timeout: 5000 });
+      await afterLayout();
+      assert.equal(await paging.and(focus).count(), 1, 'Container resize must not steal focus from paging');
+    }
+    await setContainerWidth(740);
+    const compactLink = list.getByRole('link', link);
+    await compactLink.focus();
+    await compactLink.and(focus).waitFor({ timeout: 5000 });
+    const main = page.locator('main');
+    await main.evaluate(el => { el.hidden = true; });
+    await page.waitForFunction(() => document.activeElement === document.body, null, { timeout: 5000 });
+    await afterLayout();
+    await setContainerWidth(741);
+    await main.evaluate(el => { el.hidden = false; });
+    await table.waitFor({ timeout: 5000 });
+    await afterLayout();
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Reopening the listing must not restore stale focus');
+    console.log('Listing container-only focus passed in both directions; no paging focus theft or stale focus restoration');
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    await context.routeWebSocket('**/*', socket => socket.close());
+    const page = await context.newPage();
     await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
     await page.getByRole('table').getByRole('link', { name: 'Résumé 2025.pdf' }).focus();
     await page.setViewportSize({ width: 390, height: 844 });
