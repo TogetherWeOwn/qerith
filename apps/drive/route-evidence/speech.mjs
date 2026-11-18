@@ -35,7 +35,7 @@ export async function captureSpeech(page, path, selfCheck) {
   }
   async function follow(step, url, announcement) {
     await hear(`${step}: Enter (full document)`, async () => {
-      await Promise.all([page.waitForEvent('domcontentloaded'), nvda.activate({ capture: true })]);
+      await Promise.all([page.waitForEvent('domcontentloaded'), nvda.act({ capture: true })]);
       assert.match(page.url(), url);
     }, announcement);
   }
