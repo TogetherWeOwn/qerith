@@ -16,12 +16,37 @@ const buildAdapter = {
   /** @param {import('@sveltejs/kit').Builder} builder */
   async adapt(builder) {
     const config = JSON.parse(readFileSync('wrangler.build.jsonc', 'utf8'));
-    config.main = resolve('.svelte-kit/cloudflare/_worker.js');
+    config.main = resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js');
     config.assets.directory = resolve(config.assets.directory);
     mkdirSync(resolve('.svelte-kit'), { recursive: true });
     writeFileSync(configPath, JSON.stringify(config));
     try {
       await cloudflare.adapt(builder);
+      // Both the adapter and SvelteKit can answer asset requests before the app hook.
+      // Deny the generated namespace (including env.js) and direct asset fetches.
+      writeFileSync(resolve(config.assets.directory, '_worker.js'), `
+import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+
+const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
+const unavailable = () => new Response('Service unavailable', {
+  status: 503,
+  headers: { 'cache-control': 'no-store' }
+});
+const unavailableAssets = { fetch: unavailable };
+
+export default {
+  fetch(request, env, ctx) {
+    let pathname;
+    try {
+      pathname = decodeURIComponent(new URL(request.url).pathname);
+    } catch {
+      return unavailable();
+    }
+    if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
+    return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+  }
+};
+`);
     } finally {
       rmSync(configPath, { force: true });
     }
