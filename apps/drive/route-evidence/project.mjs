@@ -42,7 +42,7 @@ const page = join(output, route);
 if (selfCheck) {
   await mkdir(page, { recursive: true });
   await writeFile(join(page, '+page.server.ts'), `export const load = ({params}) => ({ title: params.folderId === 'next' ? 'New document' : 'Route evidence self-check' });\n`);
-  await writeFile(join(page, '+page.svelte'), `<script>export let data;</script><svelte:head><title>{data.title}</title></svelte:head><main data-sveltekit-reload><h1>{data.title}</h1><a href="/f/next">Next document</a></main>\n`);
+  await writeFile(join(page, '+page.svelte'), `<script>export let data;</script><svelte:head><title>{data.title} · Drive</title></svelte:head><main data-sveltekit-reload><h1>{data.title}</h1><a href="/f/next">New document</a></main>\n`);
 } else {
   const path = join(page, '+page.server.ts');
   const loader = await readFile(path, 'utf8');

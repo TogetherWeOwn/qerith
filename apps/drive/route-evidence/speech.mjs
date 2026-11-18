@@ -45,8 +45,8 @@ export async function captureSpeech(page, path, selfCheck) {
     await browse();
     if (selfCheck) {
       await heading('Self-check', /Route evidence self-check/i);
-      await tab('Self-check', /Next document/i);
-      await follow('Self-check', /\/f\/next$/, /New document/i);
+      await tab('Self-check', /New document/i);
+      await follow('Self-check', /\/f\/next$/, /New document\W*Drive, document\b/i);
       return;
     }
     await title('Populated', /Project records.*Drive/i);
@@ -57,18 +57,18 @@ export async function captureSpeech(page, path, selfCheck) {
     await hear('Populated: I (second item)', () => perform(key.I), /Quarterly report/i, /File/i);
     await top();
     await tab('Populated folder', /Archive notes/i);
-    await follow('Folder link', /\/f\/archive$/, /Archive notes/i);
+    await follow('Folder link', /\/f\/archive$/, /Archive notes\W*Drive, document\b/i);
     await heading('Empty', /Archive notes/i);
     await hear('EmptyFolder: H', () => perform(key.H), /heading.*2|level 2.*heading/i, /This folder is empty/i);
     await page.goto(`${origin}/f/populated`);
     await browse(); await top();
     await tab('Populated folder', /Archive notes/i);
     await tab('Populated next page', /Next page/i);
-    await follow('Next page', /\/f\/populated\?page=/, /Project records|No more items/i);
+    await follow('Next page', /\/f\/populated\?page=/, /Project records\W*Drive, document\b/i);
     await heading('Past-end', /Project records/i);
     await hear('Past-end: P', () => perform(key.P), /No more items/i);
     await tab('Past-end', /First page/i);
-    await follow('First page', /\/f\/populated\??$/, /Project records/i);
+    await follow('First page', /\/f\/populated\??$/, /Project records\W*Drive, document\b/i);
     await heading('First page', /Project records/i);
     async function unavailable(id) {
       await page.goto(`${origin}/f/populated`);
