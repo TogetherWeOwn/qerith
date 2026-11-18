@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { expect } from 'vitest';
 import { Sessions } from '../../../drive/src/lib/server/identity/sessions.ts';
 import { createUploadCompletionReceipts } from '../../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 
@@ -14,7 +15,11 @@ export const intentRow = (id) => sql('SELECT * FROM drive_upload_intents WHERE i
 
 export function producer(fetch, verifyParts = async () => parts, db = env.DB, qualified = true) {
   const options = { fetch, timeoutMs: 5000 };
-  const service = createUploadCompletionReceipts(db, epoch, config, options, { isQualified: async () => qualified, verifyParts });
+  const isQualified = async (storageConfigId) => {
+    expect(storageConfigId).toBe(JSON.stringify([config.endpoint, config.bucket, epoch]));
+    return qualified;
+  };
+  const service = createUploadCompletionReceipts(db, epoch, config, options, { isQualified, verifyParts });
   options.fetch = () => { throw new Error('replacement transport'); };
   return service;
 }
