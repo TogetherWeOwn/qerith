@@ -19,6 +19,7 @@
       document.body.dataset.tabLayerOpen = String(!!document.querySelector('dialog:modal, dialog:popover-open'));
       return false;
     }
+    if (menuFixture === 'throw') throw new Error('Fixture onTab error');
     (direction === 'next' ? nextName : firstName).focus();
     if (menuFixture === 'file') return true;
   }

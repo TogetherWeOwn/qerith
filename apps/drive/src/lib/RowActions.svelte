@@ -87,8 +87,13 @@
     if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
     if (event.key === 'Tab') {
       close();
-      if (onTab(event.shiftKey ? 'previous' : 'next') === false) trigger.focus({ preventScroll: true });
-      else event.preventDefault();
+      let useNativeTab = false;
+      try {
+        useNativeTab = onTab(event.shiftKey ? 'previous' : 'next') === false;
+      } finally {
+        if (!useNativeTab) event.preventDefault();
+      }
+      if (useNativeTab) trigger.focus({ preventScroll: true });
       return;
     }
     if (event.key === 'ArrowDown') next = (index + 1) % items.length;

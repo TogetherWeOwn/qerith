@@ -428,16 +428,20 @@ try {
       await ax.detach();
       assert(nodes.some(node => !node.ignored && node.role?.value === 'button' && node.name?.value === 'Next file'), 'Closing the modal must restore background to the accessibility tree');
     }
+    const nextFile = page.getByRole('button', { name: 'Next file' });
+    const rowName = page.getByRole('button', { name: 'Sample file', exact: true });
+    // Only the callback can reach these destinations during Tab navigation.
+    for (const target of [rowName, nextFile]) await target.evaluate(el => { el.tabIndex = -1; });
     await page.keyboard.press('ArrowUp');
     assert.equal(await items.last().evaluate(el => el === document.activeElement), true);
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
-    assert.equal(await page.getByRole('button', { name: 'Next file' }).evaluate(el => el === document.activeElement), true);
+    assert.equal(await nextFile.evaluate(el => el === document.activeElement), true);
     await trigger.click();
     await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(() => document.body.dataset.tabModal), 'false');
-    assert.equal(await page.getByRole('button', { name: 'Sample file', exact: true }).evaluate(el => el === document.activeElement), true);
-    await page.getByRole('button', { name: 'Sample file', exact: true }).click({ button: 'right' });
+    assert.equal(await rowName.evaluate(el => el === document.activeElement), true);
+    await rowName.click({ button: 'right' });
     await menu.waitFor();
     await page.getByRole('menuitem', { name: 'Details' }).focus();
     await page.keyboard.press('Space');
@@ -470,13 +474,16 @@ try {
     await page.goto(`${origin}/?menu=shared&native-tab`, { waitUntil: 'networkidle' });
     const trigger = page.getByRole('button', { name: 'Actions for Sample file' });
     const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
-    for (const [openKey, tabKey, item, direction, target] of [
-      ['ArrowUp', 'Tab', 'Details', 'next', 'Next file'],
-      ['ArrowDown', 'Shift+Tab', 'Download', 'previous', 'Sample file']
+    const rowName = page.getByRole('button', { name: 'Sample file', exact: true });
+    for (const [tabKey, item, direction, target] of [
+      ['Tab', 'Details', 'next', 'Next file'],
+      ['Shift+Tab', 'Download', 'previous', 'Sample file']
     ]) {
-      await trigger.focus();
-      await page.keyboard.press(openKey);
+      // Open with focus on the row name, so closing the layer cannot restore it to the trigger.
+      await rowName.focus();
+      await rowName.click({ button: 'right' });
       await menu.waitFor();
+      if (direction === 'next') await page.keyboard.press('End');
       assert.equal(await menu.getByRole('menuitem', { name: item }).evaluate(el => el === document.activeElement), true);
       await page.keyboard.press(tabKey);
       await menu.waitFor({ state: 'hidden' });
@@ -485,7 +492,17 @@ try {
       assert.equal(tabLayerOpen, 'false');
       assert.equal(await page.getByRole('button', { name: target, exact: true }).evaluate(el => el === document.activeElement), true, `${tabKey} must follow native tab order at ${width}px`);
     }
-    console.log(`Row menu native Tab and Shift+Tab passed at ${width}x${height}`);
+    await page.goto(`${origin}/?menu=throw`, { waitUntil: 'networkidle' });
+    await trigger.click();
+    await menu.waitFor();
+    await page.evaluate(() => {
+      window.addEventListener('keydown', event => { document.body.dataset.tabPrevented = String(event.defaultPrevented); }, { once: true });
+    });
+    const [error] = await Promise.all([page.waitForEvent('pageerror'), page.keyboard.press('Tab')]);
+    assert.match(error.message, /Fixture onTab error/);
+    assert.equal(await page.evaluate(() => document.body.dataset.tabPrevented), 'true');
+    assert.equal(await menu.count(), 0);
+    console.log(`Row menu native Tab, Shift+Tab and callback-error handling passed at ${width}x${height}`);
     await context.close();
   }
   for (const [width, height] of [[1280, 180], [390, 240], [1280, 800]]) {
