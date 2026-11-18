@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { uploadPart, type UploadPartDependencies } from '../src/lib/server/upload-part';
-import { PUT } from '../src/routes/api/uploads/[intentId]/parts/[partNumber]/+server';
 
 const origin = 'https://example.test';
 const id = '12345678-1234-1234-1234-123456789abc';
@@ -13,7 +12,7 @@ const sendNever = () => { assert.fail('unexpected provider send'); };
 
 test('denies unwired, cross-origin and unauthorized requests without reading bytes', async () => {
   const request = put();
-  const closed = await PUT({ request, params: { intentId: id, partNumber: '1' } } as Parameters<typeof PUT>[0]);
+  const closed = await uploadPart(request, id, '1');
   assert.equal(closed.status, 503);
   assert.equal(closed.headers.get('cache-control'), 'no-store');
   assert.equal(request.bodyUsed, false);
