@@ -30,10 +30,10 @@ async function completing(owner) {
   return intent;
 }
 
-function publish(intent, overrides = {}, replace = false) {
+function publish(intent, overrides = {}, conflict = '') {
   const values = { version: 3, entry: `entry-${intent.owner_id}`, key: intent.object_key,
     owner: intent.owner_id, parent: null, name: 'file', size: 7, ...overrides };
-  return sql(`INSERT ${replace ? 'OR REPLACE ' : ''}INTO drive_upload_publications
+  return sql(`INSERT ${conflict} INTO drive_upload_publications
     (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, intent.id, values.version, values.entry,
     values.owner, values.key, values.parent, values.name, values.size, '"complete"').run();
@@ -66,8 +66,10 @@ it('commits the file, receipt, accounting and journal transition together', asyn
   await expect(sql('DELETE FROM drive_upload_publications WHERE intent_id = ?', intent.id).run())
     .rejects.toThrow('upload publications are permanent');
   const next = await completing('transaction-replacement');
-  await expect(publish(next, { entry: `entry-${owner}` }, true)).rejects.toThrow('duplicate upload publication');
+  await expect(publish(next, { entry: `entry-${owner}` }, 'OR REPLACE')).rejects.toThrow('duplicate upload publication');
   await expectUnpublished(next, { state: 'completing', version: 3 });
+  await sql('DELETE FROM drive_upload_intents WHERE id = ?', intent.id).run();
+  expect(await intentRow(intent.id)).toBeNull();
   expect(await receipt(intent.id)).toMatchObject({ entry_id: `entry-${owner}`, size_bytes: 7 });
   await expect(cleanup(intent.id)).rejects.toThrow();
 });
@@ -102,13 +104,47 @@ it('does not treat a legacy completion claim as a publication attempt', async ()
   await expectUnpublished(intent, { state: 'completing', version: 3 });
 });
 
+it('requires a publication receipt to acknowledge an attempt', async () => {
+  const owner = 'transaction-unreceipted';
+  const intent = await completing(owner);
+  await expect(intents.recordSuccess(owner, intent.id, 3, { kind: 'completion' }))
+    .rejects.toThrow('upload attempt requires publication');
+  await expectUnpublished(intent, { state: 'completing', version: 3 });
+  await publish(intent);
+  expect(await intentRow(intent.id)).toMatchObject({ state: 'acknowledged', version: 4, completion_acknowledged: 1 });
+});
+
 it('does not publish when cleanup claimed the intent first', async () => {
   const intent = await allocated('transaction-cleanup');
   await cleanup(intent.id);
+  // 0027 will not allow an attempt or completing journal to coexist with this claim.
   await expect(publish(intent, { version: 2 })).rejects.toThrow('upload publication not admitted');
   await expectUnpublished(intent, { state: 'allocated', version: 2 });
   expect(await sql('SELECT intent_id FROM drive_upload_cleanup_claims WHERE intent_id = ?', intent.id).first())
     .toEqual({ intent_id: intent.id });
+});
+
+it.each(['OR IGNORE', 'OR FAIL'])('rolls back invalid metadata even with %s', async (conflict) => {
+  const intent = await completing(`transaction-${conflict}`);
+  await expect(publish(intent, { name: '/' }, conflict)).rejects.toThrow('invalid publication metadata');
+  await expectUnpublished(intent, { state: 'completing', version: 3 });
+});
+
+it.each(['overflow', 'missing'])('rolls back receipt and entry for %s folder accounting', async (problem) => {
+  const owner = `transaction-count-${problem}`;
+  const parent = `folder-${problem}`;
+  const intent = await completing(owner);
+  await folder(parent, owner);
+  if (problem === 'overflow') {
+    await sql('UPDATE drive_folder_counts SET item_count = ? WHERE folder_id = ?', Number.MAX_SAFE_INTEGER, parent).run();
+  } else {
+    await sql('DELETE FROM drive_folder_counts WHERE folder_id = ?', parent).run();
+  }
+  await expect(publish(intent, { parent }, 'OR FAIL'))
+    .rejects.toThrow(problem === 'overflow' ? 'folder count overflow' : 'missing folder count');
+  await expectUnpublished(intent, { state: 'completing', version: 3 });
+  expect(await sql('SELECT item_count FROM drive_folder_counts WHERE folder_id = ?', parent).first())
+    .toEqual(problem === 'overflow' ? { item_count: Number.MAX_SAFE_INTEGER } : null);
 });
 
 it.each(['missing-parent', 'conflicting-name'])('rolls back the transaction for %s', async (conflict) => {

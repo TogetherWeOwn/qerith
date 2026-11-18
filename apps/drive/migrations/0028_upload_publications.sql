@@ -1,6 +1,6 @@
 -- A publication is retained even if its visible entry is later removed.
 CREATE TABLE drive_upload_publications (
-  intent_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_upload_intents(id),
+  intent_id TEXT PRIMARY KEY NOT NULL REFERENCES drive_upload_intent_reservations(intent_id),
   intent_version INTEGER NOT NULL,
   entry_id TEXT NOT NULL UNIQUE,
   owner_id TEXT NOT NULL,
@@ -45,12 +45,27 @@ BEGIN
   SELECT RAISE(ABORT, 'upload is published');
 END;
 
--- The journal transition, receipt, entry and accounting commit or roll back together.
+-- A legacy journal acknowledgement must not settle a publication attempt.
+CREATE TRIGGER drive_upload_publications_ack_fence
+BEFORE UPDATE OF completion_acknowledged ON drive_upload_intents
+WHEN OLD.completion_acknowledged = 0 AND NEW.completion_acknowledged = 1
+  AND EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = OLD.id)
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_publications WHERE intent_id = OLD.id AND intent_version = OLD.version)
+BEGIN SELECT RAISE(ABORT, 'upload attempt requires publication'); END;
+
+-- The outer INSERT's conflict policy can override nested CHECK handling. Abort
+-- explicitly on invalid entry metadata and a folder count that cannot advance.
 CREATE TRIGGER drive_upload_publications_insert_entry
 AFTER INSERT ON drive_upload_publications
 BEGIN
+  SELECT CASE WHEN length(NEW.entry_id) = 0 OR length(CAST(NEW.name AS BLOB)) NOT BETWEEN 1 AND 255
+    OR length(trim(NEW.name, ' .')) = 0 OR instr(NEW.name, '/') != 0 OR instr(NEW.name, char(0)) != 0
+    THEN RAISE(ABORT, 'invalid publication metadata') END;
+  SELECT CASE WHEN EXISTS (SELECT 1 FROM drive_folder_counts WHERE folder_id = NEW.parent_id
+    AND item_count = 9007199254740991) THEN RAISE(ABORT, 'folder count overflow') END;
   INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
   VALUES (NEW.entry_id, NEW.owner_id, NEW.parent_id, NEW.name, 'file', NEW.object_key, NEW.size_bytes);
+  SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT, 'upload file not inserted') END;
   UPDATE drive_upload_intents SET state = 'acknowledged', completion_acknowledged = 1, version = version + 1
     WHERE id = NEW.intent_id AND owner_id = NEW.owner_id AND object_key = NEW.object_key
       AND state = 'completing' AND version = NEW.intent_version;
