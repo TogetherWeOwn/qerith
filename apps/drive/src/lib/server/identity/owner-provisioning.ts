@@ -1,8 +1,8 @@
 import type { PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
-import type { OwnerBootstrap } from './owner-bootstrap';
+import { OwnerCeremonyDenied, type OwnerBootstrap } from './owner-bootstrap';
 
-// This protocol is not an authorization boundary. Only a separately authenticated,
-// deployer-only transport may call it; do not expose it through the app's fetch handler.
+// This protocol is not an authorization boundary. Only the authenticated
+// deployer transport may call it.
 export class OwnerProvisioning {
   constructor(private readonly bootstrap: OwnerBootstrap) {}
 
@@ -19,8 +19,8 @@ export class OwnerProvisioning {
         await this.bootstrap.enroll(request.challenge, request.response as RegistrationResponseJSON);
         return { ok: true };
       }
-    } catch {
-      // Do not disclose database or WebAuthn errors to the transport.
+    } catch (error) {
+      if (!(error instanceof OwnerCeremonyDenied)) throw error;
     }
     return { ok: false };
   }

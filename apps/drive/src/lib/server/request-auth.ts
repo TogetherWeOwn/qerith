@@ -9,6 +9,8 @@ export interface DriveAuthEnv {
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
 
+export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
+
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }

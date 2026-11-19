@@ -64,6 +64,8 @@ const buildAdapter = {
       // can fetch its exact generated assets; env.js remains closed.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
+import { ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
 import { admitsSignInFixture, allowsOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 
@@ -79,12 +81,15 @@ const unavailableAssets = { fetch: unavailable };
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname === '/api/deployer/owner-enrollment') return ownerEnrollment(request, env);
     let pathname;
     try {
       pathname = decodeURIComponent(url.pathname);
     } catch {
       return unavailable();
     }
+    const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete\\/?$/.exec(pathname)?.[1];
+    if (entryId) return deletePrivateEntry(request, entryId, env);
     if (admitsSignInFixture(env)) {
       const step = signInStep.exec(url.pathname)?.[1];
       if (step) return signIn(request, step, env);

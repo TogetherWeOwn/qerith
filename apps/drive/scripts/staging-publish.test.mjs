@@ -48,7 +48,8 @@ test('publishes the validated staging bundle with the pinned runner', async (t) 
   await publishStaging(root, (binary, args, options) => {
     called++;
     assert.equal(binary, join(root, 'node_modules/.bin/wrangler'));
-    assert.deepEqual(args, ['deploy', '.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.staging.json']);
+    assert.deepEqual(args, ['deploy', '.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.staging.json',
+      '--var', 'DRIVE_OWNER_ENROLLMENT_RELEASE:disabled']);
     assert.equal(options.cwd, root);
     assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal(options.detached, true);
@@ -58,6 +59,26 @@ test('publishes the validated staging bundle with the pinned runner', async (t) 
     return child;
   });
   assert.equal(called, 1);
+});
+
+test('passes the ephemeral authorization as a Worker secret file, not via argv or child env', async (t) => {
+  const { root } = fixture(t);
+  const sha = 'a'.repeat(40);
+  const value = `${sha}:${Date.now() + 60_000}:${'a'.repeat(43)}`;
+  assert.throws(() => publish(root, () => assert.fail('runner invoked'), accountId, value, 'b'.repeat(40)), /mismatched/);
+  let file;
+  await publish(root, (_binary, args, options) => {
+    assert.equal(args.at(-2), '--secrets-file');
+    assert.ok(args.includes(`DRIVE_OWNER_ENROLLMENT_RELEASE:${sha}`));
+    file = args.at(-1);
+    assert.ok(!args.includes(value) && !Object.hasOwn(options.env, 'DRIVE_OWNER_ENROLLMENT'));
+    assert.ok(JSON.parse(readFileSync(file, 'utf8')).DRIVE_OWNER_ENROLLMENT === value);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    process.nextTick(() => child.emit('close', 0));
+    return child;
+  }, accountId, value, sha);
+  assert.equal(existsSync(file), false);
 });
 
 test('rejects missing and wrong inputs before invoking Wrangler', (t) => {

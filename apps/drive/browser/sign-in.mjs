@@ -6,6 +6,7 @@ import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 import { captureRootListing, captureSignedOut } from './root-listing.mjs';
+import { proveOwnerEnrollment } from './owner-enrollment.mjs';
 import { captureRootUpload } from './root-upload.mjs';
 
 const origin = 'https://drive.example.test';
@@ -198,9 +199,11 @@ try {
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
   assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing/', { redirect: 'error' })).status), 401);
-  await next.click();
-  await primary(first).waitFor();
-  assert.equal(new URL(first.url()).searchParams.get('next'), target);
+  // Assert the Worker's redirect, not Chromium following it beyond the fixture relay.
+  const [expiredPage] = await Promise.all([first.waitForResponse(response =>
+    response.url() === origin + target && response.request().isNavigationRequest()), next.click()]);
+  assert.equal(expiredPage.status(), 303);
+  assert.equal((await expiredPage.allHeaders()).location, `/sign-in?${new URLSearchParams({ next: target })}`);
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
   assert.equal(await privateStatus(), 401);
@@ -216,6 +219,7 @@ try {
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
   console.log('Generated Worker + Chromium + D1: cross-site navigation, restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  await proveOwnerEnrollment(browser);
 } finally {
   await browser?.close();
   await harness.close();
