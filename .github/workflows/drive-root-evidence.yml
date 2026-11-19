@@ -1,0 +1,95 @@
+name: Drive My Drive NVDA evidence
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+    paths:
+      - .github/workflows/drive-root-evidence.yml
+      - 'apps/drive/root-evidence/**'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  root-nvda:
+    if: >-
+      github.repository == 'TogetherWeOwn/qerith' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.head.repo.fork &&
+      github.head_ref == 'ci/drive-root-nvda-evidence'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
+      SOURCE_SHA: 2bbf6f8771cf5aaa2654ceeccb44f2f5a42d6080
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HARNESS_SHA }}
+          path: harness
+          persist-credentials: false
+      - name: Admit the exact product head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./harness/apps/drive/root-evidence/admit.ps1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Verify separate checkouts and record provenance
+        run: |
+          $source = git -C source rev-parse --verify HEAD
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:SOURCE_SHA) { throw 'My Drive source checkout mismatch' }
+          ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Initialize
+          $path = "$env:RUNNER_TEMP/drive-route-evidence/provenance.json"
+          $provenance = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -AsHashtable
+          $provenance.source = $source
+          $provenance.job = $env:GITHUB_JOB
+          $provenance.route = '/'
+          $provenance.url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID/attempts/$env:GITHUB_RUN_ATTEMPT"
+          $provenance | ConvertTo-Json > $path
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Acquire digest-pinned portable NVDA and Firefox
+        timeout-minutes: 4
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Acquire
+      - name: Validate locks and install without lifecycle scripts
+        timeout-minutes: 5
+        run: |
+          node harness/apps/drive/root-evidence/install-check.mjs source/apps/drive harness/apps/drive/route-evidence
+          if ($LASTEXITCODE -ne 0) { throw 'My Drive lock validation failed' }
+          foreach ($dir in @('source/apps/drive', 'harness/apps/drive/route-evidence')) {
+            npm ci --prefix $dir --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ --allow-directory=none --allow-file=none --allow-git=none --allow-remote=none
+            if ($LASTEXITCODE -ne 0) { throw 'My Drive frozen install failed' }
+          }
+      - name: Check evidence sanitization and pinned keyboard inputs
+        run: node --test harness/apps/drive/root-evidence/speech.test.mjs
+      - name: Build the exact-head generated Worker
+        timeout-minutes: 3
+        run: npm --prefix source/apps/drive run build
+      - name: Recheck the product head before capture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./harness/apps/drive/root-evidence/admit.ps1
+      - name: Contain the relay and capture speech
+        timeout-minutes: 6
+        run: |
+          ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Protect
+          node harness/apps/drive/root-evidence/run.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && env.EVIDENCE != ''
+        with:
+          name: drive-root-nvda-${{ env.SOURCE_SHA }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.EVIDENCE }}/provenance.json
+            ${{ env.EVIDENCE }}/tools.json
+            ${{ env.EVIDENCE }}/relay.json
+            ${{ env.EVIDENCE }}/capture.json
+            ${{ env.EVIDENCE }}/speech.jsonl
+          if-no-files-found: error
+          retention-days: 7
