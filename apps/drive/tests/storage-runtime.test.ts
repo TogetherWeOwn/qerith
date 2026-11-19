@@ -47,13 +47,32 @@ test('unqualified uploads stay unavailable without touching D1 or storage', asyn
     { ...bindings(), DRIVE_S3_QUALIFICATION: '{' }, { ...bindings(), DRIVE_S3_STORAGE_EPOCH: 'second' },
     { ...bindings(), DRIVE_S3_REGION: 'us-west-2' }, bindings({ ...proof, sourceSha: '' }),
     bindings({ ...proof, completionTimeoutMs: 0 }), bindings({ ...proof, completionTimeoutMs: 60_001 })]) {
-    const runtime = wireUploadStorage(env, noFetch);
+    let dbCalls = 0, fetchCalls = 0;
+    const dbAccess = () => { dbCalls++; throw new Error('unexpected D1 access'); };
+    const DB = { prepare: dbAccess, batch: dbAccess, withSession: dbAccess } as NonNullable<UploadRouteEnv['DB']>;
+    const fetch: typeof globalThis.fetch = async (...args) => { fetchCalls++; return noFetch(...args); };
+    const runtime = wireUploadStorage({ ...env, DB }, fetch);
     assert.equal(runtime.DRIVE_UPLOAD_VERIFIER, undefined);
-    const routes = uploadRoutes(runtime, { fetch: noFetch, timeoutMs: 5000 });
-    assert.equal((await routes.part(new Request(origin, { method: 'PUT', headers: { origin } }), session, id, '1')).status, 503);
-    assert.equal((await routes.complete(new Request(origin, { method: 'POST', headers: { origin } }), session, id)).status, 503);
+    const routes = uploadRoutes(runtime, { fetch, timeoutMs: 5000 });
+    const part = new Request(origin, { method: 'PUT', headers: { origin, 'content-length': '1' }, body: 'x' });
+    const body = JSON.stringify({ name: 'file.txt', parentId: null });
+    const complete = new Request(origin, { method: 'POST', body,
+      headers: { origin, 'content-type': 'application/json', 'content-length': String(body.length) } });
+    assert.equal((await routes.part(part, session, id, '1')).status, 503);
+    assert.equal((await routes.complete(complete, session, id)).status, 503);
+    assert.deepEqual({ dbCalls, fetchCalls }, { dbCalls: 0, fetchCalls: 0 });
   }
 });
+
+const upload = { storageConfigId, operationId: 'op', intentId: 'intent', ownerId: 'owner', objectKey: 'key one',
+  uploadId: 'opaque+/=', intentVersion: 1 };
+const listPart = (number: number, etag: string) =>
+  `<Part><PartNumber>${number}</PartNumber><ETag>${etag}</ETag><Size>${number * 47}</Size></Part>`;
+const listPage = (parts: string, marker?: number) => new Response(
+  '<ListPartsResult><Bucket>drive-staging</Bucket><Key>key one</Key><UploadId>opaque+/=</UploadId>' +
+  `<IsTruncated>${marker !== undefined}</IsTruncated>` +
+  (marker === undefined ? '' : `<NextPartNumberMarker>${marker}</NextPartNumberMarker>`) + parts + '</ListPartsResult>'
+);
 
 test('verification uses signed ListParts on the exact key and upload ID across pages', async () => {
   const markers: Array<string | null> = [];
@@ -67,18 +86,34 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     assert.equal(url.searchParams.get('uploadId'), 'opaque+/=');
     markers.push(url.searchParams.get('part-number-marker'));
     const number = markers.length;
-    return new Response(`<ListPartsResult><IsTruncated>${number === 1}</IsTruncated>` +
-      (number === 1 ? '<NextPartNumberMarker>1</NextPartNumberMarker>' : '') +
-      `<Part><PartNumber>${number}</PartNumber><ETag>"tag-${number}"</ETag><Size>${number * 47}</Size></Part></ListPartsResult>`);
+    return listPage(listPart(number, number === 1 ? '"tag-1"' : '"tag-&amp;-ÿ"'), number === 1 ? 1 : undefined);
   }).DRIVE_UPLOAD_VERIFIER!;
-  const upload = { storageConfigId, operationId: 'op', intentId: 'intent', ownerId: 'owner', objectKey: 'key one',
-    uploadId: 'opaque+/=', intentVersion: 1 };
   assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }), null);
   assert.deepEqual(markers, []);
   assert.deepEqual(await verifier.verifyParts(upload), [
-    { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-2"' }
+    { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
   assert.deepEqual(markers, [null, '1']);
   const invalid = wireUploadStorage(bindings(), async () => new Response('<ListPartsResult/>')).DRIVE_UPLOAD_VERIFIER!;
   assert.equal(await invalid.verifyParts(upload), null);
+});
+
+test('verification stops on oversized individual or cumulative ETag metadata', async () => {
+  const etag = `"${'a'.repeat(8190)}"`;
+  const oversized = wireUploadStorage(bindings(), async () => listPage(listPart(1, `"a${etag.slice(1)}`))).DRIVE_UPLOAD_VERIFIER!;
+  assert.equal(await oversized.verifyParts(upload), null);
+
+  for (const limit of [128, 129]) {
+    const markers: Array<string | null> = [];
+    const verifier = wireUploadStorage(bindings(), async (input) => {
+      const marker = new URL((input as Request).url).searchParams.get('part-number-marker');
+      markers.push(marker);
+      const start = Number(marker), end = Math.min(start + 64, limit);
+      const parts = Array.from({ length: end - start }, (_, i) => listPart(start + i + 1, etag)).join('');
+      return listPage(parts, end < limit || limit === 129 ? end : undefined);
+    }).DRIVE_UPLOAD_VERIFIER!;
+    const result = await verifier.verifyParts(upload);
+    assert.equal(result?.length ?? null, limit === 128 ? 128 : null);
+    assert.deepEqual(markers, limit === 128 ? [null, '64'] : [null, '64', '128']);
+  }
 });

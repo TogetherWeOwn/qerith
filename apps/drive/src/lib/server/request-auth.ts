@@ -1,6 +1,6 @@
 import type { Handle } from '@sveltejs/kit/hooks';
 import { driveNext, isDrivePageNavigation } from '../drive-navigation';
-import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadNavigation } from './download-navigation';
+import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
 
 export interface DriveAuthEnv {
@@ -8,6 +8,8 @@ export interface DriveAuthEnv {
   DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
+
+export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
 
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
@@ -95,7 +97,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       return refuse(503);
     }
     if (!session && !signInPage) {
-      if (event.route?.id === downloadRoute && isDownloadNavigation(request)) return downloadRedirect(downloadSignIn);
+      if (event.route?.id === downloadRoute) {
+        const downloadNavigation = fixture ? isDownloadDocumentNavigation(request) : isDownloadNavigation(request);
+        if (downloadNavigation) return downloadRedirect(downloadSignIn);
+      }
       if (fixture && navigation) return downloadRedirect(`/sign-in?${new URLSearchParams({ next: driveNext(pathname + search) })}`);
       return deny(401);
     }

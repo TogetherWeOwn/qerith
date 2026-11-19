@@ -2,10 +2,16 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export async function verifyEvidence(dir, tested) {
+const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
+  ...['signed-out', 'empty', 'listed', 'invalid-page', 'exhausted', 'unavailable'].flatMap(state =>
+    [`root-${state}-${width}.png`, `axe-root-${state}-${width}.json`]),
+  `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
+])];
+
+export async function verifyEvidence(dir, tested, root = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
-  for (const name of names) {
+  for (const name of root ? [...names, ...rootFiles] : names) {
     if (!(await stat(join(dir, name))).size) throw new Error(`Empty evidence: ${name}`);
   }
   if ((await readFile(join(dir, 'head.txt'), 'utf8')).trim() !== tested) {
@@ -33,9 +39,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (![dir, tested, requestedHead, snapshot, mode, workflow, runId, runAttempt, server, repository].every(Boolean)) {
     throw new Error('Missing provenance context');
   }
-  await verifyEvidence(dir, tested);
+  const root = process.env.ROOT_EVIDENCE === 'true';
+  await verifyEvidence(dir, tested, root);
+  const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
     runUrl: `${server}/${repository}/actions/runs/${runId}`,
-    coverage: 'synthetic fixture only; not product behavior or sign-in' }, null, 2) + '\n');
+    coverage: tested === requestedHead ? `synthetic fixture; ${generated}` : 'synthetic fixture only; not product behavior or sign-in' }, null, 2) + '\n');
 }

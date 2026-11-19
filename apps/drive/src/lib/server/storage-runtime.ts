@@ -25,7 +25,8 @@ export function storageIdentity(env: StorageBindings) {
 }
 
 function qualifiedBudget(proof: string | undefined, storageConfigId: string, region: string): number | null {
-  // This binding is installed by the protected qualifier pipeline, never by the caller.
+  // This binding qualifies a storage identity, not the running build. The protected
+  // deployment pipeline owns the exact-SHA preview qualification separately.
   if (typeof proof !== 'string' || proof.length > 4096) return null;
   try {
     const evidence = JSON.parse(proof);
@@ -39,6 +40,10 @@ function qualifiedBudget(proof: string | undefined, storageConfigId: string, reg
 }
 
 const listTimeoutMs = 5000;
+const maxPartEtagBytes = 8192;
+// Count retained UTF-16 ETag bytes. Even with XML escaping and MAX_PARTS entries,
+// this budget fits within the downstream 16 MiB completion manifest limit.
+const maxRetainedEtagBytes = 2 * 1024 * 1024;
 
 function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity>>, proof: string | undefined,
   transport: typeof fetch): UploadRouteEnv['DRIVE_UPLOAD_VERIFIER'] {
@@ -54,15 +59,24 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
       const signal = AbortSignal.timeout(listTimeoutMs);
       const deadline = performance.now() + listTimeoutMs;
       const parts: CompletedPart[] = [];
+      let retainedEtagBytes = 0;
       let marker: number | undefined;
       try {
         do {
           const page = await listing.parts(objectKey, uploadId, { partNumberMarker: marker, signal });
           if (signal.aborted || performance.now() >= deadline || parts.length + page.parts.length > MAX_PARTS) return null;
-          for (const part of page.parts) parts.push(part);
+          for (const part of page.parts) {
+            const { etag } = part;
+            if (etag.length > maxPartEtagBytes || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) return null;
+            retainedEtagBytes += 2 * etag.length;
+            if (retainedEtagBytes > maxRetainedEtagBytes) return null;
+            // Rebuild from the validated Latin-1 bytes so a parser substring cannot retain the XML page.
+            const detachedEtag = String.fromCharCode(...Uint8Array.from(etag, (char) => char.charCodeAt(0)));
+            parts.push({ ...part, etag: detachedEtag });
+          }
           marker = page.nextPartNumberMarker;
         } while (marker !== undefined);
-        return parts.length ? parts : null;
+        return parts.length && !signal.aborted && performance.now() < deadline ? parts : null;
       } catch { return null; }
     }
   };

@@ -3,7 +3,7 @@ import { validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
   occupiedUploadName } from './metadata/upload-completion-receipts';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
-import { decodeUploadIdentity, uploadStorageEvidence } from './metadata/upload-storage-evidence';
+import { decodeUploadIdentity, uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
 import { allowsOrigin, authOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
@@ -68,8 +68,8 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const isQualified = (id: string) => verifier.isQualified(id);
     if (await isQualified(storageConfigId) !== true) return reply(503);
-    const timeoutMs = verifier.completionTimeoutMs?.(storageConfigId);
-    if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 0x7fffffff) return reply(503);
+    const timeoutMs = uploadCompletionBudget(verifier, storageConfigId);
+    if (timeoutMs === null) return reply(503);
     const { token, principal: { id: ownerId } } = session;
     const bindings = [intentId, ownerId, await tokenHash(token), settings.endpoint, settings.bucket, epoch];
     return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs };

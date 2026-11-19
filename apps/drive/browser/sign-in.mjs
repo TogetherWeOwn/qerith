@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
+import { captureRootListing, captureSignedOut } from './root-listing.mjs';
 
 const origin = 'https://drive.example.test';
 const rpID = new URL(origin).hostname;
@@ -53,11 +54,25 @@ try {
   });
   for (const step of ['challenge', 'restart', 'verify']) assert.equal((await post(step, { origin: 'https://other.example.test' })).status, 403);
   const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
-  const head = headers => worker.fetch(`${origin}/?return=1`, { method: 'HEAD', headers, redirect: 'manual' });
-  const redirect = await head(navigation);
-  assert.equal(redirect.status, 303);
-  assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
-  assert.equal((await head({ ...navigation, range: 'bytes=0-' })).status, 401);
+  const visit = (method, headers) => worker.fetch(`${origin}/?return=1`, { method, headers, redirect: 'manual' });
+  for (const site of ['same-origin', 'none', 'same-site', 'cross-site']) {
+    const headers = { ...navigation, 'sec-fetch-site': site };
+    for (const method of ['GET', 'HEAD']) {
+      const redirect = await visit(method, headers);
+      assert.equal(redirect.status, 303, `${method} from ${site}`);
+      assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
+      assert.equal(redirect.headers.get('cache-control'), 'private, no-store');
+    }
+  }
+  const crossSite = { ...navigation, 'sec-fetch-site': 'cross-site' };
+  for (const method of ['GET', 'HEAD']) {
+    for (const headers of [{ ...crossSite, range: 'bytes=0-' }, { ...crossSite, 'if-none-match': '"previous"' },
+      { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'cross-site' }]) {
+      const denied = await visit(method, headers);
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get('location'), null);
+    }
+  }
   const blocked = await worker.fetch(`${origin}/`, { headers: { ...navigation, origin: 'https://other.example.test' } });
   assert.equal(blocked.status, 403);
   assert.equal(blocked.headers.get('cache-control'), 'private, no-store');
@@ -110,6 +125,7 @@ try {
     return page.goto(`${origin}${response.headers.get('location')}`, { waitUntil: 'networkidle' });
   };
   await Promise.all([signInFrom(first, '/?tab=one'), signInFrom(second, '/shared?tab=two')]);
+  await captureSignedOut(first);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
   loseNext = true;
@@ -131,11 +147,15 @@ try {
   assert.equal(traffic.filter(([step]) => step === 'verify').length, 1);
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure && session.sameSite === 'Lax');
+  const signedIn = await visit('HEAD', { ...crossSite, cookie: `${sessionName}=${session.value}` });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.headers.get('location'), null);
   const tokenHash = createHash('sha256').update(session.value).digest('hex');
   assert.equal((await DB.prepare('SELECT principal_id FROM drive_sessions WHERE token_hash = ?').bind(tokenHash).first()).principal_id, 'fixture-owner');
   const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
   assert.equal(await privateStatus(), 200);
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
+  await captureRootListing(first, origin, DB);
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
@@ -153,7 +173,7 @@ try {
   assert.equal(denial.status, 401);
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
-  console.log('Generated Worker + Chromium + D1: restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  console.log('Generated Worker + Chromium + D1: cross-site navigation, restart, queued tabs, late cancel, return targets, expiry and revocation passed');
 } finally {
   await browser?.close();
   await harness.close();

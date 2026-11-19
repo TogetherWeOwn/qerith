@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -43,7 +44,7 @@ async function exercise(args, assertions) {
   }
 }
 
-async function exercisePrivateBoundary(main) {
+async function exercisePrivateBoundary(main, preview = false) {
   const origin = 'https://drive.example.test';
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
@@ -51,7 +52,10 @@ async function exercisePrivateBoundary(main) {
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
+${preview ? '' : deletionWorker}
+if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
+  ${preview ? '' : 'admitDeletion(request, env.DB);'}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -65,12 +69,13 @@ export default { fetch(request, env, ctx) {
     assets: { ...config.assets, directory: resolve(config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'drive-smoke', database_id: '00000000-0000-4000-8000-000000000001' }]
   }));
-  const harness = createTestHarness({ workers: [{ configPath, vars: { DRIVE_ORIGIN: origin } }] });
+  const vars = { DRIVE_ORIGIN: origin, ...(preview ? { DRIVE_SIGN_IN_FIXTURE: '1' } : {}) };
+  const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
-    for (const name of ['0001_identity.sql', '0009_sessions.sql', '0033_owner_registration.sql']) {
+    for (const name of (await readdir('migrations')).filter((file) => file.endsWith('.sql')).sort()) {
       const sql = await readFile(`migrations/${name}`, 'utf8');
       await DB.batch(unstable_splitSqlQuery(sql).map((statement) => DB.prepare(statement)));
     }
@@ -94,12 +99,15 @@ export default { fetch(request, env, ctx) {
     const cookie = await session('fixture', 'member');
     // Probe before an existing owner would make the bootstrap operation refuse by itself.
     await assertProvisioningUnavailable(cookie, 'member');
+    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('other', 'member', 'active')").run();
 
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
-    assert.equal((await worker.fetch(`${origin}/sign-in`)).status, 404);
-    assert.equal((await worker.fetch(`${origin}/api/sign-in/challenge`, { method: 'POST', headers: { origin } })).status, 404);
-    assert.equal((await worker.fetch(`${origin}/%73ign-in`, { headers: { cookie }, redirect: 'manual' })).status, 404);
+    if (!preview) {
+      assert.equal((await worker.fetch(`${origin}/sign-in`)).status, 404);
+      assert.equal((await worker.fetch(`${origin}/api/sign-in/challenge`, { method: 'POST', headers: { origin } })).status, 404);
+      assert.equal((await worker.fetch(`${origin}/%73ign-in`, { headers: { cookie }, redirect: 'manual' })).status, 404);
+    }
     const mutation = await access({ method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
     assert.equal(mutation.status, 403, 'mutation needs the exact Origin');
     assert.equal(mutation.headers.get('cache-control'), 'private, no-store');
@@ -115,12 +123,40 @@ export default { fetch(request, env, ctx) {
         assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'private, no-store'], route + suffix);
       }
     }
+    const allocate = (headers, suffix = '') => worker.fetch(`${origin}/api/uploads${suffix}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{"size":4}', redirect: 'manual',
+    });
+    for (const suffix of ['', '/']) {
+      for (const [headers, status] of [[{ origin }, 401], [{ cookie }, 403],
+        [{ cookie, origin: 'https://other.example.test' }, 403], [{ cookie, origin }, 503]]) {
+        const result = await allocate(headers, suffix);
+        assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'private, no-store'], 'allocate' + suffix);
+      }
+    }
     const authorized = await access({ headers: { cookie } });
-    assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
+    assert.equal(authorized.status, 200);
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
-    assert.match(await authorized.text(), /Service unavailable\./);
+    const html = await authorized.text();
+    const styles = [...html.matchAll(/href="((?:\.\/|\/)?_app\/immutable\/[^"\s]+\.css)"/g)];
+    assert.ok(styles.length, 'root HTML references its styles');
+    for (const [, path] of styles) {
+      const response = await worker.fetch(new URL(path, origin), { headers: { cookie } });
+      assert.equal(response.status, preview ? 200 : 503);
+    }
+    const fileId = '00000000-0000-4000-8000-000000000002';
+    if (preview) {
+      assert.match(html, /Your drive is empty\./);
+      await exerciseRootPages(DB, worker, origin, cookie, fileId);
+      const owner = await session('owner-fixture', 'owner');
+      await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
+      return;
+    }
+    await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
+    const unadmitted = await (await access({ headers: { cookie } })).text();
+    assert.match(unadmitted, /Service unavailable\./);
+    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder/);
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
-    const file = `${origin}/api/download/00000000-0000-4000-8000-000000000002`;
+    const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
     const signedOut = await get(navigation, `${file}/?next=https://other.invalid`);
     assert.equal(signedOut.status, 303);
@@ -159,13 +195,63 @@ export default { fetch(request, env, ctx) {
     }
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
+    const revokedAllocation = await allocate({ cookie, origin });
+    assert.deepEqual([revokedAllocation.status, revokedAllocation.headers.get('cache-control')], [401, 'private, no-store']);
     const revoked = await get({ cookie, range: 'bytes=1-' });
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);
-    await assertProvisioningUnavailable(await session('owner-fixture', 'owner'), 'owner');
+    const owner = await session('owner-fixture', 'owner');
+    await assertProvisioningUnavailable(owner, 'owner');
+    await exerciseDeletion({ worker, DB, origin, cookie: owner, revoked: cookie, other: await session('other-fixture', 'member') });
   } finally {
     await harness.close();
   }
+}
+
+async function exerciseRootPages(DB, worker, origin, cookie, fileId) {
+  const get = async (path) => (await worker.fetch(new URL(path, origin), { headers: { cookie } })).text();
+  const folder = DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, ?, 'folder')");
+  const folderId = (i) => `00000000-0000-4000-8000-${String(100 + i).padStart(12, '0')}`;
+  await DB.batch(Array.from({ length: 100 }, (_, i) => folder.bind(folderId(i), 'fixture', `Folder ${100 + i}`)));
+  await folder.bind('other-folder', 'other', 'Other principal folder').run();
+  await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES (?, 'fixture', 'Fixture.pdf', 'file', 'internal-fixture-key', 1)").bind(fileId).run();
+  const first = await get('/');
+  assert.match(first, /Folder 100/);
+  assert.match(first, /Folder 199/);
+  assert.doesNotMatch(first, /Fixture\.pdf|Other principal folder|Your drive is empty/);
+  const next = first.match(/href="(\/\?page=[A-Za-z0-9_-]+)"/);
+  assert.equal(next?.[1], `/?page=${folderId(99)}`, 'the continuation contains only the boundary ID');
+  const following = await get(next[1]);
+  assert.match(following, /Fixture\.pdf/);
+  assert.ok(following.includes(`href="/api/download/${fileId}"`));
+  assert.doesNotMatch(following, /data-action-row|<th[^>]*>(?:Size|Modified|Actions)<\/th>/);
+  assert.doesNotMatch(following, /Folder 199|Other principal folder|internal-fixture-key|Next page/);
+  assert.ok(!following.includes(cookie.split('=')[1]));
+  const invalid = await get('/?page=invalid');
+  assert.match(invalid, /This page is no longer available\./);
+  assert.match(invalid, /<a\b[^>]*\shref="\/"[^>]*>Back to first page<\/a>/);
+  assert.doesNotMatch(invalid, /Your drive is empty|Fixture\.pdf|Folder 100/);
+  await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(fileId).run();
+  const exhausted = await get(next[1]);
+  assert.match(exhausted, /No more items\./);
+  assert.doesNotMatch(exhausted, /Your drive is empty/);
+
+  // Break only the listing query; the session and download guard are still live.
+  const index = await DB.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first();
+  await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
+  try {
+    const failed = await get(next[1]);
+    assert.match(failed, /This folder didn't load/);
+    const retry = failed.match(/<a\b[^>]*\shref="([^"\s]+)"[^>]*>Try again<\/a>/);
+    assert.equal(retry?.[1], next[1], 'retry stays on the failed page');
+  } finally {
+    await DB.prepare(index.sql).run();
+  }
+  await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(folderId(99)).run();
+  const stale = await get(next[1]);
+  assert.match(stale, /This page is no longer available\./);
+  assert.doesNotMatch(stale, /No more items|Your drive is empty/);
+  console.log('Generated Worker fixture: bounded private root pages, stale page recovery and same-page retry passed');
 }
 
 const root = '.svelte-kit/cloudflare';
@@ -182,6 +268,7 @@ const generatedUnavailable = [...unavailable, ...['/_app/env.js', '/_app/%65nv.j
 await exercise([appWorker, '--config', 'wrangler.build.jsonc'], generatedUnavailable);
 console.log(`Generated Worker: ${generatedUnavailable.map(([path]) => path).join(', ')} returned 503 with Cache-Control: no-store`);
 await exercisePrivateBoundary(appWorker);
+await exercisePrivateBoundary(appWorker, true);
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);
