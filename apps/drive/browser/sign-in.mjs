@@ -64,11 +64,13 @@ try {
     }
   }
   const crossSite = { ...navigation, 'sec-fetch-site': 'cross-site' };
-  for (const headers of [{ ...crossSite, range: 'bytes=0-' }, { ...crossSite, 'if-none-match': '"previous"' },
-    { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'cross-site' }]) {
-    const denied = await visit('GET', headers);
-    assert.equal(denied.status, 401);
-    assert.equal(denied.headers.get('location'), null);
+  for (const method of ['GET', 'HEAD']) {
+    for (const headers of [{ ...crossSite, range: 'bytes=0-' }, { ...crossSite, 'if-none-match': '"previous"' },
+      { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'cross-site' }]) {
+      const denied = await visit(method, headers);
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get('location'), null);
+    }
   }
   const blocked = await worker.fetch(`${origin}/`, { headers: { ...navigation, origin: 'https://other.example.test' } });
   assert.equal(blocked.status, 403);
