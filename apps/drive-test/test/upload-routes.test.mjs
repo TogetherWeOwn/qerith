@@ -143,10 +143,13 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   } });
   ({ principal } = upload);
   try {
-    expect((await upload.send(1, { auth: upload.foreign })).status).toBe(404);
+    const foreign = await upload.send(1, { auth: upload.foreign });
+    expect([foreign.status, await foreign.text()]).toEqual([403, '']);
     const partDenied = change === 'part claim';
     expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
-    expect((await upload.send()).status).toBe(404);
+    const completion = await upload.send();
+    // A prior demotion fails at the hook; a demotion during completion fails in the route.
+    expect([completion.status, await completion.text()]).toEqual([partDenied ? 403 : 404, '']);
     expect(await upload.generation()).toBeNull();
     const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
       'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };

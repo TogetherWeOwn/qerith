@@ -51,8 +51,12 @@ export function readOpaqueCookie(request: Request, cookieName: string, pattern: 
   return token;
 }
 
+export function readSessionToken(request: Request): string | null {
+  return readOpaqueCookie(request, sessionCookie, /^[A-Za-z0-9_-]{43}$/);
+}
+
 export async function readSession(request: Request, db: NonNullable<DriveAuthEnv['DB']>) {
-  const token = readOpaqueCookie(request, sessionCookie, /^[A-Za-z0-9_-]{43}$/);
+  const token = readSessionToken(request);
   if (token === null) return null;
   // Use the primary binding and re-read membership on every private request.
   const principal = await new Sessions(db).lookup(token);
@@ -86,11 +90,12 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     if (!allowsOrigin(request, origin.origin)) return refuse(403);
 
     const fixture = admitsSignInFixture(env);
+    const staging = origin.origin === stagingOrigin;
     const routeId = event.route?.id;
     // Owner management is not admitted in preview, even before authentication.
-    if ((fixture || origin.origin === stagingOrigin) && routeId?.startsWith('/api/owner/')) return deny(404);
+    if ((fixture || staging) && routeId?.startsWith('/api/owner/')) return deny(404);
     const signInPage = routeId === '/sign-in';
-    if ((signInPage && (!fixture || !/^\/sign-in\/?$/.test(pathname))) ||
+    if ((signInPage && !(staging ? pathname === '/sign-in' : fixture && /^\/sign-in\/?$/.test(pathname))) ||
         /^\/(?:invite|recover|api\/sign-in)(?:\/|$)/.test(pathname)) return deny(404);
 
     let session;
@@ -98,6 +103,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       session = signInPage ? null : await readSession(request, env.DB);
     } catch {
       return refuse(503);
+    }
+    if (staging && session && session.principal.role !== 'owner') {
+      return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
     }
     if (!session && !signInPage) {
       if (event.route?.id === downloadRoute) {

@@ -2,7 +2,7 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { decodeClientDataJSON, isoBase64URL } from '@simplewebauthn/server/helpers';
 import { CeremonyCapacityReached, ChallengeUnavailable } from './identity/challenges';
 import { PasskeyDenied, PasskeyLogin, RevokedPasskey } from './identity/login';
-import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie } from './request-auth';
+import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, stagingOrigin } from './request-auth';
 
 const transactionCookie = '__Host-drive-login';
 const transactionPattern = /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/;
@@ -69,7 +69,6 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
   }
 }
 
-// Unwired: the Worker still exposes no public sign-in or provisioning endpoint.
 export async function signIn(
   request: Request,
   step: 'challenge' | 'restart' | 'verify',
@@ -86,7 +85,7 @@ export async function signIn(
   }
 
   try {
-    const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin);
+    const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin, origin.origin === stagingOrigin);
     // A serialized restart after a lost response must leave the previous context alone.
     const transaction = step === 'restart' ? null : readOpaqueCookie(request, transactionCookie, transactionPattern);
     const [context, challenge] = transaction?.split('.') ?? [];
