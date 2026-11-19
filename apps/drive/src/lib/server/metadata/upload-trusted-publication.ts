@@ -28,11 +28,12 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   const candidate = `${publishable} ${requireActiveOwner(ownerOnly, 'e.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const { beforeSend, ...options } = transport;
+  const { beforeSend, streamBudget, ...options } = transport;
+  const budget = streamBudget && { ...streamBudget };
   const makeReader = (checkOwner?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
-    beforeSend: async () => await isQualified?.(storageConfigId) === true && (!beforeSend || await beforeSend() === true) &&
-      (!checkOwner || await checkOwner()) }));
-  const reader = ownerOnly ? undefined : makeReader();
+    streamBudget: budget, beforeSend: async () => await isQualified?.(storageConfigId) === true &&
+      (!beforeSend || await beforeSend() === true) && (!checkOwner || await checkOwner()) }));
+  const reader = makeReader(); // Validate the transport even when each request needs its own owner check.
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {
@@ -51,7 +52,8 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
       try {
         const key = decodeUploadIdentity(key_hex);
         if (key.includes('\0')) return null;
-        const current = reader ?? makeReader(() => new Sessions(db.withSession('first-primary')).isLiveOwner(token, principalId));
+        const current = ownerOnly
+          ? makeReader(() => new Sessions(db.withSession('first-primary')).isLiveOwner(token, principalId)) : reader;
         const head = await current.head({ key, etag });
         if (head.status !== 200 || typeof head.contentLength !== 'string' || !/^\d+$/.test(head.contentLength) ||
             Number(head.contentLength) !== size_bytes || await isQualified(storageConfigId) !== true) return null;

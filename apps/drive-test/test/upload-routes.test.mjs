@@ -2,6 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
+import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
@@ -124,18 +125,21 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   }
 });
 
-it('stops multipart verification before a later page when the staging owner is demoted', async () => {
+it.each(['owner', 'member'])('checks the staging role %s again before the next multipart page', async (role) => {
   await applyD1Migrations(env.DB, migrations);
-  const operation = crypto.randomUUID();
+  const operation = crypto.randomUUID(), owner = `owner-${operation}`;
   const { token, key } = await seed(operation);
-  const setRole = (role) => sql('UPDATE drive_principals SET role = ? WHERE id = ?', role, `owner-${operation}`).run();
+  const setRole = (value) => sql('UPDATE drive_principals SET role = ? WHERE id = ?', value, owner).run();
   const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
   const calls = [];
+  const open = `<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key><UploadId>upload/+id</UploadId>`;
   const fetch = async (request) => {
-    calls.push([request.method, new URL(request.url).searchParams.get('part-number-marker')]);
-    await setRole('member');
-    return new Response(`<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key>` +
-      '<UploadId>upload/+id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>' +
+    const marker = new URL(request.url).searchParams.get('part-number-marker');
+    calls.push([request.method, marker]);
+    if (request.method === 'POST') return response(key);
+    if (marker === '2') return new Response(`${open}<IsTruncated>false</IsTruncated></ListPartsResult>`);
+    if (role === 'member') await setRole(role);
+    return new Response(`${open}<IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>` +
       '<Part><PartNumber>2</PartNumber><Size>7</Size><ETag>"part-&amp;-ÿ"</ETag></Part></ListPartsResult>');
   };
   const { DRIVE_UPLOAD_VERIFIER: verifier } = wireUploadStorage({
@@ -147,11 +151,24 @@ it('stops multipart verification before a later page when the staging owner is d
   await setRole('owner');
   try {
     const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000 }, verifier, true);
-    expect(await service.complete(token, operation)).toBe('not-admitted');
-    expect(calls).toEqual([['GET', null]]);
-    expect(await evidence('dispatches', operation)).toBeNull();
-    expect(await evidence('receipts', operation)).toBeNull();
+    const result = await service.complete(token, operation);
+    expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
+    if (role === 'member') {
+      expect(result).toBe('not-admitted');
+      expect(calls).toEqual([['GET', null]]);
+      expect(await evidence('dispatches', operation)).toBeNull();
+      expect(await evidence('receipts', operation)).toBeNull();
+    } else {
+      expect(result).toBe('recorded');
+      expect(calls).toEqual([['GET', null], ['GET', '2'], ['POST', null]]);
+      expect(await evidence('receipts', operation)).not.toBeNull();
+    }
   } finally { await setRole('member'); }
+});
+
+it('validates owner-only publication transport at construction', () => {
+  expect(() => createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 0 }, qualified, true))
+    .toThrow('Invalid S3 timeout');
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {
