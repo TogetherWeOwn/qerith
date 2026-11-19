@@ -5,14 +5,23 @@ scratch=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gitleaks-ci.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 
 scan() {
-  local repo=$1
-  shift
+  local repo=$1 report=${2:-"$scratch/history.json"} status=0
   # Force text patches and compare merges to their first parent without
   # restricting history traversal to the first-parent chain.
   # Also emit content when a file is renamed out of an allowed path.
+  # Scanner diagnostics can echo raw policy input even with --redact.
   "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 \
-    --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent --no-renames HEAD' \
-    --config "$scratch/.gitleaks.toml" --gitleaks-ignore-path "$scratch/.gitleaksignore" "$@"
+    --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent --no-renames HEAD --' \
+    --config "$scratch/.gitleaks.toml" --gitleaks-ignore-path "$scratch/.gitleaksignore" \
+    --report-format json --report-path "$report" >/dev/null 2>&1 || status=$?
+  if (( status == 0 )); then
+    printf '%s\n' 'Gitleaks history scan passed; no findings reported'
+  elif jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
+    printf 'Gitleaks reported findings (exit %s); review privately\n' "$status" >&2
+  else
+    printf 'Gitleaks history scan failed (exit %s); diagnostics withheld\n' "$status" >&2
+  fi
+  return "$status"
 }
 
 validate_config() {
@@ -37,8 +46,26 @@ for section, settings in policy.items():
 PY
 }
 
+validate_rules() {
+  local config=$1 label=$2 report="$scratch/rules.sarif"
+  validate_config "$config" || return 1
+  # An empty directory loads the policy without scanning repository data.
+  # SARIF inventories the effective rules, including built-ins after extension.
+  mkdir -p "$scratch/empty"
+  if ! "${GITLEAKS_BIN:?}" dir "$scratch/empty" --config "$config" --redact \
+    --report-format sarif --report-path "$report" >/dev/null 2>&1; then
+    printf '%s gitleaks policy could not be loaded\n' "$label" >&2
+    return 1
+  fi
+  if ! jq -e 'any(.runs[]; .tool.driver.rules | type == "array" and length > 0)' \
+    "$report" >/dev/null 2>&1; then
+    printf '%s gitleaks policy has no effective rules\n' "$label" >&2
+    return 1
+  fi
+}
+
 scan_history() {
-  test "$(git rev-parse HEAD)" = "${SCAN_HEAD:?}"
+  test "$(git rev-parse --verify HEAD)" = "${SCAN_HEAD:?}"
   test "$(git rev-parse --is-shallow-repository)" = false
 
   local policy=HEAD path changes
@@ -52,12 +79,7 @@ scan_history() {
       if git cat-file -e HEAD:.gitleaks.toml 2>/dev/null; then
         local candidate="$scratch/candidate.toml"
         git show HEAD:.gitleaks.toml > "$candidate"
-        validate_config "$candidate"
-        mkdir "$scratch/empty"
-        if ! "${GITLEAKS_BIN:?}" dir "$scratch/empty" --config "$candidate" --redact >/dev/null 2>&1; then
-          printf '%s\n' 'Gitleaks could not load the proposed policy' >&2
-          return 1
-        fi
+        validate_rules "$candidate" Proposed || return 1
       fi
     fi
   fi
@@ -66,12 +88,12 @@ scan_history() {
       git show "$policy:$path" > "$scratch/$path"
     fi
   done
-  validate_config "$scratch/.gitleaks.toml"
+  validate_rules "$scratch/.gitleaks.toml" Active || return 1
   # Gitleaks also reads the source-root ignore file, even with an explicit
   # ignore path. Unlink first so a PR-controlled symlink cannot redirect writes.
   rm -f -- .gitleaksignore
   cp -- "$scratch/.gitleaksignore" .gitleaksignore
-  scan . "$@"
+  scan . "${1:-}"
 }
 
 fake_token() {
@@ -81,10 +103,15 @@ fake_token() {
 
 assert_detected() {
   local label=$1 base=$2 commit=$3 script=$4 status=0 event=pull_request
-  local report="$scratch/$label.json"
+  local report="$scratch/$label.json" log="$scratch/$label.log"
   if [[ "$label" == no-diff ]]; then event=merge_group; fi
-  GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse HEAD)" \
-    bash "$script" scan --report-format json --report-path "$report" || status=$?
+  GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse --verify HEAD)" \
+    bash "$script" scan "$report" > "$log" 2>&1 || status=$?
+  if ! grep -Fq -- 'Gitleaks reported findings' "$log" ||
+    grep -Fq -- 'synthetic-ignore-diagnostic-' "$log"; then
+    printf 'Expected a safe finding summary in %s\n' "$label" >&2
+    return 1
+  fi
   if [[ "$status" != 1 ]] || ! jq -e --arg commit "$commit" \
     'any(.[]; .RuleID == "github-pat" and .File == "fixture.txt" and .Commit == $commit)' \
     "$report" >/dev/null; then
@@ -96,15 +123,19 @@ assert_detected() {
 
 assert_invalid_config() {
   local base=$1 script=$2 content=$3 message=$4
+  shift 4
+  local event
   printf '%s\n' "$content" > .gitleaks.toml
   git add .gitleaks.toml
   git commit -qm 'Change synthetic policy'
-  if GITHUB_EVENT_NAME=pull_request BASE_SHA="$base" SCAN_HEAD="$(git rev-parse HEAD)" \
-    bash "$script" scan > "$scratch/policy-test.log" 2>&1; then
-    printf '%s\n' 'Expected proposed gitleaks policy to be rejected' >&2
-    return 1
-  fi
-  grep -F -- "$message" "$scratch/policy-test.log"
+  for event in "$@"; do
+    if GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse --verify HEAD)" \
+      bash "$script" scan > "$scratch/policy-test.log" 2>&1; then
+      printf 'Expected gitleaks policy to be rejected on %s\n' "$event" >&2
+      return 1
+    fi
+    grep -Fx -- "$message" "$scratch/policy-test.log" || return 1
+  done
 }
 
 self_test() {
@@ -124,6 +155,13 @@ self_test() {
         fake_token > allowed.txt
       else
         printf 'base\n' > fixture.txt
+      fi
+      if [[ "$label" == merge-resolution ]]; then
+        # This file must not be interpreted as a git log pathspec.
+        printf 'ordinary file\n' > HEAD
+      elif [[ "$label" == rename ]]; then
+        # Gitleaks warns with the raw entry, even with finding redaction enabled.
+        printf 'synthetic-ignore-diagnostic-%s\n' "$(openssl rand -hex 8)" > .gitleaksignore
       fi
       git add --all
       git commit -qm base
@@ -166,11 +204,15 @@ self_test() {
       assert_detected "$label" "$base" "$leaked_at" "$script" || exit 1
       if [[ "$label" == no-diff ]]; then
         git diff --exit-code -- head-ignore.txt
-        assert_invalid_config "$base" "$script" '[' 'Invalid gitleaks TOML policy' || exit 1
+        assert_invalid_config "$base" "$script" '[' 'Invalid gitleaks TOML policy' pull_request || exit 1
         assert_invalid_config "$base" "$script" $'[Extend]\nPath = "head-ignore.txt"' \
-          'Gitleaks policy must not use extend.path' || exit 1
+          'Gitleaks policy must not use extend.path; use built-in rules or inline rules' pull_request || exit 1
         assert_invalid_config "$base" "$script" '"extend.path" = "head-ignore.txt"' \
-          'Gitleaks policy must not use extend.path' || exit 1
+          'Gitleaks policy must not use extend.path; use built-in rules or inline rules' pull_request || exit 1
+        assert_invalid_config "$base" "$script" $'[[allowlists]]\npaths = ["fixture.txt"]' \
+          'Proposed gitleaks policy has no effective rules' pull_request || exit 1
+        assert_invalid_config "$base" "$script" $'[[allowlists]]\npaths = ["another.txt"]' \
+          'Active gitleaks policy has no effective rules' push || exit 1
       fi
     )
   done
