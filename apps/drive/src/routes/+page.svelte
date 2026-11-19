@@ -9,7 +9,7 @@
   <title>My Drive</title>
 </svelte:head>
 
-<main>
+<main id="main">
   {#if data.downloadNotice}
     <div role="alert">
       <p>{data.downloadNotice.name ?? 'The file'} didn’t download. Try again.</p>

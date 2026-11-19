@@ -1,10 +1,16 @@
 import type { Handle } from '@sveltejs/kit/hooks';
+import { driveNext, isDrivePageNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
 
 export interface DriveAuthEnv {
+  DRIVE_SIGN_IN_FIXTURE?: string;
   DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
+}
+
+export function admitsSignInFixture(env: DriveAuthEnv): boolean {
+  return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
 
 export const sessionCookie = '__Host-drive-session';
@@ -55,23 +61,45 @@ function deny(status: number): Response {
   return new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
 }
 
+function pageDenial(request: Request, status: 403 | 503): Response {
+  const title = status === 403 ? 'Request blocked' : 'Drive unavailable';
+  const message = status === 403 ? 'Open Drive directly and try again.' : 'Try again in a moment.';
+  const body = `<!doctype html><html lang="en"><meta charset="utf-8"><title>${title} · Drive</title><main><h1>${title}</h1><p>${message}</p></main></html>`;
+  return new Response(request.method === 'HEAD' ? null : body, {
+    status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store' },
+  });
+}
+
 export function privateRequests(env: DriveAuthEnv): Handle {
   return async ({ event, resolve }) => {
+    const { request } = event;
+    const { pathname, search } = new URL(request.url);
+    const navigation = isDrivePageNavigation(request);
+    const refuse = (status: 403 | 503) => navigation ? pageDenial(request, status) : deny(status);
     const origin = authOrigin(env.DRIVE_ORIGIN);
     if (!origin || !env.DB) {
+      if (navigation) return pageDenial(request, 503);
       return new Response('Service unavailable', { status: 503, headers: { 'cache-control': 'no-store' } });
     }
-    if (!allowsOrigin(event.request, origin.origin)) return deny(403);
+    if (!allowsOrigin(request, origin.origin)) return refuse(403);
+
+    const fixture = admitsSignInFixture(env);
+    const signInPage = event.route?.id === '/sign-in';
+    if ((signInPage && (!fixture || !/^\/sign-in\/?$/.test(pathname))) ||
+        /^\/(?:invite|recover|api\/sign-in)(?:\/|$)/.test(pathname)) return deny(404);
 
     let session;
     try {
-      session = await readSession(event.request, env.DB);
+      session = signInPage ? null : await readSession(request, env.DB);
     } catch {
-      return deny(503);
+      return refuse(503);
     }
-    if (!session) return event.route?.id === downloadRoute && isDownloadNavigation(event.request)
-      ? downloadRedirect(downloadSignIn) : deny(401);
-    event.locals.driveSession = session;
+    if (!session && !signInPage) {
+      if (event.route?.id === downloadRoute && isDownloadNavigation(request)) return downloadRedirect(downloadSignIn);
+      if (fixture && navigation) return downloadRedirect(`/sign-in?${new URLSearchParams({ next: driveNext(pathname + search) })}`);
+      return deny(401);
+    }
+    if (session) event.locals.driveSession = session;
 
     const response = await resolve(event);
     const headers = new Headers(response.headers);

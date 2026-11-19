@@ -214,7 +214,9 @@
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
   td { vertical-align: baseline; }
-  th.size { width: var(--drive-size-column-size); } .preview th.kind { width: var(--drive-size-column-kind); }
+  th.size { width: var(--drive-size-column-size); }
+  .listing:not(.preview) th:nth-child(3) { width: var(--drive-size-column-modified); }
+  th.kind { width: var(--drive-size-column-kind); }
   .preview a { text-decoration: underline; }
   th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }

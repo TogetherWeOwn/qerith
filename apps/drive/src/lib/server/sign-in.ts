@@ -7,6 +7,7 @@ import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie } from './req
 const transactionCookie = '__Host-drive-login';
 const transactionPattern = /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/;
 const assertionLimit = 16 * 1024;
+const assertionReadMs = 2_000;
 const base64url = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value);
 
 function hostCookie(name: string, value: string, maxAge: number, sameSite: 'Strict' | 'Lax'): string {
@@ -18,18 +19,35 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
       !request.body || request.body.locked) return null;
   const reader = request.body.getReader();
   const bytes = new Uint8Array(assertionLimit);
+  const deadline = performance.now() + assertionReadMs;
+  let timedOut = false;
+  const cancel = () => {
+    // Cancellation closes pending reads before the underlying source finishes teardown.
+    void reader.cancel().catch(() => {});
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    cancel();
+  }, assertionReadMs);
   try {
     let length = 0;
+    let reads = 0;
     while (true) {
       const { value, done } = await reader.read();
+      if (timedOut) return null;
+      if (performance.now() >= deadline) {
+        cancel();
+        return null;
+      }
       if (done) break;
       if (value.length > bytes.length - length) {
-        // A cloned stream may not finish cancellation until its other branch reads.
-        void reader.cancel().catch(() => {});
+        cancel();
         return null;
       }
       bytes.set(value, length);
       length += value.length;
+      // Ready reads (including empty chunks) must not starve the Workers timer.
+      if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
     if (data?.type !== 'public-key' || !base64url(data.id) || data.rawId !== data.id ||
@@ -46,6 +64,7 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
   } catch {
     return null;
   } finally {
+    clearTimeout(timer);
     reader.releaseLock();
   }
 }

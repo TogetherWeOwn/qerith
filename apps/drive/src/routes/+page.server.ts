@@ -4,6 +4,8 @@ import { downloadStorage } from '../lib/server/published-download';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import type { PageServerLoad } from './$types';
 
+export const csr = false;
+
 async function readDownloadNotice({ cookies, locals, request, url }: Parameters<PageServerLoad>[0]) {
   if (!locals.driveSession || !isDownloadNavigation(request)) return;
   const nonce = url.searchParams.get('download');

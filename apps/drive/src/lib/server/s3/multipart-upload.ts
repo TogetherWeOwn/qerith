@@ -25,7 +25,8 @@ export function createMultipartUpload(...args: Parameters<typeof createS3Transpo
     }
     if (response.status === 200) {
       const etag = response.headers.get('etag');
-      if (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) throw new Error('S3 part upload outcome uncertain');
+      // The part journal accepts at most 8 KiB of opaque ETag bytes.
+      if (!etag || etag.length > 8192 || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) throw new Error('S3 part upload outcome uncertain');
       const checksums = returnedChecksums(response.headers);
       return { partNumber, etag, size, ...(checksums ? { checksums } : {}) };
     }

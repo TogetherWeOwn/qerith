@@ -23,7 +23,9 @@ export interface UploadPartDependencies {
 const reply = (status: number, body: string | null = null) =>
   new Response(body, { status, headers: { 'cache-control': 'no-store' } });
 
-async function readPart(request: Request, size: number): Promise<Uint8Array | null> {
+export const uploadIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+export async function readUploadBody(request: Request, size: number): Promise<Uint8Array<ArrayBuffer> | null> {
   const bytes = new Uint8Array(size);
   if (!request.body) return size === 0 ? bytes : null;
   const reader = request.body.getReader();
@@ -49,7 +51,7 @@ export async function uploadPart(request: Request, intentId: string, part: strin
   if (request.method !== 'PUT') return reply(405);
   if (request.headers.get('origin') !== new URL(request.url).origin) return reply(403);
   const partNumber = Number(part);
-  if (intentId.length !== 36 || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(intentId) ||
+  if (!uploadIdPattern.test(intentId) ||
       !Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || String(partNumber) !== part) return reply(400);
 
   let access;
@@ -60,7 +62,7 @@ export async function uploadPart(request: Request, intentId: string, part: strin
   if (!/^[0-9]+$/.test(length)) return reply(400);
   const size = Number(length);
   if (size > maxPartBytes) return reply(413);
-  const bytes = await readPart(request, size).catch(() => null);
+  const bytes = await readUploadBody(request, size).catch(() => null);
   if (!bytes) return reply(400);
 
   try {

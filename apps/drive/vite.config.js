@@ -3,9 +3,51 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 // Node executes this build configuration; Node type declarations are not app dependencies.
 // @ts-ignore
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 // @ts-ignore
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
+
+/** @param {import('@sveltejs/kit').Builder} builder */
+function fixtureAssets(builder) {
+  /** @type {import('vite').Manifest} */
+  const manifest = JSON.parse(readFileSync(`${builder.getClientDirectory()}/.vite/manifest.json`, 'utf8'));
+  const generated = relative('.', `${builder.getBuildDirectory('generated')}/build/client-optimized`).replaceAll('\\', '/');
+  const nodes = `${generated}/nodes`;
+  /** @param {string} source */
+  function leaf(source) {
+    const matches = readdirSync(nodes).filter((/** @type {string} */ file) =>
+      /^\d+\.js$/.test(file) && readFileSync(`${nodes}/${file}`, 'utf8').includes(source));
+    if (matches.length !== 1) throw new Error(`Could not locate fixture client entry: ${source}`);
+    return `${nodes}/${matches[0]}`;
+  }
+  const start = Object.keys(manifest).find((key) => key.endsWith('/@sveltejs/kit/src/runtime/client/entry.js'));
+  const runtime = start && manifest[start]?.dynamicImports?.find((key) => key.endsWith('/client-entry.js'));
+  if (!start || !runtime) throw new Error('Could not locate sign-in client entries');
+  const assets = new Set();
+  const visited = new Set();
+  /** @param {string} key @param {boolean} [stylesOnly] */
+  function include(key, stylesOnly = false) {
+    const visit = `${stylesOnly}:${key}`;
+    if (visited.has(visit)) return;
+    const entry = manifest[key];
+    if (!entry) throw new Error(`Missing fixture dependency: ${key}`);
+    visited.add(visit);
+    for (const file of [entry.file, ...entry.css ?? [], ...entry.assets ?? []]) {
+      if (stylesOnly && !/\.(?:css|woff2)$/.test(file)) continue;
+      if (!file.startsWith(`${builder.getAppPath()}/immutable/`) || !/^[\w./-]+\.(?:js|css|woff2)$/.test(file)) {
+        throw new Error(`Unexpected fixture asset: ${file}`);
+      }
+      assets.add(`/${file}`);
+    }
+    entry.imports?.forEach(key => include(key, stylesOnly));
+  }
+  // Sign-in hydrates. The read-only root needs only its styles and fonts.
+  // Neither traversal follows dynamic imports.
+  [start, runtime, `${generated}/app.js`, `${nodes}/0.js`, `${nodes}/1.js`, leaf('/src/routes/sign-in/+page.svelte')]
+    .forEach(key => include(key));
+  include(leaf('/src/routes/+page.svelte'), true);
+  return [...assets];
+}
 
 // The adapter writes its output to Wrangler's main, so never point it at the
 // fail-closed source Worker. Keep the generated-app config temporary instead.
@@ -22,12 +64,16 @@ const buildAdapter = {
     writeFileSync(configPath, JSON.stringify(config));
     try {
       await cloudflare.adapt(builder);
-      // Both the adapter and SvelteKit can answer asset requests before the app hook.
-      // Deny the generated namespace (including env.js) and direct asset fetches.
+      // The adapter can answer before the hook. Only the Drive sign-in fixture
+      // can fetch its exact generated assets; env.js remains closed.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { admitsSignInFixture, allowsOrigin } from '../../src/lib/server/request-auth.ts';
+import { signIn } from '../../src/lib/server/sign-in.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
+const fixtureAssets = new Set(${JSON.stringify(fixtureAssets(builder))});
+const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const unavailable = () => new Response('Service unavailable', {
   status: 503,
   headers: { 'cache-control': 'no-store' }
@@ -35,12 +81,24 @@ const unavailable = () => new Response('Service unavailable', {
 const unavailableAssets = { fetch: unavailable };
 
 export default {
-  fetch(request, env, ctx) {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
     let pathname;
     try {
-      pathname = decodeURIComponent(new URL(request.url).pathname);
+      pathname = decodeURIComponent(url.pathname);
     } catch {
       return unavailable();
+    }
+    if (admitsSignInFixture(env)) {
+      const step = signInStep.exec(url.pathname)?.[1];
+      if (step) return signIn(request, step, env);
+      if (fixtureAssets.has(url.pathname) && env.ASSETS &&
+          (request.method === 'GET' || request.method === 'HEAD') && allowsOrigin(request, env.DRIVE_ORIGIN)) {
+        const asset = await env.ASSETS.fetch(request);
+        const response = new Response(asset.body, asset);
+        response.headers.set('cache-control', 'private, no-store');
+        return response;
+      }
     }
     if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
     return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
