@@ -115,6 +115,16 @@ export default { fetch(request, env, ctx) {
         assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'private, no-store'], route + suffix);
       }
     }
+    const allocate = (headers, suffix = '') => worker.fetch(`${origin}/api/uploads${suffix}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{"size":4}', redirect: 'manual',
+    });
+    for (const suffix of ['', '/']) {
+      for (const [headers, status] of [[{ origin }, 401], [{ cookie }, 403],
+        [{ cookie, origin: 'https://other.example.test' }, 403], [{ cookie, origin }, 503]]) {
+        const result = await allocate(headers, suffix);
+        assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'private, no-store'], 'allocate' + suffix);
+      }
+    }
     const authorized = await access({ headers: { cookie } });
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
@@ -159,6 +169,8 @@ export default { fetch(request, env, ctx) {
     }
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
+    const revokedAllocation = await allocate({ cookie, origin });
+    assert.deepEqual([revokedAllocation.status, revokedAllocation.headers.get('cache-control')], [401, 'private, no-store']);
     const revoked = await get({ cookie, range: 'bytes=1-' });
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);

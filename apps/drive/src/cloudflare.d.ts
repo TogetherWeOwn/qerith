@@ -1,5 +1,6 @@
 declare module 'cloudflare:workers' {
-  export const env: import('./lib/server/upload-routes').UploadRouteEnv & import('./lib/server/published-download').DownloadEnv;
+  export const env: import('./lib/server/upload-routes').UploadRouteEnv & import('./lib/server/published-download').DownloadEnv &
+    import('./lib/server/upload-intent').UploadIntentEnv;
 }
 
 declare class FixedLengthStream {

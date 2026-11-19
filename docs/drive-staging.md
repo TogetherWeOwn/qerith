@@ -54,16 +54,23 @@ and verify that `staging` is restricted to `main`. Place only the authorized
 `QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID` and `QERITH_STAGING_CLOUDFLARE_API_TOKEN`
 secrets for the deploy step in that environment. The token needs Workers Scripts
 edit and D1 edit on the staging account; the workflow fixes the Worker and D1
-config before any Wrangler call. Timeouts and output limits bound the local
-process groups, not an accepted provider request. The shared concurrency group
-does not fence external writers or stale dispatches. Configure the actual HTTPS
-`DRIVE_ORIGIN` and verify deployed SHA readiness before qualification; private
-requests otherwise fail closed.
+config before any Wrangler call. Step-scoped secrets are not build isolation:
+this job trusts the reviewed source and locked build tools in its workspace.
+Timeouts and output limits bound local commands, not hard cancellation, runner
+loss or an accepted provider request. The shared concurrency group does not
+fence external writers or stale dispatches.
+
+Before qualification, confirm that deployment sets or preserves the actual HTTPS
+`DRIVE_ORIGIN` and verify deployed SHA readiness. Wrangler can overwrite a plain
+dashboard variable on deploy; a dashboard value alone is not readiness evidence.
+Private requests fail closed when the origin is missing.
 
 Use Wrangler's native `d1_migrations` ledger. Log the exact SHA, pre-apply Time
 Travel bookmark and before/after pending lists; the final list must be empty.
+The first list can initialize `d1_migrations` before the bookmark is captured.
 Neither the lists nor the source manifest attest applied bytes or schema. Before
-retrying an uncertain apply, restore the bookmark or rebuild from committed migrations.
+retrying an uncertain apply, restore the bookmark or rebuild from committed
+migrations.
 Recreation requires reviewed updates to the Wrangler binding and publisher UUID
 pin before dispatching the new SHA; do not relax validation. Record the previous
 Worker version or its absence; Worker rollback is separate from D1 recovery.
