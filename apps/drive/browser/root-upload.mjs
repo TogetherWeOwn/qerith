@@ -13,27 +13,25 @@ export async function captureRootUpload(page, origin, holdResponse) {
   const link = page.getByRole('link', { name, exact: true });
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
-  // Keep Chromium's async chooser interception enabled before either keypress.
-  const keepChooserIntercepted = () => {};
-  page.on('filechooser', keepChooserIntercepted);
-  const choose = async () => {
-    await upload.evaluate(button => {
-      const activation = [];
-      button.dataset.fixtureActivation = JSON.stringify(activation);
-      const record = source => event => {
-        activation.push([source, event.type, event.isTrusted, navigator.userActivation.isActive]);
-        button.dataset.fixtureActivation = JSON.stringify(activation);
-      };
-      button.addEventListener('keydown', record('button'), { once: true });
-      button.addEventListener('click', record('button'), { once: true });
-      document.querySelector('input[type="file"]').addEventListener('click', record('input'), { once: true });
+  // Keep interception armed; Playwright page evaluations would grant their own user gesture.
+  page.on('filechooser', () => {});
+  const cdp = await page.context().newCDPSession(page);
+  async function inspect(expression) {
+    const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
+      expression, awaitPromise: true, returnByValue: true, userGesture: false,
     });
+    assert.equal(exceptionDetails, undefined, exceptionDetails?.exception?.description);
+    return result.value;
+  }
+  const buttonSelector = 'main > header > button[type="button"]';
+  const button = `document.querySelector(${JSON.stringify(buttonSelector)})`;
+  const choose = async () => {
+    assert.equal(await inspect(`document.hasFocus() && document.activeElement === ${button}`), true);
     let chooser;
     try {
       [chooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5_000 }), page.keyboard.press('Enter')]);
     } catch (cause) {
-      const activation = await upload.getAttribute('data-fixture-activation');
-      throw new Error(`Enter did not open the picker; activation: ${activation}; page errors: ${JSON.stringify(pageErrors)}`, { cause });
+      throw new Error(`Enter did not open the picker; page errors: ${JSON.stringify(pageErrors)}`, { cause });
     }
     assert.equal(chooser.isMultiple(), false);
     await chooser.setFiles(file);
@@ -46,15 +44,23 @@ export async function captureRootUpload(page, origin, holdResponse) {
   });
   await page.bringToFront();
   await page.goto(origin);
-  await page.getByText('Your drive is empty.', { exact: true }).waitFor();
   try {
-    await upload.and(page.locator('[aria-disabled="false"]')).waitFor({ timeout: 10_000 });
+    await inspect(`new Promise((resolve, reject) => {
+      const ready = () => ${button}?.getAttribute('aria-disabled') === 'false';
+      if (ready()) return resolve(true);
+      const observer = new MutationObserver(() => {
+        if (ready()) { observer.disconnect(); clearTimeout(timer); resolve(true); }
+      });
+      const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Picker not ready')); }, 10_000);
+      observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-disabled'] });
+    })`);
   } catch (cause) {
     throw new Error(`Root picker did not hydrate; denied assets: ${JSON.stringify(deniedAssets)}`, { cause });
   }
-  assert.equal(await status.count(), 1);
+  assert.equal(await inspect(`document.querySelector('main').textContent.includes('Your drive is empty.')`), true);
+  assert.equal(await inspect(`document.querySelectorAll('[role="status"]').length`), 1);
+  assert.equal(await inspect('navigator.userActivation.isActive'), false, 'no activation before Tab');
   await page.keyboard.press('Tab');
-  assert.equal(await upload.evaluate(el => document.hasFocus() && document.activeElement === el), true);
 
   const requests = [], responses = [];
   let documents = 0;
@@ -110,7 +116,7 @@ export async function captureRootUpload(page, origin, holdResponse) {
   const downloaded = await readFile(await download.path());
   assert.deepEqual(downloaded, buffer);
 
-  await upload.focus();
+  await inspect(`${button}.focus()`);
   await choose();
   const conflict = `${name}: An item with this name already exists in My Drive.`;
   await page.getByText(conflict, { exact: true }).waitFor();
