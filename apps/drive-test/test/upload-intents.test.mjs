@@ -20,7 +20,7 @@ it('upgrades existing metadata with a private upload intent journal', async () =
 
 it('scans interrupted and uncertain operations in bounded restartable pages', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?)')
     .bind('recovery-active', 'member', 'active', 'recovery-revoked', 'member', 'revoked').run();
   const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
     (id, owner_id, object_key, upload_id, state, version) VALUES (?, ?, ?, ?, ?, ?)`);
@@ -61,7 +61,7 @@ it('scans interrupted and uncertain operations in bounded restartable pages', as
 
 it('scans inactive owners’ provider evidence in bounded pages', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?)')
     .bind('scan-active', 'member', 'active', 'scan-revoked', 'member', 'revoked').run();
   const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
     (id, owner_id, object_key, upload_id, state, completion_acknowledged)
@@ -94,7 +94,7 @@ it('scans inactive owners’ provider evidence in bounded pages', async () => {
 it('claims attempts atomically, retains late evidence and isolates revoked owners', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('claim-alice', 'member', 'active', 'claim-bob', 'member', 'active', 'claim-revoked', 'member', 'revoked').run();
   const intents = new UploadIntents(env.DB);
   expect(await intents.create('claim-revoked')).toBeNull();
@@ -139,7 +139,7 @@ it('claims attempts atomically, retains late evidence and isolates revoked owner
 
 it('scans interrupted claims in bounded pages and quarantines without authorizing retries', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('recovery-owner', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('recovery-owner', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
   const first = await intents.create('recovery-owner');
   const second = await intents.create('recovery-owner');
@@ -170,7 +170,7 @@ it('scans interrupted claims in bounded pages and quarantines without authorizin
 
 it('discovers revoked owners’ provider evidence after late success and restart', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('evidence-owner', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('evidence-owner', 'member', 'active')").run();
   let intents = new UploadIntents(env.DB);
   const allocation = await intents.create('evidence-owner');
   const completion = await intents.create('evidence-owner');
@@ -204,7 +204,7 @@ it('discovers revoked owners’ provider evidence after late success and restart
 
 it('rejects malformed outcomes and treats acknowledgements as terminal', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('terminal-owner', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('terminal-owner', 'member', 'active')").run();
   const intents = new UploadIntents(env.DB);
   const intent = await intents.create('terminal-owner');
   await expect(intents.claim('terminal-owner', intent.id, Number.MAX_SAFE_INTEGER - 2, 'allocation')).rejects.toThrow();
@@ -221,7 +221,7 @@ it('rejects malformed outcomes and treats acknowledgements as terminal', async (
 
 it('atomically claims only the active owner’s matching version and state', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('claim-owner', 'member', 'active', 'claim-other', 'member', 'active', 'atomic-revoked', 'member', 'revoked').run();
   const insert = env.DB.prepare(`INSERT INTO drive_upload_intents
     (id, owner_id, object_key, upload_id, state, version) VALUES (?, ?, ?, ?, ?, ?)`);
@@ -251,7 +251,7 @@ it('atomically claims only the active owner’s matching version and state', asy
 
 it('quarantines only the matching in-flight attempt, including after revocation', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('quarantine-owner', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('quarantine-owner', 'member', 'active')").run();
   await env.DB.prepare(`INSERT INTO drive_upload_intents
     (id, owner_id, object_key, upload_id, state, version) VALUES
     ('quarantine-a', 'quarantine-owner', 'quarantine-key-a', NULL, 'initiating', 1),
@@ -292,7 +292,7 @@ it('validates versions and operation before transition queries', async () => {
 
 it('creates private intents only for active members and isolates owners', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('alice', 'member', 'active', 'bob', 'member', 'active', 'revoked', 'member', 'revoked').run();
   const entriesBefore = (await env.DB.prepare('SELECT * FROM drive_entries ORDER BY id').all()).results;
   const intentsBefore = (await env.DB.prepare('SELECT id FROM drive_upload_intents').all()).results;

@@ -15,7 +15,7 @@ const parts = [{ partNumber: 1, etag: '"part"', size: 7 }];
 
 async function setup(owner) {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES (?, 'member', 'active')").bind(owner).run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   sessionToken = (await new Sessions(env.DB).issue(owner)).token;
   return new UploadIntents(env.DB);
 }
@@ -118,7 +118,7 @@ it('requires the initiating live session before dispatch and for receipt access'
   const complete = async () => { calls++; return { etag: '"complete"', size: 7 }; };
   const missing = new Publication(env.DB, complete, '');
   const original = new Publication(env.DB, complete, sessionToken);
-  await env.DB.prepare("INSERT INTO drive_principals VALUES ('session-other', 'member', 'active')").run();
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('session-other', 'member', 'active')").run();
   const foreign = new Publication(env.DB, complete, (await sessions.issue('session-other')).token);
   expect(await missing.completeAndPublish('session-owner', intent.id, 2, null, 'file', parts)).toBeNull();
   expect(await foreign.completeAndPublish('session-owner', intent.id, 2, null, 'file', parts)).toBeNull();

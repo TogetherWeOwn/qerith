@@ -40,7 +40,7 @@ it('journals only authorized removal of a bound object, never revocation or an u
   const unresolved = await seed('unresolved');
   expect(await producer(async () => { throw new Error('unknown completion'); }).complete(unresolved.token, 'unresolved')).toBe('uncertain');
   expect(await evidence('quarantine', 'unresolved')).not.toBeNull();
-  await sql("INSERT INTO drive_principals VALUES ('delete-grantee', 'member', 'active')").run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES ('delete-grantee', 'member', 'active')").run();
   const recipient = (await sessions.issue('delete-grantee')).token;
   const grants = new ReadGrants(env.DB);
   expect(await grants.create(token, id, 'delete-grantee')).toBe(true);
