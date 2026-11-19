@@ -68,8 +68,11 @@ export async function captureRootListing(page, origin, db) {
     await capture(page, 'forced-colours-focus', width, false);
     await page.emulateMedia({ reducedMotion: null, forcedColors: null });
   }
-  // Without storage, navigating through the link shows the one-shot failure notice.
-  await download.press('Enter');
+  assert.equal(await page.evaluate(async href => (await fetch(href)).status, href), 503);
+  const [redirect] = await Promise.all([page.waitForResponse(origin + href), download.press('Enter')]);
+  assert.equal(redirect.status(), 303);
+  // Start a new navigation: the synthetic Playwright relay only intercepts the first request in a redirect chain.
+  await root((await redirect.headerValue('location')).slice(1));
   const notice = page.getByText('The file didn’t download. Try again.', { exact: true });
   await notice.waitFor();
   await page.reload();

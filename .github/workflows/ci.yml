@@ -525,7 +525,7 @@ jobs:
           npm test --prefix apps/drive/browser
           git diff --exit-code
           git diff --cached --exit-code
-      - name: Exercise generated sign-in and My Drive in Chromium with local D1
+      - name: Exercise generated sign-in in Chromium with local D1
         if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD
         env:
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
