@@ -23,7 +23,9 @@ async function ownerSessionHash(token: string): Promise<string> {
 }
 
 type Display = { displayName: string | null; note: string | null };
-type InvitationRow = { id: string | null; display_name: string | null; note: string | null; created_at: number | null; expires_at: number | null };
+type InvitationRow = { id: string | null; display_name: string | null; note: string | null; created_at: number | null;
+  expires_at: number | null; cancelled_at: number | null; redeemed_at: number | null };
+const pageSize = 100;
 
 function optionalText(value: unknown, max: number): string | null {
   if (value == null) return null;
@@ -51,15 +53,21 @@ export class Invitations {
     return { id, token, expiresAt: row.expires_at };
   }
 
-  async list(ownerToken: string): Promise<{ id: string; displayName: string | null; note: string | null; createdAt: number | null; expiresAt: number }[]> {
-    const { results } = await this.db.prepare(`WITH owner AS (SELECT 1 ${liveOwner})
-      SELECT i.id, i.display_name, i.note, i.created_at, i.expires_at FROM owner
-      LEFT JOIN drive_invitations i ON i.cancelled_at IS NULL AND i.redeemed_at IS NULL AND i.expires_at > ${now}
-      ORDER BY i.created_at DESC, i.id`).bind(await ownerSessionHash(ownerToken)).all<InvitationRow>();
+  async list(ownerToken: string, afterId = '') {
+    // Page the primary key before filtering. Even a long cancelled/redeemed
+    // history costs at most one page of rows per request. An empty page can advance.
+    const { results } = await this.db.prepare(`WITH owner AS (SELECT 1 ${liveOwner}), page AS (
+      SELECT id, display_name, note, created_at, expires_at, cancelled_at, redeemed_at FROM drive_invitations
+      WHERE id > (SELECT ? FROM owner) ORDER BY id LIMIT ?
+    ) SELECT page.* FROM owner LEFT JOIN page ON TRUE ORDER BY id`)
+      .bind(await ownerSessionHash(ownerToken), afterId, pageSize + 1).all<InvitationRow>();
     if (!results.length) throw new InvitationUnavailable();
-    return results.flatMap(row => row.id === null || row.expires_at === null ? [] : [{
-      id: row.id, displayName: row.display_name, note: row.note, createdAt: row.created_at, expiresAt: row.expires_at,
-    }]);
+    // Keep expired invitations visible for removal; the expiry still forbids enrollment.
+    const invitations = results.slice(0, pageSize).flatMap(row =>
+      row.id === null || row.expires_at === null || row.cancelled_at !== null || row.redeemed_at !== null ? [] : [{
+        id: row.id, displayName: row.display_name, note: row.note, createdAt: row.created_at, expiresAt: row.expires_at,
+      }]);
+    return { invitations, nextCursor: results.length > pageSize ? results[pageSize - 1].id : null };
   }
 
   async present(token: string): Promise<Display> {

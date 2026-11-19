@@ -1,16 +1,14 @@
 import { env } from 'cloudflare:workers';
 import { InvalidInvitationMetadata, InvitationUnavailable } from './identity/invitations';
-import { admitsSignInFixture, stagingOrigin } from './request-auth';
 import { readUploadBody } from './upload-part';
 
 type Database = NonNullable<typeof env.DB>;
 export const ownerReply = (status: number) => new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
-export const ownerResourceId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+export const ownerResourceId = /^[A-Za-z0-9_-]{1,512}$/;
 
 export async function ownerAction({ request, locals }: { request: Request; locals: App.Locals },
   action: (db: Database, token: string) => Promise<Response>): Promise<Response> {
   // The private request hook has already checked Origin and looked up the live session.
-  if (env.DRIVE_ORIGIN === stagingOrigin || admitsSignInFixture(env)) return ownerReply(404);
   const site = request.headers.get('sec-fetch-site');
   if (site !== null && site !== 'same-origin' && site !== 'none') return ownerReply(403);
   const session = locals.driveSession;

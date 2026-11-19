@@ -46,7 +46,7 @@ it('issues hashed tokens only for a live owner and persists cancellation', async
 
 it('limits presentation to valid tokens and listing to active owners', async () => {
   const service = new Invitations(env.DB);
-  expect(await service.list(owner)).toEqual([]);
+  expect(await service.list(owner)).toEqual({ invitations: [], nextCursor: null });
   for (const actor of [member, 'A'.repeat(43)]) await expect(service.list(actor)).rejects.toThrow('Invitation unavailable');
   for (const metadata of [{ displayName: 'x'.repeat(65) }, { note: 'x'.repeat(141) }, { note: '\0' }]) {
     await expect(service.issue(owner, metadata)).rejects.toThrow();
@@ -55,7 +55,7 @@ it('limits presentation to valid tokens and listing to active owners', async () 
   const empty = await service.issue(owner);
   expect(await service.present(invite.token)).toEqual({ displayName: 'Pell', note: '😀'.repeat(140) });
   expect(await service.present(empty.token)).toEqual({ displayName: null, note: null });
-  const listed = await service.list(owner);
+  const { invitations: listed } = await service.list(owner);
   expect(listed).toHaveLength(2);
   expect(listed.find(row => row.id === invite.id)).toMatchObject({ displayName: 'Pell', note: '😀'.repeat(140), expiresAt: invite.expiresAt });
   expect(listed.find(row => row.id === invite.id).createdAt).toBeGreaterThan(0);
@@ -67,11 +67,11 @@ it('limits presentation to valid tokens and listing to active owners', async () 
   await expect(service.present('A'.repeat(43))).rejects.toThrow('Invitation unavailable');
   await env.DB.prepare('UPDATE drive_invitations SET expires_at = 1 WHERE id = ?').bind(empty.id).run();
   await expect(service.present(empty.token)).rejects.toThrow('Invitation unavailable');
-  expect(await service.list(owner)).toEqual([]);
+  expect((await service.list(owner)).invitations.map(row => row.id)).toEqual([empty.id]);
   const redeemed = await service.issue(owner);
   await env.DB.prepare('UPDATE drive_invitations SET redeemed_at = 1 WHERE id = ?').bind(redeemed.id).run();
   await expect(service.present(redeemed.token)).rejects.toThrow('Invitation unavailable');
-  expect(await service.list(owner)).toEqual([]);
+  expect((await service.list(owner)).invitations.map(row => row.id)).toEqual([empty.id]);
   await env.DB.exec("UPDATE drive_principals SET status = 'revoked' WHERE id = 'owner'");
   await expect(service.list(owner)).rejects.toThrow('Invitation unavailable');
 });
