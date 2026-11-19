@@ -143,6 +143,9 @@ export default { fetch(request, env, ctx) {
       const response = await worker.fetch(new URL(path, origin), { headers: { cookie } });
       assert.equal(response.status, preview ? 200 : 503);
     }
+    const listing = await worker.fetch(`${origin}/api/root-listing`, { headers: { cookie } });
+    assert.equal(listing.status, preview ? 200 : 404);
+    assert.equal(listing.headers.get('cache-control'), 'private, no-store');
     const fileId = '00000000-0000-4000-8000-000000000002';
     if (preview) {
       assert.match(html, /Your drive is empty\./);
@@ -154,7 +157,7 @@ export default { fetch(request, env, ctx) {
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
     const unadmitted = await (await access({ headers: { cookie } })).text();
     assert.match(unadmitted, /Service unavailable\./);
-    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder/);
+    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder|type="file"|<script\b/);
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
     const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });

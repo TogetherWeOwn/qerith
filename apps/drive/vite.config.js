@@ -25,27 +25,23 @@ function fixtureAssets(builder) {
   if (!start || !runtime) throw new Error('Could not locate sign-in client entries');
   const assets = new Set();
   const visited = new Set();
-  /** @param {string} key @param {boolean} [stylesOnly] */
-  function include(key, stylesOnly = false) {
-    const visit = `${stylesOnly}:${key}`;
-    if (visited.has(visit)) return;
+  /** @param {string} key */
+  function include(key) {
+    if (visited.has(key)) return;
     const entry = manifest[key];
     if (!entry) throw new Error(`Missing fixture dependency: ${key}`);
-    visited.add(visit);
+    visited.add(key);
     for (const file of [entry.file, ...entry.css ?? [], ...entry.assets ?? []]) {
-      if (stylesOnly && !/\.(?:css|woff2)$/.test(file)) continue;
       if (!file.startsWith(`${builder.getAppPath()}/immutable/`) || !/^[\w./-]+\.(?:js|css|woff2)$/.test(file)) {
         throw new Error(`Unexpected fixture asset: ${file}`);
       }
       assets.add(`/${file}`);
     }
-    entry.imports?.forEach(key => include(key, stylesOnly));
+    entry.imports?.forEach(include);
   }
-  // Sign-in hydrates. The read-only root needs only its styles and fonts.
-  // Neither traversal follows dynamic imports.
-  [start, runtime, `${generated}/app.js`, `${nodes}/0.js`, `${nodes}/1.js`, leaf('/src/routes/sign-in/+page.svelte')]
-    .forEach(key => include(key));
-  include(leaf('/src/routes/+page.svelte'), true);
+  // Admit the two fixture pages and their static dependencies, not other lazy routes.
+  [start, runtime, `${generated}/app.js`, `${nodes}/0.js`, `${nodes}/1.js`,
+    leaf('/src/routes/sign-in/+page.svelte'), leaf('/src/routes/+page.svelte')].forEach(key => include(key));
   return [...assets];
 }
 
