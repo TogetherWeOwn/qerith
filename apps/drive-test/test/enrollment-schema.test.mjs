@@ -19,12 +19,12 @@ it('upgrades seeded identity data, preserves the ledger, and reapplies safely', 
     .toEqual({ role: 'member', status: 'active' });
   expect(await env.DB.prepare("SELECT redeemed_at FROM drive_invitations WHERE id = 'invite'").first())
     .toEqual({ redeemed_at: null });
-  await env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES (?, ?, ?, ?, ?)')
     .bind('credential', 'member', new Uint8Array([1, 2]), 0, '[]').run();
   expect(await env.DB.prepare("SELECT principal_id, counter FROM drive_credentials WHERE id = 'credential'").first())
     .toEqual({ principal_id: 'member', counter: 0 });
-  await expect(env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
+  await expect(env.DB.prepare('INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES (?, ?, ?, ?, ?)')
     .bind('credential', 'member', new Uint8Array([3]), 0, '[]').run()).rejects.toThrow();
-  await expect(env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
+  await expect(env.DB.prepare('INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES (?, ?, ?, ?, ?)')
     .bind('missing', 'absent', new Uint8Array([3]), 0, '[]').run()).rejects.toThrow();
 });
