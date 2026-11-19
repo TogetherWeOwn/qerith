@@ -36,7 +36,36 @@ it('rejects missing, sibling and wrong destination origins before touching D1', 
     const request = new Request(url, { method: 'POST', headers: source ? { origin: source } : {} });
     for (const step of ['challenge', 'restart', 'verify']) expect((await signIn(request, step, authEnv())).status).toBe(403);
   }
+  const wrongOrigin = new Request(origin, { headers: { origin: 'https://sub.example.test' } });
+  expect((await signIn(wrongOrigin, 'verify', authEnv())).status).toBe(403);
+  const wrongMethod = await signIn(new Request(origin, { headers: { origin } }), 'verify', authEnv());
+  expect(wrongMethod.status).toBe(405);
+  expect(wrongMethod.headers.get('allow')).toBe('POST');
 });
+
+it('denies a verify body that never reaches EOF without waiting for teardown or spending the challenge', async () => {
+  const { cookie, body } = await begin();
+  const teardown = Promise.withResolvers();
+  let cancelled = false;
+  const incomplete = new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode(body)); },
+    cancel() {
+      cancelled = true;
+      return teardown.promise;
+    },
+  });
+  try {
+    const denied = await post('verify', { cookie }, incomplete);
+    expect(cancelled).toBe(true);
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ code: 'denied' });
+    expect(denied.headers.getSetCookie()).toEqual([]);
+    expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_sessions').first()).n).toBe(0);
+    expect((await post('verify', { cookie }, body)).status).toBe(204);
+  } finally {
+    teardown.resolve();
+  }
+}, 10_000);
 
 it('requires the browser transaction cookie and issues a hardened session only once', async () => {
   const { cookie, body } = await begin();
