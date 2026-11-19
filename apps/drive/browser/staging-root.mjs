@@ -127,7 +127,12 @@ try {
   await DB.prepare(`WITH RECURSIVE pages(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM pages WHERE n < 99)
     INSERT INTO drive_entries (id, owner_id, name, kind)
     SELECT printf('00000000-0000-4000-8000-%012d', n), 'owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
-  await page.goto(origin);
+  const failedDownload = await row.getAttribute('href');
+  const notice = crypto.randomUUID();
+  await context.addCookies([{ name: `__Host-drive-download-failed-${notice}`, value: failedDownload.split('/').at(-1), url: origin, secure: true }]);
+  await page.goto(`${origin}/?download=${notice}`);
+  const noticeRetry = page.getByRole('alert').getByRole('link', { name: 'Try again' });
+  assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   await upload.focus();
   const [nextChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -145,6 +150,17 @@ try {
   await row.waitFor({ state: 'detached' });
   await page.getByRole('link', { name: 'A.bin', exact: true }).waitFor();
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+  assert.equal(await noticeRetry.getAttribute('href'), failedDownload, 'refresh preserves the document notice');
+
+  // Damage only the disposable listing index; upload and live-owner admission still work.
+  await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
+  await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+  const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+  await failedRefreshChooser.setFiles({ ...file, name: 'B.bin' });
+  const listingRetry = page.getByRole('link', { name: 'Try again', exact: true });
+  await page.getByText("This folder didn't load.", { exact: false }).waitFor();
+  await noticeRetry.waitFor({ state: 'detached' });
+  assert.equal(await listingRetry.evaluate(el => document.activeElement === el), true);
 
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
@@ -173,6 +189,7 @@ try {
 
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
+    noticePreservedOnRefresh: true, focusRestoredOnListingFailure: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,

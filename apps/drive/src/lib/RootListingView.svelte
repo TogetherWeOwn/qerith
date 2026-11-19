@@ -16,13 +16,15 @@
   let result = $derived(refreshed ?? initial);
   let busy = $state(false);
   let header: HTMLElement;
+  let recovery = $state<HTMLAnchorElement>();
   let refreshVersion = 0, appliedVersion = 0;
 
   $effect.pre(() => {
-    if (!staging || initial.status !== 'ok') return;
+    if (!staging) return;
     // The user may have moved focus while the data request was in flight.
     const focused = document.activeElement;
-    void tick().then(() => restoreFocus(focused));
+    const next = initial.status;
+    void tick().then(() => restoreFocus(focused, next));
   });
 
   async function refresh() {
@@ -44,8 +46,10 @@
     restoreFocus(focused);
   }
 
-  function restoreFocus(focused: Element | null) {
-    if (focused && !focused.isConnected && document.activeElement === document.body) header?.querySelector('button')?.focus();
+  function restoreFocus(focused: Element | null, next: RootListingResult['status'] = 'ok') {
+    if (focused && !focused.isConnected && document.activeElement === document.body) {
+      (next === 'ok' ? header?.querySelector('button') : recovery)?.focus();
+    }
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
@@ -64,10 +68,10 @@
 <p class="status" role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
-  <a data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
+  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
-  <a data-sveltekit-reload href="/">Back to first page</a>
+  <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {:else}
   {#if items.length}
     <FileList folder="My Drive" preview announceChanges={false} {items} />

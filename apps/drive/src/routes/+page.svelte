@@ -1,8 +1,11 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import RootListingView from '../lib/RootListingView.svelte';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
+  // The document consumes the notice; listing invalidation must not dismiss it.
+  const downloadNotice = untrack(() => data.downloadNotice);
 </script>
 
 <svelte:head>
@@ -10,11 +13,11 @@
 </svelte:head>
 
 <main id="main">
-  {#if data.downloadNotice}
+  {#if downloadNotice && (!data.staging || data.listing?.status === 'ok')}
     <div role="alert">
-      <p>{data.downloadNotice.name ?? 'The file'} didn’t download. Try again.</p>
-      {#if data.downloadNotice.id}
-        <a data-sveltekit-reload href={`/api/download/${data.downloadNotice.id}`}>Try again</a>
+      <p>{downloadNotice.name ?? 'The file'} didn’t download. Try again.</p>
+      {#if downloadNotice.id}
+        <a data-sveltekit-reload href={`/api/download/${downloadNotice.id}`}>Try again</a>
       {/if}
     </div>
   {/if}
