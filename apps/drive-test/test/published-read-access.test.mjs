@@ -6,6 +6,7 @@ import { createPublishedReadAccess } from '../../drive/src/lib/server/metadata/r
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
 import { publishedDownload } from '../../drive/src/lib/server/published-download.ts';
+import { stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { config, epoch, parts, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
@@ -98,7 +99,8 @@ it('preserves opaque evidence and fails closed on malformed evidence or a primar
 
 it('composes with immutable full and range GETs without storage calls for denied or unbound reads', async () => {
   const { id, token } = await seedBoundPublication('read-stream');
-  const storage = { DB: env.DB, DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket,
+  await sql("UPDATE drive_principals SET role = 'owner' WHERE id = 'owner-read-stream'").run();
+  const storage = { DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket,
     DRIVE_S3_REGION: config.region, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId,
     DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey, DRIVE_S3_STORAGE_EPOCH: epoch };
   const fetch = vi.fn(async (request) => request.headers.has('range')
@@ -106,7 +108,7 @@ it('composes with immutable full and range GETs without storage calls for denied
     : new Response('abcdefg', { headers: { etag, 'content-length': '7' } }));
   const onReadError = vi.fn();
   const get = (headers = {}, auth = token, bindings = storage, signal) => publishedDownload(
-    new Request('https://drive.example/file', { headers, signal }), id, auth, bindings, onReadError, fetch);
+    new Request(`${stagingOrigin}/api/download/${id}`, { headers, signal }), id, auth, bindings, onReadError, fetch);
   for (const response of [await get({}, 'a'.repeat(43)), await get({}, token,
     { ...storage, DRIVE_S3_STORAGE_EPOCH: 'different-epoch' })]) {
     expect(response.status).toBe(404);
@@ -190,9 +192,30 @@ it('composes with immutable full and range GETs without storage calls for denied
     await expect(client.read(), stop).rejects.toThrow();
     if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
   }
+  const setRole = (role) => sql("UPDATE drive_principals SET role = ? WHERE id = 'owner-read-stream'", role).run();
+  let firstLookup = true;
+  const DB = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
+    const row = await env.DB.withSession(mode).prepare(query).bind(...args).first();
+    if (firstLookup) { firstLookup = false; await setRole('member'); }
+    return row;
+  } }) }) }) };
+  expect((await get({}, token, { ...storage, DB })).status).toBe(404);
+  expect(fetch).toHaveBeenCalledTimes(16); // No provider dispatch after the initial lookup.
+  for (const conditional of [false, true]) {
+    await setRole('owner');
+    fetch.mockImplementationOnce(async () => {
+      await setRole('member');
+      return new Response(conditional ? null : 'abcdefg', { headers: { etag, 'content-length': '7' } });
+    });
+    const denied = await get(conditional ? { 'if-none-match': etag } : {});
+    expect([denied.status, denied.headers.get('etag'), await denied.text()]).toEqual([404, null, '']);
+  }
+  expect(await sessions.lookup(token)).toMatchObject({ role: 'member' });
+  expect((await get()).status).toBe(404);
+  await sql("UPDATE drive_principals SET role = 'owner' WHERE id = 'owner-read-stream'").run();
   await sessions.revoke(token);
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
   expect(revoked.status).toBe(404);
   expect(revoked.headers.get('content-range')).toBeNull();
-  expect(fetch).toHaveBeenCalledTimes(16);
+  expect(fetch).toHaveBeenCalledTimes(18);
 });

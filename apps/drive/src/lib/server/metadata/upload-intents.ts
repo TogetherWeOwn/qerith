@@ -1,3 +1,5 @@
+import { requireActiveOwner } from './private';
+
 // Server-only reconciliation records. Authenticate the principal before calling;
 // neither an intent nor a provider acknowledgement publishes a file.
 interface Statement {
@@ -40,13 +42,14 @@ export class UploadIntents<DB extends Database = Database> {
 
   // Bind the namespace before claiming on the same transaction that checks live authority.
   async claimNewAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
-    size: number, endpoint: string, bucket: string, epoch: string): Promise<UploadIntent | null> {
+    size: number, endpoint: string, bucket: string, epoch: string, ownerOnly = false): Promise<UploadIntent | null> {
     if (!Number.isSafeInteger(size) || size < 0) throw new TypeError('Invalid declared upload size');
     const id = crypto.randomUUID(), key = crypto.randomUUID();
     const [, , claim] = await this.db.batch<UploadIntent>([
       this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
-        SELECT ?, ?, ?, 'created', ? WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions
-          WHERE token_hash = ? AND principal_id = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER))`)
+        SELECT ?, ?, ?, 'created', ? WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions s
+          WHERE token_hash = ? AND principal_id = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+            ${requireActiveOwner(ownerOnly, 's.principal_id')})`)
         .bind(id, principalId, key, size, principalId, sessionHash, principalId),
       this.db.prepare(`INSERT INTO drive_upload_storage_bindings (intent_id, endpoint, bucket, storage_epoch)
         SELECT id, ?, ?, ? FROM drive_upload_intents WHERE id = ? AND object_key = ?`)
