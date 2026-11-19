@@ -68,8 +68,12 @@ export async function captureRootListing(page, origin, db) {
     await capture(page, 'forced-colours-focus', width, false);
     await page.emulateMedia({ reducedMotion: null, forcedColors: null });
   }
-  // No storage is configured in the read-only fixture; the link reaches the reviewed route and fails closed.
-  assert.equal(await page.evaluate(async href => (await fetch(href)).status, href), 503);
+  // Without storage, navigating through the link shows the one-shot failure notice.
+  await download.press('Enter');
+  const notice = page.getByText('The file didn’t download. Try again.', { exact: true });
+  await notice.waitFor();
+  await page.reload();
+  assert.equal(await notice.count(), 0);
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
     await root('?page=invalid');
