@@ -76,7 +76,7 @@ export default { fetch(request, env, ctx) {
     }
     const token = randomBytes(32).toString('base64url');
     const cookie = `__Host-drive-session=${token}`;
-    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'member', 'active')").run();
+    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'member', 'active'), ('other', 'member', 'active')").run();
     await DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'fixture', ?)")
       .bind(createHash('sha256').update(token).digest('hex'), Date.now() + 60_000).run();
 
@@ -99,7 +99,8 @@ export default { fetch(request, env, ctx) {
     const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
     const folder = DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, ?, 'folder')");
-    await DB.batch(Array.from({ length: 100 }, (_, i) => folder.bind(`folder-${i}`, 'fixture', `Folder ${100 + i}`)));
+    const folderId = (i) => `00000000-0000-4000-8000-${String(100 + i).padStart(12, '0')}`;
+    await DB.batch(Array.from({ length: 100 }, (_, i) => folder.bind(folderId(i), 'fixture', `Folder ${100 + i}`)));
     await folder.bind('other-folder', 'other', 'Other principal folder').run();
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES (?, 'fixture', 'Fixture.pdf', 'file', 'internal-fixture-key', 1)").bind(fileId).run();
     const first = await (await access({ headers: { cookie } })).text();
@@ -107,20 +108,36 @@ export default { fetch(request, env, ctx) {
     assert.match(first, /Folder 199/);
     assert.doesNotMatch(first, /Fixture\.pdf|Other principal folder|Your drive is empty/);
     const next = first.match(/href="(\/\?page=[A-Za-z0-9_-]+)"/);
-    assert.ok(next, 'the first root page has an opaque continuation link');
+    assert.equal(next?.[1], `/?page=${folderId(99)}`, 'the continuation contains only the boundary ID');
     const following = await (await get({ cookie }, `${origin}${next[1]}`)).text();
     assert.match(following, /Fixture\.pdf/);
     assert.ok(following.includes(`href="/api/download/${fileId}"`));
     assert.doesNotMatch(following, /Folder 199|Other principal folder|internal-fixture-key|Next page/);
     assert.ok(!following.includes(token));
-    const failed = await (await get({ cookie }, `${origin}/?page=invalid`)).text();
-    assert.match(failed, /This folder didn't load/);
-    assert.doesNotMatch(failed, /Your drive is empty|Fixture\.pdf|Folder 100/);
+    const invalid = await (await get({ cookie }, `${origin}/?page=invalid`)).text();
+    assert.match(invalid, /This page is no longer available\./);
+    assert.match(invalid, /href="\/">Back to first page/);
+    assert.doesNotMatch(invalid, /Your drive is empty|Fixture\.pdf|Folder 100/);
     await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(fileId).run();
     const exhausted = await (await get({ cookie }, `${origin}${next[1]}`)).text();
     assert.match(exhausted, /No more items\./);
     assert.doesNotMatch(exhausted, /Your drive is empty/);
-    console.log('Generated Worker: root empty, bounded pages, download link, hidden metadata, load failure and exhausted continuation passed');
+
+    // Break only the listing query; the session and download guard are still live.
+    const index = await DB.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first();
+    await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
+    try {
+      const failed = await (await get({ cookie }, `${origin}${next[1]}`)).text();
+      assert.match(failed, /This folder didn't load/);
+      assert.ok(failed.includes(`href="${next[1]}">Try again</a>`), 'retry stays on the failed page');
+    } finally {
+      await DB.prepare(index.sql).run();
+    }
+    await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(folderId(99)).run();
+    const stale = await (await get({ cookie }, `${origin}${next[1]}`)).text();
+    assert.match(stale, /This page is no longer available\./);
+    assert.doesNotMatch(stale, /No more items|Your drive is empty/);
+    console.log('Generated Worker: bounded private root pages, stale page recovery and same-page retry passed');
     const signedOut = await get(navigation, `${file}/?next=https://other.invalid`);
     assert.equal(signedOut.status, 303);
     assert.equal(signedOut.headers.get('location'), '/sign-in?next=%2F');

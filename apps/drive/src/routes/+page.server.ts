@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { loadRootListing } from '../lib/server/root-listing';
+import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import type { PageServerLoad } from './$types';
 
 async function readDownloadNotice({ cookies, locals, request, url }: Parameters<PageServerLoad>[0]) {
@@ -19,5 +19,5 @@ async function readDownloadNotice({ cookies, locals, request, url }: Parameters<
 export const load: PageServerLoad = async (event) => {
   const pages = event.url.searchParams.getAll('page');
   const listing = await loadRootListing(event.request, env, pages);
-  return { listing, paged: pages.length > 0, downloadNotice: await readDownloadNotice(event) };
+  return { listing, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };
 };

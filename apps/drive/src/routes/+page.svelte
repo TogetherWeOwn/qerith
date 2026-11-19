@@ -18,7 +18,7 @@
       {/if}
     </div>
   {/if}
-  <RootListingView result={data.listing} paged={data.paged} />
+  <RootListingView result={data.listing} page={data.page} />
 </main>
 
 <style>

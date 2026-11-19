@@ -2,11 +2,10 @@
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import { entryId } from './download-id';
-  import type { BrowseResult } from './server/browse';
-  import type { RootListing } from './server/root-listing';
+  import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result, paged }: { result: BrowseResult<RootListing>; paged: boolean } = $props();
+  let { result, page }: { result: RootListingResult; page: string | null } = $props();
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
@@ -18,18 +17,21 @@
 <h1>My Drive</h1>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
-  <a data-sveltekit-reload href="/">Try again</a>
+  <a data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
+{:else if result.status === 'invalid-page'}
+  <p class="error">This page is no longer available.</p>
+  <a href="/">Back to first page</a>
 {:else}
   {#if items.length}
     <FileList folder="My Drive" showMetadata={false} {items} />
-  {:else if paged}
+  {:else if page}
     <p>No more items.</p>
   {:else}
     <EmptyFolder root={true} />
   {/if}
-  {#if paged || result.folder.nextPage}
+  {#if page || result.folder.nextPage}
     <nav aria-label="My Drive pages">
-      {#if paged}<a href="/">Back to first page</a>{/if}
+      {#if page}<a href="/">Back to first page</a>{/if}
       {#if result.folder.nextPage}
         <a href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>
       {/if}
