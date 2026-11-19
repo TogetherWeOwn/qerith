@@ -90,7 +90,8 @@ test('does not read without trusted evidence or downgrade a conditional range', 
 });
 
 test('checks strong If-Match before weak If-None-Match and evaluates both before Range', async () => {
-  const deps = setup(() => new Response());
+  let reply = () => new Response(null, { headers: { etag: generation.etag, 'content-length': '4' } });
+  const deps = setup(() => reply());
   const headers = { 'if-none-match': `"tag,with,commas", W/${generation.etag}`, range: 'bytes=20-' };
   const fresh = await downloadFile(request(headers), fileId, deps);
   assert.equal(fresh.status, 304);
@@ -104,7 +105,14 @@ test('checks strong If-Match before weak If-None-Match and evaluates both before
     assert.equal(response.status, 404);
     assert.equal(response.headers.get('etag'), null);
   }
-  assert.equal(deps.reads.length, 0);
+  assert.deepEqual(deps.reads.map((read) => [read.method, read.headers.get('if-match'), read.headers.get('range')]),
+    [['HEAD', generation.etag, null]]);
+  for (const [status, length] of [[404, '4'], [412, '4'], [200, '5']] as const) {
+    reply = () => new Response(null, { status, headers: { etag: generation.etag, 'content-length': length } });
+    const missing = await downloadFile(request(headers), fileId, deps);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('etag'), null);
+  }
 });
 
 test('suppresses upstream failures and contradictory evidence without retrying', async () => {

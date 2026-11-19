@@ -5,7 +5,7 @@ export interface DownloadDependencies<Access> {
   authorize(request: Request, fileId: string): Promise<Access | null>;
   // Resolve this authorized file's committed receipt, never client input or a bare S3 HEAD.
   resolveGeneration(access: Access, fileId: string): Promise<PublishedReadReference | null>;
-  readerFor(storageConfigId: string): Pick<ReturnType<typeof createImmutableS3Reader>, 'get'> | null;
+  readerFor(storageConfigId: string): ReturnType<typeof createImmutableS3Reader> | null;
   onReadError?(): void;
   fixedLength?(body: ReadableStream<Uint8Array>, length: number): Promise<BodyInit>;
 }
@@ -48,7 +48,12 @@ export async function downloadFile<Access>(request: Request, fileId: string, dep
     const ifMatch = request.headers.get('if-match');
     if (ifMatch !== null && !matchesETag(ifMatch, etag)) return empty(412);
     const ifNoneMatch = request.headers.get('if-none-match');
-    if (ifNoneMatch !== null && matchesETag(ifNoneMatch, etag, true)) return empty(304, { etag });
+    if (ifNoneMatch !== null && matchesETag(ifNoneMatch, etag, true)) {
+      // Corroborate existence only after authorization and receipt validation.
+      const object = await reader.head({ key, etag }, { signal: request.signal });
+      return object.status === 200 && /^\d+$/.test(object.contentLength ?? '') && Number(object.contentLength) === sizeBytes
+        ? empty(304, { etag }) : empty(404);
+    }
     const disposition = attachment(generation.name);
     const requested = request.headers.get('range');
     const ifRange = request.headers.get('if-range');
@@ -73,13 +78,7 @@ export async function downloadFile<Access>(request: Request, fileId: string, dep
       contentRange = `bytes ${start}-${end}/${sizeBytes}`;
     }
 
-    let result;
-    try {
-      result = await reader.get({ key, etag }, { range, maxResponseBytes: length, signal: request.signal });
-    } catch {
-      dependencies.onReadError?.();
-      return empty(404);
-    }
+    const result = await reader.get({ key, etag }, { range, maxResponseBytes: length, signal: request.signal });
     if (result.status !== 200 && result.status !== 206) return empty(404);
     // The immutable reader checks the returned interval; also require the published total.
     const wrongRange = range === undefined ? result.contentRange !== null
@@ -92,9 +91,10 @@ export async function downloadFile<Access>(request: Request, fileId: string, dep
     let body: BodyInit;
     try {
       body = await dependencies.fixedLength?.(result.body, length) ?? result.body;
-    } catch (error) {
+    } catch {
       void result.body.cancel().catch(() => {});
-      throw error;
+      dependencies.onReadError?.(); // Metadata matched the authorized receipt before the body failed.
+      return empty(404);
     }
     return new Response(body, { status: result.status, headers: {
       'accept-ranges': 'bytes',

@@ -13,8 +13,8 @@ export const GET: RequestHandler = async ({ request, params, locals, cookies }) 
     ? await publishedDownload(request, params.fileId, session.token, env, () => { retryable = true; })
     : new Response(null, { status: 404 });
   if (response.status < 400 || !isDownloadNavigation(request)) return response;
-  // Denied, revoked and missing files share a generic notice. For an authorized
-  // transport failure, the root rechecks access before displaying the name.
-  cookies.set(downloadNoticeCookie, retryable ? params.fileId : 'unavailable', { path: '/', secure: true, maxAge: 60 });
-  return downloadRedirect(downloadFolder);
+  // Bind the notice to this navigation so concurrent tabs cannot show each other's Retry link.
+  const nonce = crypto.randomUUID();
+  cookies.set(downloadNoticeCookie, `${nonce}:${retryable ? params.fileId : 'unavailable'}`, { path: '/', secure: true, maxAge: 60 });
+  return downloadRedirect(`${downloadFolder}?download=${nonce}`);
 };

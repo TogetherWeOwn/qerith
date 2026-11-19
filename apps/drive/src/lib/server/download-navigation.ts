@@ -12,7 +12,8 @@ export function isDownloadNavigation(request: Request) {
   const site = headers.get('sec-fetch-site');
   return request.method === 'GET' && (site === 'same-origin' || site === 'none') &&
     headers.get('sec-fetch-mode') === 'navigate' && headers.get('sec-fetch-dest') === 'document' &&
-    !['range', 'if-range', 'if-match'].some((name) => headers.has(name));
+    !['range', 'if-range', 'if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since']
+      .some((name) => headers.has(name));
 }
 
 export function downloadRedirect(location: string) {

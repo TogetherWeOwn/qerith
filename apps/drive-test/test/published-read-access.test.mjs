@@ -134,9 +134,21 @@ it('composes with immutable full and range GETs without storage calls for denied
     const denied = await get({ range: 'bytes=1-2' });
     expect(denied.status).toBe(404);
     expect(await denied.text()).toBe('');
-    if (upstream.status === 404 || upstream.status === 412) expect(onReadError).not.toHaveBeenCalled();
   }
+  expect(onReadError).not.toHaveBeenCalled();
+  fetch.mockResolvedValueOnce(new Response(null, { headers: { etag, 'content-length': '7' } }));
+  const empty = await get();
+  expect(empty.status).toBe(404);
+  expect(empty.headers.get('content-disposition')).toBeNull();
   expect(onReadError).toHaveBeenCalledTimes(1);
+  const singleHeaders = { etag, 'content-range': 'bytes 1-1/7', 'content-length': '1' };
+  fetch.mockResolvedValueOnce(new Response('b', { status: 206, headers: singleHeaders }));
+  expect(await (await get({ range: 'bytes=1-1' })).text()).toBe('b');
+  fetch.mockResolvedValueOnce(new Response(new ReadableStream({ start(output) {
+    output.enqueue(new Uint8Array([98]));
+  }, pull(output) { output.error(new Error('EOF unavailable')); } }, { highWaterMark: 0 }),
+  { status: 206, headers: singleHeaders }));
+  expect((await get({ range: 'bytes=1-1' })).status).toBe(404);
   for (const range of [null, 'bytes=1-2']) {
     fetch.mockResolvedValueOnce(new Response('b', { status: range ? 206 : 200, headers: range
       ? { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' } : { etag, 'content-length': '7' } }));
@@ -145,18 +157,19 @@ it('composes with immutable full and range GETs without storage calls for denied
     await expect(truncated.arrayBuffer()).rejects.toThrow();
   }
   for (const stop of ['provider', 'client']) {
-    const cancelled = Promise.withResolvers();
+    const cancelled = vi.fn();
     let source;
     const pendingEof = new ReadableStream({ start(output) {
       source = output;
       output.enqueue(new TextEncoder().encode('abcdefg'));
-    }, cancel: cancelled.resolve }, { highWaterMark: 0 });
+    }, cancel: cancelled }, { highWaterMark: 0 });
     fetch.mockResolvedValueOnce(new Response(pendingEof, { headers: { etag, 'content-length': '7' } }));
     const client = (await get()).body.getReader();
     expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
     if (stop === 'client') {
-      await client.cancel();
-      await cancelled.promise;
+      const stop = client.cancel();
+      await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce(), { timeout: 1000 });
+      await stop;
     } else {
       source.error(new Error('EOF unavailable'));
       await expect(client.read()).rejects.toThrow();
@@ -166,5 +179,5 @@ it('composes with immutable full and range GETs without storage calls for denied
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
   expect(revoked.status).toBe(404);
   expect(revoked.headers.get('content-range')).toBeNull();
-  expect(fetch).toHaveBeenCalledTimes(10);
+  expect(fetch).toHaveBeenCalledTimes(13);
 });

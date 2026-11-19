@@ -26,39 +26,47 @@ export function downloadStorage(env: DownloadEnv) {
   } catch { return null; }
 }
 
-// Passing the native readable to Response lets Workers set the wire length.
-// Pipe cancellation and source errors travel in both directions without buffering the object.
+// The immutable reader validates the byte count at EOF. Check that there are
+// deliverable bytes before committing headers, and hold the last byte until EOF.
 async function fixedLength(body: ReadableStream<Uint8Array>, length: number) {
-  if (length === 0) {
-    const reader = body.getReader();
-    try {
+  const reader = body.getReader();
+  const cancel = () => reader.cancel().catch(() => {});
+  try {
+    const first = await reader.read();
+    if (first.done) return new Uint8Array(0);
+    if (length === 1) {
       if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
-      return new Uint8Array(0);
-    } finally {
-      void reader.cancel().catch(() => {});
-      reader.releaseLock();
+      return first.value.slice();
     }
+    // Only the native readable lets Workers set the response's wire length.
+    const stream = new FixedLengthStream(length);
+    const writer = stream.writable.getWriter();
+    void writer.closed.catch(cancel); // client cancellation, including during a pending upstream read
+    void (async () => {
+      let remaining = length;
+      try {
+        for (let part: ReadableStreamReadResult<Uint8Array> = first; !part.done; part = await reader.read()) {
+          const bytes = part.value;
+          remaining -= bytes.length;
+          if (remaining === 0) {
+            if (bytes.length > 1) await writer.write(bytes.subarray(0, -1));
+            if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
+            await writer.write(bytes.subarray(-1));
+            break;
+          }
+          await writer.write(bytes);
+        }
+        await writer.close();
+      } catch (error) {
+        void cancel();
+        void writer.abort(error).catch(() => {});
+      }
+    })();
+    return stream.readable;
+  } catch (error) {
+    void cancel();
+    throw error;
   }
-  const stream = new FixedLengthStream(length);
-  // A client may consider the advertised length complete even before the
-  // stream closes. Send the last byte only after upstream EOF is confirmed.
-  let remaining = length;
-  let lastByte: Uint8Array | undefined;
-  const verified = body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, output) {
-      remaining -= chunk.byteLength;
-      if (remaining === 0) {
-        lastByte = chunk.slice(-1);
-        if (chunk.byteLength > 1) output.enqueue(chunk.subarray(0, -1));
-      } else output.enqueue(chunk);
-    },
-    flush(output) {
-      if (!lastByte) throw new Error('Incomplete download');
-      output.enqueue(lastByte);
-    }
-  }));
-  void verified.pipeTo(stream.writable).catch(() => {});
-  return stream.readable;
 }
 
 export async function publishedDownload(request: Request, id: string, token: string,
