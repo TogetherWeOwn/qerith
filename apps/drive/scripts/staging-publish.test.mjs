@@ -131,13 +131,14 @@ test('command-line publisher refuses publication independently of the workflow',
 
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const job = workflow.split('\n  publish:\n')[1]?.split(/\n  \S/, 1)[0];
+  const job = workflow.split('\n  publish:\n')[1]?.split(/^ {2}(?:[\w-]+|'[^']+'|"[^"]+")[ \t]*:/m, 1)[0];
   assert.ok(job);
   assert.match(job, /\n    if: \$\{\{ false \}\}/);
   assert.match(job, /needs: preparation/);
   assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(job, /^ {4}(['"]?)environment\1[ \t]*:/m, 'publish job must not bind an environment');
-  const expressions = job.match(/\$\{\{[\s\S]*?\}\}/g) ?? [];
+  // Ignore closing delimiters inside single-quoted Actions expression strings.
+  const expressions = job.match(/\$\{\{(?:'(?:[^']|'')*'|(?!\}\})[^'])*\}\}/g) ?? [];
   assert.ok(expressions.every((expression) => !/\bsecrets\b/i.test(expression)), 'publish job must not reference secrets');
 });
 
