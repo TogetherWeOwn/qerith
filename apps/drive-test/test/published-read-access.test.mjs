@@ -156,7 +156,8 @@ it('composes with immutable full and range GETs without storage calls for denied
     expect(truncated.status).toBe(range ? 206 : 200);
     await expect(truncated.arrayBuffer()).rejects.toThrow();
   }
-  for (const stop of ['provider', 'client', 'backpressure', 'final-byte']) {
+  for (const stop of ['provider', 'client', 'backpressure', 'final-byte', 'single-byte']) {
+    const single = stop === 'single-byte', afterEof = single || stop === 'final-byte';
     const cancelled = vi.fn();
     const abort = new AbortController();
     const cutoff = new AbortController();
@@ -164,21 +165,23 @@ it('composes with immutable full and range GETs without storage calls for denied
     let source;
     const pendingEof = new ReadableStream({ start(output) {
       source = output;
-      output.enqueue(new TextEncoder().encode('abcdefg'));
+      output.enqueue(new TextEncoder().encode(single ? 'b' : 'abcdefg'));
     }, pull(output) {
-      if (stop === 'final-byte') output.close();
+      if (afterEof) output.close();
       eof.resolve();
     }, cancel: cancelled }, { highWaterMark: 0 });
-    fetch.mockResolvedValueOnce(new Response(pendingEof, { headers: { etag, 'content-length': '7' } }));
+    fetch.mockResolvedValueOnce(new Response(pendingEof, single
+      ? { status: 206, headers: singleHeaders } : { headers: { etag, 'content-length': '7' } }));
     const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(cutoff.signal);
-    const client = (await get({}, token, storage, abort.signal).finally(() => timeout.mockRestore())).body.getReader();
+    const client = (await get(single ? { range: 'bytes=1-1' } : {}, token, storage, abort.signal)
+      .finally(() => timeout.mockRestore())).body.getReader();
     if (stop === 'backpressure') {
       cutoff.abort();
       expect(cancelled).toHaveBeenCalledOnce(); // Before any client read relieves backpressure.
     } else {
-      expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
+      if (!single) expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
       await eof.promise;
-      if (stop === 'final-byte') {
+      if (afterEof) {
         await scheduler.wait(0); // Let the verified final byte reach the native writer, not the client.
         cutoff.abort();
       } else if (stop === 'client') abort.abort();
@@ -191,5 +194,5 @@ it('composes with immutable full and range GETs without storage calls for denied
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
   expect(revoked.status).toBe(404);
   expect(revoked.headers.get('content-range')).toBeNull();
-  expect(fetch).toHaveBeenCalledTimes(15);
+  expect(fetch).toHaveBeenCalledTimes(16);
 });

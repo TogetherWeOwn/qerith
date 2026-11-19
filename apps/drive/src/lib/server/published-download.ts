@@ -33,13 +33,10 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number, sig
   const cancel = () => reader.cancel().catch(() => {});
   try {
     const first = await reader.read();
+    // For one byte, verify EOF before handing off the response, not before a second write.
+    if (length === 1 && !first.done && !(await reader.read()).done) throw new Error('Unexpected download bytes');
     signal.throwIfAborted();
     if (first.done) return new Uint8Array(0);
-    if (length === 1) {
-      if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
-      signal.throwIfAborted();
-      return first.value.slice();
-    }
     // Keep the native wire length. At this compatibility date abort clears pending writes.
     const { readable, writable } = new FixedLengthStream(length);
     const writer = writable.getWriter();
@@ -55,7 +52,7 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number, sig
           remaining -= bytes.length;
           if (remaining === 0) {
             if (bytes.length > 1) await writer.write(bytes.subarray(0, -1));
-            if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
+            if (length > 1 && !(await reader.read()).done) throw new Error('Unexpected download bytes');
             signal.throwIfAborted();
             await writer.write(bytes.subarray(-1));
             break;
