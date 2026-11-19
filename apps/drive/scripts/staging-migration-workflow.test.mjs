@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -53,7 +53,7 @@ test('workflow rejects mismatched source, SHA and checkout', (t) => {
   }
 });
 
-test('migration workflow records the native ledger and fails closed on a pending post-list', (t) => {
+test('migration workflow records the native ledger and fails closed on a pending post-list', async (t) => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
   const step = workflow.split('      - name: Record staging migration and rollback evidence\n')[1]
     ?.split('      - name: Publish built staging Worker')[0];
@@ -66,10 +66,15 @@ test('migration workflow records the native ledger and fails closed on a pending
   writeFileSync(wrangler, `#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
 if [ "${'${HANG_IGNORE_TERM:-}'}" = 1 ]; then trap '' TERM; while :; do :; done; fi
+if [ "${'${CHILD_MODE:-}'}" != '' ]; then
+  (sleep 2; printf escaped > "$CHILD_MARKER") &
+  if [ "$CHILD_MODE" = overflow ]; then /usr/bin/yes x | /usr/bin/head -c 100000; fi
+  wait
+fi
 case "$*" in
   *time-travel*) printf '%s\\n' "$BOOKMARK_RESPONSE" ;;
   *'migrations list'*) printf '%s\\n' "\${ERROR_OUTPUT:-}" >&2; printf '%s\\n' "\${LIST_OUTPUT}" ;;
-  *'migrations apply'*) exit "\${APPLY_STATUS:-0}" ;;
+  *'migrations apply'*) if [ "\${LARGE_APPLY:-}" = 1 ]; then /usr/bin/head -c 150000 /dev/zero; fi; exit "\${APPLY_STATUS:-0}" ;;
 esac
 `);
   chmodSync(wrangler, 0o700);
@@ -87,6 +92,18 @@ esac
   assert.doesNotMatch(readFileSync(env.CALLS, 'utf8'), /migrations apply/);
   const ok = run({});
   assert.equal(ok.status, 0, ok.stderr);
+  const firstApply = run({ LARGE_APPLY: '1' });
+  assert.equal(firstApply.status, 0, firstApply.stderr);
+  for (const mode of ['timeout', 'overflow']) {
+    const marker = join(root, `child-${mode}`);
+    const result = spawnSync('/bin/bash', ['-c', script.replace(' 45s ', ' 1s ')], {
+      cwd: root, env: { ...env, CHILD_MODE: mode, CHILD_MARKER: marker }, encoding: 'utf8', timeout: 5000,
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.error, undefined, `${mode} must terminate the launcher and child`);
+    await new Promise(resolve => setTimeout(resolve, 2300));
+    assert.equal(existsSync(marker), false, `${mode} child survived capture`);
+  }
   assert.match(ok.stdout, /test-bookmark/);
   const guarded = run({ LIST_OUTPUT: '::warning::untrusted output\n✅ No migrations to apply!' });
   assert.equal(guarded.status, 0, guarded.stderr);

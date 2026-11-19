@@ -57,7 +57,9 @@ native `d1_migrations` ledger. Log the
 pre-apply Time Travel bookmark and pending lists before and after apply for the
 exact SHA; the final list must be empty. An uncertain apply requires restoring the
 bookmark or recreating the disposable database from migrations before retry.
-Worker rollback is separate from database recovery. The staging lifecycle shares
+A recreated database has a new UUID: update both the staging Wrangler binding and
+the publisher's fixed database ID via normal review before dispatching the new SHA;
+never relax the target check. Worker rollback is separate from database recovery. The staging lifecycle shares
 one Actions concurrency group; it does not fence external writers. The pending
 lists are not a content-digest history of migrations already applied, and an
 empty pending list is not proof that the database schema matches the source. The

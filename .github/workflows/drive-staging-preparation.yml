@@ -111,26 +111,39 @@ jobs:
           trap 'rm -rf -- "$capture_dir"' EXIT
           bookmark_file="$capture_dir/bookmark"
           after_file="$capture_dir/after"
-          # Capture both streams in bounded memory; never disclose provider stderr.
-          # A command, buffer, timeout or output-file write failure fails closed.
+          # Bound captured streams; discard apply progress and never disclose stderr.
+          # Timeout or overflow kills the launcher process group, not remote requests.
           capture() {
             node -e '
-              const { execFileSync } = require("node:child_process");
+              const { spawn } = require("node:child_process");
               const { writeFileSync } = require("node:fs");
-              const [output, duration, command, ...args] = process.argv.slice(1);
-              try {
-                const stdout = execFileSync(command, args, {
-                  stdio: ["ignore", "pipe", "pipe"], maxBuffer: 65536,
-                  timeout: Number.parseInt(duration, 10) * 1000, killSignal: "SIGKILL",
-                });
-                writeFileSync(output, stdout, { flag: "wx" });
-              } catch {
-                console.error("Wrangler command or bounded capture failed.");
-                process.exitCode = 1;
+              const [output, duration, mode, command, ...args] = process.argv.slice(1);
+              const child = spawn(command, args, { detached: true, stdio: ["ignore", mode === "discard" ? "ignore" : "pipe", "pipe"] });
+              let failed = false, stdout = [], stdoutBytes = 0, stderrBytes = 0;
+              function stop() {
+                failed = true;
+                if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
               }
+              const timer = setTimeout(stop, Number.parseInt(duration, 10) * 1000);
+              child.stdout?.on("data", chunk => {
+                stdoutBytes += chunk.length;
+                if (stdoutBytes > 65536) stop(); else stdout.push(chunk);
+              });
+              child.stderr.on("data", chunk => { stderrBytes += chunk.length; if (stderrBytes > 65536) stop(); });
+              child.on("error", stop);
+              child.on("close", code => {
+                clearTimeout(timer);
+                try {
+                  if (failed || code !== 0) throw new Error();
+                  writeFileSync(output, Buffer.concat(stdout), { flag: "wx" });
+                } catch {
+                  console.error("Wrangler command or bounded capture failed.");
+                  process.exitCode = 1;
+                }
+              });
             ' "$@"
           }
-          capture "$bookmark_file" 45s "$wrangler" d1 time-travel info qerith-drive-staging --json --config "$config"
+          capture "$bookmark_file" 45s keep "$wrangler" d1 time-travel info qerith-drive-staging --json --config "$config"
           node -e '
             const fs = require("node:fs");
             try {
@@ -151,14 +164,14 @@ jobs:
             printf '\n::%s::\n' "$token"
           }
           printf '%s\n' 'Pending migrations before apply:'
-          capture "$capture_dir/before" 45s "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config"
+          capture "$capture_dir/before" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config"
           log_capture "$capture_dir/before"
           apply_status=0
-          capture "$capture_dir/apply" 120s "$wrangler" d1 migrations apply qerith-drive-staging --remote --config "$config" || apply_status=$?
+          capture "$capture_dir/apply" 120s discard "$wrangler" d1 migrations apply qerith-drive-staging --remote --config "$config" || apply_status=$?
           if (( apply_status == 0 )); then log_capture "$capture_dir/apply"; fi
           printf '%s\n' 'Pending migrations after apply:'
           list_status=0
-          capture "$after_file" 45s "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config" || list_status=$?
+          capture "$after_file" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config" || list_status=$?
           if (( list_status == 0 )); then log_capture "$after_file"; fi
           if (( apply_status != 0 || list_status != 0 )) ||
              [[ "$(grep -Fxc '✅ No migrations to apply!' "$after_file" || true)" != 1 ]] ||
