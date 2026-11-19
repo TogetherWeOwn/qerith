@@ -33,8 +33,7 @@ async function begin(options = {}, status = 'active') {
 it('rejects missing, sibling and wrong destination origins before touching D1', async () => {
   for (const [url, source] of [[origin, null], [origin, 'https://sub.example.test'], ['https://sub.example.test', origin]]) {
     const request = new Request(url, { method: 'POST', headers: source ? { origin: source } : {} });
-    expect((await signIn(request, 'challenge', authEnv())).status).toBe(403);
-    expect((await signIn(request, 'verify', authEnv())).status).toBe(403);
+    for (const step of ['challenge', 'restart', 'verify']) expect((await signIn(request, step, authEnv())).status).toBe(403);
   }
 });
 
@@ -56,12 +55,13 @@ it('requires the browser transaction cookie and issues a hardened session only o
   expect(await readSession(request, env.DB)).toBeNull();
 });
 
-it('replaces a live challenge without retaining its slot or clearing the replacement on verification', async () => {
+it('replaces a live challenge once and permits a restart when the replacement response is lost', async () => {
   const { cookie, body } = await begin();
   const replacements = await Promise.all([post('challenge', { cookie }), post('challenge', { cookie })]);
-  expect(replacements.map(response => response.status).sort()).toEqual([200, 401]);
+  expect(replacements.map(response => response.status).sort()).toEqual([200, 409]);
   const winner = replacements.find(response => response.status === 200);
-  const loser = replacements.find(response => response.status === 401);
+  const loser = replacements.find(response => response.status === 409);
+  expect(await loser.json()).toEqual({ code: 'restart-required' });
   expect(loser.headers.getSetCookie()).toEqual([]);
   const currentCookie = winner.headers.getSetCookie()[0].split(';')[0];
   const denied = await post('verify', { cookie: currentCookie }, body);
@@ -69,6 +69,13 @@ it('replaces a live challenge without retaining its slot or clearing the replace
   expect(denied.headers.getSetCookie()).toEqual([]);
   const row = await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all();
   expect(row.results).toEqual([{ challenge: (await winner.json()).challenge }]);
+  const restart = await post('restart', { cookie }); // The browser still holds the original cookie.
+  expect(restart.status).toBe(200);
+  const restartCookie = restart.headers.getSetCookie()[0].split(';')[0];
+  expect(restartCookie.split('.')[0]).not.toBe(cookie.split('.')[0]);
+  const signed = await fixture('authentication', { challenge: (await restart.json()).challenge });
+  expect((await post('verify', { cookie: restartCookie }, JSON.stringify(signed.authentication))).status).toBe(204);
+  expect((await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all()).results).toEqual(row.results);
 });
 
 it('reserves ceremony capacity for registration when authentication is full', async () => {
@@ -77,8 +84,8 @@ it('reserves ceremony capacity for registration when authentication is full', as
   await env.DB.prepare(`WITH RECURSIVE slots(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM slots WHERE n < 512)
     INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
     SELECT 'slot-' || n, 'authentication', printf('%043d', n), ? FROM slots`).bind(Date.now() + 300_000).run();
-  for (const headers of [{}, { cookie }]) {
-    const refused = await post('challenge', headers);
+  for (const [step, headers] of [['challenge', {}], ['challenge', { cookie }], ['restart', { cookie }]]) {
+    const refused = await post(step, headers);
     expect(refused.status).toBe(429);
     expect(refused.headers.get('retry-after')).toBe('60');
     expect(refused.headers.getSetCookie()).toEqual([]);

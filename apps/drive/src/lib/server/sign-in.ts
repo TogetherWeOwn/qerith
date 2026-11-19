@@ -53,7 +53,7 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
 // Unwired: the Worker still exposes no public sign-in or provisioning endpoint.
 export async function signIn(
   request: Request,
-  step: 'challenge' | 'verify',
+  step: 'challenge' | 'restart' | 'verify',
   env: { DRIVE_ORIGIN?: string; DB?: ConstructorParameters<typeof PasskeyLogin>[0] },
 ): Promise<Response> {
   const headers = new Headers({ 'cache-control': 'private, no-store' });
@@ -68,8 +68,10 @@ export async function signIn(
 
   try {
     const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin);
-    const [context, challenge] = readOpaqueCookie(request, transactionCookie, transactionPattern)?.split('.') ?? [];
-    if (step === 'challenge') {
+    // A serialized restart after a lost response must leave the previous context alone.
+    const transaction = step === 'restart' ? null : readOpaqueCookie(request, transactionCookie, transactionPattern);
+    const [context, challenge] = transaction?.split('.') ?? [];
+    if (step !== 'verify') {
       const nextContext = context ?? isoBase64URL.fromBuffer(crypto.getRandomValues(new Uint8Array(32)));
       const nextChallenge = await login.issueChallenge(nextContext, challenge);
       headers.append('set-cookie', hostCookie(transactionCookie, `${nextContext}.${nextChallenge}`, 300, 'Strict'));
@@ -89,6 +91,7 @@ export async function signIn(
       headers.set('retry-after', '60');
       return reply(429, 'rate-limited');
     }
+    if (step === 'challenge' && error instanceof ChallengeUnavailable) return reply(409, 'restart-required');
     if (error instanceof ChallengeUnavailable || error instanceof PasskeyDenied) return reply(401, 'denied');
     if (error instanceof RevokedPasskey) return reply(403, 'revoked');
     return reply(503, 'unavailable');

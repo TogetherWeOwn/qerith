@@ -5,8 +5,8 @@ import { expect, it } from 'vitest';
 it('upgrades seeded data and replays the full migration ledger safely', async () => {
   const prior = env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0009_sessions.sql');
   await applyD1Migrations(env.DB, prior);
-  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
-  await env.DB.prepare('INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES (?, ?, ?, ?, ?)')
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  await env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
     .bind('credential', 'member', new Uint8Array([1, 2]), 0, '[]').run();
   const ledger = async () => (await env.DB.prepare('SELECT id, name FROM d1_migrations ORDER BY id').all()).results;
   const before = await ledger();

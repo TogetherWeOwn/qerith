@@ -5,7 +5,7 @@ import { expect, it } from 'vitest';
 it('upgrades seeded members and replays the real migration directory', async () => {
   const prior = env.DRIVE_MIGRATIONS.filter(({ name }) => name < '0010_login_generations.sql');
   await applyD1Migrations(env.DB, prior);
-  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals VALUES ('member', 'member', 'active')");
   const ledger = async () => (await env.DB.prepare('SELECT id, name FROM d1_migrations ORDER BY id').all()).results;
   const before = await ledger();
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
