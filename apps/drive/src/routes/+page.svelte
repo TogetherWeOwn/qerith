@@ -13,7 +13,7 @@
 </svelte:head>
 
 <main id="main">
-  {#if downloadNotice && (!data.staging || data.listing?.status === 'ok')}
+  {#if downloadNotice}
     <div role="alert">
       <p>{downloadNotice.name ?? 'The file'} didn’t download. Try again.</p>
       {#if downloadNotice.id}

@@ -74,15 +74,27 @@ try {
   } });
 
   const assets = new Set();
-  let holdRefresh;
+  let holdRefresh, noticeFixture;
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
-    if (request.isNavigationRequest()) headers['x-fixture-navigation'] = '1';
+    let seededNotice;
+    if (request.isNavigationRequest()) {
+      headers['x-fixture-navigation'] = '1';
+      if (noticeFixture && url.pathname === '/' && url.search === `?download=${noticeFixture.nonce}`) {
+        // Seed only this Worker document request, not a persistent browser cookie.
+        seededNotice = noticeFixture;
+        noticeFixture = undefined;
+        headers['sec-fetch-site'] = 'same-origin';
+        headers.cookie = `${headers.cookie}; ${seededNotice.name}=${seededNotice.id}`;
+      }
+    }
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
+    if (seededNotice) assert.ok(response.headers.getSetCookie().some(value => value.startsWith(`${seededNotice.name}=;`)),
+      'the Worker consumed the synthetic document notice');
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
     if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
@@ -128,11 +140,15 @@ try {
     INSERT INTO drive_entries (id, owner_id, name, kind)
     SELECT printf('00000000-0000-4000-8000-%012d', n), 'owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
   const failedDownload = await row.getAttribute('href');
-  const notice = crypto.randomUUID();
-  await context.addCookies([{ name: `__Host-drive-download-failed-${notice}`, value: failedDownload.split('/').at(-1), url: origin, secure: true }]);
-  await page.goto(`${origin}/?download=${notice}`);
   const noticeRetry = page.getByRole('alert').getByRole('link', { name: 'Try again' });
-  assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
+  async function visitWithNotice() {
+    const nonce = crypto.randomUUID(), name = `__Host-drive-download-failed-${nonce}`;
+    noticeFixture = { nonce, name, id: failedDownload.split('/').at(-1) };
+    const document = await page.goto(`${origin}/?download=${nonce}`);
+    assert.equal(document?.status(), 200);
+    assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
+  }
+  await visitWithNotice();
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   await upload.focus();
   const [nextChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -157,10 +173,11 @@ try {
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
   await failedRefreshChooser.setFiles({ ...file, name: 'B.bin' });
-  const listingRetry = page.getByRole('link', { name: 'Try again', exact: true });
+  const listingRetry = page.getByRole('link', { name: 'Try again', exact: true }).and(page.locator('a[href="/"]'));
   await page.getByText("This folder didn't load.", { exact: false }).waitFor();
-  await noticeRetry.waitFor({ state: 'detached' });
-  assert.equal(await listingRetry.evaluate(el => document.activeElement === el), true);
+  await listingRetry.and(page.locator(':focus')).waitFor();
+  assert.equal(await noticeRetry.getAttribute('href'), failedDownload, 'an unavailable listing preserves the document notice');
+  await visitWithNotice();
 
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
@@ -189,7 +206,7 @@ try {
 
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
-    noticePreservedOnRefresh: true, focusRestoredOnListingFailure: true,
+    noticePreservedOnRefresh: true, noticePreservedOnListingFailure: true, focusRestoredOnListingFailure: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,
