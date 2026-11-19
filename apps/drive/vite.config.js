@@ -79,7 +79,7 @@ const generated = ${JSON.stringify(generatedAssets(builder))};
 const fixtureAssets = new Set([...generated.signIn, ...generated.root]);
 const assets = {
   signIn: new Set(generated.signIn),
-  root: new Set(generated.root.filter(path => /\\.(css|woff2)$/.test(path)))
+  root: new Set(generated.root)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const unavailable = () => new Response('Service unavailable', {

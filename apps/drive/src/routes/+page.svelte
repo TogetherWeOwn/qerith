@@ -19,7 +19,7 @@
     </div>
   {/if}
   {#if data.listing}
-    <RootListingView result={data.listing} page={data.page} uploadConfigured={data.uploadConfigured} />
+    <RootListingView result={data.listing} page={data.page} uploadConfigured={data.uploadConfigured} staging={data.staging} />
   {:else}
     Service unavailable.
   {/if}

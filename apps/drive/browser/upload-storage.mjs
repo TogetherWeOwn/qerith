@@ -4,7 +4,7 @@ const endpoint = 'https://storage.example.test', bucket = 'drive-fixture', epoch
 const region = 'test', accessKeyId = 'fixture-key', secretAccessKey = 'synthetic-secret';
 const partTag = '"fixture-part"', etag = '"fixture-object"';
 const uploads = new Map(), objects = new Map();
-const bindings = {
+export const bindings = {
   DRIVE_S3_ENDPOINT: endpoint, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: region,
   DRIVE_S3_ACCESS_KEY_ID: accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,
   DRIVE_S3_STORAGE_EPOCH: epoch,
@@ -44,6 +44,16 @@ export async function storageFetch(request) {
   }
   const bytes = objects.get(key);
   if (bytes && !url.search && request.headers.get('if-match') === etag && ['HEAD', 'GET'].includes(request.method)) {
+    const range = request.headers.get('range');
+    if (range !== null) {
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+      if (!match || request.method !== 'GET') throw new Error('Unexpected fixture range');
+      const [, first, last] = match, start = Number(first), end = Number(last);
+      if (start > end || end >= bytes.byteLength) throw new Error('Unexpected fixture range bounds');
+      const part = bytes.slice(start, end + 1);
+      return new Response(part, { status: 206, headers: { etag, 'content-length': String(part.byteLength),
+        'content-range': `bytes ${start}-${end}/${bytes.byteLength}` } });
+    }
     return new Response(request.method === 'GET' ? bytes.slice(0) : null,
       { headers: { etag, 'content-length': String(bytes.byteLength) } });
   }

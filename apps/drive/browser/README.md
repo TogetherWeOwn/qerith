@@ -30,6 +30,13 @@ Local runs can include uncommitted changes and must not be treated as commit
 provenance. After a CI change merges, a substantive pull request body edit starts
 a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
+On the matching head, CI also builds the real generated Worker and runs
+`sign-in.mjs` in Chromium. The existing sign-in and root-upload fixture evidence
+is separate from `staging-root-round-trip.json`: the latter uses the exact staging
+origin, a disposable D1, and synthetic storage with no sign-in fixture flag or
+remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
+without navigation, full and range byte equality, and admission denials.
+
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended
 fixture state before capture, assert real keyboard focus and activation behavior,

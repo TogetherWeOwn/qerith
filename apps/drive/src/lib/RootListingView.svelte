@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { flushSync } from 'svelte';
+  import { invalidate } from '$app/navigation';
+  import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import RootUpload from './RootUpload.svelte';
@@ -7,7 +8,9 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadConfigured }: { result: RootListingResult; page: string | null; uploadConfigured: boolean } = $props();
+  let { result: initial, page, uploadConfigured, staging }: {
+    result: RootListingResult; page: string | null; uploadConfigured: boolean; staging: boolean;
+  } = $props();
   let status = $state('');
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
@@ -16,6 +19,14 @@
   let refreshVersion = 0, appliedVersion = 0;
 
   async function refresh() {
+    if (staging) {
+      const focused = document.activeElement;
+      await invalidate('drive:root-listing');
+      await tick();
+      if (initial.status !== 'ok') throw new Error('Root listing unavailable');
+      restoreFocus(focused);
+      return;
+    }
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
     const response = await fetch(`/api/root-listing${query}`, { redirect: 'error' });
@@ -25,7 +36,11 @@
     appliedVersion = version;
     const focused = document.activeElement;
     flushSync(() => { refreshed = next; });
-    if (focused && !focused.isConnected && document.activeElement === document.body) header.querySelector('button')?.focus();
+    restoreFocus(focused);
+  }
+
+  function restoreFocus(focused: Element | null) {
+    if (focused && !focused.isConnected && document.activeElement === document.body) header?.querySelector('button')?.focus();
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
