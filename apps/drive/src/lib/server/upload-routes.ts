@@ -9,7 +9,6 @@ import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartUpload } from './s3/multipart-upload';
 import { readUploadBody, uploadIdPattern, uploadPart } from './upload-part';
-
 type Database = Parameters<typeof createUploadCompletionReceipts>[0];
 type Verifier = NonNullable<Parameters<typeof createUploadCompletionReceipts>[4]>;
 type Session = NonNullable<App.Locals['driveSession']>;
@@ -18,10 +17,8 @@ export interface UploadRouteEnv extends DriveAuthEnv {
   DB?: Database & { batch(statements: ReturnType<Database['prepare']>[]): Promise<unknown> };
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
-  DRIVE_UPLOAD_VERIFIER?: Verifier & {
-    // Full response-body budget attested by the qualifier for this storage identity.
-    completionTimeoutMs(storageConfigId: string): number | null;
-  };
+  // Full response-body budget attested by the qualifier for this storage identity.
+  DRIVE_UPLOAD_VERIFIER?: Verifier & { completionTimeoutMs(storageConfigId: string): number | null };
 }
 
 const headers = { 'cache-control': 'private, no-store' };
@@ -68,7 +65,6 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     const bindings = [intentId, ownerId, await tokenHash(token), settings.endpoint, settings.bucket, epoch];
     return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs };
   }
-
   return {
     async part(request: Request, session: Session | undefined, intentId: string, number: string): Promise<Response> {
       try {
@@ -77,7 +73,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         const { db, bindings, settings, epoch, ownerId, isQualified, storageConfigId } = access;
         const ledger = new UploadPartOperationEvidence(db);
         return await uploadPart(request, intentId, number, {
-          send: createMultipartUpload(settings, transport),
+          send: createMultipartUpload(settings, { ...transport, beforeSend: () => isQualified(storageConfigId) }),
           async authorize() {
             const intent = await db.withSession('first-primary').prepare(`SELECT i.version ${allocated}`)
               .bind(...bindings).first<{ version: number }>();
@@ -113,17 +109,15 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         }).then(({ status }) => reply(status));
       } catch { return reply(503); }
     },
-
     async complete(request: Request, session: Session | undefined, intentId: string): Promise<Response> {
       const access = await authorize(request, session, intentId).catch(() => reply(503));
       if (access instanceof Response) return access;
       const target = await destination(request).catch(() => null);
       if (!target) return reply(400);
       const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
-      const { parentId, name } = target;
-      const destinationBindings = [parentId, parentId, parentId, name], operationId = crypto.randomUUID();
+      const { parentId, name } = target, operationId = crypto.randomUUID();
+      const destinationBindings = [parentId, parentId, parentId, name];
       try {
-        // The seal trigger rolls back incomplete or uncertain snapshots.
         await db.batch([
           db.prepare(`INSERT INTO drive_upload_completion_operations
             SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version ${allocated}
@@ -152,10 +146,8 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             .bind(...bindings, parentId, name).first<{ id: string }>();
           return published ? Response.json(published, { headers }) : reply(404);
         }
-        if (!row.recorded) {
-          const complete = createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier);
-          if (await complete.complete(token, row.operation_id, target) !== 'recorded') return reply(409);
-        }
+        if (!row.recorded && await createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier)
+          .complete(token, row.operation_id, target) !== 'recorded') return reply(409);
         const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
         const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
         return published ? Response.json({ id: published.id }, { status: 201, headers }) : reply(409);

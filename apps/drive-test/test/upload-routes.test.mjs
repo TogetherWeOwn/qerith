@@ -12,15 +12,15 @@ const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 
 async function fixture({ fail, verify, beforeHead, isQualified = qualified, endpoint = config.endpoint,
   size = 7, completionTimeoutMs = () => 15_000 } = {}) {
   await applyD1Migrations(env.DB, migrations);
-  const intent = crypto.randomUUID(), calls = [], parts = [];
-  const key = `private-storage-${intent}`, principal = `uploader-${intent}`, other = `other-${intent}`;
+  const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
+  const other = `other-${intent}`, calls = [], parts = [];
   await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active'), (?, 'member', 'active')", principal, other).run();
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
   const bindings = { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
-    DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified, completionTimeoutMs,
+    DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent), completionTimeoutMs,
       verifyParts: (upload) => verify ? verify(upload, parts) : parts } : undefined };
   const routes = uploadRoutes(bindings, { timeoutMs: 5000, async fetch(request) {
     calls.push(request.method);
@@ -57,10 +57,9 @@ it('publishes only the conditionally verified generation and never sends a dupli
   expect((await send()).status).toBe(409); // An empty seal must roll back.
   expect((await Promise.all([send(1), send(1)])).map(({ status }) => status).sort()).toEqual([204, 404]);
   const published = await send();
-  expect(published.status).toBe(201);
-  expect(published.headers.get('cache-control')).toBe('private, no-store');
   const receipt = await published.json();
-  expect(receipt).toEqual({ id: expect.any(String) });
+  expect([published.status, published.headers.get('cache-control'), receipt])
+    .toEqual([201, 'private, no-store', { id: expect.any(String) }]);
   expect(await generation()).toEqual({ entry_id: receipt.id, size_bytes: 7, etag });
   const replay = await send();
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
@@ -88,33 +87,44 @@ it.each([
   expect(calls).toEqual([]);
 });
 
-it.each(['PUT', 'POST'])('does not leak, publish or resend after uncertain %s', async (fail) => {
-  const partFailed = fail === 'PUT';
-  const { send, calls, generation } = await fixture({ fail, size: partFailed ? minimum + 7 : 7 });
-  const first = await send(1, { bytes: partFailed ? minimum : 7 });
-  expect(first.status).toBe(partFailed ? 409 : 204);
-  expect(await first.text()).toBe('');
-  if (partFailed) expect((await send(2)).status).toBe(404);
+it.each(['PUT', 'POST', 'qualification'])('preserves send fences and empty errors (%s)', async (fail) => {
+  const partFailed = fail !== 'POST';
+  let checkPart = fail === 'qualification';
+  const part = { bytes: partFailed ? minimum : 7 };
+  const { send, calls, generation } = await fixture({ fail, size: partFailed ? minimum + 7 : 7,
+    isQualified: async (id, intent) => await qualified(id) && (!checkPart ||
+      !await sql('SELECT 1 FROM drive_upload_part_operations WHERE intent_id = ?', intent).first()) });
+  const first = await send(1, part);
+  expect([first.status, await first.text()]).toEqual([partFailed ? 409 : 204, '']);
+  checkPart = false;
+  if (partFailed) expect([(await send(1, part)).status, (await send(2)).status]).toEqual([404, 404]);
   expect([(await send()).status, (await send()).status]).toEqual([409, partFailed ? 409 : 404]);
   expect(await generation()).toBeNull();
-  expect(calls).toEqual(partFailed ? ['PUT'] : ['PUT', 'POST']);
+  expect(calls).toEqual(fail === 'POST' ? ['PUT', 'POST'] : fail === 'PUT' ? ['PUT'] : []);
 });
 
-it('resumes an undispatched seal, then reuses the receipt after a failed HEAD', async () => {
+it.each(['provider error', 'qualification', 'session'])('requires current authority when publishing (%s)', async (veto) => {
   let current = true, verifications = 0, heads = 0;
-  const { send, foreign, generation, calls } = await fixture({
+  const { send, foreign, generation, calls, key } = await fixture({
     isQualified: (id) => current && qualified(id),
     verify: (_, parts) => { if (++verifications === 1) current = false; return parts; },
-    beforeHead: () => { if (++heads === 1) throw new Error('Transient HEAD failure'); }
+    beforeHead: (token) => {
+      if (++heads !== 1) return;
+      if (veto === 'session') return sessions.revoke(token);
+      if (veto === 'provider error') throw new Error('Transient HEAD failure');
+      current = false;
+    }
   });
   expect([(await send(1)).status, (await send()).status]).toEqual([204, 409]);
   expect(calls).toEqual(['PUT']);
   current = true;
   expect((await send()).status).toBe(409);
   expect(await generation()).toBeNull();
+  expect(await sql('SELECT id FROM drive_entries WHERE object_key = ?', key).first()).toBeNull();
+  current = true;
   expect((await send(undefined, { auth: foreign })).status).toBe(404);
-  expect((await send()).status).toBe(201);
-  expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
+  expect((await send()).status).toBe(veto === 'session' ? 401 : 201);
+  expect(calls).toEqual(veto === 'session' ? ['PUT', 'POST', 'HEAD'] : ['PUT', 'POST', 'HEAD', 'HEAD']);
 });
 
 it('checks sibling conflicts before sealing and again at dispatch', async () => {
@@ -142,11 +152,4 @@ it('rejects impossible small-part layouts without consuming slots', async () => 
     [1, minimum - 1, 404], [1, minimum, 204], [undefined, 0, 201]])
     expect((await send(number, { bytes })).status).toBe(status);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
-});
-
-it('rechecks the session at the atomic publication write after a matching HEAD', async () => {
-  const { send, calls, generation } = await fixture({ beforeHead: (token) => sessions.revoke(token) });
-  expect([(await send(1)).status, (await send()).status, (await send()).status]).toEqual([204, 409, 401]);
-  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
-  expect(await generation()).toBeNull();
 });

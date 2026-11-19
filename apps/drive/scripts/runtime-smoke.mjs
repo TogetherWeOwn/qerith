@@ -78,9 +78,8 @@ async function exercisePrivateBoundary(main) {
     for (const [route, method] of [['parts/1', 'PUT'], ['complete', 'POST']]) for (const suffix of ['', '/']) {
       for (const [headers, status] of [[{ origin }, 401], [{ cookie }, 403],
         [{ cookie, origin: `${origin}, ${origin}` }, 403], [{ cookie, origin }, 503]]) {
-        const response = await worker.fetch(`${origin}/api/uploads/${intent}/${route}${suffix}`, {
-          method, headers: { 'content-type': 'application/json', ...headers }, redirect: 'manual'
-        });
+        const response = await worker.fetch(`${origin}/api/uploads/${intent}/${route}${suffix}`,
+          { method, headers, redirect: 'manual' });
         assert.equal(response.status, status, `${route}: boundary rejects without redirect or storage activation`);
         assert.equal(response.headers.get('cache-control'), 'private, no-store');
       }
