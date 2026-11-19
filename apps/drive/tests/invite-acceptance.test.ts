@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { inviteAcceptance, type InviteRegistration } from '../src/lib/server/invite-acceptance';
 
 const origin = 'https://drive.example.test';
-const token = 'i'.repeat(43), challenge = 'c'.repeat(43), cookie = `__Host-drive-session=${'s'.repeat(43)}`;
+const token = 'i'.repeat(43), cookie = `__Host-drive-session=${'s'.repeat(43)}`;
+const challenge = Buffer.alloc(64, 1).toString('base64url');
 const headers = { origin, 'content-type': 'application/json' };
 const options = { challenge, rp: { name: 'Drive' }, user: { id: 'handle', name: 'Guest', displayName: 'Guest' }, pubKeyCredParams: [] };
 const response = { id: 'key', rawId: 'key', type: 'public-key', clientExtensionResults: {}, response: {
@@ -47,8 +48,9 @@ void test('presents only display data and dispatches only the known WebAuthn fie
   const display = await run(request());
   assertPolicy(display, 200);
   assert.deepEqual(await display.json(), { displayName: 'Guest', note: null });
-  assert.deepEqual(await (await run(request(), 'challenge')).json(), { options });
-  const body = JSON.stringify({ token, challenge, response: { ...response, extra: token } });
+  const issued = await (await run(request(), 'challenge')).json();
+  assert.deepEqual(issued, { options });
+  const body = JSON.stringify({ token, challenge: issued.options.challenge, response: { ...response, extra: token } });
   assertPolicy(await run(request({ body }), 'enroll'), 204);
   assert.deepEqual(calls, ['present', ['challenge', token], ['enroll', token, challenge, response]]);
 });

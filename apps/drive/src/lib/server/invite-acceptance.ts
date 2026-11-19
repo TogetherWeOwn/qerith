@@ -71,15 +71,13 @@ export async function inviteAcceptance(request: Request, step: InviteStep, env: 
   const origin = authOrigin(env.DRIVE_ORIGIN);
   if (!origin || !env.DB) return deny(503);
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...headers, allow: 'POST' } });
-  const url = new URL(request.url);
-  if (!allowsOrigin(request, origin.origin) || url.search || url.hash) return deny(403);
+  if (!allowsOrigin(request, origin.origin) || /[?#]/.test(request.url)) return deny(403);
 
   const input = await readInput(request);
   if (!record(input) || typeof input.token !== 'string' || !opaqueValue.test(input.token) ||
       Object.keys(input).length !== (step === 'enroll' ? 3 : 1)) return deny(400);
   const { token, challenge } = input;
-  const assertion = step === 'enroll' && typeof challenge === 'string' && opaqueValue.test(challenge)
-    ? readRegistration(input.response) : null;
+  const assertion = step === 'enroll' && base64url(challenge) ? readRegistration(input.response) : null;
   if (step === 'enroll' && !assertion) return deny(400);
 
   try {
