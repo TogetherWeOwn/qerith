@@ -10,7 +10,7 @@ const config = { endpoint: 'https://storage.example', bucket: 'drive-test', regi
 async function fixture() {
   const db = env.DB, owner = crypto.randomUUID();
   await applyD1Migrations(db, env.DRIVE_MIGRATIONS);
-  await db.prepare("INSERT INTO drive_principals VALUES (?, 'member', 'active')").bind(owner).run();
+  await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   const sessions = new Sessions(db), { token } = await sessions.issue(owner);
   const bindings = { DB: db, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
     DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true) } };
