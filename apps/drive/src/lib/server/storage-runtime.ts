@@ -53,7 +53,7 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
   return {
     async isQualified(id: string, signal?: AbortSignal) { return id === storageConfigId && !signal?.aborted; },
     completionTimeoutMs(id) { return id === storageConfigId ? budget : null; },
-    async verifyParts({ storageConfigId: id, objectKey, uploadId }, beforeSend) {
+    async verifyParts({ storageConfigId: id, objectKey, uploadId, beforeSend }) {
       if (id !== storageConfigId) return null;
       const signal = AbortSignal.timeout(listTimeoutMs);
       const deadline = performance.now() + listTimeoutMs;

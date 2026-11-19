@@ -90,9 +90,9 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     const number = ++pages;
     return listPage(listPart(number, number === 1 ? '"tag-1"' : '"tag-&amp;-ÿ"'), number === 1 ? 1 : undefined);
   }).DRIVE_UPLOAD_VERIFIER!;
-  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }, checkOwner), null);
+  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong', beforeSend: checkOwner }), null);
   assert.deepEqual(events, []);
-  assert.deepEqual(await verifier.verifyParts(upload, checkOwner), [
+  assert.deepEqual(await verifier.verifyParts({ ...upload, beforeSend: checkOwner }), [
     { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
   assert.deepEqual(events, ['owner check', null, 'owner check', '1']);
@@ -107,7 +107,7 @@ test('verification fails closed when the owner check denies a page', async () =>
       const number = ++sends;
       return listPage(listPart(number, '"tag"'), number === 1 ? 1 : undefined);
     }).DRIVE_UPLOAD_VERIFIER!;
-    assert.equal(await verifier.verifyParts(upload, async () => ++checks !== deniedPage), null);
+    assert.equal(await verifier.verifyParts({ ...upload, beforeSend: async () => ++checks !== deniedPage }), null);
     assert.deepEqual({ checks, sends }, { checks: deniedPage, sends: deniedPage - 1 });
   }
 });

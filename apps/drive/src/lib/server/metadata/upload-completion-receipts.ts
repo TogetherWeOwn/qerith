@@ -37,7 +37,8 @@ interface UploadPublicationVerifier {
     objectKey: string;
     uploadId: string;
     intentVersion: number;
-  }>, beforeSend?: () => Promise<boolean>): Promise<readonly CompletedPart[] | null>;
+    beforeSend?: () => Promise<boolean>;
+  }>): Promise<readonly CompletedPart[] | null>;
 }
 
 type UploadOwner = 'i.owner_id' | 'o.owner_id' | 'c.owner_id';
@@ -144,7 +145,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
         await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
       const checkOwner = ownerOnly ? () => new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId) : undefined;
       const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
-        objectKey, uploadId, intentVersion: upload.intent_version }), checkOwner);
+        objectKey, uploadId, intentVersion: upload.intent_version, ...(checkOwner && { beforeSend: checkOwner }) }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
       const parts = verified.map(({ partNumber, etag, size }) => ({ partNumber, etag, size }));
       let manifest: Uint8Array<ArrayBuffer>;
