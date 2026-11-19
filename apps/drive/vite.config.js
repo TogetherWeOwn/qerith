@@ -68,7 +68,7 @@ const buildAdapter = {
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
-import { ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
+import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
@@ -92,10 +92,10 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
+      // First-owner enrollment is a separate release-bound mode, not a preview route.
+      if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
-      // First-owner enrollment is a separate release-bound mode, not a preview route.
-      if (!ready && url.pathname === '/api/deployer/owner-enrollment') return ownerEnrollment(request, env);
       return dispatchStagingRequest(request, env, ready, assets, {
         adapter: request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx),
         ceremony: (request, step) => signIn(request, step, env),

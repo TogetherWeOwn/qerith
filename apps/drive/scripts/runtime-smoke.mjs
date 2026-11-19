@@ -82,18 +82,22 @@ function fixtureStorage() {
   };
 }
 
-async function exercisePrivateBoundary(main, preview = false, staging = false) {
+async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false } = {}) {
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
+  const rawStorage = staging || rawOutsideStaging;
+  const release = 'a'.repeat(40);
+  const enrollmentToken = staging ? randomBytes(32).toString('base64url') : undefined;
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
   const configPath = resolve(join(fixture.path, 'wrangler.json'));
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
-${staging ? `globalThis.fetch = (${fixtureStorage})();` : preview ? '' : deletionWorker}
+${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? '' : deletionWorker}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
-  ${preview || staging ? '' : 'admitDeletion(request, env.DB);'}
+  ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
+  ${staging ? "if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };" : ''}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -107,12 +111,13 @@ export default { fetch(request, env, ctx) {
     assets: { ...config.assets, directory: resolve(config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'drive-smoke', database_id: '00000000-0000-4000-8000-000000000001' }]
   }));
-  const vars = staging ? {
-    DRIVE_ORIGIN: origin, DRIVE_S3_ENDPOINT: 'https://storage.example.test', DRIVE_S3_BUCKET: 'fixture',
+  const vars = { DRIVE_ORIGIN: origin, ...(preview ? { DRIVE_SIGN_IN_FIXTURE: '1' } : {}), ...(rawStorage ? {
+    DRIVE_S3_ENDPOINT: 'https://storage.example.test', DRIVE_S3_BUCKET: 'fixture',
     DRIVE_S3_REGION: 'test-1', DRIVE_S3_ACCESS_KEY_ID: 'fixture', DRIVE_S3_SECRET_ACCESS_KEY: 'fixture', DRIVE_S3_STORAGE_EPOCH: 'fixture',
     DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, region: 'test-1', completionTimeoutMs: 5000,
-      storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: 'a'.repeat(40), runId: '1', runAttempt: 1 })
-  } : { DRIVE_ORIGIN: origin, ...(preview ? { DRIVE_SIGN_IN_FIXTURE: '1' } : {}) };
+      storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: release, runId: '1', runAttempt: 1 })
+  } : {}), ...(staging ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
+    DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}` } : {}) };
   const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
@@ -140,6 +145,14 @@ export default { fetch(request, env, ctx) {
       assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
     };
     let cookie = await session('fixture', staging ? 'owner' : 'member');
+    if (rawOutsideStaging) {
+      const refused = await worker.fetch(`${origin}/api/uploads`, {
+        method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: '{"size":4}',
+      });
+      assert.deepEqual([refused.status, await refused.text()], [503, '']);
+      assert.equal(await DB.prepare('SELECT 1 FROM drive_upload_intents').first(), null);
+      return;
+    }
     const member = staging ? await session('member', 'member') : cookie;
     // Probe before an existing owner would make the bootstrap operation refuse by itself.
     await assertProvisioningUnavailable(member, 'member');
@@ -149,6 +162,16 @@ export default { fetch(request, env, ctx) {
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
+      const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
+        method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
+        body: '{"operation":"challenge"}',
+      });
+      assert.equal((await bootstrap()).status, 404, 'qualified preview has no enrollment route');
+      const grant = { 'x-test-bootstrap': '1' };
+      assert.equal((await bootstrap(grant)).status, 403, 'release-bound enrollment still needs the bearer');
+      assert.equal((await bootstrap({ ...grant, authorization: `Bearer ${enrollmentToken}` })).status, 409,
+        'release-bound enrollment remains available with qualified storage and refuses a second owner');
+      assert.equal((await get('/sign-in', grant)).status, 200, 'the enrollment release keeps sign-in available');
       for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list',
         '/api/root-listing', '/api/deployer/owner-enrollment', '/api/entries/fixture/delete']) {
         assert.equal((await get(path, { cookie })).status, 404, path);
@@ -401,8 +424,9 @@ const generatedUnavailable = [...unavailable, ...['/_app/env.js', '/_app/%65nv.j
 await exercise([appWorker, '--config', 'wrangler.build.jsonc'], generatedUnavailable);
 console.log(`Generated Worker: ${generatedUnavailable.map(([path]) => path).join(', ')} returned 503 with Cache-Control: no-store`);
 await exercisePrivateBoundary(appWorker);
-await exercisePrivateBoundary(appWorker, true);
-await exercisePrivateBoundary(appWorker, false, true);
+await exercisePrivateBoundary(appWorker, { preview: true });
+await exercisePrivateBoundary(appWorker, { staging: true });
+await exercisePrivateBoundary(appWorker, { rawOutsideStaging: true });
 await exercise(['tests/runtime-fixture.ts', '--config', 'wrangler.build.jsonc'], [['/', 200, 'runtime-ok']]);
 await exercise(['tests/webauthn-runtime-fixture.mjs', '--config', 'wrangler.jsonc'], [['/', 200, 'webauthn-runtime-ok']]);
 await exercise(['tests/ceremony-worker-fixture.ts', '--config', 'wrangler.jsonc'], [['/', 200, 'ceremony-runtime-ok']]);

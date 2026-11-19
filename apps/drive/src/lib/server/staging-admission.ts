@@ -1,7 +1,8 @@
 import { entryId } from '../download-id';
 import { isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn } from './download-navigation';
-import { allowsOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { Sessions } from './identity/sessions';
+import { allowsOrigin, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadIdPattern } from './upload-part';
 
 interface PreviewAssets {
@@ -10,8 +11,8 @@ interface PreviewAssets {
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
-type Target = { kind: 'sign-in' | 'public-asset' | 'private-asset' | 'root' | 'download' | 'upload' } |
-  { kind: 'ceremony'; step: CeremonyStep };
+type Target = { kind: 'sign-in' | 'public-asset' | 'root' | 'download' | 'upload' } |
+  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'private-asset'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -68,10 +69,16 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   if (target.kind === 'sign-in' || target.kind === 'ceremony' || target.kind === 'public-asset') return target;
 
   try {
-    const session = await readSession(request, env.DB);
-    if (session?.principal.role === 'owner') return target;
-    // An otherwise valid member cookie must not prevent the owner from signing in.
-    if (session) return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
+    const token = readSessionToken(request);
+    // Charge the entire session lookup against the lifetime reported by D1.
+    const started = performance.now();
+    const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
+    const deadline = started + (session?.remaining_ms ?? 0);
+    if (session && performance.now() < deadline) {
+      if (session.role === 'owner') return target.kind === 'private-asset' ? { ...target, deadline } : target;
+      // An otherwise valid member cookie must not prevent the owner from signing in.
+      return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
+    }
     if (navigation && target.kind === 'root') return signInRedirect();
     if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
     return deny(401);
@@ -89,6 +96,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
       return dispatch.ceremony(request, target.step);
     case 'public-asset':
     case 'private-asset': {
+      if (target.kind === 'private-asset' && !(performance.now() < (target.deadline ?? 0))) return deny(401);
       const asset = await dispatch.asset(request);
       const response = new Response(asset.body, asset);
       response.headers.set('cache-control', 'private, no-store');

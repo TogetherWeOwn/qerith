@@ -46,19 +46,29 @@ async function enrollmentInput(request: Request): Promise<unknown> {
   }
 }
 
-export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Promise<Response> {
+function enrollmentGrant(env: EnrollmentEnv) {
   const secret = env.DRIVE_OWNER_ENROLLMENT;
-  if (!env.DB || typeof secret !== 'string' || secret.length !== 98) return deny(503);
+  if (typeof secret !== 'string' || secret.length !== 98) return null;
   const grant = /^([a-f0-9]{40}):(\d{13}):([A-Za-z0-9_-]{43})$/.exec(secret);
   const expiresAt = Number(grant?.[2]);
   const now = Date.now();
   if (!grant || grant[1] !== env.DRIVE_OWNER_ENROLLMENT_RELEASE ||
-      expiresAt <= now || expiresAt > now + maxAuthorizationMs) return deny(503);
+      expiresAt <= now || expiresAt > now + maxAuthorizationMs) return null;
+  return { expiresAt, token: grant[3] };
+}
+
+export function admitsOwnerEnrollment(env: EnrollmentEnv): boolean {
+  return enrollmentGrant(env) !== null;
+}
+
+export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Promise<Response> {
+  const grant = enrollmentGrant(env);
+  if (!env.DB || !grant) return deny(503);
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...headers, allow: 'POST' } });
   if (!allowsOrigin(request, stagingOrigin) || new URL(request.url).search) return deny(403);
   const authorization = request.headers.get('authorization');
   const bearer = authorization?.length === 50 && /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization);
-  if (!bearer || !subtle.timingSafeEqual(encoder.encode(bearer[1]), encoder.encode(grant[3]))) return deny(403);
+  if (!bearer || !subtle.timingSafeEqual(encoder.encode(bearer[1]), encoder.encode(grant.token))) return deny(403);
 
   try {
     const input = await enrollmentInput(request);
@@ -66,7 +76,7 @@ export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Pro
     // A suspended/revoked owner also permanently closes bootstrap. The SQL in
     // OwnerBootstrap independently enforces this at challenge and commit time.
     if (await env.DB.prepare("SELECT 1 FROM drive_principals WHERE role = 'owner' LIMIT 1").first()) return deny(409);
-    const bootstrap = new OwnerBootstrap(env.DB, new URL(stagingOrigin).hostname, stagingOrigin, expiresAt);
+    const bootstrap = new OwnerBootstrap(env.DB, new URL(stagingOrigin).hostname, stagingOrigin, grant.expiresAt);
     const result = await new OwnerProvisioning(bootstrap).execute(input);
     return Response.json(result, { status: result.ok ? 200 : 400, headers });
   } catch {

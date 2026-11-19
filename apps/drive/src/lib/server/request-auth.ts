@@ -51,8 +51,12 @@ export function readOpaqueCookie(request: Request, cookieName: string, pattern: 
   return token;
 }
 
+export function readSessionToken(request: Request): string | null {
+  return readOpaqueCookie(request, sessionCookie, /^[A-Za-z0-9_-]{43}$/);
+}
+
 export async function readSession(request: Request, db: NonNullable<DriveAuthEnv['DB']>) {
-  const token = readOpaqueCookie(request, sessionCookie, /^[A-Za-z0-9_-]{43}$/);
+  const token = readSessionToken(request);
   if (token === null) return null;
   // Use the primary binding and re-read membership on every private request.
   const principal = await new Sessions(db).lookup(token);

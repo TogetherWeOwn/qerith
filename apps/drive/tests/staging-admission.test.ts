@@ -12,12 +12,15 @@ const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
   new Request(stagingOrigin + path, { method, headers: headers ?? { origin: stagingOrigin, cookie } });
 
-function runtime(role: 'owner' | 'member' | 'revoked' | 'offline' = 'owner') {
+function runtime(role: 'owner' | 'member' | 'revoked' | 'offline' = 'owner', remaining_ms = 60_000, delayMs = 0) {
   let reads = 0;
   const DB = { prepare: () => {
     reads++;
     if (role === 'offline') throw new Error('fixture unavailable');
-    return { bind: () => ({ first: async () => role === 'revoked' ? null : { id, role } }) };
+    return { bind: () => ({ first: async () => {
+      if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
+      return role === 'revoked' ? null : { id, role, remaining_ms };
+    } }) };
   } };
   return { env: { DRIVE_ORIGIN: stagingOrigin, DB }, reads: () => reads, revoke: () => { role = 'revoked'; } };
 }
@@ -50,7 +53,12 @@ test('preview admits only the declared methods and exact routes or assets', asyn
       const { env, reads } = runtime();
       const result = await admitStagingRequest(request(path, method), env, true, assets);
       if ((allowed as readonly string[]).includes(method)) {
-        assert.deepEqual(result, target, `${method} ${path}`);
+        if (target.kind === 'private-asset') {
+          assert.ok(!(result instanceof Response) && result.kind === 'private-asset' &&
+            typeof result.deadline === 'number' && result.deadline > performance.now());
+        } else {
+          assert.deepEqual(result, target, `${method} ${path}`);
+        }
         assert.equal(reads(), protectedRoutes.some(route => route[0] === path) ? 1 : 0);
       } else {
         denied(result, 404);
@@ -116,7 +124,8 @@ test('every protected request checks a live owner, including assets after revoca
   assert.equal(result.headers.get('location'), '/sign-in?next=%2F%3Fafter%3Dcursor');
 
   const { env, reads, revoke } = runtime();
-  assert.deepEqual(await admitStagingRequest(request(root), env, true, assets), { kind: 'private-asset' });
+  const admitted = await admitStagingRequest(request(root), env, true, assets);
+  assert.ok(!(admitted instanceof Response) && admitted.kind === 'private-asset');
   revoke();
   denied(await admitStagingRequest(request(root), env, true, assets), 401);
   assert.equal(reads(), 2);
@@ -150,6 +159,15 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
     denied(await dispatchStagingRequest(request(path, method), env, true, assets, dispatch), 401);
   }
   assert.equal(reads(), protectedRoutes.length);
+});
+
+test('private assets are not dispatched when the session lifetime runs out during lookup', async () => {
+  const { env, reads } = runtime('owner', 1, 10);
+  const unexpected = async () => assert.fail('expired owner session reached downstream dispatch');
+  denied(await dispatchStagingRequest(request(root), env, true, assets, {
+    adapter: unexpected, asset: unexpected, ceremony: unexpected,
+  }), 401);
+  assert.equal(reads(), 1);
 });
 
 test('admitted traffic reaches one handler; assets cannot carry CDN cache overrides', async () => {
