@@ -11,7 +11,7 @@ interface UploadIntentEnv extends DriveAuthEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
-  DRIVE_UPLOAD_VERIFIER?: { isQualified(storageConfigId: string): Promise<boolean> };
+  DRIVE_UPLOAD_VERIFIER?: { isQualified(storageConfigId: string, signal: AbortSignal): Promise<boolean> };
 }
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers });
@@ -24,6 +24,7 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!origin || !db) return reply(503);
   if (request.method !== 'POST') return reply(405);
   if (!allowsOrigin(request, origin.origin)) return reply(403);
+  let sent = false;
   try {
     const session = await readSession(request, db);
     if (!session) return reply(401);
@@ -33,14 +34,31 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const live = async () => (await new Sessions(db).lookup(token))?.id === owner;
     const { fetch, timeoutMs } = transport;
-    let sent = false, deadline = 0;
+    let deadline = 0;
     const allocate = createMultipartCreate(settings, { timeoutMs, async fetch(input) {
-      if (await verifier.isQualified(storageConfigId) !== true || !await live() || !(input instanceof Request) ||
+      if (!(input instanceof Request) || input.signal.aborted ||
+        await verifier.isQualified(storageConfigId, input.signal) !== true || !await live() ||
         input.signal.aborted || request.signal.aborted || performance.now() >= deadline) throw new Error('Allocation not admitted');
       sent = true;
       return fetch(input);
     } });
-    if (await verifier.isQualified(storageConfigId) !== true || request.signal.aborted) return reply(503);
+    if (request.signal.aborted || timeoutMs > 0x7fffffff) return reply(503);
+    const preflight = new AbortController();
+    const signal = AbortSignal.any([request.signal, preflight.signal]);
+    const cutoff = performance.now() + timeoutMs;
+    const timer = setTimeout(() => preflight.abort(), timeoutMs);
+    let stop: () => void;
+    const stopped = new Promise<false>(resolve => {
+      stop = () => resolve(false);
+      signal.addEventListener('abort', stop, { once: true });
+    });
+    try {
+      if (await Promise.race([verifier.isQualified(storageConfigId, signal), stopped]) !== true ||
+        signal.aborted || performance.now() >= cutoff) return reply(503);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', stop!);
+    }
     const intents = new UploadIntents(db);
     const { endpoint, bucket } = settings;
     const claim = await intents.claimNewAllocation(owner, await tokenHash(token), size, endpoint, bucket, epoch);
@@ -59,5 +77,8 @@ export async function createUploadIntent(request: Request, size: number, env: Up
       return reply(sent ? 409 : 503);
     }
     return await live() ? Response.json({ id }, { status: 201, headers }) : reply(401);
-  } catch { return reply(503); }
+  } catch {
+    // After dispatch, a failure to return the ID is not a pre-dispatch outage.
+    return reply(sent ? 409 : 503);
+  }
 }

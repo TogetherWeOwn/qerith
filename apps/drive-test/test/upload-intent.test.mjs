@@ -64,19 +64,37 @@ it('does not dispatch when the last qualification check consumes the deadline', 
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each(['confirmed', 'malformed', 'wrong key'])('journals one signed attempt after a %s reply', async (outcome) => {
+it('times out an unresponsive qualification preflight before creating an intent', async () => {
+  const { bindings, fetch, request, row } = await fixture();
+  const check = bindings.DRIVE_UPLOAD_VERIFIER.isQualified;
+  let approve;
+  check.mockImplementation(() => new Promise(resolve => { approve = resolve; }));
+  const response = await createUploadIntent(request(), 4, bindings, { fetch, timeoutMs: 20 });
+  expect(response.status).toBe(503);
+  expect(check).toHaveBeenCalledTimes(1);
+  expect(check.mock.calls[0][1].aborted).toBe(true);
+  approve(true);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['confirmed', 'malformed', 'wrong key', 'post-dispatch session read failure'])('journals one signed attempt: %s', async (outcome) => {
   const { db, owner, request, bindings, row, fetch } = await fixture();
-  let inFlight, receiver, response;
+  let inFlight, receiver, response, lookup;
   fetch.mockImplementation(async function () {
     receiver = this;
     inFlight = await row();
+    if (outcome === 'post-dispatch session read failure')
+      lookup = vi.spyOn(Sessions.prototype, 'lookup').mockRejectedValueOnce(new Error('D1 unavailable'));
     const key = outcome === 'wrong key' ? 'different-key' : inFlight.object_key;
     return new Response(outcome === 'malformed' ? 'unknown outcome' :
       `<InitiateMultipartUploadResult><Key>${key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
   });
   vi.stubGlobal('fetch', fetch);
-  try { response = await createUploadIntent(request(), maxUploadIntentBytes, bindings); } finally { vi.unstubAllGlobals(); }
+  try { response = await createUploadIntent(request(), maxUploadIntentBytes, bindings); }
+  finally { lookup?.mockRestore(); vi.unstubAllGlobals(); }
   const intent = await row(), success = outcome === 'confirmed';
+  const allocated = success || outcome === 'post-dispatch session read failure';
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(receiver).toBe(globalThis);
   expect(inFlight).toMatchObject({ state: 'initiating', version: 1, declared_size: maxUploadIntentBytes });
@@ -86,7 +104,7 @@ it.each(['confirmed', 'malformed', 'wrong key'])('journals one signed attempt af
   expect(response.status).toBe(success ? 201 : 409);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.text()).toBe(success ? JSON.stringify({ id: intent.id }) : '');
-  expect(intent).toMatchObject({ state: success ? 'allocated' : 'uncertain', version: 2, upload_id: success ? 'provider-only' : null });
+  expect(intent).toMatchObject({ state: allocated ? 'allocated' : 'uncertain', version: 2, upload_id: allocated ? 'provider-only' : null });
   expect(await db.prepare('SELECT * FROM drive_upload_storage_bindings WHERE intent_id = ?').bind(intent.id).first())
     .toEqual({ intent_id: intent.id, endpoint: config.endpoint, bucket: config.bucket, storage_epoch: 'fixture' });
   await expect(db.prepare('UPDATE drive_upload_intents SET declared_size = 1 WHERE id = ?').bind(intent.id).run()).rejects.toThrow('immutable');
