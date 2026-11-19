@@ -81,7 +81,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             return { async claim(partNumber, sizeBytes) {
               if (await isQualified(storageConfigId) !== true) return null;
               const operationId = crypto.randomUUID();
-              // Only the highest part may be short. The unclaimed slots must still fit the remaining bytes.
+              // Unused slots are optional; only the highest present part may be short.
               const claim = await db.prepare(`INSERT INTO drive_upload_part_operations
                 SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version, ?, ? ${allocated}
                   AND i.version = ? AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
@@ -92,8 +92,9 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
                     SELECT part_number, size_bytes FROM drive_upload_part_operations WHERE intent_id = i.id)
                     HAVING sum(size_bytes < ${MIN_PART_BYTES}) <= 1 AND max(CASE WHEN size_bytes < ${MIN_PART_BYTES}
                       THEN part_number ELSE 0 END) IN (0, max(part_number))
-                    AND i.declared_size - sum(size_bytes) BETWEEN ${MIN_PART_BYTES} * (max(part_number) - count(*)) AND ${MAX_PART_BYTES} *
-                      (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*)))
+                    AND (i.declared_size = sum(size_bytes) OR i.declared_size - sum(size_bytes) BETWEEN
+                      CASE WHEN min(size_bytes) >= ${MIN_PART_BYTES} AND max(part_number) < ${MAX_PARTS} THEN 1 ELSE ${MIN_PART_BYTES} END
+                      AND ${MAX_PART_BYTES} * (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*))))
                 RETURNING hex(object_key) AS key_hex, hex(upload_id) AS upload_hex`)
                 .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version, partNumber, partNumber, sizeBytes)
                 .first<{ key_hex: string; upload_hex: string }>();

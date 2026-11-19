@@ -20,7 +20,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
   const bindings = { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
     DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent), completionTimeoutMs,
-      verifyParts: (upload) => verify ? verify(upload, parts) : parts } : undefined };
+      verifyParts: (upload) => verify ? verify(upload, parts) : [...parts].sort((a, b) => a.partNumber - b.partNumber) } : undefined };
   const routes = uploadRoutes(bindings, { timeoutMs: 5000, async fetch(request) {
     calls.push(request.method);
     if (request.method === fail) throw new Error(`provider detail: ${key}`);
@@ -51,19 +51,20 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   return { send, generation, calls, foreign, key, principal };
 }
 
-it('publishes only the conditionally verified generation and never sends a duplicate part or completion', async () => {
-  const { send, generation, calls, foreign } = await fixture();
+it('publishes a verified sparse upload without duplicate part or completion sends', async () => {
+  const { send, generation, calls, foreign } = await fixture({ size: minimum + 7 });
   expect((await send()).status).toBe(409); // An empty seal must roll back.
-  expect((await Promise.all([send(1), send(1)])).map(({ status }) => status).sort()).toEqual([204, 404]);
-  const published = await send();
-  const receipt = await published.json();
+  const part = { bytes: minimum };
+  expect((await Promise.all([send(1, part), send(1, part)])).map(({ status }) => status).sort()).toEqual([204, 404]);
+  expect((await send(3)).status).toBe(204);
+  const published = await send(), receipt = await published.json();
   expect([published.status, published.headers.get('cache-control'), receipt])
     .toEqual([201, 'private, no-store', { id: expect.any(String) }]);
-  expect(await generation()).toEqual({ entry_id: receipt.id, size_bytes: 7, etag });
+  expect(await generation()).toEqual({ entry_id: receipt.id, size_bytes: minimum + 7, etag });
   const replay = await send();
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
-  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+  expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {
@@ -144,11 +145,9 @@ it('checks sibling conflicts before sealing and again at dispatch', async () => 
 });
 
 it('rejects impossible small-part layouts without consuming slots', async () => {
-  const { send, calls } = await fixture({ size: minimum + 7,
-    verify: (_, parts) => [...parts].sort((a, b) => a.partNumber - b.partNumber) });
-  // Only slot 2 can be short, and it may arrive before the full first slot.
-  for (const [number, bytes, status] of [[3, 7, 404], [1, 7, 404], [2, 7, 204],
-    [1, minimum - 1, 404], [1, minimum, 204], [undefined, 0, 201]])
+  const { send, calls } = await fixture({ size: minimum + 7 });
+  for (const [number, bytes, status] of [[10_000, minimum, 404], [1, 7, 404], [3, 6, 204], [4, minimum + 1, 404],
+    [1, minimum - 1, 404], [1, minimum, 404], [1, minimum + 2, 404], [1, minimum + 1, 204], [undefined, 0, 201]])
     expect((await send(number, { bytes })).status).toBe(status);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
 });
