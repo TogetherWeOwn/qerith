@@ -124,7 +124,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   return {
     storageConfigId,
     async complete(token: string, operationId: string, target?: { parentId: string | null; name: string }):
-      Promise<'recorded' | 'not-admitted' | 'uncertain'> {
+      Promise<'recorded' | 'not-admitted' | 'dispatch-denied' | 'uncertain'> {
       if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
       const operation = uploadIdentityBytes(operationId);
       const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
@@ -158,7 +158,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
           SELECT o.operation_id, o.endpoint, o.bucket, o.intent_version + 1, ?, o.session_hash ${allocated}
           ${target ? `AND ${availableUploadDestination('o.owner_id')}` : ''} RETURNING operation_id`)
           .bind(manifestDigest, ...admission, ...destination).first();
-        if (!claim) return 'not-admitted';
+        if (!claim) return target ? 'dispatch-denied' : 'not-admitted';
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {

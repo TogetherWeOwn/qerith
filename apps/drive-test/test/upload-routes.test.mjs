@@ -123,7 +123,7 @@ it.each(['PUT', 'POST', 'qualification', 'receipt'])('preserves send fences and 
 
 it.each(['provider error', 'qualification', 'session'])('requires current authority when publishing (%s)', async (veto) => {
   let current = true, verifications = 0, heads = 0;
-  const { send, foreign, generation, calls, key } = await fixture({
+  const { send, foreign, generation, calls, key, principal } = await fixture({
     isQualified: (id) => current && qualified(id),
     verify: (_, parts) => { if (++verifications === 1) current = false; return parts; },
     beforeHead: async (token) => {
@@ -204,6 +204,42 @@ it('reports a sibling appearing at publication and reuses the verified receipt o
   const replay = await send();
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
+});
+
+it('replays the recorded receipt after the published file moves and the old folder is removed', async () => {
+  const { send, calls, principal } = await fixture();
+  const parentId = await occupy(principal, 'old-parent');
+  expect((await send(1)).status).toBe(204);
+  const published = await send(undefined, { parentId }), receipt = await published.json();
+  expect(published.status).toBe(201);
+  await sql('UPDATE drive_entries SET parent_id = NULL WHERE id = ?', receipt.id).run();
+  await sql('DELETE FROM drive_entries WHERE id = ?', parentId).run();
+  const replay = await send(undefined, { parentId });
+  expect([replay.status, await replay.json()]).toEqual([200, receipt]);
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+});
+
+it('does not relabel an unresolved part claim as a name conflict', async () => {
+  const { send, calls, key, principal } = await fixture();
+  await sql(`INSERT INTO drive_upload_part_operations
+    SELECT ?, id, owner_id, object_key, ?, upload_id, version, 1, 7 FROM drive_upload_intents WHERE object_key = ?`,
+    crypto.randomUUID(), epoch, key).run();
+  await occupy(principal, 'file');
+  const result = await send();
+  expect([result.status, await result.text()]).toEqual([404, '']);
+  expect(calls).toEqual([]);
+});
+
+it('keeps a failed HEAD opaque even if a sibling appears during verification', async () => {
+  const { send, calls, principal, generation } = await fixture({ beforeHead: async () => {
+    await occupy(principal, 'file');
+    throw new Error('provider detail');
+  } });
+  expect((await send(1)).status).toBe(204);
+  const result = await send();
+  expect([result.status, await result.text()]).toEqual([409, '']);
+  expect(await generation()).toBeNull();
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
 });
 
 it('does not relabel an uncertain completion as a name conflict or send it again', async () => {

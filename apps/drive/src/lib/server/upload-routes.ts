@@ -4,7 +4,7 @@ import { accessibleUploadParent, availableUploadDestination, createUploadComplet
   occupiedUploadName } from './metadata/upload-completion-receipts';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
 import { decodeUploadIdentity, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { createTrustedUploadPublication } from './metadata/upload-trusted-publication';
+import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
 import { allowsOrigin, authOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
@@ -127,7 +127,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
       const { parentId, name } = target, operationId = crypto.randomUUID();
       const destinationBindings = [parentId, parentId, parentId, name];
-      let fallback = 409;
+      let fallback = 409, checkName = false;
       try {
         await db.batch([
           db.prepare(`INSERT INTO drive_upload_completion_operations
@@ -144,14 +144,23 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
             AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
-        if (!row) fallback = 404;
-        else if (row.recorded || await createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier)
-          .complete(token, row.operation_id, target) === 'recorded') {
-          const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
-          const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
-          if (published) return Response.json({ id: published.id }, { status: 201, headers });
+        if (!row) {
+          fallback = 404;
+          checkName = true;
+        } else {
+          const result = row.recorded ? 'recorded' : await createUploadCompletionReceipts(db, epoch, settings,
+            { ...transport, timeoutMs }, verifier).complete(token, row.operation_id, target);
+          checkName = result === 'dispatch-denied';
+          if (result === 'recorded') {
+            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
+            const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
+            if (published) return Response.json({ id: published.id }, { status: 201, headers });
+          }
         }
-      } catch { /* Classify from durable state, not provider or constraint error text. */ }
+      } catch (error) {
+        // A failed provider verification is not a failed namespace write.
+        checkName = error instanceof UploadPublicationWriteError;
+      }
 
       try {
         // Take one primary snapshot of live access, prior success and sibling occupancy.
@@ -161,15 +170,18 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
           JOIN drive_entries e ON e.id = p.entry_id AND e.owner_id = p.owner_id
           WHERE p.intent_id = i.id AND p.owner_id = i.owner_id AND g.endpoint = b.endpoint AND g.bucket = b.bucket
             AND g.storage_epoch = b.storage_epoch AND p.parent_id IS ? AND p.name = ?
-        ) AS published_id, (${occupiedUploadName('i.owner_id')} AND ${unfenced} AND (
+        ) AS published_id, ${accessibleUploadParent('i.owner_id')} AS accessible,
+        (? AND ${occupiedUploadName('i.owner_id')} AND ${unfenced} AND (
           (${unsealed} AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
-            JOIN drive_upload_part_observations r USING (operation_id) WHERE p.intent_id = i.id AND r.kind = 'uncertain'))
+            LEFT JOIN drive_upload_part_observations r ON r.operation_id = p.operation_id AND r.kind = 'reported'
+            LEFT JOIN drive_upload_part_observations u ON u.operation_id = p.operation_id AND u.kind = 'uncertain'
+            WHERE p.intent_id = i.id AND (r.operation_id IS NULL OR u.operation_id IS NOT NULL)))
           OR EXISTS (SELECT 1 FROM c WHERE c.intent_id = i.id AND c.owner_id = i.owner_id AND c.session_hash = s.token_hash)
-        )) AS name_taken ${bound} AND ${accessibleUploadParent('i.owner_id')}`)
-          .bind(parentId, name, parentId, name, ...bindings, parentId, parentId)
-          .first<{ published_id: string | null; name_taken: number }>();
-        if (!state) return reply(404);
-        if (state.published_id) return Response.json({ id: state.published_id }, { headers });
+        )) AS name_taken ${bound}`)
+          .bind(parentId, name, parentId, parentId, Number(checkName), parentId, name, ...bindings)
+          .first<{ published_id: string | null; accessible: number; name_taken: number }>();
+        if (state?.published_id) return Response.json({ id: state.published_id }, { headers });
+        if (!state?.accessible) return reply(404);
         if (state.name_taken) return Response.json({ code: 'name-taken' }, { status: 409, headers });
       } catch { /* An unavailable read cannot establish a conflict. */ }
       return reply(fallback);
