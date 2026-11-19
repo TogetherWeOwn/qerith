@@ -526,8 +526,9 @@ jobs:
           git diff --exit-code
           git diff --cached --exit-code
       - name: Exercise generated sign-in in Chromium with local D1
-        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/sign-in.mjs') != ''
+        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD
         run: |
+          test -f apps/drive/browser/sign-in.mjs
           npm run build --prefix apps/drive
           (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
       - name: Verify evidence and record both provenance identities
