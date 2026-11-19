@@ -1,0 +1,42 @@
+# Drive deletion cleanup (closed)
+
+The drain is a fixture-only callback, not a deployed scheduler. The default
+Worker and generated preview do not register a scheduled handler. No request,
+cron configuration, binding or environment setting admits the drain.
+
+## Proposed cadence and capacity
+
+After separate qualification and release approval, propose one invocation every
+15 minutes. Each invocation attempts at most eight due ledger jobs, oldest
+`available_at` first. It uses the existing 60-second fenced leases, five-second
+storage request bound and five-minute retry delay for unconfirmed attempts.
+No invocation loops over batches. At that cadence the theoretical ceiling is
+768 attempts per day, including retries, not 768 confirmed deletions. Missed
+ticks, contention, D1 latency and provider failures reduce usable throughput.
+
+## Deadline detection and response
+
+A separately operated check should sample the primary ledger every 15 minutes,
+independently of drain success. Use D1 time and `created_at`, never the mutable
+`available_at`, to compute age. Count all jobs with `completed_at IS NULL` and
+`created_at <= unixepoch() - 23 * 3600` as approaching the deadline. At
+`24 * 3600`, page the Drive on-call for overdue undelivered work, including
+leased, deferred and storage-identity-mismatched jobs. Also page on missing
+observations and on durable receipts where `completed_at - created_at > 86400`
+so a late completion between samples does not hide a breach. Alert on counts
+and ages, not object keys or credentials. On-call checks scheduler and ledger
+health, escalates unresolved removal proof to the storage incident owner and
+keeps the job unconfirmed until exact evidence exists. No evidence is inferred
+from absence, and no fallback delete is authorized.
+
+## Required qualification
+
+Fixtures prove bounded catch-up and fenced settlement with synthetic proof;
+moving a job's due time does not establish the live 24-hour objective. Qualify
+exclusive mutation, atomic conditional deletion and permanent removal for each
+exact endpoint, bucket and epoch, including distinguishing removal from absence
+and version markers. Measure enqueue-to-receipt elapsed time against real
+scheduler delivery, queue load, missed ticks, storage outages, lost responses,
+and D1 recovery. Demonstrate escalation and catch-up under those conditions and
+account separately for objects that do not qualify for a ledger job. No live
+qualification, activation or deployment is part of this change.
