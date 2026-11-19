@@ -13,7 +13,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
   const other = `other-${intent}`, calls = [], parts = [];
-  await sql("INSERT INTO drive_principals VALUES (?, 'member', 'active'), (?, 'member', 'active')", principal, other).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active'), (?, 'member', 'active')", principal, other).run();
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
