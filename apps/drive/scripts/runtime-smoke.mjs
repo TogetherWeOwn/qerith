@@ -83,8 +83,35 @@ async function exercisePrivateBoundary(main) {
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
     assert.match(await authorized.text(), /Service unavailable\./);
+    const navigation = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
+    const file = `${origin}/api/download/00000000-0000-4000-8000-000000000002`;
+    const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
+    const signedOut = await get(navigation, `${file}/?next=https://other.invalid`);
+    assert.equal(signedOut.status, 303);
+    assert.equal(signedOut.headers.get('location'), '/sign-in?next=%2F');
+    assert.equal(signedOut.headers.get('set-cookie'), null);
+    for (const [name, value] of [['range', 'bytes=1-'], ['if-range', '"old"'], ['if-match', '"old"']]) {
+      for (const [auth, status] of [[{}, 401], [{ cookie }, 503]]) {
+        const response = await get({ ...navigation, ...auth, [name]: value }, `${file}/`);
+        assert.equal(response.status, status);
+        assert.equal(response.headers.get('location'), null);
+        assert.equal(response.headers.get('content-range'), null);
+      }
+    }
+    const unavailable = await get({ ...navigation, cookie });
+    assert.equal(unavailable.status, 303);
+    assert.equal(unavailable.headers.get('location'), '/');
+    const noticeCookie = unavailable.headers.get('set-cookie').split(';')[0];
+    assert.equal(noticeCookie, '__Host-drive-download-failed=unavailable');
+    const notice = await access({ headers: { ...navigation, cookie: `${cookie}; ${noticeCookie}` } });
+    assert.match(await notice.text(), /The file didn’t download\. Try again\./);
+    assert.match(notice.headers.get('set-cookie'), /Max-Age=0/i);
+    assert.doesNotMatch(await (await access({ headers: { ...navigation, cookie } })).text(), /didn’t download/);
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
+    const revoked = await get({ cookie, range: 'bytes=1-' });
+    assert.equal(revoked.status, 401);
+    assert.equal(revoked.headers.get('location'), null);
   } finally {
     await harness.close();
   }
