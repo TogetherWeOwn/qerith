@@ -93,7 +93,8 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const allocated = `${sealed} ${requireActiveOwner(ownerOnly, 'o.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const transportOptions = { ...transport };
+  const { streamBudget, ...options } = transport;
+  const transportOptions = { ...options, streamBudget: streamBudget && { ...streamBudget } };
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)

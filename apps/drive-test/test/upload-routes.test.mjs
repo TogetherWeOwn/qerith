@@ -164,7 +164,9 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   }
 });
 
-it.each(['owner', 'member'])('checks the staging role %s again before the next multipart page', async (role) => {
+it.each([
+  ['owner', false], ['member', false], ['owner', true]
+])('checks the staging role %s again before the next multipart page (changed completion budget: %s)', async (role, mutateBudget) => {
   await applyD1Migrations(env.DB, migrations);
   const operation = crypto.randomUUID(), owner = `owner-${operation}`;
   const { token, key } = await seed(operation);
@@ -189,7 +191,9 @@ it.each(['owner', 'member'])('checks the staging role %s again before the next m
   }, fetch);
   await setRole('owner');
   try {
-    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000 }, verifier, true);
+    const streamBudget = { idleMs: 5000, totalMs: 5000 };
+    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, true);
+    if (mutateBudget) streamBudget.idleMs = 0;
     const result = await service.complete(token, operation);
     expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
     if (role === 'member') {
