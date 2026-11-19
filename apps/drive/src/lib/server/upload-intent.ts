@@ -1,6 +1,6 @@
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type UploadAllocationDatabase } from './metadata/upload-intents';
-import { uploadStorageEvidence } from './metadata/upload-storage-evidence';
+import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { allowsOrigin, authOrigin, readSession, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { createMultipartCreate } from './s3/multipart-create';
@@ -11,7 +11,10 @@ export interface UploadIntentEnv extends DriveAuthEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
-  DRIVE_UPLOAD_VERIFIER?: { isQualified(storageConfigId: string, signal: AbortSignal): Promise<boolean> };
+  DRIVE_UPLOAD_VERIFIER?: {
+    isQualified(storageConfigId: string, signal: AbortSignal): Promise<boolean>;
+    completionTimeoutMs?(storageConfigId: string): number | null;
+  };
 }
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers });
@@ -44,9 +47,10 @@ async function readIntentSize(request: Request): Promise<number | null> {
       if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     if (length !== null && offset !== limit) return null;
-    const body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, offset)));
-    return body && Object.keys(body).length === 1 && Object.hasOwn(body, 'size') && typeof body.size === 'number'
-      ? body.size : null;
+    const json = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, offset));
+    // Accept the browser's integer form without duplicate-key or floating-point normalization.
+    const match = /^[\t\n\r ]*\{[\t\n\r ]*"size"[\t\n\r ]*:[\t\n\r ]*(0|[1-9][0-9]*)[\t\n\r ]*\}[\t\n\r ]*$/.exec(json);
+    return match ? Number(match[1]) : null;
   } catch { return null; }
   finally {
     signal.removeEventListener('abort', cancel);
@@ -57,7 +61,15 @@ async function readIntentSize(request: Request): Promise<number | null> {
 export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
   const size = await readIntentSize(request);
-  return size === null ? reply(400) : createUploadIntent(request, size, env, transport);
+  if (size === null) return reply(400);
+  const { DB, DRIVE_ORIGIN, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH, DRIVE_UPLOAD_VERIFIER: verifier } = env;
+  return createUploadIntent(request, size, {
+    DB, DRIVE_ORIGIN, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
+    // Do not allocate against storage the part and completion routes cannot use.
+    DRIVE_UPLOAD_VERIFIER: verifier && { async isQualified(id, signal) {
+      return await verifier.isQualified(id, signal) === true && uploadCompletionBudget(verifier, id) !== null;
+    } },
+  }, transport);
 }
 
 // Server-only; the caller supplies a parsed byte count and trusted Worker bindings.

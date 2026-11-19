@@ -6,8 +6,8 @@ body. The browser supplies the exact `Origin`; do not set `Content-Length`
 yourself. `size` is an integer byte count from 0 through 16 MiB (inclusive), not
 a filename, a part count, or file data. The server buffers at most 64 request
 bytes, with a two-second read deadline. It requires a complete UTF-8 object with
-only `size`, and
-checks the received length against `Content-Length` when present.
+one literal `size` key and a decimal integer (no fraction or exponent). It checks
+the received length against `Content-Length` when present.
 
 | Reply | Meaning |
 | --- | --- |
@@ -24,7 +24,8 @@ acknowledgement does not prove that storage did nothing.
 
 Allocation requires the existing HTTPS origin, live session and membership in
 D1, upload claim and evidence migrations, and matching qualified S3 config,
-storage epoch and verifier bindings. The server retains provider identifiers
-and signs the request itself. An unconfigured Worker remains fail-closed; this
+storage epoch and verifier bindings. The verifier must attest a usable
+completion budget for the same storage identity before allocation. The server
+retains provider identifiers and signs the request itself. An unconfigured Worker remains fail-closed; this
 route does not provision bindings, admit deployment, or establish a browser
 byte round-trip.

@@ -13,7 +13,7 @@ async function fixture() {
   await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   const sessions = new Sessions(db), { token } = await sessions.issue(owner);
   const bindings = { DB: db, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
-    DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true) } };
+    DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true), completionTimeoutMs: () => 5000 } };
   const request = (source = origin, cookie = `__Host-drive-session=${token}`, target = origin) =>
     new Request(`${target}/api/uploads`, { method: 'POST', headers: { ...(source ? { origin: source } : {}), cookie } });
   const fetch = vi.fn(), transport = { fetch, timeoutMs: 5000 };
@@ -45,7 +45,8 @@ it('rejects malformed, oversized and truncated JSON before claiming or dispatchi
   const valid = '{"size":4}';
   for (const [body, headers] of [
     [null], ['{"size":'], ['null'], ['{"size":"4"}'], ['{"size":4,"name":"file"}'],
-    ['{"size":-1}'], ['{"size":1.5}'], [JSON.stringify({ size: maxUploadIntentBytes + 1 })],
+    ['{"size":-1}'], ['{"size":1.5}'], ['{"size":1.0000000000000001}'], ['{"size":1e0}'],
+    ['{"size":1,"size":4}'], [JSON.stringify({ size: maxUploadIntentBytes + 1 })],
     [new Uint8Array([0xff])], [valid.padEnd(65)], [valid, { 'content-type': 'text/plain' }],
     [valid, { 'content-length': '65' }], [valid, { 'content-length': String(valid.length + 1) }],
     [valid, { 'content-length': String(valid.length - 1) }],
@@ -77,6 +78,17 @@ it('refuses unauthenticated, revoked and unconfigured HTTP requests before dispa
     expect((await post(body, { overrides: { [key]: undefined } })).status).toBe(503);
   await db.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(owner).run();
   expect((await post(body)).status).toBe(401);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('does not claim against qualified storage without a usable completion budget', async () => {
+  const { post, row, fetch, bindings } = await fixture();
+  for (const completionTimeoutMs of [undefined, () => null, () => 0, () => 1.5, () => 0x80000000]) {
+    const verifier = { ...bindings.DRIVE_UPLOAD_VERIFIER, completionTimeoutMs };
+    expect((await post('{"size":4}', { overrides: { DRIVE_UPLOAD_VERIFIER: verifier } })).status).toBe(503);
+  }
+  expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).toHaveBeenCalledTimes(5);
   expect(await row()).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
 });
