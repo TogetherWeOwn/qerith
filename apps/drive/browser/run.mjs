@@ -1406,7 +1406,16 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await download.waitFor({ timeout: 5000 });
+          try {
+            await download.waitFor({ timeout: 5000 });
+          } catch (error) {
+            console.error('Menu opening focus failure:', { inline, from, to, state: await page.evaluate(() => ({
+              active: document.activeElement?.outerHTML,
+              expanded: Array.from(document.querySelectorAll('[aria-expanded="true"]'), el => el.outerHTML),
+              layers: Array.from(document.querySelectorAll('dialog'), el => ({ open: el.open, popover: el.matches(':popover-open'), visible: !!el.getClientRects().length }))
+            })) });
+            throw error;
+          }
           await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });
