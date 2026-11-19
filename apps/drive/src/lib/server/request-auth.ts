@@ -87,7 +87,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
 
     const fixture = admitsSignInFixture(env);
     const staging = origin.origin === stagingOrigin;
-    const signInPage = event.route?.id === '/sign-in';
+    const routeId = event.route?.id;
+    // Owner management is not admitted in preview, even before authentication.
+    if ((fixture || staging) && routeId?.startsWith('/api/owner/')) return deny(404);
+    const signInPage = routeId === '/sign-in';
     if ((signInPage && !(staging ? pathname === '/sign-in' : fixture && /^\/sign-in\/?$/.test(pathname))) ||
         /^\/(?:invite|recover|api\/sign-in)(?:\/|$)/.test(pathname)) return deny(404);
 
