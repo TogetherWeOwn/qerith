@@ -70,15 +70,30 @@ export default { fetch(request, env, ctx) {
     await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
-    for (const name of ['0001_identity.sql', '0009_sessions.sql']) {
+    for (const name of ['0001_identity.sql', '0009_sessions.sql', '0033_owner_registration.sql']) {
       const sql = await readFile(`migrations/${name}`, 'utf8');
       await DB.batch(unstable_splitSqlQuery(sql).map((statement) => DB.prepare(statement)));
     }
-    const token = randomBytes(32).toString('base64url');
-    const cookie = `__Host-drive-session=${token}`;
-    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'owner', 'active')").run();
-    await DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'fixture', ?)")
-      .bind(createHash('sha256').update(token).digest('hex'), Date.now() + 60_000).run();
+    const session = async (id, role) => {
+      const token = randomBytes(32).toString('base64url');
+      await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(id, role).run();
+      await DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
+        .bind(createHash('sha256').update(token).digest('hex'), id, Date.now() + 60_000).run();
+      return `__Host-drive-session=${token}`;
+    };
+    const assertProvisioningUnavailable = async (cookie, role) => {
+      for (const path of ['/owner/bootstrap', '/api/owner/provisioning']) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: 'POST', redirect: 'manual', headers: { cookie, origin, 'content-type': 'application/json' },
+          body: JSON.stringify({ operation: 'challenge' })
+        });
+        assert.equal(response.status, 404, `${path} must not expose provisioning to a ${role} session`);
+      }
+      assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
+    };
+    const cookie = await session('fixture', 'member');
+    // Probe before an existing owner would make the bootstrap operation refuse by itself.
+    await assertProvisioningUnavailable(cookie, 'member');
 
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
@@ -94,13 +109,6 @@ export default { fetch(request, env, ctx) {
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
     assert.match(await authorized.text(), /Service unavailable\./);
-    for (const path of ['/owner/bootstrap', '/api/owner/provisioning']) {
-      const response = await worker.fetch(`${origin}${path}`, {
-        method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' },
-        body: JSON.stringify({ operation: 'challenge' })
-      });
-      assert.equal(response.status, 404, `${path} must not expose provisioning to an owner session`);
-    }
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
     const file = `${origin}/api/download/00000000-0000-4000-8000-000000000002`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
@@ -144,6 +152,7 @@ export default { fetch(request, env, ctx) {
     const revoked = await get({ cookie, range: 'bytes=1-' });
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);
+    await assertProvisioningUnavailable(await session('owner-fixture', 'owner'), 'owner');
   } finally {
     await harness.close();
   }
