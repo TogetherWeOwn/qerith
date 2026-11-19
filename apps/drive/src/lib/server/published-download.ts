@@ -1,29 +1,20 @@
 import { downloadFile } from './download';
 import { createPublishedReadAccess } from './metadata/read-access';
 import { createImmutableS3Reader, createS3Objects } from './s3/objects';
+import { storageIdentity, type StorageBindings } from './storage-runtime';
 
-export interface DownloadEnv {
+export interface DownloadEnv extends StorageBindings {
   DB?: Parameters<typeof createPublishedReadAccess>[0];
-  DRIVE_S3_ENDPOINT?: string;
-  DRIVE_S3_BUCKET?: string;
-  DRIVE_S3_REGION?: string;
-  DRIVE_S3_ACCESS_KEY_ID?: string;
-  DRIVE_S3_SECRET_ACCESS_KEY?: string;
-  DRIVE_S3_STORAGE_EPOCH?: string;
 }
 
 const timeoutMs = 15_000;
 const streamBudget = { idleMs: 30_000, totalMs: 4 * 60 * 60 * 1000 };
 
 export function downloadStorage(env: DownloadEnv) {
-  const { DB, DRIVE_S3_ENDPOINT: endpoint, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: region,
-    DRIVE_S3_ACCESS_KEY_ID: accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,
-    DRIVE_S3_STORAGE_EPOCH: epoch } = env;
-  if (!DB || !endpoint || !bucket || !region || !accessKeyId || !secretAccessKey || !epoch) return null;
-  try {
-    const config = { endpoint, bucket, region, accessKeyId, secretAccessKey };
-    return { ...createPublishedReadAccess(DB, epoch, config), config };
-  } catch { return null; }
+  const identity = storageIdentity(env);
+  if (!env.DB || !identity) return null;
+  const { settings: config, epoch } = identity;
+  return { ...createPublishedReadAccess(env.DB, epoch, config), config };
 }
 
 // The immutable reader validates the byte count at EOF. Check that there are
