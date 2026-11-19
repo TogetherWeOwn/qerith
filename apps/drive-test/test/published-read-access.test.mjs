@@ -19,7 +19,7 @@ it('resolves the current listed name and exact generation for a live owner or gr
   const { id: folder } = await metadata.createFolder(owner, null, 'shared');
   const name = 'résumé.pdf';
   await metadata.move(owner, id, folder, name);
-  await sql("INSERT INTO drive_principals VALUES ('reader', 'member', 'active')").run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES ('reader', 'member', 'active')").run();
   const reader = (await sessions.issue('reader')).token;
   const grants = new ReadGrants(env.DB);
   const primary = vi.fn((mode) => env.DB.withSession(mode));
