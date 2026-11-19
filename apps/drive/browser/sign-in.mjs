@@ -107,6 +107,12 @@ try {
   let loseNext = false;
   let configuredStorage = false;
   let proof;
+  const held = new Map();
+  function holdResponse(matches) {
+    const release = Promise.withResolvers();
+    held.set(matches, release.promise);
+    return () => { held.delete(matches); release.resolve(); };
+  }
   await context.route(`${origin}/**`, async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -128,6 +134,7 @@ try {
       verified.resolve();
       await deliver.promise;
     }
+    for (const [matches, release] of held) if (matches(url.pathname)) await release;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   });
   const signInFrom = async (page, path) => {
@@ -168,7 +175,7 @@ try {
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
   await captureRootListing(first, origin, DB);
   configuredStorage = true;
-  await captureRootUpload(first, origin);
+  await captureRootUpload(first, origin, holdResponse);
   configuredStorage = false;
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();

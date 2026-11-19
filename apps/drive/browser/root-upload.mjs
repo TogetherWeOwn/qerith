@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 
-export async function captureRootUpload(page, origin) {
+export async function captureRootUpload(page, origin, holdResponse) {
   const name = 'Drive round-trip.bin';
   const buffer = Buffer.from(Uint8Array.from({ length: 8193 }, (_, i) => (i ^ (i >> 5)) & 255));
   const file = { name, buffer, mimeType: 'application/octet-stream' };
@@ -36,9 +36,8 @@ export async function captureRootUpload(page, origin) {
     }
   });
 
-  const complete = `${origin}/api/uploads/*/complete`;
-  const release = Promise.withResolvers();
-  await page.route(complete, async route => { await release.promise; await route.fallback(); }, { times: 1 });
+  const releaseCompletion = holdResponse(path => path.startsWith('/api/uploads/') && path.endsWith('/complete'));
+  const releaseRefresh = holdResponse(path => path === '/__data.json');
   try {
     await choose();
     await page.getByText(`Uploading ${name} to My Drive.`, { exact: true }).waitFor();
@@ -50,11 +49,17 @@ export async function captureRootUpload(page, origin) {
       await page.setViewportSize({ width, height });
       await capture(page, 'uploading', width);
     }
+    const refreshing = page.waitForRequest(request => new URL(request.url()).pathname === '/__data.json');
+    releaseCompletion();
+    await refreshing;
+    await page.getByText(`${name}: Uploaded.`, { exact: true }).waitFor();
+    assert.equal(await upload.getAttribute('aria-disabled'), 'false', 'publication unlocks the picker during refresh');
+    assert.equal(await link.count(), 0, 'the server listing response is still held');
   } finally {
-    release.resolve();
+    releaseCompletion();
+    releaseRefresh();
   }
   await link.waitFor();
-  await page.getByText(`${name}: Uploaded.`, { exact: true }).waitFor();
   assert.equal(await status.count(), 1);
   assert.equal(await status.textContent(), `${name}: Uploaded.`);
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);

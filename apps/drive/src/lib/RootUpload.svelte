@@ -10,6 +10,7 @@
   let acceptedBytes = $state(0);
   let message = $state('');
   let published = $state(false);
+  let selection = 0;
 
   function openPicker() {
     if (!busy) picker.click();
@@ -21,6 +22,11 @@
     input.value = '';
     if (!file || busy) return;
     busy = true;
+    const attempt = ++selection;
+    const report = (next: string) => {
+      message = next;
+      announce(`${file.name}: ${next}`);
+    };
     selected = { name: file.name, size: file.size };
     acceptedBytes = 0;
     published = false;
@@ -31,15 +37,16 @@
       const result = await uploadToRoot(file, () => { acceptedBytes = file.size; });
       if (result.status === 'published') {
         published = true;
-        message = 'Uploaded.';
-        try { await refresh(); }
-        catch { message = 'Uploaded. Refresh My Drive to see it.'; }
+        report('Uploaded.');
+        // A slow listing read must not keep a completed upload busy or replace newer feedback.
+        void refresh().catch(() => {
+          if (attempt === selection) report('Uploaded. Refresh My Drive to see it.');
+        });
       } else if (result.status === 'name-taken') {
-        message = 'An item with this name already exists in My Drive.';
+        report('An item with this name already exists in My Drive.');
       } else {
-        message = 'Upload interrupted.';
+        report('Upload interrupted.');
       }
-      announce(`${file.name}: ${message}`);
     } finally {
       busy = false;
     }
