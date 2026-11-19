@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const variants = ['valid', 'unnamed', 'waiting', 'cancelled', 'unsupported', 'dead-link', 'signed-in', 'rate-limited', 'long-note'];
 
 export async function exerciseInviteAcceptance(browser, origin, axe, output) {
-  for (const [width, height] of [[1280, 800], [390, 844]]) {
+  for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     await context.routeWebSocket('**/*', socket => socket.close());
@@ -15,7 +15,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       const field = page.getByRole('textbox', { name: 'Your name' });
       const button = page.getByRole('button', { name: 'Set up a passkey', exact: true });
       const waiting = page.getByRole('button', { name: 'Waiting for your device…' });
-      const status = page.getByRole('status');
+      const status = page.locator('#invite-status');
       const cancel = page.getByRole('button', { name: 'Cancel', exact: true });
       const focused = locator => locator.and(page.locator(':focus')).waitFor({ timeout: 5000 });
       const dataset = key => page.evaluate(key => document.body.dataset[key], key);
@@ -31,6 +31,25 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         }));
         await writeFile(resolve(output, `axe-${evidence}.json`), JSON.stringify(results, null, 2));
         assert.equal(results.violations.length, 0, `axe violations for ${evidence}: ${JSON.stringify(results.violations)}`);
+      }
+
+      if (width === 320) {
+        await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
+        await load('long-note');
+        const modes = await page.evaluate(() => ({
+          reflow: document.documentElement.scrollWidth <= innerWidth,
+          forcedColors: matchMedia('(forced-colors: active)').matches,
+          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches && !document.getAnimations().length
+        }));
+        assert.deepEqual(modes, { reflow: true, forcedColors: true, reducedMotion: true });
+        await page.keyboard.press('Tab');
+        await focused(field);
+        assert.equal(await field.evaluate(el => el.matches(':focus-visible') && parseFloat(getComputedStyle(el).outlineWidth) > 0), true);
+        await capture('forced-colours-focus');
+        await page.emulateMedia({ forcedColors: 'none' });
+        await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+        await capture('greyscale');
+        continue;
       }
 
       for (const variant of variants) {
@@ -96,8 +115,10 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       await page.getByRole('alert').filter({ hasText: 'Type a name.' }).waitFor();
       assert.equal(await dataset('attempts'), undefined);
       await capture('name-error');
-      await field.pressSequentially('x'.repeat(65));
-      assert.equal((await field.inputValue()).length, 64);
+      await field.fill('🙂'.repeat(65));
+      await field.press('Enter');
+      await page.getByRole('alert').filter({ hasText: 'Use 64 characters or fewer.' }).waitFor();
+      assert.equal(await dataset('attempts'), undefined);
       await field.fill('  Péll  ');
       await page.keyboard.press('Tab');
       await focused(button);
@@ -124,6 +145,31 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         focusOrder: ['Your name', 'Set up a passkey', 'Cancel', 'Set up a passkey', "This link doesn't work any more"],
         blankRejected: true, duplicateWhileWaitingRejected: true, retryKeepsEditedName: true
       }, null, 2));
+      await load('long-note');
+      const sanitizedName = '🙂'.repeat(40) + 'Pell';
+      assert.equal(await field.inputValue(), sanitizedName);
+      await field.press('Enter');
+      assert.equal(await dataset('name'), sanitizedName);
+
+      await load('signed-in');
+      const home = page.getByRole('link', { name: 'Go to My Drive' });
+      await page.keyboard.press('Tab');
+      await focused(home);
+      await page.evaluate(() => window.dispatchEvent(new Event('fixture-refresh-user')));
+      await page.getByRole('heading', { name: "You're signed in as Sam" }).waitFor();
+      await focused(home);
+
+      await load('valid');
+      await page.evaluate(() => window.dispatchEvent(new Event('fixture-expire-invite')));
+      await page.getByRole('status').filter({ hasText: "This link doesn't work any more" }).waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+
+      await load('delayed');
+      await page.locator('form').evaluate(form => { form.requestSubmit(); form.requestSubmit(); });
+      await waiting.waitFor();
+      assert.equal(await dataset('attempts'), '1');
+      await page.evaluate(() => window.dispatchEvent(new Event('fixture-finish-setup')));
+      assert.equal(await waiting.getAttribute('aria-busy'), 'true');
       console.log(`Invite acceptance: ${variants.length} screenshot/axe states and keyboard flow passed at ${width}x${height}`);
     } finally {
       await context.close();

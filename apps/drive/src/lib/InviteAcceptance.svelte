@@ -1,94 +1,102 @@
 <script lang="ts" module>
-  // The caller resolves the link and owns registration, cancellation and success navigation.
-  export type InviteAcceptanceState =
-    | { kind: 'valid' | 'waiting' | 'cancelled' | 'unsupported' | 'rate-limited'; inviter?: string; displayName?: string; note?: string }
+  export type InviteAcceptanceView =
+    | { kind: 'invite'; inviter?: string; displayName?: string; note?: string }
     | { kind: 'dead-link' }
     | { kind: 'signed-in'; signedInName: string };
+  export type InvitePasskeyPhase = 'valid' | 'waiting' | 'cancelled' | 'unsupported' | 'rate-limited';
 </script>
 
 <script lang="ts">
   import { afterUpdate, beforeUpdate, onMount } from 'svelte';
-  import PasskeyPage from './PasskeyPage.svelte';
+  import SignInPage from './SignInPage.svelte';
   import { signInCopy } from './sign-in-state';
 
-  export let state: InviteAcceptanceState;
-  export let onSetup: (displayName: string) => void;
+  // The caller resolves the link and keys this view per invite. It owns the ceremony and navigation.
+  export let view: InviteAcceptanceView;
+  export let phase: InvitePasskeyPhase = 'valid';
+  // Return a promise while preparing the ceremony, or set the waiting phase synchronously.
+  export let onSetup: (displayName: string) => void | Promise<void>;
   export let onCancel: () => void;
 
   let heading: HTMLHeadingElement;
   let card: HTMLElement;
   let field: HTMLInputElement;
   let primary: HTMLButtonElement;
-  let cancel: HTMLButtonElement;
-  let name = '';
+  let focused: Element | null;
+  let rendered: InviteAcceptanceView['kind'] | undefined;
+  let announcement = '';
   let nameError = '';
   let ready = false;
-  let restore: 'heading' | 'primary' | undefined;
-  const nameLimit = 64;
-  $: invite = state.kind !== 'dead-link' && state.kind !== 'signed-in' ? state : null;
-  $: prefill = invite?.displayName ?? '';
-  $: { name = prefill; nameError = ''; }
-  $: status = state.kind === 'waiting' || state.kind === 'unsupported' || state.kind === 'rate-limited'
-    ? signInCopy[state.kind].notice : undefined;
-  $: unavailable = state.kind !== 'valid' && state.kind !== 'cancelled';
+  let pending = false;
+  const deadTitle = "This link doesn't work any more";
+  $: invite = view.kind === 'invite' ? view : null;
+  $: shown = pending ? 'waiting' : phase;
+  $: status = shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
+  $: unavailable = shown !== 'valid' && shown !== 'cancelled';
 
   onMount(() => { ready = true; });
   beforeUpdate(() => {
-    if (typeof document === 'undefined') return;
-    const focused = document.activeElement;
-    restore = !invite && focused !== heading && card?.contains(focused) ? 'heading'
-      : state.kind !== 'waiting' && focused === cancel ? 'primary' : undefined;
+    const active = typeof document === 'undefined' ? null : document.activeElement;
+    focused = card?.contains(active) ? active : null;
   });
   afterUpdate(() => {
-    if (restore === 'heading') heading.focus();
-    if (restore === 'primary') primary.focus();
-    restore = undefined;
+    if (focused && !card.contains(focused) && document.activeElement === document.body) {
+      (invite ? primary : heading).focus();
+    }
+    if (view.kind !== rendered) {
+      announcement = rendered === 'invite' && view.kind === 'dead-link' && !focused ? deadTitle : '';
+      rendered = view.kind;
+      nameError = '';
+    }
   });
 
-  function setup() {
-    if (!ready || unavailable) return;
-    const displayName = name.trim();
-    nameError = !displayName ? 'Type a name.' : displayName.length > nameLimit ? 'Use 64 characters or fewer.' : '';
-    if (nameError) field.focus();
-    else onSetup(displayName);
+  async function setup() {
+    if (!ready || pending || unavailable || !invite) return;
+    const displayName = field.value.trim();
+    nameError = !displayName ? 'Type a name.' : Array.from(displayName).length > 64 ? 'Use 64 characters or fewer.' : '';
+    if (nameError) { field.focus(); return; }
+    pending = true;
+    try { await onSetup(displayName); }
+    finally { pending = false; }
   }
 </script>
 
-<PasskeyPage title="Accept invite">
+<SignInPage title="Accept invite">
   <section aria-labelledby="invite-title" bind:this={card}>
     <h1 id="invite-title" tabindex="-1" aria-describedby={invite ? undefined : 'invite-description'} bind:this={heading}>
-      {#if state.kind === 'dead-link'}This link doesn't work any more
-      {:else if state.kind === 'signed-in'}You're signed in as <bdi>{state.signedInName}</bdi>
-      {:else if state.inviter}<bdi>{state.inviter}</bdi> invited you to Drive
+      {#if view.kind === 'dead-link'}{deadTitle}
+      {:else if view.kind === 'signed-in'}You're signed in as <bdi>{view.signedInName}</bdi>
+      {:else if view.inviter}<bdi>{view.inviter}</bdi> invited you to Drive
       {:else}You're invited to Drive{/if}
     </h1>
-    {#if state.kind === 'dead-link'}
+    <p class="sr-only" role="status">{announcement}</p>
+    {#if view.kind === 'dead-link'}
       <p id="invite-description">Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one.</p>
-    {:else if state.kind === 'signed-in'}
+    {:else if view.kind === 'signed-in'}
       <p id="invite-description">This invite is for someone else, so it wasn't used.</p>
       <a class="ghost" href="/">Go to My Drive</a>
     {:else}
-      {#if state.note}<blockquote dir="auto">{state.note}</blockquote>{/if}
+      {#if view.note}<blockquote dir="auto">{view.note}</blockquote>{/if}
       <form method="post" novalidate on:submit|preventDefault={setup}>
         <label for="invite-name">Your name</label>
-        <input id="invite-name" type="text" dir="auto" autocomplete="name" required maxlength={nameLimit}
-          readonly={state.kind === 'waiting'} bind:this={field} bind:value={name} on:input={() => { nameError = ''; }}
+        <input id="invite-name" type="text" dir="auto" autocomplete="name" required
+          readonly={shown === 'waiting'} bind:this={field} value={view.displayName ?? ''} on:input={() => { nameError = ''; }}
           aria-invalid={nameError ? 'true' : undefined} aria-describedby={nameError ? 'invite-name-error' : undefined} />
         <p id="invite-name-error" class="error" role="alert">{nameError}</p>
-        <button class="primary" class:quiet={state.kind === 'unsupported' || state.kind === 'rate-limited'} type="submit"
-          bind:this={primary} disabled={!ready} aria-disabled={unavailable} aria-busy={state.kind === 'waiting'}
-          aria-describedby={unavailable ? 'invite-status' : undefined}>
-          {state.kind === 'waiting' || state.kind === 'rate-limited' ? signInCopy[state.kind].action : 'Set up a passkey'}
+        <button class="primary" class:quiet={shown === 'unsupported' || shown === 'rate-limited'} type="submit"
+          bind:this={primary} disabled={!ready} aria-disabled={unavailable} aria-busy={shown === 'waiting'}
+          aria-describedby={status ? 'invite-status' : undefined}>
+          {shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
         </button>
-        <p id="invite-status" class:notice={state.kind === 'unsupported'} role="status">{status ?? ''}</p>
-        {#if state.kind === 'waiting'}<button class="cancel" type="button" on:click={onCancel} bind:this={cancel}>Cancel</button>{/if}
-        {#if state.kind === 'cancelled'}<p class="notice info" role="alert">{signInCopy.cancelled.notice}</p>{/if}
+        <p id="invite-status" class:notice={shown === 'unsupported'} role="status">{status ?? ''}</p>
+        {#if shown === 'waiting'}<button class="cancel" type="button" on:click={onCancel}>Cancel</button>{/if}
+        {#if shown === 'cancelled'}<p class="notice info" role="alert">{signInCopy.cancelled.notice}</p>{/if}
       </form>
       <p class="explanation">Your device asks to save a passkey for this site. That's how you sign in from now on.</p>
       <p class="explanation lock"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>No passwords. Your passkey stays on your device or password manager.</p>
     {/if}
   </section>
-</PasskeyPage>
+</SignInPage>
 
 <style>
   section { padding: var(--drive-space-inset-card-lg); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
@@ -111,6 +119,7 @@
   .info { background: var(--drive-color-bg-surface); }
   .error { margin-block: var(--drive-space-2) 0; color: var(--drive-color-state-danger); font-size: var(--drive-font-size-small); }
   p:empty { margin: 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .explanation { font-size: var(--drive-font-size-small); }
   .lock { display: flex; gap: var(--drive-space-2); }
   svg { width: var(--drive-size-icon-md); height: var(--drive-size-icon-md); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
