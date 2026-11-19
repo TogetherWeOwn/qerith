@@ -53,11 +53,25 @@ try {
   });
   for (const step of ['challenge', 'restart', 'verify']) assert.equal((await post(step, { origin: 'https://other.example.test' })).status, 403);
   const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
-  const head = headers => worker.fetch(`${origin}/?return=1`, { method: 'HEAD', headers, redirect: 'manual' });
-  const redirect = await head(navigation);
-  assert.equal(redirect.status, 303);
-  assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
-  assert.equal((await head({ ...navigation, range: 'bytes=0-' })).status, 401);
+  const visit = (method, headers) => worker.fetch(`${origin}/?return=1`, { method, headers, redirect: 'manual' });
+  for (const site of ['same-origin', 'none', 'same-site', 'cross-site']) {
+    const headers = { ...navigation, 'sec-fetch-site': site };
+    for (const method of ['GET', 'HEAD']) {
+      const redirect = await visit(method, headers);
+      assert.equal(redirect.status, 303, `${method} from ${site}`);
+      assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
+      assert.equal(redirect.headers.get('cache-control'), 'private, no-store');
+    }
+  }
+  const crossSite = { ...navigation, 'sec-fetch-site': 'cross-site' };
+  for (const method of ['GET', 'HEAD']) {
+    for (const headers of [{ ...crossSite, range: 'bytes=0-' }, { ...crossSite, 'if-none-match': '"previous"' },
+      { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'cross-site' }]) {
+      const denied = await visit(method, headers);
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get('location'), null);
+    }
+  }
   const blocked = await worker.fetch(`${origin}/`, { headers: { ...navigation, origin: 'https://other.example.test' } });
   assert.equal(blocked.status, 403);
   assert.equal(blocked.headers.get('cache-control'), 'private, no-store');
@@ -131,6 +145,9 @@ try {
   assert.equal(traffic.filter(([step]) => step === 'verify').length, 1);
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure && session.sameSite === 'Lax');
+  const signedIn = await visit('HEAD', { ...crossSite, cookie: `${sessionName}=${session.value}` });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.headers.get('location'), null);
   const tokenHash = createHash('sha256').update(session.value).digest('hex');
   assert.equal((await DB.prepare('SELECT principal_id FROM drive_sessions WHERE token_hash = ?').bind(tokenHash).first()).principal_id, 'fixture-owner');
   const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
@@ -153,7 +170,7 @@ try {
   assert.equal(denial.status, 401);
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
-  console.log('Generated Worker + Chromium + D1: restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  console.log('Generated Worker + Chromium + D1: cross-site navigation, restart, queued tabs, late cancel, return targets, expiry and revocation passed');
 } finally {
   await browser?.close();
   await harness.close();
