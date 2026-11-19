@@ -24,10 +24,10 @@
     selected = { name: file.name, size: file.size };
     acceptedBytes = 0;
     published = false;
-    announce(`Uploading ${file.name} to My Drive.`);
-    message = 'Uploading…';
 
     try {
+      announce(`Uploading ${file.name} to My Drive.`);
+      message = 'Uploading…';
       const result = await uploadToRoot(file, () => { acceptedBytes = file.size; });
       if (result.status === 'published') {
         published = true;
@@ -35,7 +35,7 @@
         try { await refresh(); }
         catch { message = 'Uploaded. Refresh My Drive to see it.'; }
       } else if (result.status === 'name-taken') {
-        message = 'A file with this name already exists in My Drive.';
+        message = 'An item with this name already exists in My Drive.';
       } else {
         message = 'Upload interrupted.';
       }
