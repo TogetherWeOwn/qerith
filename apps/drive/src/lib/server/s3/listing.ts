@@ -33,15 +33,17 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         return { keys, nextContinuationToken: next };
       } catch { throw new Error('Invalid S3 listing response'); }
     },
-    async parts(key: string, uploadId: string, options: { partNumberMarker?: number; signal?: AbortSignal } = {}) {
+    async parts(key: string, uploadId: string, options: { partNumberMarker?: number; maxParts?: number; signal?: AbortSignal } = {}) {
       try {
         if (!key || key.split('/').some((segment) => segment === '.' || segment === '..')) throw new Error();
         encodeURIComponent(key);
       } catch { throw new Error('Invalid or unsupported S3 key'); }
-      const marker = options.partNumberMarker;
+      const { partNumberMarker: marker, maxParts } = options;
       if (!uploadId || (marker !== undefined && (!Number.isInteger(marker) || marker < 0 || marker > 10000))) throw new Error('Invalid S3 listing cursor');
+      if (maxParts !== undefined && (!Number.isInteger(maxParts) || maxParts < 1 || maxParts > 1000)) throw new Error('Invalid S3 listing page size');
       const query: Record<string, string> = { uploadId };
       if (marker !== undefined) query['part-number-marker'] = String(marker);
+      if (maxParts !== undefined) query['max-parts'] = String(maxParts);
       const body = await page(key, query, options.signal);
       try {
         const root = parseListingXml(body, 'ListPartsResult');
