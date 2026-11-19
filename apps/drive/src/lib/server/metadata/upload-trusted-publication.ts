@@ -1,4 +1,4 @@
-import { tokenHash } from '../identity/sessions';
+import { Sessions, tokenHash } from '../identity/sessions';
 import { createImmutableS3Reader, createS3Objects } from '../s3/objects';
 import { requireActiveOwner, validateName } from './private';
 import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from './upload-storage-evidence';
@@ -6,6 +6,7 @@ import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from
 interface Statement {
   bind(...values: (string | number | null | ArrayBuffer)[]): Statement;
   first<T>(): Promise<T | null>;
+  all<T>(): Promise<{ results: T[] }>;
 }
 interface Session { prepare(sql: string): Statement }
 interface Database extends Session { withSession(constraint: 'first-primary'): Session }
@@ -28,8 +29,10 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { beforeSend, ...options } = transport;
-  const reader = createImmutableS3Reader(createS3Objects(settings, { ...options,
-    beforeSend: async () => await isQualified?.(storageConfigId) === true && (!beforeSend || await beforeSend() === true) }));
+  const makeReader = (checkOwner?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
+    beforeSend: async () => await isQualified?.(storageConfigId) === true && (!beforeSend || await beforeSend() === true) &&
+      (!checkOwner || await checkOwner()) }));
+  const reader = ownerOnly ? undefined : makeReader();
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {
@@ -48,7 +51,8 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
       try {
         const key = decodeUploadIdentity(key_hex);
         if (key.includes('\0')) return null;
-        const head = await reader.head({ key, etag });
+        const current = reader ?? makeReader(() => new Sessions(db.withSession('first-primary')).isLiveOwner(token, principalId));
+        const head = await current.head({ key, etag });
         if (head.status !== 200 || typeof head.contentLength !== 'string' || !/^\d+$/.test(head.contentLength) ||
             Number(head.contentLength) !== size_bytes || await isQualified(storageConfigId) !== true) return null;
       } catch { return null; }

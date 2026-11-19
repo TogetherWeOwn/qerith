@@ -1,9 +1,11 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
+import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
+import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
-import { config, epoch, migrations, response, sessions, sql } from './fixtures/upload-completion.mjs';
+import { config, epoch, evidence, migrations, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
 const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
@@ -120,6 +122,36 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   } finally {
     await demote();
   }
+});
+
+it('stops multipart verification before a later page when the staging owner is demoted', async () => {
+  await applyD1Migrations(env.DB, migrations);
+  const operation = crypto.randomUUID();
+  const { token, key } = await seed(operation);
+  const setRole = (role) => sql('UPDATE drive_principals SET role = ? WHERE id = ?', role, `owner-${operation}`).run();
+  const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
+  const calls = [];
+  const fetch = async (request) => {
+    calls.push([request.method, new URL(request.url).searchParams.get('part-number-marker')]);
+    await setRole('member');
+    return new Response(`<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key>` +
+      '<UploadId>upload/+id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>' +
+      '<Part><PartNumber>2</PartNumber><Size>7</Size><ETag>"part-&amp;-ÿ"</ETag></Part></ListPartsResult>');
+  };
+  const { DRIVE_UPLOAD_VERIFIER: verifier } = wireUploadStorage({
+    DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+    DRIVE_S3_STORAGE_EPOCH: epoch, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey,
+    DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId, region: config.region,
+      sourceSha: 'a'.repeat(40), runId: '123', runAttempt: 1, completionTimeoutMs: 5000 })
+  }, fetch);
+  await setRole('owner');
+  try {
+    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000 }, verifier, true);
+    expect(await service.complete(token, operation)).toBe('not-admitted');
+    expect(calls).toEqual([['GET', null]]);
+    expect(await evidence('dispatches', operation)).toBeNull();
+    expect(await evidence('receipts', operation)).toBeNull();
+  } finally { await setRole('member'); }
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {

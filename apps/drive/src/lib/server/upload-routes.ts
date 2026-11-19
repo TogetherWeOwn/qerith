@@ -155,9 +155,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             { ...transport, timeoutMs }, verifier, ownerOnly).complete(token, row.operation_id, target);
           checkName = result === 'dispatch-denied';
           if (result === 'recorded') {
-            const publisher = createTrustedUploadPublication(db, epoch, settings, { ...transport,
-              beforeSend: ownerOnly ? () => new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId) : undefined
-            }, isQualified, ownerOnly);
+            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified, ownerOnly);
             const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
             if (published) return Response.json({ id: published.id }, { status: 201, headers });
           }
