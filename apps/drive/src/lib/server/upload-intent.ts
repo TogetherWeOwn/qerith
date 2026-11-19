@@ -18,7 +18,7 @@ const reply = (status: number) => new Response(null, { status, headers });
 
 // Server-only; the caller supplies a parsed byte count and trusted Worker bindings.
 export async function createUploadIntent(request: Request, size: number, env: UploadIntentEnv,
-  transport = { fetch: globalThis.fetch, timeoutMs: 5000 }): Promise<Response> {
+  transport = { fetch: (input: Request) => globalThis.fetch(input), timeoutMs: 5000 }): Promise<Response> {
   const origin = authOrigin(env.DRIVE_ORIGIN);
   const { DB: db, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch, DRIVE_UPLOAD_VERIFIER: verifier } = env;
   if (!origin || !db) return reply(503);
@@ -32,12 +32,13 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     const { token, principal: { id: owner } } = session;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const live = async () => (await new Sessions(db).lookup(token))?.id === owner;
-    let sent = false;
-    const allocate = createMultipartCreate(settings, { ...transport, async fetch(input) {
-      if (await verifier.isQualified(storageConfigId) !== true || !await live() ||
-        !(input instanceof Request) || input.signal.aborted || request.signal.aborted) throw new Error('Allocation not admitted');
+    const { fetch, timeoutMs } = transport;
+    let sent = false, deadline = 0;
+    const allocate = createMultipartCreate(settings, { timeoutMs, async fetch(input) {
+      if (await verifier.isQualified(storageConfigId) !== true || !await live() || !(input instanceof Request) ||
+        input.signal.aborted || request.signal.aborted || performance.now() >= deadline) throw new Error('Allocation not admitted');
       sent = true;
-      return transport.fetch(input);
+      return fetch(input);
     } });
     if (await verifier.isQualified(storageConfigId) !== true || request.signal.aborted) return reply(503);
     const intents = new UploadIntents(db);
@@ -46,6 +47,8 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     if (!claim) return reply(401);
     const { id, object_key: key, version } = claim;
     try {
+      // The final admission checks run inside transport's response budget.
+      deadline = performance.now() + timeoutMs;
       const { uploadId } = await allocate(key, request.signal);
       if (!await intents.recordSuccess(owner, id, version, { kind: 'allocation', uploadId })) return reply(409);
     } catch {

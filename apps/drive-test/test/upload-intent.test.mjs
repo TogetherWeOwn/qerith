@@ -53,17 +53,36 @@ it.each(['mutation', 'dispatch'])('denies revocation at the %s boundary', async 
   expect(await row()).toEqual(boundary === 'mutation' ? null : expect.objectContaining({ state: 'created', upload_id: null }));
 });
 
-it.each([true, false])('journals a single signed attempt (provider acknowledges: %s)', async (success) => {
-  const { db, owner, create, row, fetch } = await fixture();
-  fetch.mockImplementation(async (request) => {
-    const intent = await row();
-    expect(intent).toMatchObject({ state: 'initiating', version: 1, declared_size: maxUploadIntentBytes });
-    expect(request.url).toBe(`${config.endpoint}/${config.bucket}/${intent.object_key}?uploads=`);
-    expect(request.headers.get('authorization')).toMatch(/^AWS4-HMAC-SHA256 /);
-    return new Response(success ? '<InitiateMultipartUploadResult><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>' : 'unknown outcome');
+it('does not dispatch when the last qualification check consumes the deadline', async () => {
+  const { bindings, create, row, fetch } = await fixture();
+  const check = bindings.DRIVE_UPLOAD_VERIFIER.isQualified;
+  let clock = 0;
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  check.mockImplementation(async () => { if (check.mock.calls.length === 2) clock = 5000; return true; });
+  try { expect((await create()).status).toBe(503); } finally { now.mockRestore(); }
+  expect(await row()).toMatchObject({ state: 'created', upload_id: null });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['confirmed', 'malformed', 'wrong key'])('journals one signed attempt after a %s reply', async (outcome) => {
+  const { db, owner, request, bindings, row, fetch } = await fixture();
+  let inFlight, receiver, response;
+  fetch.mockImplementation(async function () {
+    receiver = this;
+    inFlight = await row();
+    const key = outcome === 'wrong key' ? 'different-key' : inFlight.object_key;
+    return new Response(outcome === 'malformed' ? 'unknown outcome' :
+      `<InitiateMultipartUploadResult><Key>${key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
   });
-  const response = await create(undefined, maxUploadIntentBytes), intent = await row();
+  vi.stubGlobal('fetch', fetch);
+  try { response = await createUploadIntent(request(), maxUploadIntentBytes, bindings); } finally { vi.unstubAllGlobals(); }
+  const intent = await row(), success = outcome === 'confirmed';
   expect(fetch).toHaveBeenCalledTimes(1);
+  expect(receiver).toBe(globalThis);
+  expect(inFlight).toMatchObject({ state: 'initiating', version: 1, declared_size: maxUploadIntentBytes });
+  const [[signed]] = fetch.mock.calls;
+  expect(signed.url).toBe(`${config.endpoint}/${config.bucket}/${intent.object_key}?uploads=`);
+  expect(signed.headers.get('authorization')).toMatch(/^AWS4-HMAC-SHA256 /);
   expect(response.status).toBe(success ? 201 : 409);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.text()).toBe(success ? JSON.stringify({ id: intent.id }) : '');
