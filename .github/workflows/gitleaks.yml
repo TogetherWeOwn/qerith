@@ -1,0 +1,93 @@
+name: gitleaks
+
+# Keep the job name stable for the default-branch ruleset.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'merge_group' }}
+
+env:
+  SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+
+jobs:
+  scan:
+    name: gitleaks (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # Candidate tests run on another VM, never in the history scan's job.
+      matrix:
+        mode: ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'merge_group') && '["history","candidate"]' || '["history"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SCAN_HEAD }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the scanner wrapper
+        id: wrapper
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          script=scripts/gitleaks-ci.sh
+          if [[ -n "$BASE_SHA" ]]; then
+            git cat-file -e "$BASE_SHA^{commit}"
+            if [[ "$MODE" == candidate ]]; then
+              changed=$(git diff --name-only "$BASE_SHA"...HEAD -- "$script" .github/workflows/gitleaks.yml)
+              if [[ -z "$changed" ]]; then exit 0; fi
+            elif git cat-file -e "$BASE_SHA:$script" 2>/dev/null; then
+              git show "$BASE_SHA:$script" > "$RUNNER_TEMP/gitleaks-ci.sh"
+              script="$RUNNER_TEMP/gitleaks-ci.sh"
+            fi
+            # The first PR adding the scanner has no base copy to run.
+          fi
+          printf 'GITLEAKS_SCRIPT=%s\n' "$script" >> "$GITHUB_ENV"
+          printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
+      - name: Install pinned gitleaks
+        if: steps.wrapper.outputs.enabled == 'true'
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          # Release checksum for the Linux x64 archive; update with the version.
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d "$RUNNER_TEMP/gitleaks-install.XXXXXX")
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 30 --retry 3 -o "$scratch/$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$asset"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$scratch/$asset" | sha256sum --check -
+          tar -xzf "$scratch/$asset" -C "$scratch" gitleaks
+          bin="$RUNNER_TEMP/gitleaks"
+          install -m 0755 "$scratch/gitleaks" "$bin"
+          "$bin" version
+          printf 'GITLEAKS_BIN=%s\n' "$bin" >> "$GITHUB_ENV"
+      - name: Test full-history scan regressions
+        if: steps.wrapper.outputs.enabled == 'true'
+        run: bash "$GITLEAKS_SCRIPT" self-test
+      - name: Scan the full history
+        if: matrix.mode == 'history'
+        run: bash "$GITLEAKS_SCRIPT" scan
+
+  gitleaks:
+    name: gitleaks
+    needs: scan
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: test "$SCAN_RESULT" = success
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}

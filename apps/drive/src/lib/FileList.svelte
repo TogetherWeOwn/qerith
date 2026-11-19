@@ -20,12 +20,12 @@
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
   const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
 
-  $: if (detailsId !== null && (!onAction || !inlineDetails || !items.some(item => item.id === detailsId))) {
+  $: if (detailsId !== null && ((onAction && !inlineDetails) || !items.some(item => item.id === detailsId))) {
     if (onAction && findRowPart(visibleView(), 'data-details-id', detailsId)?.contains(document.activeElement)) triggerFor(visibleView(), detailsId)?.focus();
     detailsId = null;
   }
   async function selectAction(source: HTMLElement, id: string, action: RowAction) {
-    if (action !== 'Details' || !inlineDetails) { onAction?.(id, action); return; }
+    if (action !== 'Details' || (onAction && !inlineDetails)) { onAction?.(id, action); return; }
     const sourceTrigger = triggerFor(source, id);
     detailsId = id;
     await tick();
@@ -77,9 +77,9 @@
       // Closing a top-layer menu can itself change focus, so snapshot it first.
       const active = document.activeElement;
       const focused = active === document.body ? lastFocused : active;
-      if (onAction) dismissMenus(from, compact ? desktopActions : compactActions);
+      dismissMenus(from, compact ? desktopActions : compactActions);
       if (!to.getClientRects().length) {
-        if (onAction) dismissMenus(to, compact ? compactActions : desktopActions);
+        dismissMenus(to, compact ? compactActions : desktopActions);
         lastFocused = null;
         return;
       }
@@ -100,8 +100,7 @@
         target = focused === facts ? next : next?.querySelector('button[type="button"]');
       } else {
         const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
-        const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(row => row.dataset.actionRow === id);
-        target = row?.querySelector(actionTrigger);
+        target = findRowPart(to, 'data-action-row', id)?.querySelector(actionTrigger);
       }
       lastFocused = null;
       target?.focus();
@@ -139,9 +138,9 @@
   export let hasMore = false;
   export let loadingMore = false;
   export let loadMoreError = false;
+  let usedPaging = false;
   export let onSort: ((direction: 'asc' | 'desc') => void) | undefined = undefined;
   export let onMore: (() => void) | undefined = undefined;
-  let usedPaging = false;
   $: orderDescription = direction === 'asc' ? 'A to Z' : 'Z to A';
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${orderDescription} (binary order). Times in ${timeZone}.`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
@@ -158,15 +157,13 @@
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th>{#if onAction}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th><th scope="col" class="actions">Actions</th></tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
         <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        {#if onAction}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
-        {/if}
+        <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
       </tr>
       {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
@@ -174,10 +171,8 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li class:with-actions={!!onAction} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
-      {#if onAction}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
-      {/if}
+    <li class="with-actions" on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
+      <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
       {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
   {/each}
@@ -236,4 +231,8 @@
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
+  @container (max-width: 200px) {
+    li.with-actions > :first-child { grid-column: 1 / -1; }
+    li.with-actions > [data-action-row] { grid-row: 2; }
+  }
 </style>
