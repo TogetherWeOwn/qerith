@@ -698,28 +698,44 @@ try {
       }
     }, source);
     const menu = page.getByRole('menu', { name: 'Actions for Sample file' });
-    if (source === 'menu') {
-      await trigger.click();
-    } else {
+    if (source !== 'menu') {
       const queued = await trigger.evaluate(async (el, source) => {
         const scroller = source === 'document' ? document : el.closest('main').firstElementChild;
         const top = () => scroller === document ? window.scrollY : scroller.scrollTop;
+        const move = value => {
+          if (scroller === document) window.scrollTo(0, value);
+          else scroller.scrollTop = value;
+        };
+        const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
         let deliveredAt;
         scroller.addEventListener('scroll', () => { deliveredAt = top(); }, { once: true });
         el.focus({ preventScroll: true });
         // Move first, then open in the same task before Chromium delivers the scroll event.
-        if (scroller === document) window.scrollTo(0, 10);
-        else scroller.scrollTop = 10;
+        move(10);
         const atOpen = top();
         el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-        await new Promise(resolve => requestAnimationFrame(resolve));
-        return { atOpen, deliveredAt, focusedText: document.activeElement?.textContent?.trim() };
+        await frame();
+        const focusedText = document.activeElement?.textContent?.trim();
+        // After the opening frame, even a coalesced round-trip scroll dismisses the menu.
+        let roundTripAt;
+        scroller.addEventListener('scroll', () => { roundTripAt = top(); }, { once: true });
+        move(30);
+        const away = top();
+        move(10);
+        await frame();
+        return { atOpen, deliveredAt, focusedText, away, roundTripAt, restored: document.activeElement === el };
       }, source);
       assert.equal(queued.atOpen, 10, `${source} must scroll before opening`);
       assert.equal(queued.deliveredAt, queued.atOpen, `${source} must deliver the queued scroll without moving again`);
       assert.equal(queued.focusedText, 'Download', `${source} scroll queued before opening must not dismiss the focused menu`);
       console.log(`Queued ${source} scroll preserved Download focus`);
+      assert.equal(queued.away, 30, `${source} must move after opening`);
+      assert.equal(queued.roundTripAt, queued.atOpen, `${source} must deliver the round-trip scroll at the opening offset`);
+      assert.equal(queued.restored, true, `${source} round-trip scroll must restore trigger focus`);
+      assert.equal(await menu.count(), 0, `${source} round-trip scroll must dismiss the menu`);
+      console.log(`Post-open ${source} round-trip scroll dismissed the menu`);
     }
+    await trigger.click();
     await menu.waitFor();
     const scroll = source === 'document' ? page.locator('html') : source === 'ancestor' ? page.locator('main > div').first() : menu;
     const moved = await scroll.evaluate((el, source) => {
