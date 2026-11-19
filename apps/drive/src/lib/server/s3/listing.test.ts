@@ -50,7 +50,7 @@ test('rejects ambiguous, invalid or non-advancing pages', async () => {
 
 test('lists parts and validates pagination and part metadata', async () => {
   let sent: Request | undefined;
-  const wrap = (content: string) => `<ListPartsResult>${content}</ListPartsResult>`;
+  const wrap = (content: string) => `<ListPartsResult><Bucket>test-bucket</Bucket><Key>key</Key><UploadId>upload+/=</UploadId>${content}</ListPartsResult>`;
   const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
     sent = input as Request;
     return new Response(wrap('<IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><Size>42</Size><ETag>"tag"</ETag></Part>'));
@@ -62,7 +62,7 @@ test('lists parts and validates pagination and part metadata', async () => {
   assert.equal(url.searchParams.get('uploadId'), 'upload+/=');
   assert.equal(url.searchParams.get('part-number-marker'), '1');
   const final = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(wrap('<IsTruncated>false</IsTruncated><NextPartNumberMarker>0</NextPartNumberMarker>')) });
-  assert.deepEqual(await final.parts('key', 'id'), { parts: [], nextPartNumberMarker: undefined });
+  assert.deepEqual(await final.parts('key', 'upload+/='), { parts: [], nextPartNumberMarker: undefined });
   for (const content of [
     '<IsTruncated>true</IsTruncated>',
     '<IsTruncated>true</IsTruncated><NextPartNumberMarker>1</NextPartNumberMarker>',
@@ -70,7 +70,20 @@ test('lists parts and validates pagination and part metadata', async () => {
     '<IsTruncated>false</IsTruncated><Part><PartNumber>2</PartNumber><Size>1</Size><ETag>x</ETag></Part><Part><PartNumber>2</PartNumber><Size>1</Size><ETag>x</ETag></Part>'
   ]) {
     const bad = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(wrap(content)) });
-    await assert.rejects(bad.parts('key', 'id', { partNumberMarker: 1 }), { message: 'Invalid S3 listing response' });
+    await assert.rejects(bad.parts('key', 'upload+/=', { partNumberMarker: 1 }), { message: 'Invalid S3 listing response' });
+  }
+});
+
+test('requires one exact bucket, key and upload ID in each ListParts result', async () => {
+  const identity = ['<Bucket>test-bucket</Bucket>', '<Key>key</Key>', '<UploadId>id</UploadId>'];
+  for (const [index, field] of identity.entries()) {
+    for (const replacement of ['', field + field, field.replace(/>([^<]+)</, '>other<')]) {
+      const fields = identity.with(index, replacement).join('');
+      const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(
+        `<ListPartsResult>${fields}<IsTruncated>false</IsTruncated></ListPartsResult>`
+      ) });
+      await assert.rejects(listing.parts('key', 'id'), { message: 'Invalid S3 listing response' });
+    }
   }
 });
 
@@ -125,7 +138,7 @@ test('round-trips supported listed keys and opaque query data', async () => {
   const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
     const request = input as Request; requests.push(request);
     if (requests.length === 1) return new Response(page('<IsTruncated>false</IsTruncated><Contents><Key>safe%2F...%2Fa..b%2F%252E%252F%2B%20%E9%9B%AA</Key></Contents>'));
-    return new Response('<ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>');
+    return new Response('<ListPartsResult><Bucket>test-bucket</Bucket><Key>safe/.../a..b/%2E%2F+ 雪</Key><UploadId>../%2F+</UploadId><IsTruncated>false</IsTruncated></ListPartsResult>');
   } });
   const result = await listing.objects({ prefix: '../%2F', continuationToken: '../%2E/' });
   assert.deepEqual(result.keys, ['safe/.../a..b/%2E%2F+ 雪']);
