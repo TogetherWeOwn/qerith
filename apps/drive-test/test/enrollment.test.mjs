@@ -3,6 +3,7 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Invitations } from '../../drive/src/lib/server/identity/invitations.ts';
 import { InvitationEnrollment } from '../../drive/src/lib/server/identity/enrollment.ts';
+import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
 
 async function setup() {
@@ -13,12 +14,13 @@ async function setup() {
     DELETE FROM drive_invitations;
     DELETE FROM drive_principals;
     INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active');`);
-  return { invitations: new Invitations(env.DB), enrollment: new InvitationEnrollment(env.DB, rpID, origin) };
+  const owner = (await new Sessions(env.DB).issue('owner')).token;
+  return { owner, invitations: new Invitations(env.DB), enrollment: new InvitationEnrollment(env.DB, rpID, origin) };
 }
 
 it('verifies and atomically persists exactly one competing redemption', async () => {
-  const { invitations, enrollment } = await setup();
-  const invite = await invitations.issue('owner');
+  const { owner, invitations, enrollment } = await setup();
+  const invite = await invitations.issue(owner);
   const challenge = await enrollment.issueChallenge(invite.token);
   const signed = await fixture('registration', { challenge });
   const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => enrollment.enroll(invite.token, challenge, signed.registration)));
@@ -38,12 +40,12 @@ it('verifies and atomically persists exactly one competing redemption', async ()
 });
 
 it('rejects bad ceremonies and unavailable invitations and challenges without partial writes', async () => {
-  const { invitations, enrollment } = await setup();
+  const { owner, invitations, enrollment } = await setup();
   for (const state of ['invalid', 'cancelled', 'invite-expired', 'challenge-expired', 'replaced']) {
-    const invite = await invitations.issue('owner');
+    const invite = await invitations.issue(owner);
     const challenge = await enrollment.issueChallenge(invite.token);
     const signed = await fixture('registration', { challenge, uv: state !== 'invalid' });
-    if (state === 'cancelled') await invitations.cancel('owner', invite.id);
+    if (state === 'cancelled') await invitations.cancel(owner, invite.id);
     if (state === 'invite-expired') await env.DB.prepare('UPDATE drive_invitations SET expires_at = 1 WHERE id = ?').bind(invite.id).run();
     if (state === 'challenge-expired') await env.DB.prepare('UPDATE drive_bound_ceremonies SET expires_at = 1 WHERE challenge = ?').bind(challenge).run();
     if (state === 'replaced') await enrollment.issueChallenge(invite.token);
@@ -55,12 +57,12 @@ it('rejects bad ceremonies and unavailable invitations and challenges without pa
 });
 
 it('rolls back invitation, challenge and principal when a credential is not unique', async () => {
-  const { invitations, enrollment } = await setup();
-  const first = await invitations.issue('owner');
+  const { owner, invitations, enrollment } = await setup();
+  const first = await invitations.issue(owner);
   const firstChallenge = await enrollment.issueChallenge(first.token);
   const firstSigned = await fixture('registration', { challenge: firstChallenge });
   await enrollment.enroll(first.token, firstChallenge, firstSigned.registration);
-  const second = await invitations.issue('owner');
+  const second = await invitations.issue(owner);
   const challenge = await enrollment.issueChallenge(second.token);
   const signed = await fixture('registration', { challenge });
   await expect(enrollment.enroll(second.token, challenge, signed.registration)).rejects.toThrow();
