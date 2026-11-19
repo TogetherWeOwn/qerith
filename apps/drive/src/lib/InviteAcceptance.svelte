@@ -7,7 +7,7 @@
 </script>
 
 <script lang="ts">
-  import { afterUpdate, beforeUpdate, onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import SignInPage from './SignInPage.svelte';
   import { signInCopy } from './sign-in-state';
 
@@ -22,8 +22,8 @@
   let card: HTMLElement;
   let field: HTMLInputElement;
   let primary: HTMLButtonElement;
-  let focused: Element | null;
   let rendered: InviteAcceptanceView['kind'] | undefined;
+  let previousPhase: InvitePasskeyPhase | undefined;
   let announcement = '';
   let nameError = '';
   let ready = false;
@@ -33,22 +33,27 @@
   $: shown = pending ? 'waiting' : phase;
   $: status = shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
   $: unavailable = shown !== 'valid' && shown !== 'cancelled';
+  $: updateFocus(view.kind, shown);
 
   onMount(() => { ready = true; });
-  beforeUpdate(() => {
+
+  async function updateFocus(kind: InviteAcceptanceView['kind'], nextPhase: InvitePasskeyPhase) {
+    if (kind === rendered && nextPhase === previousPhase) return;
+    // Capture focus once, before a view or phase change can remove its control.
     const active = typeof document === 'undefined' ? null : document.activeElement;
-    focused = card?.contains(active) ? active : null;
-  });
-  afterUpdate(() => {
-    if (focused && !card.contains(focused) && document.activeElement === document.body) {
-      (invite ? primary : heading).focus();
-    }
-    if (view.kind !== rendered) {
-      announcement = rendered === 'invite' && view.kind === 'dead-link' && !focused ? deadTitle : '';
-      rendered = view.kind;
+    const focused = card?.contains(active) ? active : null;
+    if (kind !== rendered) {
+      announcement = rendered === 'invite' && kind === 'dead-link' && !focused ? deadTitle : '';
+      rendered = kind;
       nameError = '';
     }
-  });
+    previousPhase = nextPhase;
+    if (!focused) return;
+    await tick();
+    if (card?.isConnected && !card.contains(focused) && document.activeElement === document.body) {
+      (view.kind === 'invite' ? primary : heading)?.focus();
+    }
+  }
 
   async function setup() {
     if (!ready || pending || unavailable || !invite) return;
