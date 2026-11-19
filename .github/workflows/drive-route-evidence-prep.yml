@@ -1,0 +1,50 @@
+name: Drive route evidence preparation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/drive-route-evidence-prep.yml
+      - apps/drive/scripts/route-evidence-tools.ps1
+      - apps/drive/scripts/route-evidence-checks.mjs
+      - apps/drive/scripts/route-evidence-checks.test.mjs
+      - apps/drive/package.json
+      - apps/drive/package-lock.json
+
+permissions:
+  contents: read
+
+jobs:
+  preparation:
+    if: >-
+      github.repository == 'TogetherWeOwn/qerith' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.head.repo.fork
+    runs-on: windows-2025
+    timeout-minutes: 12
+    env:
+      HARNESS_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: harness
+          persist-credentials: false
+      - name: Verify checkout and record runner provenance
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Initialize
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Run pure helper tests
+        run: node --test harness/apps/drive/scripts/route-evidence-checks.test.mjs
+      - name: Acquire pinned tool archives without launching them
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Acquire
+      - name: Verify the effective firewall block without starting a relay
+        run: ./harness/apps/drive/scripts/route-evidence-tools.ps1 -Phase Protect
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && env.EVIDENCE != ''
+        with:
+          name: drive-route-evidence-prep-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7

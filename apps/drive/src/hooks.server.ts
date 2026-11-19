@@ -1,8 +1,4 @@
-import type { Handle } from '@sveltejs/kit';
+import { env } from 'cloudflare:workers';
+import { privateRequests } from './lib/server/request-auth';
 
-// The app remains unavailable until live session and membership checks are wired.
-export const handle: Handle = async () =>
-  new Response('Service unavailable', {
-    status: 503,
-    headers: { 'cache-control': 'no-store' }
-  });
+export const handle = privateRequests(env);

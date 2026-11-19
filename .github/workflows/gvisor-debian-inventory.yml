@@ -1,0 +1,48 @@
+name: gVisor Debian inventory
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gvisor-debian-inventory.yml'
+      - 'scripts/screen-reader/gvisor_inventory.py'
+      - 'scripts/screen-reader/gvisor_framing.py'
+      - 'scripts/screen-reader/test_gvisor_framing.py'
+      - 'scripts/screen-reader/test_gvisor_inventory.py'
+      - 'scripts/screen-reader/gvisor_extract.py'
+      - 'scripts/screen-reader/test_gvisor_extract.py'
+      - 'scripts/screen-reader/gvisor_companions.py'
+      - 'scripts/screen-reader/test_gvisor_companions.py'
+      - 'scripts/screen-reader/gvisor_metadata.py'
+      - 'scripts/screen-reader/debian_metadata.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test ordering and archive safety
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_inventory.py", run_name="__main__")'
+      - name: Test companion evidence collection
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_companions.py", run_name="__main__")'
+      - name: Test synthetic extraction policy
+        run: timeout --signal=TERM --kill-after=10s 120s python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_extract.py", run_name="__main__")'
+      - name: Test diagnostic framing
+        run: python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/test_gvisor_framing.py", run_name="__main__")'
+      - name: Authenticate and inspect diagnostic framing
+        run: |
+          ulimit -f 180000
+          ulimit -v 1048576
+          timeout --signal=TERM --kill-after=10s 420s python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/gvisor_framing.py", run_name="__main__")'
+      - name: Authenticate and inventory candidate without execution
+        run: |
+          ulimit -f 180000
+          ulimit -v 1048576
+          timeout --signal=TERM --kill-after=10s 420s python3 -I -c 'import runpy, sys; sys.path.insert(0, "scripts/screen-reader"); runpy.run_path("scripts/screen-reader/gvisor_inventory.py", run_name="__main__")'

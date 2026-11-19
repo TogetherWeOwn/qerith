@@ -1,5 +1,7 @@
 {
-  "extends": "./.svelte-kit/tsconfig.json",
+  "extends": "$app/tsconfig",
+  "include": ["src", "*"],
+  "exclude": ["src/service-worker", "src/**/*.test.ts", "vite.config.js"],
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
@@ -9,6 +11,8 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true,
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    "types": ["$app/types", "estree"],
+    "typeRoots": ["./types", "./node_modules/@types", "./node_modules"]
   }
 }
