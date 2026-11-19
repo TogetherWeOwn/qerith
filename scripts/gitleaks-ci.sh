@@ -9,22 +9,54 @@ scan() {
   shift
   # Force text patches and compare merges to their first parent without
   # restricting history traversal to the first-parent chain.
+  # Also emit content when a file is renamed out of an allowed path.
   "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 \
-    --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent HEAD' \
+    --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent --no-renames HEAD' \
     --config "$scratch/.gitleaks.toml" --gitleaks-ignore-path "$scratch/.gitleaksignore" "$@"
+}
+
+validate_config() {
+  # Only a self-contained policy can be pinned by copying one Git blob.
+  python3 -I - "$1" <<'PY'
+import sys
+import tomllib
+
+try:
+    with open(sys.argv[1], "rb") as config:
+        policy = tomllib.load(config)
+except (tomllib.TOMLDecodeError, UnicodeError):
+    sys.exit("Invalid gitleaks TOML policy")
+# Gitleaks decodes keys case-insensitively.
+for section, settings in policy.items():
+    if section.lower() == "extend" and (
+        not isinstance(settings, dict) or any(key.lower() == "path" for key in settings)
+    ):
+        sys.exit("Gitleaks policy must not use extend.path; use built-in rules or inline rules")
+PY
 }
 
 scan_history() {
   test "$(git rev-parse HEAD)" = "${SCAN_HEAD:?}"
   test "$(git rev-parse --is-shallow-repository)" = false
 
-  local policy=HEAD path
-  if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-    # Pin both policy files to the immutable base SHA, not the PR checkout.
+  local policy=HEAD path changes
+  if [[ "$GITHUB_EVENT_NAME" == pull_request || "$GITHUB_EVENT_NAME" == merge_group ]]; then
+    # Pin both policy files to the immutable base SHA, not the candidate.
     policy=${BASE_SHA:?}
     git cat-file -e "$policy^{commit}"
-    if ! git diff --quiet "$policy"...HEAD -- .gitleaks.toml .gitleaksignore; then
-      printf '%s\n' '::warning::Scanner policy changes are not used to scan this PR.'
+    changes=$(git diff --name-only "$policy"...HEAD -- .gitleaks.toml .gitleaksignore)
+    if [[ -n "$changes" ]]; then
+      printf '%s\n' '::warning::Candidate policy changes are not used for the history scan.'
+      if git cat-file -e HEAD:.gitleaks.toml 2>/dev/null; then
+        local candidate="$scratch/candidate.toml"
+        git show HEAD:.gitleaks.toml > "$candidate"
+        validate_config "$candidate"
+        mkdir "$scratch/empty"
+        if ! "${GITLEAKS_BIN:?}" dir "$scratch/empty" --config "$candidate" --redact >/dev/null 2>&1; then
+          printf '%s\n' 'Gitleaks could not load the proposed policy' >&2
+          return 1
+        fi
+      fi
     fi
   fi
   for path in .gitleaks.toml .gitleaksignore; do
@@ -32,6 +64,7 @@ scan_history() {
       git show "$policy:$path" > "$scratch/$path"
     fi
   done
+  validate_config "$scratch/.gitleaks.toml"
   # Gitleaks also reads the source-root ignore file, even with an explicit
   # ignore path. Unlink first so a PR-controlled symlink cannot redirect writes.
   rm -f -- .gitleaksignore
@@ -45,9 +78,10 @@ fake_token() {
 }
 
 assert_detected() {
-  local label=$1 base=$2 commit=$3 script=$4 status=0
+  local label=$1 base=$2 commit=$3 script=$4 status=0 event=pull_request
   local report="$scratch/$label.json"
-  GITHUB_EVENT_NAME=pull_request BASE_SHA="$base" SCAN_HEAD="$(git rev-parse HEAD)" \
+  if [[ "$label" == no-diff ]]; then event=merge_group; fi
+  GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse HEAD)" \
     bash "$script" scan --report-format json --report-path "$report" || status=$?
   if [[ "$status" != 1 ]] || ! jq -e --arg commit "$commit" \
     'any(.[]; .RuleID == "github-pat" and .File == "fixture.txt" and .Commit == $commit)' \
@@ -58,10 +92,23 @@ assert_detected() {
   printf 'Detected synthetic %s finding at the expected commit\n' "$label"
 }
 
+assert_invalid_config() {
+  local base=$1 script=$2 content=$3 message=$4
+  printf '%s\n' "$content" > .gitleaks.toml
+  git add .gitleaks.toml
+  git commit -qm 'Change synthetic policy'
+  if GITHUB_EVENT_NAME=pull_request BASE_SHA="$base" SCAN_HEAD="$(git rev-parse HEAD)" \
+    bash "$script" scan > "$scratch/policy-test.log" 2>&1; then
+    printf '%s\n' 'Expected proposed gitleaks policy to be rejected' >&2
+    return 1
+  fi
+  grep -F -- "$message" "$scratch/policy-test.log"
+}
+
 self_test() {
   local label repo script
   script=$(realpath -- "${BASH_SOURCE[0]}")
-  for label in no-diff merge-resolution; do
+  for label in no-diff merge-resolution rename; do
     repo="$scratch/$label"
     git init -q -b main "$repo"
     (
@@ -69,11 +116,20 @@ self_test() {
       git config user.name 'Gitleaks self-test'
       git config user.email 'gitleaks-fixture@example.invalid'
       git config commit.gpgsign false
-      printf 'base\n' > fixture.txt
-      git add fixture.txt
+      if [[ "$label" == rename ]]; then
+        printf '%s\n' '[extend]' 'useDefault = true' '[[allowlists]]' \
+          "paths = ['^allowed\.txt$']" > .gitleaks.toml
+        fake_token > allowed.txt
+      else
+        printf 'base\n' > fixture.txt
+      fi
+      git add --all
       git commit -qm base
       base=$(git rev-parse HEAD)
-      if [[ "$label" == no-diff ]]; then
+      if [[ "$label" == rename ]]; then
+        git mv allowed.txt fixture.txt
+        git commit -qm 'Rename synthetic fixture'
+      elif [[ "$label" == no-diff ]]; then
         printf 'fixture.txt -diff\n' > .gitattributes
         fake_token > fixture.txt
         git add .gitattributes fixture.txt
@@ -105,9 +161,12 @@ self_test() {
         git add .gitleaks.toml .gitleaksignore head-ignore.txt
         git commit -qm 'Add untrusted scan policy'
       fi
-      assert_detected "$label" "$base" "$leaked_at" "$script"
+      assert_detected "$label" "$base" "$leaked_at" "$script" || exit 1
       if [[ "$label" == no-diff ]]; then
         git diff --exit-code -- head-ignore.txt
+        assert_invalid_config "$base" "$script" '[' 'Invalid gitleaks TOML policy' || exit 1
+        assert_invalid_config "$base" "$script" $'[Extend]\nPath = "head-ignore.txt"' \
+          'Gitleaks policy must not use extend.path' || exit 1
       fi
     )
   done
