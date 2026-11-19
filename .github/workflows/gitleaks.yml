@@ -21,8 +21,6 @@ jobs:
     name: gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,8 +40,10 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$asset"
           printf '%s  %s\n' "$GITLEAKS_SHA256" "$scratch/$asset" | sha256sum --check -
           tar -xzf "$scratch/$asset" -C "$scratch" gitleaks
-          install -m 0755 "$scratch/gitleaks" "$GITLEAKS_BIN"
-          "$GITLEAKS_BIN" version
+          bin="$RUNNER_TEMP/gitleaks"
+          install -m 0755 "$scratch/gitleaks" "$bin"
+          "$bin" version
+          printf 'GITLEAKS_BIN=%s\n' "$bin" >> "$GITHUB_ENV"
       - name: Test full-history scan regressions
         run: bash scripts/gitleaks-ci.sh self-test
       - name: Scan the full history
