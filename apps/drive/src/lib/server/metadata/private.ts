@@ -1,3 +1,5 @@
+import type { ListingBoundary } from './listing-cursor';
+
 // Identity integration must supply drive_active_members(id) from live membership.
 // This service accepts a server-authenticated principal, not a client owner ID.
 interface Statement {
@@ -18,6 +20,8 @@ export interface Entry {
 export interface Cursor { name: string; id: string }
 export interface ListedEntry extends Entry { item_count: number | null }
 export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
+type RootEntry = Pick<Entry, 'id' | 'name' | 'kind'>;
+interface RootPage { entries: RootEntry[]; nextCursor: ListingBoundary | null }
 
 const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
@@ -48,8 +52,14 @@ export class PrivateMetadata {
       .bind(id, principalId, principalId).first<Entry>();
   }
 
-  async list(principalId: string, parentId: string | null, cursor: Cursor | null = null): Promise<Page> {
-    if (cursor !== null && (typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
+  list(principalId: string, parentId: null, cursor: ListingBoundary | null, sessionHash: string): Promise<RootPage | null>;
+  list(principalId: string, parentId: string | null, cursor?: Cursor | null): Promise<Page>;
+  async list(principalId: string, parentId: string | null, cursor: Cursor | ListingBoundary | null = null, sessionHash?: string): Promise<Page | RootPage | null> {
+    if (sessionHash !== undefined) {
+      if (parentId !== null || (cursor !== null && !('kind' in cursor))) throw new TypeError('Invalid root listing');
+      return this.listSessionRoot(principalId, cursor, sessionHash);
+    }
+    if (cursor !== null && (!('id' in cursor) || typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
       throw new TypeError('Invalid cursor');
     }
     const boundary = cursor === null ? '' : 'AND (name, id) > (?, ?)';
@@ -65,6 +75,35 @@ export class PrivateMetadata {
     const entries = rows.slice(0, 100);
     const last = entries[entries.length - 1];
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
+  }
+
+  private async listSessionRoot(principalId: string, cursor: ListingBoundary | null, sessionHash: string): Promise<RootPage | null> {
+    const ordered = 'ORDER BY kind DESC, name COLLATE BINARY ASC, id ASC';
+    const limit = `${ordered} LIMIT 101`;
+    const entries = `SELECT id, name, kind FROM drive_entries INDEXED BY drive_entries_listing_asc
+      WHERE owner_id = (SELECT principal_id FROM authorized) AND parent_id IS NULL`;
+    // Two index ranges let a folder cursor continue directly into the files.
+    const ranges = cursor ? `same_kind AS (
+      ${entries} AND kind = ? AND name COLLATE BINARY > ? ${limit}
+    ), later_kind AS (
+      ${entries} AND kind < ? ${limit}
+    ), children AS (
+      SELECT * FROM (SELECT * FROM same_kind UNION ALL SELECT * FROM later_kind) ${limit}
+    )` : `children AS (${entries} ${limit})`;
+    // A sentinel from the same statement distinguishes an authorized empty root from a denied read.
+    const { results } = await this.db.prepare(`WITH authorized AS (
+      SELECT s.principal_id FROM drive_sessions s JOIN drive_active_members m ON m.id = s.principal_id
+      WHERE s.principal_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+    ), ${ranges} SELECT id, name, kind FROM children UNION ALL SELECT NULL, NULL, NULL FROM authorized
+      ORDER BY kind DESC, name, id`)
+      .bind(principalId, sessionHash, ...(cursor ? [cursor.kind, cursor.name, cursor.kind] : []))
+      .all<RootEntry | { id: null; name: null; kind: null }>();
+    if (!results.some(row => row.id === null)) return null;
+    const items = results.filter((row): row is RootEntry => row.id !== null);
+    return {
+      entries: items.slice(0, 100),
+      nextCursor: items.length > 100 ? { kind: items[99].kind, name: items[99].name } : null
+    };
   }
 
   // Decimal text preserves precision beyond JavaScript's safe integer range.

@@ -20,10 +20,12 @@ it('lists bounded pages of only the session owner’s root and projects client-s
   const insert = (id, owner, parent, name, key = null) => env.DB.prepare(`INSERT INTO drive_entries
     (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, owner, parent, name, key ? 'file' : 'folder', key, key ? 1 : null);
+  const boundaryId = 'boundary-'.repeat(16);
   await env.DB.batch([
+    ...Array.from({ length: 99 }, (_, n) => insert(`f${n}`, 'member', null, `folder-${String(n).padStart(2, '0')}`)),
+    insert(boundaryId, 'member', null, 'á-👩🏽‍💻'),
+    insert('last-folder', 'member', null, 'Ω folder'),
     insert('file', 'member', null, 'first.txt', 'test-storage-key'),
-    ...Array.from({ length: 98 }, (_, n) => insert(`f${n}`, 'member', null, `folder-${String(n).padStart(2, '0')}`)),
-    insert('boundary', 'member', null, 'á-👩🏽‍💻.pdf', 'test-boundary-key'),
     insert('last', 'member', null, 'Ω.txt', 'test-last-key'),
     insert('nested', 'member', 'f0', 'hidden'),
     insert('other-file', 'other', null, '界.txt', 'test-other-key')
@@ -34,16 +36,18 @@ it('lists bounded pages of only the session owner’s root and projects client-s
   const first = await loadRootListing(request(token), auth, []);
   expect(first.status).toBe('ok');
   expect(first.folder.entries).toHaveLength(100);
-  expect(first.folder.entries[0]).toEqual({ id: 'file', name: 'first.txt', kind: 'file' });
-  expect(first.folder.entries.at(-1)).toEqual({ id: 'boundary', name: 'á-👩🏽‍💻.pdf', kind: 'file' });
+  expect(first.folder.entries[0]).toEqual({ id: 'f0', name: 'folder-00', kind: 'folder' });
+  expect(first.folder.entries.at(-1)).toEqual({ id: boundaryId, name: 'á-👩🏽‍💻', kind: 'folder' });
   expect(first.folder.nextPage).toMatch(/^[A-Za-z0-9_-]+$/);
   expect(JSON.stringify(first)).not.toContain(token);
-  expect(JSON.stringify(first)).not.toContain('test-storage-key');
   expect(JSON.stringify(first)).not.toContain('hidden');
 
   const page = first.folder.nextPage;
   expect(await loadRootListing(request(token), auth, [page])).toEqual({
-    status: 'ok', folder: { entries: [{ id: 'last', name: 'Ω.txt', kind: 'file' }], nextPage: null }
+    status: 'ok', folder: { entries: [
+      { id: 'last-folder', name: 'Ω folder', kind: 'folder' },
+      { id: 'file', name: 'first.txt', kind: 'file' }, { id: 'last', name: 'Ω.txt', kind: 'file' }
+    ], nextPage: null }
   });
   expect(await loadRootListing(request(otherToken), auth, [page])).toEqual({
     status: 'ok', folder: { entries: [{ id: 'other-file', name: '界.txt', kind: 'file' }], nextPage: null }
@@ -71,4 +75,48 @@ it('denies absent, wrong-origin, and revoked sessions rather than returning an e
   await env.DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
     .bind(await tokenHash(token), principalId, expiresAt).run();
   expect(await loadRootListing(request(token), auth, [])).toEqual(unavailable);
+});
+
+it.each(['session revoked', 'session expired', 'membership revoked'])('denies a listing when %s after session lookup', async (change) => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  const principalId = `listing-${change}`;
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(principalId),
+    env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Private', 'folder')")
+      .bind(principalId, principalId)
+  ]);
+  const sessions = new Sessions(env.DB);
+  const { token } = await sessions.issue(principalId);
+  let lookedUp;
+  let listed = false;
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          const statement = env.DB.prepare(sql).bind(...values);
+          return {
+            async all() {
+              const result = await statement.all();
+              listed = true;
+              return result;
+            },
+            async first() {
+              const row = await statement.first();
+              lookedUp = row?.id;
+              if (change === 'session revoked') await sessions.revoke(token);
+              else if (change === 'session expired') {
+                await env.DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = ?').bind(principalId).run();
+              } else {
+                await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(principalId).run();
+              }
+              return row;
+            }
+          };
+        }
+      };
+    }
+  };
+  expect(await loadRootListing(request(token), { ...auth, DB: db }, [])).toEqual({ status: 'unavailable' });
+  expect(lookedUp).toBe(principalId);
+  expect(listed).toBe(true);
 });
