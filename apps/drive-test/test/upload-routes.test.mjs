@@ -36,19 +36,34 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
     return new Response(null, { headers: { etag, 'content-length': String(size) } });
   } });
   const handle = privateRequests(bindings);
-  function send(number, { auth = token, source = origin, host = origin, name = 'file', bytes = 7 } = {}) {
-    const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId: null, name });
+  function send(number, { auth = token, source = origin, host = origin, name = 'file', parentId = null,
+    intentId = intent, bytes = 7 } = {}) {
+    const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
     if (auth) headers.cookie = `__Host-drive-session=${auth}`;
     if (source) headers.origin = source;
-    const request = new Request(`${host}/api/uploads/${intent}/${number ? `parts/${number}` : 'complete'}`,
+    const request = new Request(`${host}/api/uploads/${intentId}/${number ? `parts/${number}` : 'complete'}`,
       { method: number ? 'PUT' : 'POST', body, headers });
     return handle({ event: { request, locals: {} }, resolve: ({ locals }) => number
-      ? routes.part(request, locals.driveSession, intent, String(number))
-      : routes.complete(request, locals.driveSession, intent) });
+      ? routes.part(request, locals.driveSession, intentId, String(number))
+      : routes.complete(request, locals.driveSession, intentId) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
-  return { send, generation, calls, foreign, key, principal };
+  return { send, generation, calls, foreign, key, principal, other };
+}
+
+async function occupy(owner, name, parentId = null) {
+  const id = crypto.randomUUID();
+  await sql("INSERT INTO drive_entries (id, owner_id, name, parent_id, kind) VALUES (?, ?, ?, ?, 'folder')",
+    id, owner, name, parentId).run();
+  return id;
+}
+
+async function expectNameTaken(result) {
+  expect(result.status).toBe(409);
+  expect(result.headers.get('cache-control')).toBe('private, no-store');
+  expect(result.headers.get('content-type')).toBe('application/json');
+  expect(await result.text()).toBe('{"code":"name-taken"}');
 }
 
 it('publishes a verified sparse upload without duplicate part or completion sends', async () => {
@@ -108,12 +123,15 @@ it.each(['PUT', 'POST', 'qualification', 'receipt'])('preserves send fences and 
 
 it.each(['provider error', 'qualification', 'session'])('requires current authority when publishing (%s)', async (veto) => {
   let current = true, verifications = 0, heads = 0;
-  const { send, foreign, generation, calls, key } = await fixture({
+  const { send, foreign, generation, calls, key, principal } = await fixture({
     isQualified: (id) => current && qualified(id),
     verify: (_, parts) => { if (++verifications === 1) current = false; return parts; },
-    beforeHead: (token) => {
+    beforeHead: async (token) => {
       if (++heads !== 1) return;
-      if (veto === 'session') return sessions.revoke(token);
+      if (veto === 'session') {
+        await occupy(principal, 'file');
+        return sessions.revoke(token);
+      }
       if (veto === 'provider error') throw new Error('Transient HEAD failure');
       current = false;
     }
@@ -121,7 +139,8 @@ it.each(['provider error', 'qualification', 'session'])('requires current author
   expect([(await send(1)).status, (await send()).status]).toEqual([204, 409]);
   expect(calls).toEqual(['PUT']);
   current = true;
-  expect((await send()).status).toBe(409);
+  const rejected = await send();
+  expect([rejected.status, await rejected.text()]).toEqual([veto === 'session' ? 404 : 409, '']);
   expect(await generation()).toBeNull();
   expect(await sql('SELECT id FROM drive_entries WHERE object_key = ?', key).first()).toBeNull();
   current = true;
@@ -130,21 +149,109 @@ it.each(['provider error', 'qualification', 'session'])('requires current author
   expect(calls).toEqual(veto === 'session' ? ['PUT', 'POST', 'HEAD'] : ['PUT', 'POST', 'HEAD', 'HEAD']);
 });
 
-it('checks sibling conflicts before sealing and again at dispatch', async () => {
-  const occupy = (owner, name) => sql("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, ?, 'folder')",
-    crypto.randomUUID(), owner, name).run();
+it('reports a sibling conflict only for the live owner and an accessible destination', async () => {
+  const { send, calls, principal, other, foreign, key, generation } = await fixture();
+  const ownParent = await occupy(principal, 'parent'), foreignParent = await occupy(other, 'parent');
+  await occupy(principal, 'file', ownParent);
+  await occupy(other, 'file', foreignParent);
+  await expectNameTaken(await send(undefined, { parentId: ownParent }));
+  for (const options of [{ parentId: foreignParent }, { parentId: crypto.randomUUID() },
+    { parentId: foreignParent, auth: foreign }, { parentId: ownParent, intentId: crypto.randomUUID() }]) {
+    const result = await send(undefined, options);
+    expect([result.status, await result.text()]).toEqual([404, '']);
+  }
+  await sql('UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = ?', principal).run();
+  const expired = await send(undefined, { parentId: ownParent });
+  expect([expired.status, await expired.text()]).toEqual([401, '']);
+  const renewed = (await sessions.issue(principal)).token;
+  await sessions.revoke(renewed);
+  const revoked = await send(undefined, { parentId: ownParent, auth: renewed });
+  expect([revoked.status, await revoked.text()]).toEqual([401, '']);
+  expect(await sql('SELECT 1 FROM drive_upload_completion_operations WHERE object_key = ?', key).first()).toBeNull();
+  expect(await generation()).toBeNull();
+  expect(calls).toEqual([]);
+});
+
+it('reports a sibling appearing after sealing without dispatching completion', async () => {
   let verifies = 0;
-  const { send, calls, principal } = await fixture({ verify: async ({ ownerId }, parts) => {
+  const { send, calls, key } = await fixture({ verify: async ({ ownerId }, parts) => {
     if (++verifies === 1) await occupy(ownerId, 'file');
     return parts;
   } });
-  await occupy(principal, 'occupied');
-  expect((await send(undefined, { name: 'occupied' })).status).toBe(404);
   expect((await send(1)).status).toBe(204);
-  expect((await send()).status).toBe(409);
+  await expectNameTaken(await send());
+  expect(await sql(`SELECT 1 FROM drive_upload_completion_dispatches JOIN drive_upload_completion_operations
+    USING (operation_id) WHERE object_key = ?`, key).first()).toBeNull();
   expect(calls).toEqual(['PUT']);
   expect((await send(undefined, { name: 'free' })).status).toBe(201);
   expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+});
+
+it('reports a sibling appearing at publication and reuses the verified receipt once the name is free', async () => {
+  let sibling;
+  const { send, calls, principal, generation } = await fixture({ beforeHead: async () => {
+    sibling ??= await occupy(principal, 'file');
+  } });
+  expect((await send(1)).status).toBe(204);
+  await expectNameTaken(await send());
+  await expectNameTaken(await send());
+  expect(await generation()).toBeNull();
+  expect(await sql('SELECT id, kind FROM drive_entries WHERE id = ?', sibling).first()).toEqual({ id: sibling, kind: 'folder' });
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+  await sql("UPDATE drive_entries SET name = 'moved' WHERE id = ?", sibling).run();
+  const published = await send(), receipt = await published.json();
+  expect([published.status, receipt]).toEqual([201, { id: expect.any(String) }]);
+  const replay = await send();
+  expect([replay.status, await replay.json()]).toEqual([200, receipt]);
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
+});
+
+it('replays the recorded receipt after the published file moves and the old folder is removed', async () => {
+  const { send, calls, principal } = await fixture();
+  const parentId = await occupy(principal, 'old-parent');
+  expect((await send(1)).status).toBe(204);
+  const published = await send(undefined, { parentId }), receipt = await published.json();
+  expect(published.status).toBe(201);
+  await sql('UPDATE drive_entries SET parent_id = NULL WHERE id = ?', receipt.id).run();
+  await sql('DELETE FROM drive_entries WHERE id = ?', parentId).run();
+  const replay = await send(undefined, { parentId });
+  expect([replay.status, await replay.json()]).toEqual([200, receipt]);
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+});
+
+it('does not relabel an unresolved part claim as a name conflict', async () => {
+  const { send, calls, key, principal } = await fixture();
+  await sql(`INSERT INTO drive_upload_part_operations
+    SELECT ?, id, owner_id, object_key, ?, upload_id, version, 1, 7 FROM drive_upload_intents WHERE object_key = ?`,
+    crypto.randomUUID(), epoch, key).run();
+  await occupy(principal, 'file');
+  const result = await send();
+  expect([result.status, await result.text()]).toEqual([404, '']);
+  expect(calls).toEqual([]);
+});
+
+it('keeps a failed HEAD opaque even if a sibling appears during verification', async () => {
+  const { send, calls, principal, generation } = await fixture({ beforeHead: async () => {
+    await occupy(principal, 'file');
+    throw new Error('provider detail');
+  } });
+  expect((await send(1)).status).toBe(204);
+  const result = await send();
+  expect([result.status, await result.text()]).toEqual([409, '']);
+  expect(await generation()).toBeNull();
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+});
+
+it('does not relabel an uncertain completion as a name conflict or send it again', async () => {
+  const { send, calls, principal, generation } = await fixture({ fail: 'POST' });
+  expect((await send(1)).status).toBe(204);
+  const failed = await send();
+  expect([failed.status, await failed.text()]).toEqual([409, '']);
+  await occupy(principal, 'file');
+  const retry = await send();
+  expect([retry.status, await retry.text()]).toEqual([404, '']);
+  expect(await generation()).toBeNull();
+  expect(calls).toEqual(['PUT', 'POST']);
 });
 
 it('rejects impossible small-part layouts without consuming slots', async () => {

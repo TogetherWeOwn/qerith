@@ -38,10 +38,14 @@ interface UploadPublicationVerifier {
   }>): Promise<readonly CompletedPart[] | null>;
 }
 
-export const availableUploadDestination = (owner: 'i.owner_id' | 'o.owner_id' | 'c.owner_id') =>
-  `(? IS NULL OR EXISTS (SELECT 1 FROM drive_entries p WHERE p.id = ? AND p.owner_id = ${owner} AND p.kind = 'folder'))
-  AND NOT EXISTS (SELECT 1 FROM drive_entries s WHERE s.owner_id = ${owner}
+type UploadOwner = 'i.owner_id' | 'o.owner_id' | 'c.owner_id';
+export const accessibleUploadParent = (owner: UploadOwner) =>
+  `(? IS NULL OR EXISTS (SELECT 1 FROM drive_entries p WHERE p.id = ? AND p.owner_id = ${owner} AND p.kind = 'folder'))`;
+export const occupiedUploadName = (owner: UploadOwner) =>
+  `EXISTS (SELECT 1 FROM drive_entries s WHERE s.owner_id = ${owner}
     AND COALESCE(s.parent_id, '') = COALESCE(?, '') AND s.name = ?)`;
+export const availableUploadDestination = (owner: UploadOwner) =>
+  `${accessibleUploadParent(owner)} AND NOT ${occupiedUploadName(owner)}`;
 
 const utf8 = new TextEncoder();
 const allocated = `FROM drive_upload_sealed_candidates o
@@ -120,7 +124,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   return {
     storageConfigId,
     async complete(token: string, operationId: string, target?: { parentId: string | null; name: string }):
-      Promise<'recorded' | 'not-admitted' | 'uncertain'> {
+      Promise<'recorded' | 'not-admitted' | 'dispatch-denied' | 'uncertain'> {
       if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
       const operation = uploadIdentityBytes(operationId);
       const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
@@ -154,7 +158,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
           SELECT o.operation_id, o.endpoint, o.bucket, o.intent_version + 1, ?, o.session_hash ${allocated}
           ${target ? `AND ${availableUploadDestination('o.owner_id')}` : ''} RETURNING operation_id`)
           .bind(manifestDigest, ...admission, ...destination).first();
-        if (!claim) return 'not-admitted';
+        if (!claim) return target ? 'dispatch-denied' : 'not-admitted';
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {

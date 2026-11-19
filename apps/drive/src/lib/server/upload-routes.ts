@@ -1,9 +1,10 @@
 import { tokenHash } from './identity/sessions';
 import { validateName } from './metadata/private';
-import { availableUploadDestination, createUploadCompletionReceipts } from './metadata/upload-completion-receipts';
+import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
+  occupiedUploadName } from './metadata/upload-completion-receipts';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
 import { decodeUploadIdentity, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { createTrustedUploadPublication } from './metadata/upload-trusted-publication';
+import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
 import { allowsOrigin, authOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
@@ -26,13 +27,21 @@ const reply = (status: number) => new Response(null, { status, headers });
 
 const owned = `JOIN drive_sessions s ON s.principal_id = i.owner_id JOIN drive_active_members m ON m.id = i.owner_id
   WHERE i.id = ? AND i.owner_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
-const allocated = `FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id ${owned}
-    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ? AND i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.upload_id IS NOT NULL
-    AND i.version < 9007199254740990 AND i.declared_size IS NOT NULL
-    AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = i.id)
+const bound = `FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id ${owned}
+    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ?`;
+const unfenced = `NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = i.id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = i.id)
-    AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = i.id)
+    AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = i.id)`;
+const unsealed = `i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.upload_id IS NOT NULL
+    AND i.version < 9007199254740990 AND i.declared_size IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations WHERE intent_id = i.id)`;
+const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
+// The producer views exclude dispatched operations without a verified receipt.
+const candidates = `WITH c AS (
+  SELECT operation_id, intent_version + 1 AS claim_version, 0 AS recorded, intent_id, owner_id,
+    session_hash, endpoint, bucket, storage_epoch FROM drive_upload_sealed_candidates
+  UNION ALL SELECT operation_id, claim_version, 1, intent_id, owner_id,
+    session_hash, endpoint, bucket, storage_epoch FROM drive_upload_publishable_completions)`;
 
 async function destination(request: Request): Promise<{ name: string; parentId: string | null }> {
   const length = request.headers.get('content-length') ?? '', size = Number(length);
@@ -118,6 +127,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
       const { parentId, name } = target, operationId = crypto.randomUUID();
       const destinationBindings = [parentId, parentId, parentId, name];
+      let fallback = 409, checkName = false;
       try {
         await db.batch([
           db.prepare(`INSERT INTO drive_upload_completion_operations
@@ -129,30 +139,52 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
               i.declared_size FROM drive_upload_completion_operations o JOIN drive_upload_intents i ON i.id = o.intent_id
             WHERE o.operation_id = ?`).bind(operationId)
         ]);
-        // The producer views exclude dispatched operations without a verified receipt.
-        const row = await db.withSession('first-primary').prepare(`WITH c AS (
-          SELECT operation_id, intent_version + 1 AS claim_version, 0 AS recorded, intent_id, owner_id,
-            session_hash, endpoint, bucket, storage_epoch FROM drive_upload_sealed_candidates
-          UNION ALL SELECT operation_id, claim_version, 1, intent_id, owner_id,
-            session_hash, endpoint, bucket, storage_epoch FROM drive_upload_publishable_completions)
+        const row = await db.withSession('first-primary').prepare(`${candidates}
           SELECT operation_id, claim_version, recorded FROM c
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
             AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
         if (!row) {
-          const published = await db.withSession('first-primary').prepare(`SELECT p.entry_id AS id
-            FROM drive_upload_publications p JOIN drive_upload_intents i ON i.id = p.intent_id AND i.owner_id = p.owner_id
-            JOIN drive_published_generations g ON g.entry_id = p.entry_id JOIN drive_entries e ON e.id = p.entry_id AND e.owner_id = p.owner_id
-            ${owned} AND g.endpoint = ? AND g.bucket = ? AND g.storage_epoch = ? AND p.parent_id IS ? AND p.name = ?`)
-            .bind(...bindings, parentId, name).first<{ id: string }>();
-          return published ? Response.json(published, { headers }) : reply(404);
+          fallback = 404;
+          checkName = true;
+        } else {
+          const result = row.recorded ? 'recorded' : await createUploadCompletionReceipts(db, epoch, settings,
+            { ...transport, timeoutMs }, verifier).complete(token, row.operation_id, target);
+          checkName = result === 'dispatch-denied';
+          if (result === 'recorded') {
+            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
+            const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
+            if (published) return Response.json({ id: published.id }, { status: 201, headers });
+          }
         }
-        if (!row.recorded && await createUploadCompletionReceipts(db, epoch, settings, { ...transport, timeoutMs }, verifier)
-          .complete(token, row.operation_id, target) !== 'recorded') return reply(409);
-        const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified);
-        const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
-        return published ? Response.json({ id: published.id }, { status: 201, headers }) : reply(409);
-      } catch { return reply(409); }
+      } catch (error) {
+        // A failed provider verification is not a failed namespace write.
+        checkName = error instanceof UploadPublicationWriteError;
+      }
+
+      try {
+        // Take one primary snapshot of live access, prior success and sibling occupancy.
+        // This also covers a sibling winning at the atomic dispatch or publication write.
+        const state = await db.withSession('first-primary').prepare(`${candidates} SELECT (
+          SELECT p.entry_id FROM drive_upload_publications p JOIN drive_published_generations g ON g.entry_id = p.entry_id
+          JOIN drive_entries e ON e.id = p.entry_id AND e.owner_id = p.owner_id
+          WHERE p.intent_id = i.id AND p.owner_id = i.owner_id AND g.endpoint = b.endpoint AND g.bucket = b.bucket
+            AND g.storage_epoch = b.storage_epoch AND p.parent_id IS ? AND p.name = ?
+        ) AS published_id, ${accessibleUploadParent('i.owner_id')} AS accessible,
+        (? AND ${occupiedUploadName('i.owner_id')} AND ${unfenced} AND (
+          (${unsealed} AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
+            LEFT JOIN drive_upload_part_observations r ON r.operation_id = p.operation_id AND r.kind = 'reported'
+            LEFT JOIN drive_upload_part_observations u ON u.operation_id = p.operation_id AND u.kind = 'uncertain'
+            WHERE p.intent_id = i.id AND (r.operation_id IS NULL OR u.operation_id IS NOT NULL)))
+          OR EXISTS (SELECT 1 FROM c WHERE c.intent_id = i.id AND c.owner_id = i.owner_id AND c.session_hash = s.token_hash)
+        )) AS name_taken ${bound}`)
+          .bind(parentId, name, parentId, parentId, Number(checkName), parentId, name, ...bindings)
+          .first<{ published_id: string | null; accessible: number; name_taken: number }>();
+        if (state?.published_id) return Response.json({ id: state.published_id }, { headers });
+        if (!state?.accessible) return reply(404);
+        if (state.name_taken) return Response.json({ code: 'name-taken' }, { status: 409, headers });
+      } catch { /* An unavailable read cannot establish a conflict. */ }
+      return reply(fallback);
     }
   };
 }

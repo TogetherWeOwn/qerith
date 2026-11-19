@@ -11,6 +11,10 @@ interface Session { prepare(sql: string): Statement }
 interface Database extends Session { withSession(constraint: 'first-primary'): Session }
 interface Receipt { key_hex: string; etag: string; size_bytes: number; evidence_revision: string }
 
+export class UploadPublicationWriteError extends Error {
+  constructor(cause: unknown) { super('Upload publication write failed', { cause }); }
+}
+
 const candidate = `FROM drive_upload_publishable_completions e
   WHERE e.operation_id = CAST(? AS TEXT) AND e.intent_id = CAST(? AS TEXT) AND e.owner_id = CAST(? AS TEXT)
     AND e.claim_version = ? AND e.endpoint = ? AND e.bucket = ? AND e.storage_epoch = ? AND e.session_hash = ?`;
@@ -50,14 +54,16 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
 
       // Use an INSERT SELECT, not a separate application check: authorization,
       // journal state and quarantine may have changed even during a matching HEAD.
-      return db.prepare(`INSERT INTO drive_upload_publications
-        (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag,
-          completion_operation_id, evidence_revision)
-        SELECT e.intent_id, e.claim_version, ?, e.owner_id, e.object_key, ?, ?, e.size_bytes, e.etag,
-          e.operation_id, e.evidence_revision ${candidate}
-          AND e.evidence_revision = ? AND e.etag = ? AND e.size_bytes = ?
-        RETURNING entry_id AS id`)
-        .bind(crypto.randomUUID(), parentId, name, ...binding, evidence_revision, etag, size_bytes).first<{ id: string }>();
+      try {
+        return await db.prepare(`INSERT INTO drive_upload_publications
+          (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag,
+            completion_operation_id, evidence_revision)
+          SELECT e.intent_id, e.claim_version, ?, e.owner_id, e.object_key, ?, ?, e.size_bytes, e.etag,
+            e.operation_id, e.evidence_revision ${candidate}
+            AND e.evidence_revision = ? AND e.etag = ? AND e.size_bytes = ?
+          RETURNING entry_id AS id`)
+          .bind(crypto.randomUUID(), parentId, name, ...binding, evidence_revision, etag, size_bytes).first<{ id: string }>();
+      } catch (error) { throw new UploadPublicationWriteError(error); }
     }
   };
 }
