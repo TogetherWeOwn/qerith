@@ -1,5 +1,6 @@
 import { createMultipartComplete } from '../s3/multipart-complete';
 import { completionXml, type CompletedPart } from '../s3/multipart-completion';
+import { requireActiveOwner } from './private';
 import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from './upload-storage-evidence';
 
 interface Statement {
@@ -48,7 +49,7 @@ export const availableUploadDestination = (owner: UploadOwner) =>
   `${accessibleUploadParent(owner)} AND NOT ${occupiedUploadName(owner)}`;
 
 const utf8 = new TextEncoder();
-const allocated = `FROM drive_upload_sealed_candidates o
+const sealed = `FROM drive_upload_sealed_candidates o
   WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?
     AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = o.intent_id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts a WHERE a.intent_id = o.intent_id)`;
@@ -86,7 +87,8 @@ async function matchesSealedParts(db: Session, operation: ArrayBuffer, upload: S
 
 /** Unwired server-only producer; there is no default qualified verifier. */
 export function createUploadCompletionReceipts(db: Database, epoch: string, config: Parameters<typeof createMultipartComplete>[0],
-  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
+  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier, ownerOnly = false) {
+  const allocated = `${sealed} ${requireActiveOwner(ownerOnly, 'o.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const complete = createMultipartComplete(settings, { ...transport,

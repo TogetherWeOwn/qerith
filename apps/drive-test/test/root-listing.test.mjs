@@ -2,6 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
+import { stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { loadRootListing } from '../../drive/src/lib/server/root-listing.ts';
 
 const origin = 'https://drive.example.test';
@@ -80,11 +81,12 @@ it('denies absent, wrong-origin, and revoked sessions rather than returning an e
   expect(await loadRootListing(request(token), auth, [])).toEqual(unavailable);
 });
 
-it.each(['session revoked', 'session expired', 'membership revoked'])('denies a listing when %s after session lookup', async (change) => {
+it.each(['session revoked', 'session expired', 'membership revoked', 'owner demoted'])('denies a listing when %s after session lookup', async (change) => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const principalId = `listing-${change}`;
+  const demoted = change === 'owner demoted', DRIVE_ORIGIN = demoted ? stagingOrigin : origin;
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(principalId),
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(principalId, demoted ? 'owner' : 'member'),
     env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Private', 'folder')")
       .bind(principalId, principalId)
   ]);
@@ -106,6 +108,8 @@ it.each(['session revoked', 'session expired', 'membership revoked'])('denies a 
         if (change === 'session revoked') await sessions.revoke(token);
         else if (change === 'session expired') {
           await env.DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = ?').bind(principalId).run();
+        } else if (demoted) {
+          await env.DB.prepare("UPDATE drive_principals SET role = 'member' WHERE id = ?").bind(principalId).run();
         } else {
           await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(principalId).run();
           // Restore the fixture session so only the membership check can deny the read.
@@ -116,7 +120,7 @@ it.each(['session revoked', 'session expired', 'membership revoked'])('denies a 
       }
     };
   } }) };
-  expect(await loadRootListing(request(token), { ...auth, DB: db }, [])).toEqual({ status: 'unavailable' });
+  expect(await loadRootListing(request(token, undefined, DRIVE_ORIGIN), { DB: db, DRIVE_ORIGIN }, [])).toEqual({ status: 'unavailable' });
   expect(lookedUp).toBe(principalId);
   expect(listed).toBe(true);
 });

@@ -1,7 +1,7 @@
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { allowsOrigin, authOrigin, readSession, type DriveAuthEnv } from './request-auth';
+import { allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { createMultipartCreate } from './s3/multipart-create';
 
@@ -80,10 +80,11 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!origin || !db) return reply(503);
   if (request.method !== 'POST') return reply(405);
   if (!allowsOrigin(request, origin.origin)) return reply(403);
+  const ownerOnly = env.DRIVE_ORIGIN === stagingOrigin;
   let sent = false;
   try {
     const session = await readSession(request, db);
-    if (!session) return reply(401);
+    if (!session || (ownerOnly && session.principal.role !== 'owner')) return reply(401);
     if (!Number.isSafeInteger(size) || size < 0 || size > maxUploadIntentBytes) return reply(400);
     if (!config || !epoch || !verifier) return reply(503);
     const { token, principal: { id: owner } } = session;
@@ -92,7 +93,7 @@ export async function createUploadIntent(request: Request, size: number, env: Up
       // Charge the entire D1 round trip against its remaining lifetime; no shared clock required.
       const started = performance.now();
       const live = await new Sessions(db).lookupWithRemainingLifetime(token);
-      return live?.id === owner ? started + live.remaining_ms : 0;
+      return live?.id === owner && (!ownerOnly || live.role === 'owner') ? started + live.remaining_ms : 0;
     };
     const { fetch, timeoutMs } = transport;
     let deadline = 0;
@@ -124,7 +125,7 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     }
     const intents = new UploadIntents(db);
     const { endpoint, bucket } = settings;
-    const claim = await intents.claimNewAllocation(owner, await tokenHash(token), size, endpoint, bucket, epoch);
+    const claim = await intents.claimNewAllocation(owner, await tokenHash(token), size, endpoint, bucket, epoch, ownerOnly);
     if (!claim) return reply(401);
     const { id, object_key: key, version } = claim;
     try {

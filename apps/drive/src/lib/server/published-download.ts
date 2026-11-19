@@ -1,10 +1,12 @@
 import { downloadFile } from './download';
 import { createPublishedReadAccess } from './metadata/read-access';
+import { stagingOrigin } from './request-auth';
 import { createImmutableS3Reader, createS3Objects } from './s3/objects';
 import { storageIdentity, type StorageBindings } from './storage-runtime';
 
 export interface DownloadEnv extends StorageBindings {
   DB?: Parameters<typeof createPublishedReadAccess>[0];
+  DRIVE_ORIGIN?: string;
 }
 
 const timeoutMs = 15_000;
@@ -14,7 +16,7 @@ export function downloadStorage(env: DownloadEnv) {
   const identity = storageIdentity(env);
   if (!env.DB || !identity) return null;
   const { settings: config, epoch } = identity;
-  return { ...createPublishedReadAccess(env.DB, epoch, config), config };
+  return { ...createPublishedReadAccess(env.DB, epoch, config, env.DRIVE_ORIGIN === stagingOrigin), config };
 }
 
 // The immutable reader validates the byte count at EOF. Check that there are

@@ -1,6 +1,6 @@
 import { tokenHash } from '../identity/sessions';
 import { createImmutableS3Reader, createS3Objects } from '../s3/objects';
-import { validateName } from './private';
+import { requireActiveOwner, validateName } from './private';
 import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from './upload-storage-evidence';
 
 interface Statement {
@@ -15,7 +15,7 @@ export class UploadPublicationWriteError extends Error {
   constructor(cause: unknown) { super('Upload publication write failed', { cause }); }
 }
 
-const candidate = `FROM drive_upload_publishable_completions e
+const publishable = `FROM drive_upload_publishable_completions e
   WHERE e.operation_id = CAST(? AS TEXT) AND e.intent_id = CAST(? AS TEXT) AND e.owner_id = CAST(? AS TEXT)
     AND e.claim_version = ? AND e.endpoint = ? AND e.bucket = ? AND e.storage_epoch = ? AND e.session_hash = ?`;
 
@@ -23,7 +23,8 @@ const candidate = `FROM drive_upload_publishable_completions e
 // qualify the exact namespace for conditional writes/reads and exclusive mutation.
 // No environmental or provider-name heuristic substitutes for that evidence.
 export function createTrustedUploadPublication(db: Database, epoch: string, config: Parameters<typeof createS3Objects>[0],
-  transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>) {
+  transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>, ownerOnly = false) {
+  const candidate = `${publishable} ${requireActiveOwner(ownerOnly, 'e.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { beforeSend, ...options } = transport;

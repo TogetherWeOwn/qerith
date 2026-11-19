@@ -1,7 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
-import { privateRequests } from '../../drive/src/lib/server/request-auth.ts';
+import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
 import { config, epoch, migrations, response, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
@@ -9,16 +9,18 @@ const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
 async function fixture({ fail, verify, beforeHead, isQualified = qualified, endpoint = config.endpoint,
-  size = 7, completionTimeoutMs = () => 15_000 } = {}) {
+  size = 7, completionTimeoutMs = () => 15_000, staging = false } = {}) {
+  const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
   const other = `other-${intent}`, calls = [], parts = [];
-  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active'), (?, 'member', 'active')", principal, other).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active'), (?, 'member', 'active')",
+    principal, staging ? 'owner' : 'member', other).run();
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
-  const bindings = { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
+  const bindings = { DB: env.DB, DRIVE_ORIGIN: requestOrigin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
     DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent), completionTimeoutMs,
       verifyParts: (upload) => verify ? verify(upload, parts) : [...parts].sort((a, b) => a.partNumber - b.partNumber) } : undefined };
   const routes = uploadRoutes(bindings, { timeoutMs: 5000, async fetch(request) {
@@ -36,7 +38,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
     return new Response(null, { headers: { etag, 'content-length': String(size) } });
   } });
   const handle = privateRequests(bindings);
-  function send(number, { auth = token, source = origin, host = origin, name = 'file', parentId = null,
+  function send(number, { auth = token, source = requestOrigin, host = requestOrigin, name = 'file', parentId = null,
     intentId = intent, bytes = 7 } = {}) {
     const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
@@ -80,6 +82,29 @@ it('publishes a verified sparse upload without duplicate part or completion send
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
+});
+
+it.each(['none', 'parts verification', 'generation HEAD'])('keeps staging upload owner-only at %s', async (change) => {
+  let principal;
+  const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
+  const upload = await fixture({ staging: true, async verify(_upload, parts) {
+    if (change === 'parts verification') await demote();
+    return parts;
+  }, async beforeHead() {
+    if (change === 'generation HEAD') await demote();
+  } });
+  ({ principal } = upload);
+  expect((await upload.send(1, { auth: upload.foreign })).status).toBe(403);
+  expect((await upload.send(1)).status).toBe(204);
+  const result = await upload.send();
+  if (change === 'none') {
+    expect(result.status).toBe(201);
+    expect(await upload.generation()).toMatchObject({ entry_id: (await result.json()).id });
+  } else {
+    expect(result.status).toBe(404);
+    expect(await upload.generation()).toBeNull();
+  }
+  expect(upload.calls).toEqual(change === 'parts verification' ? ['PUT'] : ['PUT', 'POST', 'HEAD']);
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {
