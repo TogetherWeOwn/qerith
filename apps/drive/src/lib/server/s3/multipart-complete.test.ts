@@ -116,3 +116,12 @@ test('rejects invalid inputs and pre-cancellation without sending', async () => 
   await assert.rejects(complete('key', 'id', parts, controller.signal), /cancelled/);
   assert.equal(calls, 0);
 });
+
+test('does not dispatch when qualification reaches the deadline', async ({ mock }) => {
+  let now = 0, sends = 0;
+  mock.method(performance, 'now', () => now);
+  const complete = createMultipartComplete(config, { timeoutMs: 1000, fetch: async () => { sends++; return new Response(); },
+    beforeSend: async () => { now = 1000; return true; } });
+  await assert.rejects(complete('key', 'id', parts), /outcome uncertain/);
+  assert.deepEqual([now, sends], [1000, 0]);
+});

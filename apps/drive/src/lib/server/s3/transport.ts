@@ -9,7 +9,7 @@ const viewByteOffset = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byt
 const viewBuffer = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'buffer')!.get!;
 const validateView = typedArrayPrototype.values as (this: Uint8Array) => IterableIterator<number>;
 
-type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date };
+type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date; beforeSend?: () => Promise<boolean> };
 type Operation = {
   method: 'GET' | 'HEAD' | 'PUT' | 'POST' | 'DELETE';
   key: string;
@@ -107,8 +107,9 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       const signed = await abortable(signer.sign(url, {
         method, headers, body, signal: controller.signal, redirect: 'manual'
       }), controller.signal);
+      const { beforeSend, fetch: transport } = options;
+      if (beforeSend && await abortable(beforeSend(), controller.signal) !== true) throw new Error('S3 send not admitted');
       checkAbort();
-      const transport = options.fetch;
       response = await abortable(transport(signed), controller.signal, cancelResponse);
       checkAbort();
       if (response.status >= 300 && response.status < 400 && response.status !== 304) {

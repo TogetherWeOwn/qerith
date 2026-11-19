@@ -38,17 +38,15 @@ const allocated = `FROM drive_upload_intents i JOIN drive_upload_storage_binding
     AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations WHERE intent_id = i.id)`;
 
 async function destination(request: Request): Promise<{ name: string; parentId: string | null }> {
-  const length = request.headers.get('content-length') ?? '';
-  const size = Number(length);
+  const length = request.headers.get('content-length') ?? '', size = Number(length);
   if (request.headers.get('content-type') !== 'application/json' || !/^\d{1,4}$/.test(length) || size < 1 || size > 4096)
     throw new TypeError('Invalid publication body');
   const bytes = await readUploadBody(request, size);
   if (!bytes) throw new TypeError('Invalid publication body');
   const { name, parentId } = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   validateName(name);
-  if (parentId !== null && (typeof parentId !== 'string' || !uploadIdPattern.test(parentId))) {
+  if (parentId !== null && (typeof parentId !== 'string' || !uploadIdPattern.test(parentId)))
     throw new TypeError('Invalid publication parent');
-  }
   return { name, parentId };
 }
 

@@ -7,10 +7,8 @@ import { config, epoch, migrations, response, sessions, sql } from './fixtures/u
 import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
 
 const origin = 'https://drive.example.test';
-const uploadId = 'provider-upload-id';
-const tag = '"provider-part-tag"';
+const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
-const minimum = 5 * 1024 * 1024;
 async function fixture({ fail, verify, beforeHead, isQualified = qualified, endpoint = config.endpoint,
   size = 7, completionTimeoutMs = () => 15_000 } = {}) {
   await applyD1Migrations(env.DB, migrations);
@@ -20,8 +18,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
-  const { token } = await sessions.issue(principal);
-  const foreign = (await sessions.issue(other)).token;
+  const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
   const bindings = { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
     DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified, completionTimeoutMs,
       verifyParts: (upload) => verify ? verify(upload, parts) : parts } : undefined };
@@ -66,8 +63,7 @@ it('publishes only the conditionally verified generation and never sends a dupli
   expect(receipt).toEqual({ id: expect.any(String) });
   expect(await generation()).toEqual({ entry_id: receipt.id, size_bytes: 7, etag });
   const replay = await send();
-  expect(replay.status).toBe(200);
-  expect(await replay.json()).toEqual(receipt);
+  expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
   expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
 });
@@ -99,8 +95,7 @@ it.each(['PUT', 'POST'])('does not leak, publish or resend after uncertain %s', 
   expect(first.status).toBe(partFailed ? 409 : 204);
   expect(await first.text()).toBe('');
   if (partFailed) expect((await send(2)).status).toBe(404);
-  expect((await send()).status).toBe(409);
-  expect((await send()).status).toBe(partFailed ? 409 : 404);
+  expect([(await send()).status, (await send()).status]).toEqual([409, partFailed ? 409 : 404]);
   expect(await generation()).toBeNull();
   expect(calls).toEqual(partFailed ? ['PUT'] : ['PUT', 'POST']);
 });
@@ -112,8 +107,7 @@ it('resumes an undispatched seal, then reuses the receipt after a failed HEAD', 
     verify: (_, parts) => { if (++verifications === 1) current = false; return parts; },
     beforeHead: () => { if (++heads === 1) throw new Error('Transient HEAD failure'); }
   });
-  expect((await send(1)).status).toBe(204);
-  expect((await send()).status).toBe(409);
+  expect([(await send(1)).status, (await send()).status]).toEqual([204, 409]);
   expect(calls).toEqual(['PUT']);
   current = true;
   expect((await send()).status).toBe(409);
@@ -143,20 +137,16 @@ it('checks sibling conflicts before sealing and again at dispatch', async () => 
 it('rejects impossible small-part layouts without consuming slots', async () => {
   const { send, calls } = await fixture({ size: minimum + 7,
     verify: (_, parts) => [...parts].sort((a, b) => a.partNumber - b.partNumber) });
-  expect((await send(3)).status).toBe(404); // Both earlier slots would require full parts.
-  expect((await send(1)).status).toBe(404); // No earlier slot can fill the rest.
-  expect((await send(2)).status).toBe(204); // The short final part may arrive first.
-  expect((await send(1, { bytes: minimum - 1 })).status).toBe(404);
-  expect((await send(1, { bytes: minimum })).status).toBe(204);
-  expect((await send()).status).toBe(201);
+  // Only slot 2 can be short, and it may arrive before the full first slot.
+  for (const [number, bytes, status] of [[3, 7, 404], [1, 7, 404], [2, 7, 204],
+    [1, minimum - 1, 404], [1, minimum, 204], [undefined, 0, 201]])
+    expect((await send(number, { bytes })).status).toBe(status);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
 });
 
 it('rechecks the session at the atomic publication write after a matching HEAD', async () => {
   const { send, calls, generation } = await fixture({ beforeHead: (token) => sessions.revoke(token) });
-  expect((await send(1)).status).toBe(204);
-  expect((await send()).status).toBe(409);
-  expect((await send()).status).toBe(401);
+  expect([(await send(1)).status, (await send()).status, (await send()).status]).toEqual([204, 409, 401]);
   expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
   expect(await generation()).toBeNull();
 });
