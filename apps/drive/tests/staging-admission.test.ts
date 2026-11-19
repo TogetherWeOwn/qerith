@@ -68,6 +68,7 @@ test('unlisted paths fail before authentication, including framework paths and n
     '/__data.json', '/sign-in/__data.json', '/_app/env.js', '/_app/version.json', '/_app/immutable/chunks/other.js',
     '/_app/immutable/assets/%72oot.css', '/_app/immutable/assets/root.css.map', '/api/uploads/', '/api/uploads/list',
     '/api/sign-in/enroll', '/api/sign-in/%76erify', `/api/download/${id}/`, `/api/download/${id}%2F`,
+    '/api/owner/invitations', `/api/owner/invitations/${id}/cancel`, `/api/owner/members/${id}/revoke`,
     `/api/uploads/${id}/complete/`, `/api/uploads/${id}/abort`, `/api/uploads/${id}/parts/1/`,
     ...['0', '01', '10001', '1e1', '%31'].map(part => `/api/uploads/${id}/parts/${part}`)]) {
     for (const method of ['GET', 'HEAD', 'POST', 'PUT']) {

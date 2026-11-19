@@ -5,6 +5,7 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
+import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -148,6 +149,7 @@ export default { fetch(request, env, ctx) {
       assert.match(html, /Your drive is empty\./);
       await exerciseRootPages(DB, worker, origin, cookie, fileId);
       const owner = await session('owner-fixture', 'owner');
+      await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       return;
     }
@@ -201,6 +203,7 @@ export default { fetch(request, env, ctx) {
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);
     const owner = await session('owner-fixture', 'owner');
+    await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
     await assertProvisioningUnavailable(owner, 'owner');
     await exerciseDeletion({ worker, DB, origin, cookie: owner, revoked: cookie, other: await session('other-fixture', 'member') });
   } finally {
