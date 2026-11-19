@@ -112,6 +112,7 @@ export default { fetch(request, env, ctx) {
     const following = await (await get({ cookie }, `${origin}${next[1]}`)).text();
     assert.match(following, /Fixture\.pdf/);
     assert.ok(following.includes(`href="/api/download/${fileId}"`));
+    assert.doesNotMatch(following, /data-action-row|<th[^>]*>(?:Size|Modified|Actions)<\/th>/);
     assert.doesNotMatch(following, /Folder 199|Other principal folder|internal-fixture-key|Next page/);
     assert.ok(!following.includes(token));
     const invalid = await (await get({ cookie }, `${origin}/?page=invalid`)).text();

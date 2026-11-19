@@ -871,7 +871,7 @@ try {
     assert.equal(await longName.textContent(), 'a-very-long-file-name-without-breaks-to-check-reflow.txt');
     assert.equal(await longName.evaluate(el => getComputedStyle(el).textOverflow), 'clip');
     assert.equal(await container.locator('time').count(), 3);
-    assert.equal(await container.locator('svg[aria-hidden="true"]').count(), 3);
+    assert.equal(await container.locator('.name svg[aria-hidden="true"]').count(), 3);
     assert.equal(await container.getByRole('link', { name: 'Archive' }).locator('..').locator('svg circle').count(), 1);
     assert.equal(await container.getByRole('link', { name: 'Résumé 2025.pdf' }).locator('..').locator('svg path').count(), 2);
     const tag = container.getByText('Shared', { exact: true });
@@ -906,8 +906,10 @@ try {
     for (const name of ['Archive', 'a-very-long-file-name-without-breaks-to-check-reflow.txt', 'Résumé 2025.pdf']) {
       await page.keyboard.press('Tab');
       assert.equal(await container.getByRole('link', { name }).evaluate(el => el === document.activeElement), true);
+      await page.keyboard.press('Tab');
+      assert.equal(await container.getByRole('button', { name: `Actions for ${name}` }).evaluate(el => el === document.activeElement), true);
     }
-    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'long file', 'Résumé 2025.pdf'] }));
+    await writeFile(resolve(output, `keyboard-${size}.json`), JSON.stringify({ focusOrder: ['Archive', 'actions', 'long file', 'actions', 'Résumé 2025.pdf', 'actions'] }));
     if (width !== 320) {
       const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
       await page.screenshot({ path: resolve(output, `${size}-greyscale.png`) });
@@ -938,6 +940,94 @@ try {
     }
     await context.close();
   }
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    const name = 'a-very-long-file-name-without-breaks-to-check-reflow.txt';
+    await page.goto(`${origin}/?listing`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: `Actions for ${name}` }).click();
+    assert.equal(await page.getByRole('menuitem').count(), 1);
+    assert.equal(await page.getByRole('menuitem', { name: 'Details' }).count(), 1);
+    await page.getByRole('menuitem', { name: 'Details' }).click();
+    assert.match(await page.getByRole('group', { name: `Details for ${name}` }).textContent(), /a-very-long-file-name-without-breaks-to-check-reflow\.txt/);
+    await context.close();
+  }
+  {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 844 }, serviceWorkers: 'block' });
+    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(`${origin}/?listing&two-lists`, { waitUntil: 'networkidle' });
+    const lists = page.locator('ul.mobile');
+    for (let i = 0; i < 2; i++) {
+      await lists.nth(i).getByRole('button', { name: 'Actions for Archive' }).click();
+      await page.getByRole('menuitem', { name: 'Details' }).click();
+      await page.waitForFunction(() => document.activeElement?.matches('[data-details-id]'));
+    }
+    const second = page.locator('.listing').nth(1);
+    await second.evaluate(el => { el.parentElement.style.width = '1000px'; });
+    await page.waitForFunction(() => document.activeElement?.matches('table.desktop [data-details-id]'));
+    await second.evaluate(el => { el.parentElement.style.width = '500px'; });
+    await page.waitForFunction(() => document.activeElement?.matches('ul.mobile [data-details-id]'));
+    await page.keyboard.press('Escape');
+    assert.equal(await lists.nth(0).locator('[data-details-id]').count(), 1);
+    assert.equal(await lists.nth(1).locator('[data-details-id]').count(), 0);
+    assert.equal(await lists.nth(1).getByRole('button', { name: 'Actions for Archive' }).evaluate(el => el === document.activeElement), true);
+    for (const [from, to, selector] of [[500, 1000, 'table.desktop'], [1000, 500, 'ul.mobile']]) {
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
+      await second.locator('button[aria-label="Actions for Archive"]:visible').click();
+      assert.equal(await page.getByRole('menu').count(), 1);
+      await page.waitForFunction(() => document.activeElement?.matches('[role="menuitem"]'));
+      const beforeResize = await second.evaluate(el => ({
+        active: document.activeElement?.outerHTML.slice(0, 500),
+        activeInListing: el.contains(document.activeElement),
+        expanded: Array.from(el.querySelectorAll('button[aria-label="Actions for Archive"]'), button => button.getAttribute('aria-expanded')),
+      }));
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, to);
+      try {
+        await page.waitForFunction(({ selector }) => {
+          const active = document.activeElement;
+          return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
+        }, { selector });
+      } catch (error) {
+        console.error('Resize focus state:', await second.evaluate(el => ({
+          active: document.activeElement?.outerHTML.slice(0, 500),
+          triggers: Array.from(el.querySelectorAll('button[aria-label="Actions for Archive"]'), button => ({
+            expanded: button.getAttribute('aria-expanded'),
+            visible: button.getClientRects().length > 0,
+            layout: button.closest('table') ? 'desktop' : 'mobile',
+          })),
+        })), { from, to, beforeResize });
+        throw error;
+      }
+      assert.equal(await page.getByRole('menu').count(), 0);
+    }
+    for (const [from, to, selector] of [[500, 1000, 'table.desktop'], [1000, 500, 'ul.mobile']]) {
+      await second.evaluate((el, width) => { el.parentElement.style.width = `${width}px`; }, from);
+      await second.evaluate((el, width) => {
+        delete el.dataset.resizedDuringOpening;
+        const original = HTMLDialogElement.prototype.showPopover;
+        HTMLDialogElement.prototype.showPopover = function () {
+          delete HTMLDialogElement.prototype.showPopover;
+          el.dataset.resizedDuringOpening = 'true';
+          el.parentElement.style.width = `${width}px`;
+          return original.call(this);
+        };
+      }, to);
+      await second.locator('button[aria-label="Actions for Archive"]:visible').click();
+      assert.equal(await second.getAttribute('data-resized-during-opening'), 'true');
+      await page.waitForFunction(({ selector }) => {
+        const active = document.activeElement;
+        return active?.matches(`${selector} button[aria-label="Actions for Archive"]`) && active.getAttribute('aria-expanded') === 'false';
+      }, { selector });
+      assert.equal(await page.getByRole('menu').count(), 0);
+    }
+    await page.goto(`${origin}/?listing&whitespace`, { waitUntil: 'networkidle' });
+    await page.locator('[data-action-row="tab"] button:visible').click();
+    await page.getByRole('menuitem', { name: 'Details' }).click();
+    assert.equal(await page.getByRole('group', { name: 'Details for whitespace-only name' }).count(), 1);
+    await context.close();
+  }
   for (const width of [1280, 390, 320]) for (const segmenter of [true, false]) {
     const height = width === 1280 ? 800 : 844;
     const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
@@ -955,7 +1045,7 @@ try {
       const first = range.getClientRects()[0];
       const glyph = el.parentElement.querySelector('svg').getBoundingClientRect();
       const row = el.closest('li, tr');
-      const cells = [...row.querySelectorAll(':scope > td:not(:first-child)')].map(cell => {
+      const cells = [...row.querySelectorAll(':scope > td:nth-child(2), :scope > td:nth-child(3), :scope > td:nth-child(4)')].map(cell => {
         const text = document.createRange();
         text.selectNodeContents(cell);
         return text.getClientRects()[0];
@@ -970,6 +1060,13 @@ try {
     });
     assert(alignment.lines > 1 && alignment.rowHeight >= alignment.linkHeight, `Long name must expand its row: ${JSON.stringify(alignment)}`);
     assert(alignment.glyphDelta <= 6 && alignment.cellDeltas.every(delta => delta <= 8), `First-line alignment: ${JSON.stringify(alignment)}`);
+    if (width > 820) {
+      const actionColumn = await page.locator('table.desktop th').last().evaluate(el => ({
+        width: parseFloat(getComputedStyle(el).width),
+        expected: parseFloat(getComputedStyle(el).getPropertyValue('--drive-size-column-actions'))
+      }));
+      assert.equal(actionColumn.width, actionColumn.expected, `Actions column width: ${JSON.stringify(actionColumn)}`);
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
     await page.screenshot({ path: resolve(output, `listing-unicode-${width}-${segmenter ? 'segmenter' : 'fallback'}.png`), fullPage: true });
     await page.evaluate(axe);
@@ -1095,10 +1192,11 @@ try {
         below: el.contains(document.elementFromPoint(x, rect.bottom - 4)) };
     });
     assert.deepEqual(hit, { top: 8, bottom: 8, above: true, below: true });
-    assert.equal(await page.locator('button[aria-haspopup="menu"], th.actions').count(), 0);
+    assert.equal(await container.getByRole('button', { name: /^Actions for / }).count(), 2);
+    assert.equal(await page.getByRole('columnheader', { name: 'Actions', exact: true }).count(), width > 820 ? 1 : 0);
     assert.equal(await spaces.evaluate(el => el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }))), true);
 
-    await page.goto(`${origin}/?listing&actions`, { waitUntil: 'networkidle' });
+    await page.goto(`${origin}/?listing&actions&inline`, { waitUntil: 'networkidle' });
     assert.equal(await container.getByRole('button', { name: /^Actions for / }).count(), 3);
     assert.equal(await page.getByRole('columnheader', { name: 'Actions', exact: true }).count(), width > 820 ? 1 : 0);
     const trigger = container.getByRole('button', { name: 'Actions for Archive', exact: true });
@@ -1145,7 +1243,8 @@ try {
       return getComputedStyle(row).backgroundColor === row.dataset.expectedOpenColor;
     }, null, { timeout: 5000 });
     await page.getByRole('menuitem', { name: 'Details', exact: true }).click();
-    assert.equal(await page.locator('main > p').textContent(), '1: Details');
+    await container.getByRole('group', { name: 'Details for Archive' }).and(focus).waitFor({ timeout: 5000 });
+    await page.keyboard.press('Escape');
     await trigger.and(focus).waitFor({ timeout: 5000 });
     // Linux Chromium cannot generate a macOS Control-click; dispatch its pointer event shape.
     const dispatchContextMenu = pointerType => metadata.evaluate((el, pointerType) => el.dispatchEvent(
@@ -1159,16 +1258,18 @@ try {
     await trigger.and(focus).waitFor({ timeout: 5000 });
     const ownedTrigger = container.getByRole('button', { name: 'Actions for Résumé 2025.pdf', exact: true });
     const inlineUrl = `${origin}/?listing&actions&inline`;
-    for (const inline of [false, true]) for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
-      if (inline && action === 'Download') await page.goto(inlineUrl);
-      if (inline && action === 'Details') continue;
-      await ownedTrigger.press('ArrowDown');
-      await page.getByRole('menuitem', { name: action, exact: true }).click();
-      assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
-      assert.equal(await page.getByRole('menu').count(), 0);
-      assert.equal(await page.locator('[data-details-id]').count(), 0, 'Details belongs to the caller, not an inline panel');
+    for (const inline of [false, true]) {
+      await page.goto(inline ? inlineUrl : `${origin}/?listing&actions`);
+      for (const action of ['Download', 'Share', 'Rename', 'Move', 'Details', 'Delete']) {
+        if (inline && action === 'Details') continue;
+        await ownedTrigger.press('ArrowDown');
+        await page.getByRole('menuitem', { name: action, exact: true }).click();
+        assert.equal(await page.getByRole('menu').count(), 0);
+        assert.equal(await page.locator('main > p').textContent(), `2: ${action}`);
+        assert.equal(await page.locator('[data-details-id]').count(), 0, 'Forwarded actions must not open inline details');
+      }
     }
-    console.log(`Listing actions at ${width}px: opt-in, native Tab order, and all six actions forwarded`);
+    console.log(`Listing actions at ${width}px: opt-in, native Tab order, and callback actions forwarded`);
     const item = name => page.getByRole('menuitem', { name, exact: true });
     const actionsFor = name => page.getByRole('button', { name: `Actions for ${name}`, exact: true });
     const detailsFor = name => page.getByRole('group', { name: `Details for ${name}`, exact: true });
@@ -1342,7 +1443,16 @@ try {
         }
         await page.keyboard.press('ArrowDown');
         if (phase === 'settled') {
-          await download.waitFor({ timeout: 5000 });
+          try {
+            await download.waitFor({ timeout: 5000 });
+          } catch (error) {
+            console.error('Menu opening focus failure:', { inline, from, to, state: await page.evaluate(() => ({
+              active: document.activeElement?.outerHTML,
+              expanded: Array.from(document.querySelectorAll('[aria-expanded="true"]'), el => el.outerHTML),
+              layers: Array.from(document.querySelectorAll('dialog'), el => ({ open: el.open, popover: el.matches(':popover-open'), visible: !!el.getClientRects().length }))
+            })) });
+            throw error;
+          }
           await setContainerWidth(to);
         } else {
           await resizeTarget.and(page.locator('[data-resized-during-opening="true"]')).waitFor({ timeout: 5000 });

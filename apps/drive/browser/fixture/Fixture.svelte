@@ -32,6 +32,7 @@
     { id: '3', name: 'a-very-long-file-name-without-breaks-to-check-reflow.txt', href: '#long', kind: 'File', glyph: 'file', size: '1.0 KB', bytes: 1000, modified: '12 Nov', modifiedAt: '2026-11-12T09:00:00Z', shared: false },
     { id: '2', name: 'Résumé 2025.pdf', href: '#resume', kind: 'PDF', glyph: 'document', size: '5.4 MB', bytes: 5400000, modified: '13 Nov', modifiedAt: '2026-11-13T09:00:00Z', shared: false }
   ];
+  const detailsItems = items.map(item => ({ ...item, owned: true, details: { modifiedFull: '14 November 2026, 09:00 UTC', uploaded: '12 November 2026, 09:00 UTC', ...(item.shared ? { sharedWith: ['Mora', 'Sam'] } : {}) } }));
   const listingActions = new URLSearchParams(window.location.search).has('actions');
   const actionItems = items.map(item => item.id === '2' ? { ...item, owned: true } : item);
   const whitespaceItems = [
@@ -119,6 +120,8 @@
     <button bind:this={nextName}>Next file</button>
     <p aria-live="polite">{selected}</p>
   </main>
+{:else if listing && !listingActions && new URLSearchParams(window.location.search).has('two-lists')}
+  <main><div style="width: 500px"><FileList folder="First" timeZone="UTC" {items} /></div><div style="width: 500px"><FileList folder="Second" timeZone="UTC" {items} /></div></main>
 {:else if listing && listingActions}
   <main>
     {#if inlineDetails && params.has('two-lists')}
@@ -132,7 +135,7 @@
     {#if inlineDetails}<button>After listing</button>{/if}
   </main>
 {:else if listing}
-  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
+  <main>{#if paged}<h1>My Drive</h1><p>{pagedItems.length} items</p><FileList folder="My Drive" timeZone="America/New_York" items={visiblePage} {direction} total={new URLSearchParams(window.location.search).has('unknown-total') ? undefined : pagedItems.length} hasMore={shown < pagedItems.length} {loadMoreError} {loadingMore} onSort={sortPage} onMore={showMore} />{:else if new URLSearchParams(window.location.search).has('details')}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('missing-details') ? items : detailsItems} inlineDetails={true} onAction={(_id, action) => { selected = action; }} /><button>After listing</button>{:else}<FileList folder="My Drive" timeZone="America/New_York" items={new URLSearchParams(window.location.search).has('unicode') ? unicodeItems : new URLSearchParams(window.location.search).has('whitespace') ? whitespaceItems : items} />{/if}</main>
 {:else if empty}
   <main><EmptyFolder root={empty === 'root'} onUpload={() => uploads++} /></main>
 {:else}

@@ -20,12 +20,12 @@
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
   const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
 
-  $: if (detailsId !== null && (!onAction || !inlineDetails || !items.some(item => item.id === detailsId))) {
+  $: if (detailsId !== null && ((onAction && !inlineDetails) || !items.some(item => item.id === detailsId))) {
     if (onAction && findRowPart(visibleView(), 'data-details-id', detailsId)?.contains(document.activeElement)) triggerFor(visibleView(), detailsId)?.focus();
     detailsId = null;
   }
   async function selectAction(source: HTMLElement, id: string, action: RowAction) {
-    if (action !== 'Details' || !inlineDetails) { onAction?.(id, action); return; }
+    if (action !== 'Details' || (onAction && !inlineDetails)) { onAction?.(id, action); return; }
     const sourceTrigger = triggerFor(source, id);
     detailsId = id;
     await tick();
@@ -77,9 +77,9 @@
       // Closing a top-layer menu can itself change focus, so snapshot it first.
       const active = document.activeElement;
       const focused = active === document.body ? lastFocused : active;
-      if (onAction) dismissMenus(from, compact ? desktopActions : compactActions);
+      dismissMenus(from, compact ? desktopActions : compactActions);
       if (!to.getClientRects().length) {
-        if (onAction) dismissMenus(to, compact ? compactActions : desktopActions);
+        dismissMenus(to, compact ? compactActions : desktopActions);
         lastFocused = null;
         return;
       }
@@ -100,8 +100,7 @@
         target = focused === facts ? next : next?.querySelector('button[type="button"]');
       } else {
         const id = focused.closest<HTMLElement>('[data-action-row]')?.dataset.actionRow;
-        const row = Array.from(to.querySelectorAll<HTMLElement>('[data-action-row]')).find(row => row.dataset.actionRow === id);
-        target = row?.querySelector(actionTrigger);
+        target = findRowPart(to, 'data-action-row', id)?.querySelector(actionTrigger);
       }
       lastFocused = null;
       target?.focus();
@@ -134,18 +133,18 @@
   export let folder: string;
   export let timeZone: string | undefined = undefined;
   // The caller pages and orders folders before files, by binary name within each group.
-  export let showMetadata = true;
+  export let preview = false;
   export let direction: 'asc' | 'desc' = 'asc';
   export let total: number | undefined = undefined;
   export let hasMore = false;
   export let loadingMore = false;
   export let loadMoreError = false;
+  let usedPaging = false;
   export let onSort: ((direction: 'asc' | 'desc') => void) | undefined = undefined;
   export let onMore: (() => void) | undefined = undefined;
-  let usedPaging = false;
   $: orderDescription = direction === 'asc' ? 'A to Z' : 'Z to A';
-  $: nameOrder = showMetadata ? `${orderDescription} (binary order)` : 'in binary order';
-  $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${showMetadata && timeZone ? ` Times in ${timeZone}.` : ''}`;
+  $: nameOrder = preview ? 'in binary order' : `${orderDescription} (binary order)`;
+  $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${!preview && timeZone ? ` Times in ${timeZone}.` : ''}`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
   export let inlineDetails = false;
   export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
@@ -165,7 +164,7 @@
 {/snippet}
 
 <svelte:window on:keydown={escapeDetails} />
-<div class="listing" class:preview={!showMetadata}>
+<div class="listing" class:preview>
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
@@ -173,27 +172,27 @@
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if showMetadata}<th scope="col" class="size">Size</th><th scope="col" class="modified">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if onAction}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td>{@render entryName(item)}</td>
-        {#if showMetadata}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
-        {#if onAction}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
+        {#if !preview}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
+        {#if !preview}
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
         {/if}
       </tr>
-      {#if detailsId === item.id}<tr><td colspan={2 + (showMetadata ? 2 : 0) + (onAction ? 1 : 0)}><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
+      {#if !preview && detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
   </tbody>
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li class:with-actions={!!onAction} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if showMetadata}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
-      {#if onAction}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
+    <li class:with-actions={!preview} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
+      {#if !preview}
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
       {/if}
-      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
+      {#if !preview && detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
   {/each}
 </ul>
@@ -215,7 +214,7 @@
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
   td { vertical-align: baseline; }
-  th.size { width: var(--drive-size-column-size); } th.modified { width: var(--drive-size-column-modified); } th.kind { width: var(--drive-size-column-kind); }
+  th.size { width: var(--drive-size-column-size); } .preview th.kind { width: var(--drive-size-column-kind); }
   .preview a { text-decoration: underline; }
   th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
@@ -252,4 +251,8 @@
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
+  @container (max-width: 200px) {
+    li.with-actions > :first-child { grid-column: 1 / -1; }
+    li.with-actions > [data-action-row] { grid-row: 2; }
+  }
 </style>

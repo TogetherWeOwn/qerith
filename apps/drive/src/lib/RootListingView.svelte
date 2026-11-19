@@ -23,7 +23,7 @@
   <a href="/">Back to first page</a>
 {:else}
   {#if items.length}
-    <FileList folder="My Drive" showMetadata={false} {items} />
+    <FileList folder="My Drive" preview {items} />
   {:else if page}
     <p>No more items.</p>
   {:else}
