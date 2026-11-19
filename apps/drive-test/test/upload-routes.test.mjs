@@ -1,6 +1,6 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
@@ -8,7 +8,7 @@ import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts
 import { postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
 import { config, epoch, evidence, migrations, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
-import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
+import { etag, headOk, qualified, setup } from './fixtures/upload-publication-generation.mjs';
 const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
@@ -110,19 +110,17 @@ it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation 
       return new Response(`<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key>` +
         `<UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
     } });
-    expect(await sessions.lookup(token)).toEqual({ id: principal, role: change === 'owner' ? 'owner' : 'member' });
-    expect(states).toEqual(change === 'claim' ? [null] : [null, 'initiating']);
-    expect(calls).toEqual(change === 'owner' ? ['POST'] : []);
+    const allowed = change === 'owner', claimed = change !== 'claim';
+    expect(await sessions.lookup(token)).toEqual({ id: principal, role: allowed ? 'owner' : 'member' });
+    expect(states).toEqual(claimed ? [null, 'initiating'] : [null]);
+    expect(calls).toEqual(allowed ? ['POST'] : []);
     const intent = await row();
-    if (change === 'owner') {
-      expect(result.status).toBe(201);
-      expect(intent).toMatchObject({ state: 'allocated', version: 2, upload_id: uploadId });
-      expect(await result.json()).toEqual({ id: intent.id });
-    } else {
-      expect([result.status, await result.text()]).toEqual([change === 'claim' ? 401 : 503, '']);
-      if (change === 'claim') expect(intent).toBeNull();
-      else expect(intent).toMatchObject({ state: 'created', version: 2, upload_id: null });
-    }
+    expect(intent).toEqual(claimed ? expect.objectContaining({
+      state: allowed ? 'allocated' : 'created', version: 2, upload_id: allowed ? uploadId : null
+    }) : null);
+    expect(result.status).toBe(allowed ? 201 : claimed ? 503 : 401);
+    if (allowed) expect(await result.json()).toEqual({ id: intent.id });
+    else expect(await result.text()).toBe('');
   } finally { await demote(); }
 });
 
@@ -159,14 +157,10 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
       JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.owner_id = ?`, principal).first()).toBeNull();
     if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
       JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
-  } finally {
-    await demote();
-  }
+  } finally { await demote(); }
 });
 
-it.each([
-  ['owner', false], ['member', false], ['owner', true]
-])('checks the staging role %s again before the next multipart page (changed completion budget: %s)', async (role, mutateBudget) => {
+it.each(['owner', 'member'])('checks the staging role %s again before the next multipart page', async (role) => {
   await applyD1Migrations(env.DB, migrations);
   const operation = crypto.randomUUID(), owner = `owner-${operation}`;
   const { token, key } = await seed(operation);
@@ -192,30 +186,38 @@ it.each([
   await setRole('owner');
   try {
     let idleMs = 5000;
-    const streamBudget = mutateBudget ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
+    const streamBudget = role === 'owner' ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
     const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, true);
     idleMs = 0;
-    const result = await service.complete(token, operation);
+    const allowed = role === 'owner';
+    expect(await service.complete(token, operation)).toBe(allowed ? 'recorded' : 'not-admitted');
     expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
-    if (role === 'member') {
-      expect(result).toBe('not-admitted');
-      expect(calls).toEqual([['GET', null]]);
-      expect(await evidence('dispatches', operation)).toBeNull();
-      expect(await evidence('receipts', operation)).toBeNull();
-    } else {
-      expect(result).toBe('recorded');
-      expect(calls).toEqual([['GET', null], ['GET', '2'], ['POST', null]]);
-      expect(await evidence('receipts', operation)).not.toBeNull();
-    }
+    expect(calls).toEqual(allowed ? [['GET', null], ['GET', '2'], ['POST', null]] : [['GET', null]]);
+    expect(Boolean(await evidence('receipts', operation))).toBe(allowed);
+    if (!allowed) expect(await evidence('dispatches', operation)).toBeNull();
   } finally { await setRole('member'); }
 });
 
-it('validates owner-only publication transport at construction', () => {
-  expect(() => createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 0 }, qualified, true))
-    .toThrow('Invalid S3 timeout');
-  const streamBudget = Object.create({ idleMs: 5000, totalMs: 5000 });
-  expect(() => createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, qualified, true))
-    .not.toThrow();
+it('validates owner-only upload transports at construction without I/O', () => {
+  const fetch = vi.fn(), verifier = { isQualified: vi.fn(), verifyParts: vi.fn() };
+  const streamBudget = Object.create({ idleMs: 0, totalMs: 5000 });
+  for (const options of [{ fetch, timeoutMs: 0 }, { fetch, timeoutMs: 5000, streamBudget }]) {
+    expect(() => createUploadCompletionReceipts(env.DB, epoch, config, options, verifier, true)).toThrow('Invalid S3 timeout');
+    expect(() => createTrustedUploadPublication(env.DB, epoch, config, options, qualified, true)).toThrow('Invalid S3 timeout');
+  }
+  for (const mock of [fetch, verifier.isQualified, verifier.verifyParts]) expect(mock).not.toHaveBeenCalled();
+});
+
+it('rechecks publication qualification after the caller hook, before HEAD', async () => {
+  const { complete, publish } = await setup(crypto.randomUUID());
+  expect(await complete()).toBe('recorded');
+  let current = true;
+  const fetch = vi.fn(headOk), streamBudget = Object.create({ idleMs: 5000, totalMs: 5000 });
+  const service = createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget,
+    async beforeSend() { current = await Promise.resolve(false); return true; } }, (id) => current && qualified(id));
+  expect(await publish(service)).toBeNull();
+  expect(current).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {

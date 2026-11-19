@@ -77,7 +77,8 @@ const listPage = (parts: string, marker?: number) => new Response(
 test('verification uses signed ListParts on the exact key and upload ID across pages', async () => {
   const events: Array<string | null> = [];
   let pages = 0;
-  const checkOwner = async () => { events.push('owner check'); return true; };
+  let allowedPages = 2;
+  const checkOwner = async () => { events.push('owner check'); return pages < allowedPages; };
   const verifier = wireUploadStorage(bindings(), async input => {
     assert.ok(input instanceof Request);
     const url = new URL(input.url);
@@ -96,20 +97,13 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
   assert.deepEqual(events, ['owner check', null, 'owner check', '1']);
+  for (allowedPages = 0; allowedPages < 2; allowedPages++) {
+    pages = events.length = 0;
+    assert.equal(await verifier.verifyParts({ ...upload, beforeSend: checkOwner }), null);
+    assert.deepEqual(events, allowedPages ? ['owner check', null, 'owner check'] : ['owner check']);
+  }
   const invalid = wireUploadStorage(bindings(), async () => new Response('<ListPartsResult/>')).DRIVE_UPLOAD_VERIFIER!;
   assert.equal(await invalid.verifyParts(upload), null);
-});
-
-test('verification fails closed when the owner check denies a page', async () => {
-  for (const deniedPage of [1, 2]) {
-    let checks = 0, sends = 0;
-    const verifier = wireUploadStorage(bindings(), async () => {
-      const number = ++sends;
-      return listPage(listPart(number, '"tag"'), number === 1 ? 1 : undefined);
-    }).DRIVE_UPLOAD_VERIFIER!;
-    assert.equal(await verifier.verifyParts({ ...upload, beforeSend: async () => ++checks !== deniedPage }), null);
-    assert.deepEqual({ checks, sends }, { checks: deniedPage, sends: deniedPage - 1 });
-  }
 });
 
 test('verification stops on oversized individual or cumulative ETag metadata', async () => {

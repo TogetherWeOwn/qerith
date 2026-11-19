@@ -95,7 +95,10 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const { endpoint, bucket } = settings;
   const { streamBudget, ...options } = transport;
   const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
-  const transportOptions = { ...options, streamBudget: budget };
+  const makeComplete = (checkOwner?: () => Promise<boolean>) => createMultipartComplete(settings, { ...options,
+    streamBudget: budget, beforeSend: async () => await verifier?.isQualified(storageConfigId) === true &&
+      (!checkOwner || await checkOwner()) });
+  const completeMultipart = makeComplete();
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
@@ -155,9 +158,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
       if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
-      const complete = createMultipartComplete(settings, { ...transportOptions,
-        beforeSend: async () => await verifier.isQualified(storageConfigId) === true &&
-          (!checkOwner || await checkOwner()) });
+      const complete = checkOwner ? makeComplete(checkOwner) : completeMultipart;
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {

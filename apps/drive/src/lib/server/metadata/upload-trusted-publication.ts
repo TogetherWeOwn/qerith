@@ -31,8 +31,8 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   const { beforeSend, streamBudget, ...options } = transport;
   const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
   const makeReader = (checkOwner?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
-    streamBudget: budget, beforeSend: async () => await isQualified?.(storageConfigId) === true &&
-      (!beforeSend || await beforeSend() === true) && (!checkOwner || await checkOwner()) }));
+    streamBudget: budget, beforeSend: async () => (!beforeSend || await beforeSend() === true) &&
+      await isQualified?.(storageConfigId) === true && (!checkOwner || await checkOwner()) }));
   const reader = makeReader(); // Validate the transport even when each request needs its own owner check.
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
