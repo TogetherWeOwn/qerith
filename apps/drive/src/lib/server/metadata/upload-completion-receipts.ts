@@ -151,6 +151,9 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
       if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
+      const complete = createMultipartComplete(settings, { ...transportOptions,
+        beforeSend: async () => await verifier.isQualified(storageConfigId) === true &&
+          (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) });
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {
@@ -164,9 +167,6 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {
-        const complete = createMultipartComplete(settings, { ...transportOptions,
-          beforeSend: async () => await verifier.isQualified(storageConfigId) === true &&
-            (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) });
         const response = await complete(objectKey, uploadId, parts);
         const receipt = { etag: response.etag, response_checksums: JSON.stringify(response.checksums ?? {}),
           evidence_revision: crypto.randomUUID() };

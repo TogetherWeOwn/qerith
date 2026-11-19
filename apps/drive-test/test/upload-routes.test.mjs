@@ -113,6 +113,8 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
     expect(upload.calls).toEqual(expected[change]);
     if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
       USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
+    if (change === 'parts verification') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
+      JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.owner_id = ?`, principal).first()).toBeNull();
     if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
       JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
   } finally {

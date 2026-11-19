@@ -72,8 +72,20 @@ export async function publishedDownload(request: Request, id: string, token: str
   let generation: Awaited<ReturnType<typeof resolveGeneration>> = null;
   // Start before authorization and keep the same cutoff through storage and native delivery.
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(streamBudget.totalMs)]);
+  const resolveCurrent = async () => {
+    if (!ownerOnly) return resolveGeneration(token, id);
+    if (signal.aborted) return null;
+    const lookup = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    const stopped = Promise.withResolvers<null>();
+    const abort = () => stopped.resolve(null);
+    lookup.addEventListener('abort', abort, { once: true });
+    try {
+      const current = await Promise.race([resolveGeneration(token, id), stopped.promise]);
+      return lookup.aborted ? null : current;
+    } finally { lookup.removeEventListener('abort', abort); }
+  };
   const stillAuthorized = async () => {
-    const current = await resolveGeneration(token, id);
+    const current = await resolveCurrent();
     return !signal.aborted && !!current && !!generation && current.evidenceRevision === generation.evidenceRevision &&
       current.key === generation.key && current.etag === generation.etag && current.sizeBytes === generation.sizeBytes &&
       current.name === generation.name;
@@ -86,12 +98,12 @@ export async function publishedDownload(request: Request, id: string, token: str
   } catch { return downloadFile(request, id); }
   const response = await downloadFile(new Request(request, { signal }), id, {
     authorize: async () => token,
-    resolveGeneration: async () => generation = await resolveGeneration(token, id),
+    resolveGeneration: async () => generation = await resolveCurrent(),
     readerFor: (id) => id === storageConfigId ? reader : null,
     onReadError,
     fixedLength: (body, length) => fixedLength(body, length, signal)
   });
-  if (ownerOnly && [200, 206, 304, 412, 416].includes(response.status) && !await stillAuthorized()) {
+  if (ownerOnly && generation && response.status !== 404 && !await stillAuthorized()) {
     void response.body?.cancel().catch(() => {});
     return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } });
   }
