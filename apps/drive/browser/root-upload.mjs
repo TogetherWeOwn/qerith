@@ -12,8 +12,6 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh)
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   const status = page.getByRole('status');
   const link = page.getByRole('link', { name, exact: true });
-  const pageErrors = [];
-  page.on('pageerror', error => pageErrors.push(error.message));
   // Keep interception armed; Playwright page evaluations would grant their own user gesture.
   page.on('filechooser', () => {});
   const cdp = await page.context().newCDPSession(page);
@@ -28,36 +26,22 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh)
   const button = `document.querySelector(${JSON.stringify(buttonSelector)})`;
   const choose = async (selection = file) => {
     assert.equal(await inspect(`document.hasFocus() && document.activeElement === ${button}`), true);
-    let chooser;
-    try {
-      [chooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5_000 }), page.keyboard.press('Enter')]);
-    } catch (cause) {
-      throw new Error(`Enter did not open the picker; page errors: ${JSON.stringify(pageErrors)}`, { cause });
-    }
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5_000 }), page.keyboard.press('Enter')]);
     assert.equal(chooser.isMultiple(), false);
     await chooser.setFiles(selection);
   };
 
-  const deniedAssets = [];
-  page.on('response', response => {
-    const path = new URL(response.url()).pathname;
-    if (path.startsWith('/_app/') && response.status() >= 400) deniedAssets.push([path, response.status()]);
-  });
   await page.bringToFront();
   await page.goto(origin);
-  try {
-    await inspect(`new Promise((resolve, reject) => {
-      const ready = () => ${button}?.getAttribute('aria-disabled') === 'false';
-      if (ready()) return resolve(true);
-      const observer = new MutationObserver(() => {
-        if (ready()) { observer.disconnect(); clearTimeout(timer); resolve(true); }
-      });
-      const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Picker not ready')); }, 10_000);
-      observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-disabled'] });
-    })`);
-  } catch (cause) {
-    throw new Error(`Root picker did not hydrate; denied assets: ${JSON.stringify(deniedAssets)}`, { cause });
-  }
+  await inspect(`new Promise((resolve, reject) => {
+    const ready = () => ${button}?.getAttribute('aria-disabled') === 'false';
+    if (ready()) return resolve(true);
+    const observer = new MutationObserver(() => {
+      if (ready()) { observer.disconnect(); clearTimeout(timer); resolve(true); }
+    });
+    const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Picker not ready')); }, 10_000);
+    observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-disabled'] });
+  })`);
   assert.equal(await inspect(`document.querySelector('main').textContent.includes('Your drive is empty.')`), true);
   assert.equal(await inspect(`document.querySelectorAll('[role="status"]').length`), 1);
   assert.equal(await inspect('navigator.userActivation.isActive'), false, 'no activation before Tab');

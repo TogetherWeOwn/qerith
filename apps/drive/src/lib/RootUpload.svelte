@@ -3,12 +3,13 @@
   import { uploadToRoot } from './root-upload';
   import './tokens.css';
 
-  let { announce, refresh, paginated }: { announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean } = $props();
+  let { announce, refresh, paginated, busy = $bindable(false) }: {
+    announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
+  } = $props();
   const id = $props.id();
   let picker: HTMLInputElement;
   let selected = $state<{ name: string; size: number }>();
   let ready = $state(false);
-  let busy = $state(false);
   let acceptedBytes = $state(0);
   let message = $state('');
   let published = $state(false);

@@ -542,7 +542,7 @@ jobs:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
           ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
-          UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/root-upload.mjs') != '' }}
+          UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

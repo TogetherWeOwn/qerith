@@ -10,7 +10,8 @@
   let status = $state('');
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
-  let refreshVersion = 0;
+  let busy = $state(false);
+  let refreshVersion = 0, appliedVersion = 0;
 
   async function refresh() {
     const version = ++refreshVersion;
@@ -19,7 +20,9 @@
     if (!response.ok) throw new Error('Root listing unavailable');
     const next: RootListingResult = await response.json();
     if (next.status !== 'ok') throw new Error('Root listing unavailable');
-    if (version === refreshVersion) refreshed = next;
+    if (version < appliedVersion) return;
+    appliedVersion = version;
+    refreshed = next;
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
@@ -32,7 +35,7 @@
 <header>
   <h1>My Drive</h1>
   {#if result.status === 'ok'}
-    <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} />
+    <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
 </header>
 <p class="status" role="status">{status}</p>
@@ -51,7 +54,7 @@
     <EmptyFolder root={true} />
   {/if}
   {#if page || result.folder.nextPage}
-    <nav aria-label="My Drive pages">
+    <nav aria-label="My Drive pages" inert={busy}>
       {#if page}<a data-sveltekit-reload href="/">Back to first page</a>{/if}
       {#if result.folder.nextPage}
         <a data-sveltekit-reload href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>

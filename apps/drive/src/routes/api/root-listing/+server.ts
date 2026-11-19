@@ -3,6 +3,7 @@ import { admitsSignInFixture } from '../../../lib/server/request-auth';
 import { loadRootListing } from '../../../lib/server/root-listing';
 import type { RequestHandler } from './$types';
 
+export const trailingSlash = 'ignore';
 export const GET: RequestHandler = async ({ request, url }) => {
   if (!admitsSignInFixture(env)) return new Response(null, { status: 404 });
   const listing = await loadRootListing(request, env, url.searchParams.getAll('page'));

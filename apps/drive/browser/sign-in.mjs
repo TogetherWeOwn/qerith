@@ -189,13 +189,15 @@ try {
   await first.goto(origin);
   const next = first.getByRole('link', { name: 'Next page' });
   const target = await next.getAttribute('href');
+  assert.match(target, /^\/\?page=/);
   await next.click();
-  await first.getByRole('link', { name: 'Second.bin' }).waitFor();
+  await first.waitForURL(origin + target);
+  await first.getByRole('table').getByRole('link', { name: 'Second.bin', exact: true }).waitFor();
   await first.getByRole('link', { name: 'Back to first page' }).click();
   await first.getByRole('button', { name: 'Upload', exact: true }).and(first.locator('[aria-disabled="false"]')).waitFor();
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
-  assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
+  assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing/', { redirect: 'error' })).status), 401);
   await next.click();
   await primary(first).waitFor();
   assert.equal(new URL(first.url()).searchParams.get('next'), target);
