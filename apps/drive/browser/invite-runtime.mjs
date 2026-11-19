@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
-import { Invitations } from '../src/lib/server/identity/invitations.ts';
-import { Membership } from '../src/lib/server/identity/membership.ts';
+import { tsImport } from 'tsx/esm/api';
 import { capture, widths } from './root-listing.mjs';
+
+// The trusted browser lane starts with plain Node; transform only the fixture's service imports.
+const [{ Invitations }, { Membership }] = await Promise.all([
+  tsImport('../src/lib/server/identity/invitations.ts', import.meta.url),
+  tsImport('../src/lib/server/identity/membership.ts', import.meta.url),
+]);
 
 export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken }) {
   const invites = new Invitations(DB);
