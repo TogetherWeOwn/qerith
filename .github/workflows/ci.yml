@@ -556,9 +556,20 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  drive-release-preflight:
+    name: Drive release preflight (synthetic)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: python3 -IB -m unittest discover -s scripts/drive-release -p test_preflight.py -v
+
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser, drive-release-preflight]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
