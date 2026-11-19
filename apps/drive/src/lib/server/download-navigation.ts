@@ -1,5 +1,5 @@
 export const downloadRoute = '/api/download/[fileId]';
-export const downloadNoticeCookie = '__Host-drive-download-failed';
+export const downloadNoticeCookie = (nonce: string) => `__Host-drive-download-failed-${nonce}`;
 export const entryId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 // Until folder routes are admitted, return to the canonical Drive root. No

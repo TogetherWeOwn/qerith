@@ -13,8 +13,8 @@ export const GET: RequestHandler = async ({ request, params, locals, cookies }) 
     ? await publishedDownload(request, params.fileId, session.token, env, () => { retryable = true; })
     : new Response(null, { status: 404 });
   if (response.status < 400 || !isDownloadNavigation(request)) return response;
-  // Bind the notice to this navigation so concurrent tabs cannot show each other's Retry link.
+  // Separate cookie names keep concurrent navigations from replacing each other's notices.
   const nonce = crypto.randomUUID();
-  cookies.set(downloadNoticeCookie, `${nonce}:${retryable ? params.fileId : 'unavailable'}`, { path: '/', secure: true, maxAge: 60 });
+  cookies.set(downloadNoticeCookie(nonce), retryable ? params.fileId : 'unavailable', { path: '/', secure: true, maxAge: 60 });
   return downloadRedirect(`${downloadFolder}?download=${nonce}`);
 };

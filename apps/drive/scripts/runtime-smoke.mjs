@@ -112,18 +112,26 @@ export default { fetch(request, env, ctx) {
         assert.equal(response.headers.get('content-range'), null);
       }
     }
-    const unavailable = await get({ ...navigation, cookie });
-    assert.equal(unavailable.status, 303);
-    const location = unavailable.headers.get('location');
-    assert.match(location, /^\/\?download=[a-f0-9-]{36}$/);
-    const noticeCookie = unavailable.headers.get('set-cookie').split(';')[0];
-    assert.equal(decodeURIComponent(noticeCookie), `__Host-drive-download-failed=${location.split('=')[1]}:unavailable`);
-    const noticeHeaders = { ...navigation, cookie: `${cookie}; ${noticeCookie}` };
-    assert.doesNotMatch(await (await access({ headers: noticeHeaders })).text(), /didn’t download/);
-    const notice = await get(noticeHeaders, `${origin}${location}`);
-    assert.match(await notice.text(), /The file didn’t download\. Try again\./);
-    assert.match(notice.headers.get('set-cookie'), /Max-Age=0/i);
-    assert.doesNotMatch(await (await get({ ...navigation, cookie }, `${origin}${location}`)).text(), /didn’t download/);
+    const failures = [];
+    for (let tab = 0; tab < 2; tab++) {
+      const unavailable = await get({ ...navigation, cookie });
+      assert.equal(unavailable.status, 303);
+      const location = unavailable.headers.get('location');
+      assert.match(location, /^\/\?download=[a-f0-9-]{36}$/);
+      const name = `__Host-drive-download-failed-${location.split('=')[1]}`;
+      assert.equal(unavailable.headers.get('set-cookie').split(';')[0], `${name}=unavailable`);
+      failures.push({ location, name });
+    }
+    assert.notEqual(failures[0].name, failures[1].name);
+    const notices = (pending) => ({ ...navigation, cookie: [cookie, ...pending.map(({ name }) => `${name}=unavailable`)].join('; ') });
+    assert.doesNotMatch(await (await access({ headers: notices(failures) })).text(), /didn’t download/);
+    for (const [index, { location, name }] of failures.entries()) {
+      const notice = await get(notices(failures.slice(index)), `${origin}${location}`);
+      assert.match(await notice.text(), /The file didn’t download\. Try again\./);
+      assert.ok(notice.headers.get('set-cookie').startsWith(`${name}=`));
+      assert.match(notice.headers.get('set-cookie'), /Max-Age=0/i);
+      assert.doesNotMatch(await (await get(notices(failures.slice(index + 1)), `${origin}${location}`)).text(), /didn’t download/);
+    }
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
     const revoked = await get({ cookie, range: 'bytes=1-' });
