@@ -22,7 +22,9 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>) {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const reader = createImmutableS3Reader(createS3Objects(settings, { ...transport }));
+  const { beforeSend, ...options } = transport;
+  const reader = createImmutableS3Reader(createS3Objects(settings, { ...options,
+    beforeSend: async () => (!beforeSend || await beforeSend() === true) && await isQualified?.(storageConfigId) === true }));
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {
@@ -35,7 +37,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
         claimVersion, endpoint, bucket, epoch, await tokenHash(token)] as const;
       const receipt = await db.withSession('first-primary').prepare(`SELECT hex(e.object_key) AS key_hex,
         e.etag, e.size_bytes, e.evidence_revision ${candidate}`).bind(...binding).first<Receipt>();
-      if (!receipt || await isQualified(storageConfigId) !== true) return null;
+      if (!receipt) return null;
 
       const { key_hex, etag, size_bytes, evidence_revision } = receipt;
       try {
@@ -43,7 +45,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
         if (key.includes('\0')) return null;
         const head = await reader.head({ key, etag });
         if (head.status !== 200 || typeof head.contentLength !== 'string' || !/^\d+$/.test(head.contentLength) ||
-            Number(head.contentLength) !== size_bytes) return null;
+            Number(head.contentLength) !== size_bytes || await isQualified(storageConfigId) !== true) return null;
       } catch { return null; }
 
       // Use an INSERT SELECT, not a separate application check: authorization,

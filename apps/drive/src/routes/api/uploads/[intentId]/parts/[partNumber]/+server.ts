@@ -1,9 +1,9 @@
-import { uploadPart } from '../../../../../../lib/server/upload-part';
+import { env } from 'cloudflare:workers';
+import { uploadRoutes } from '../../../../../../lib/server/upload-routes';
 import type { RequestHandler } from './$types';
 
 // SvelteKit normalizes slashes before the private request hook.
 export const trailingSlash = 'ignore';
 
-// No live session or part claim adapter is wired to the deployed app.
-export const PUT: RequestHandler = ({ request, params }) =>
-  uploadPart(request, params.intentId, params.partNumber);
+export const PUT: RequestHandler = ({ request, params, locals }) =>
+  uploadRoutes(env).part(request, locals.driveSession, params.intentId, params.partNumber);

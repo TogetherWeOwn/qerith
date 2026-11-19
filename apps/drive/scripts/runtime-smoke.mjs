@@ -105,6 +105,13 @@ export default { fetch(request, env, ctx) {
       assert.equal(part.status, 401, 'the private endpoint is guarded before any slash redirect');
       assert.equal(part.headers.get('cache-control'), 'private, no-store');
     }
+    for (const [route, method] of [['parts/1', 'PUT'], ['complete', 'POST']]) for (const suffix of ['', '/']) {
+      for (const [headers, status] of [[{ origin }, 401], [{ cookie }, 403], [{ cookie, origin }, 503]]) {
+        const result = await worker.fetch(`${origin}/api/uploads/00000000-0000-4000-8000-000000000002/${route}${suffix}`,
+          { method, headers: { 'content-type': 'application/json', ...headers }, redirect: 'manual' });
+        assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'private, no-store'], route + suffix);
+      }
+    }
     const authorized = await access({ headers: { cookie } });
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
