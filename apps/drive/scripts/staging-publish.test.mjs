@@ -131,12 +131,14 @@ test('command-line publisher refuses publication independently of the workflow',
 
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const job = workflow.split('\n  publish:\n')[1];
+  const job = workflow.split('\n  publish:\n')[1]?.split(/\n  \S/, 1)[0];
   assert.ok(job);
   assert.match(job, /\n    if: \$\{\{ false \}\}/);
   assert.match(job, /needs: preparation/);
   assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
-  if (!job.includes('\n    environment: staging')) assert.doesNotMatch(job, /secrets\./);
+  assert.doesNotMatch(job, /^ {4}(['"]?)environment\1[ \t]*:/m, 'publish job must not bind an environment');
+  const expressions = job.match(/\$\{\{[\s\S]*?\}\}/g) ?? [];
+  assert.ok(expressions.every((expression) => !/\bsecrets\b/i.test(expression)), 'publish job must not reference secrets');
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {
