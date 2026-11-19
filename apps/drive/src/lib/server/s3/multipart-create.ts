@@ -4,7 +4,7 @@ import { createS3Transport } from './transport';
 const namespace = 'http://s3.amazonaws.com/doc/2006-03-01/';
 const xmlChars = /^[\u0009\u000a\u000d -퟿-�\u{10000}-\u{10ffff}]*$/u;
 
-function uploadIdFromResponse(body: Uint8Array): string {
+function uploadIdFromResponse(body: Uint8Array, bucket: string, key: string): string {
   const invalid = (): never => { throw new Error('Invalid multipart create response'); };
   let xml: string;
   try { xml = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch { return invalid(); }
@@ -78,13 +78,15 @@ function uploadIdFromResponse(body: Uint8Array): string {
     values.set(element.localName, value);
   }
   const id = values.get('UploadId');
-  if (!id || !xmlChars.test(id)) return invalid();
+  if (!id || !xmlChars.test(id) || (values.has('Bucket') && values.get('Bucket') !== bucket) ||
+    (values.has('Key') && values.get('Key') !== key)) return invalid();
   return id;
 }
 
 /** Initiate once; an uncertain outcome may have allocated an upload. */
 export function createMultipartCreate(...args: Parameters<typeof createS3Transport>) {
   const request = createS3Transport(...args);
+  const { bucket } = args[0];
   return async (key: string, signal?: AbortSignal) => {
     if (!key || key.split('/').some((segment) => segment === '.' || segment === '..')) throw new Error('Invalid S3 object key');
     try { encodeURIComponent(key); } catch { throw new Error('Invalid S3 object key'); }
@@ -93,7 +95,7 @@ export function createMultipartCreate(...args: Parameters<typeof createS3Transpo
     try { response = await request({ method: 'POST', key, query: { uploads: '' }, signal, maxResponseBytes: 64 * 1024 }); }
     catch { throw new Error('S3 multipart create allocation uncertain'); }
     if (response.status === 200) {
-      try { return { uploadId: uploadIdFromResponse(response.body) }; }
+      try { return { uploadId: uploadIdFromResponse(response.body, bucket, key) }; }
       catch { throw new Error('S3 multipart create allocation uncertain'); }
     }
     if (response.status === 408 || response.status >= 500 || (response.status >= 200 && response.status < 300)) throw new Error('S3 multipart create allocation uncertain');

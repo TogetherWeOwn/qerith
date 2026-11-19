@@ -9,7 +9,7 @@ test('creates one signed upload and preserves opaque identifiers', async () => {
   let calls = 0;
   const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async (input) => {
     calls++; sent = input as Request;
-    return new Response('<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>key</Key><UploadId>id+/=%&amp;é</UploadId></InitiateMultipartUploadResult>');
+    return new Response('<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>test-bucket</Bucket><Key>folder/a +%/é</Key><UploadId>id+/=%&amp;é</UploadId></InitiateMultipartUploadResult>');
   } });
   assert.deepEqual(await create('folder/a +%/é'), { uploadId: 'id+/=%&é' });
   const url = new URL(sent!.url);
@@ -19,6 +19,14 @@ test('creates one signed upload and preserves opaque identifiers', async () => {
   assert.match(sent!.headers.get('authorization') ?? '', /AWS4-HMAC-SHA256/);
   assert.equal(await sent!.text(), '');
   assert.equal(calls, 1);
+});
+
+test('reports an explicit bucket or key mismatch as uncertain', async () => {
+  for (const field of ['Bucket', 'Key']) {
+    const create = createMultipartCreate(config, { timeoutMs: 1000, fetch: async () =>
+      new Response(`<InitiateMultipartUploadResult><${field}>other</${field}><UploadId>id</UploadId></InitiateMultipartUploadResult>`) });
+    await assert.rejects(create('key'), { message: 'S3 multipart create allocation uncertain' });
+  }
 });
 
 test('accepts XML declaration, namespace spacing and opaque CDATA', async () => {
