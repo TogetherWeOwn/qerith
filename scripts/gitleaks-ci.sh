@@ -26,10 +26,12 @@ try:
         policy = tomllib.load(config)
 except (tomllib.TOMLDecodeError, UnicodeError):
     sys.exit("Invalid gitleaks TOML policy")
-# Gitleaks decodes keys case-insensitively.
+# Gitleaks decodes keys case-insensitively and treats dots as separators.
 for section, settings in policy.items():
-    if section.lower() == "extend" and (
-        not isinstance(settings, dict) or any(key.lower() == "path" for key in settings)
+    if section.lower().split(".")[0] != "extend":
+        continue
+    if "." in section or not isinstance(settings, dict) or any(
+        key.lower().split(".")[0] == "path" for key in settings
     ):
         sys.exit("Gitleaks policy must not use extend.path; use built-in rules or inline rules")
 PY
@@ -166,6 +168,8 @@ self_test() {
         git diff --exit-code -- head-ignore.txt
         assert_invalid_config "$base" "$script" '[' 'Invalid gitleaks TOML policy' || exit 1
         assert_invalid_config "$base" "$script" $'[Extend]\nPath = "head-ignore.txt"' \
+          'Gitleaks policy must not use extend.path' || exit 1
+        assert_invalid_config "$base" "$script" '"extend.path" = "head-ignore.txt"' \
           'Gitleaks policy must not use extend.path' || exit 1
       fi
     )
