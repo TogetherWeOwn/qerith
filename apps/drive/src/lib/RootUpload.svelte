@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { uploadToRoot } from './root-upload';
   import './tokens.css';
 
@@ -6,14 +7,17 @@
   const id = $props.id();
   let picker: HTMLInputElement;
   let selected = $state<{ name: string; size: number }>();
+  let ready = $state(false);
   let busy = $state(false);
   let acceptedBytes = $state(0);
   let message = $state('');
   let published = $state(false);
   let selection = 0;
 
+  onMount(() => { ready = true; });
+
   function openPicker() {
-    if (!busy) picker.click();
+    if (ready && !busy) picker.click();
   }
 
   async function upload(event: Event) {
@@ -53,7 +57,7 @@
   }
 </script>
 
-<button type="button" aria-disabled={busy} onclick={openPicker}>Upload</button>
+<button type="button" aria-disabled={!ready || busy} onclick={openPicker}>Upload</button>
 <input type="file" hidden bind:this={picker} onchange={upload} />
 {#if selected}
   <section aria-labelledby={`${id}-uploads`}>

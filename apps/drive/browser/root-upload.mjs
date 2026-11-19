@@ -17,11 +17,22 @@ export async function captureRootUpload(page, origin, holdResponse) {
     await chooser.setFiles(file);
   };
 
-  await page.goto(origin, { waitUntil: 'networkidle' });
+  const deniedAssets = [];
+  page.on('response', response => {
+    const path = new URL(response.url()).pathname;
+    if (path.startsWith('/_app/') && response.status() >= 400) deniedAssets.push([path, response.status()]);
+  });
+  await page.bringToFront();
+  await page.goto(origin);
   await page.getByText('Your drive is empty.', { exact: true }).waitFor();
+  try {
+    await upload.and(page.locator('[aria-disabled="false"]')).waitFor({ timeout: 10_000 });
+  } catch (cause) {
+    throw new Error(`Root picker did not hydrate; denied assets: ${JSON.stringify(deniedAssets)}`, { cause });
+  }
   assert.equal(await status.count(), 1);
   await page.keyboard.press('Tab');
-  assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+  assert.equal(await upload.evaluate(el => document.hasFocus() && document.activeElement === el), true);
 
   const requests = [], responses = [];
   let documents = 0;
