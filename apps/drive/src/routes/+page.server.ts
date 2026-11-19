@@ -1,16 +1,23 @@
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
+import { loadRootListing } from '../lib/server/root-listing';
 import type { PageServerLoad } from './$types';
 
-export const load: PageServerLoad = async ({ cookies, locals, request, url }) => {
-  if (!locals.driveSession || !isDownloadNavigation(request)) return {};
+async function readDownloadNotice({ cookies, locals, request, url }: Parameters<PageServerLoad>[0]) {
+  if (!locals.driveSession || !isDownloadNavigation(request)) return;
   const nonce = url.searchParams.get('download');
-  if (!nonce || !entryId.test(nonce)) return {};
+  if (!nonce || !entryId.test(nonce)) return;
   const cookie = downloadNoticeCookie(nonce);
   const id = cookies.get(cookie);
-  if (!id) return {};
+  if (!id) return;
   cookies.delete(cookie, { path: '/', secure: true });
   const reference = entryId.test(id) && await downloadStorage(env)?.resolveGeneration(locals.driveSession.token, id);
-  return { downloadNotice: reference ? { id, name: reference.name } : { id: null, name: null } };
+  return reference ? { id, name: reference.name } : { id: null, name: null };
+}
+
+export const load: PageServerLoad = async (event) => {
+  const pages = event.url.searchParams.getAll('page');
+  const listing = await loadRootListing(event.request, env, pages);
+  return { listing, paged: pages.length > 0, downloadNotice: await readDownloadNotice(event) };
 };

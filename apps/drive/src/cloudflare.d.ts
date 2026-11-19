@@ -1,5 +1,12 @@
 declare module 'cloudflare:workers' {
-  export const env: import('./lib/server/request-auth').DriveAuthEnv & import('./lib/server/published-download').DownloadEnv;
+  interface DriveStatement {
+    bind(...values: (string | number | null)[]): DriveStatement;
+    first<T>(): Promise<T | null>;
+    all<T>(): Promise<{ results: T[] }>;
+  }
+
+  export const env: Omit<import('./lib/server/request-auth').DriveAuthEnv, 'DB'> &
+    import('./lib/server/published-download').DownloadEnv & { DB?: { prepare(sql: string): DriveStatement } };
 }
 
 declare class FixedLengthStream {

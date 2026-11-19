@@ -70,7 +70,7 @@ export default { fetch(request, env, ctx) {
     await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
-    for (const name of ['0001_identity.sql', '0009_sessions.sql']) {
+    for (const name of ['0001_identity.sql', '0002_private_metadata.sql', '0009_sessions.sql', '0015_folder_listing_order.sql']) {
       const sql = await readFile(`migrations/${name}`, 'utf8');
       await DB.batch(unstable_splitSqlQuery(sql).map((statement) => DB.prepare(statement)));
     }
@@ -91,12 +91,36 @@ export default { fetch(request, env, ctx) {
       assert.equal(part.headers.get('cache-control'), 'private, no-store');
     }
     const authorized = await access({ headers: { cookie } });
-    assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
+    assert.equal(authorized.status, 200);
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
-    assert.match(await authorized.text(), /Service unavailable\./);
+    assert.match(await authorized.text(), /Your drive is empty\./);
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
-    const file = `${origin}/api/download/00000000-0000-4000-8000-000000000002`;
+    const fileId = '00000000-0000-4000-8000-000000000002';
+    const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
+    const folder = DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, ?, 'folder')");
+    await DB.batch(Array.from({ length: 100 }, (_, i) => folder.bind(`folder-${i}`, 'fixture', `Folder ${100 + i}`)));
+    await folder.bind('other-folder', 'other', 'Other principal folder').run();
+    await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES (?, 'fixture', 'Fixture.pdf', 'file', 'internal-fixture-key', 1)").bind(fileId).run();
+    const first = await (await access({ headers: { cookie } })).text();
+    assert.match(first, /Folder 100/);
+    assert.match(first, /Folder 199/);
+    assert.doesNotMatch(first, /Fixture\.pdf|Other principal folder|Your drive is empty/);
+    const next = first.match(/href="(\/\?page=[A-Za-z0-9_-]+)"/);
+    assert.ok(next, 'the first root page has an opaque continuation link');
+    const following = await (await get({ cookie }, `${origin}${next[1]}`)).text();
+    assert.match(following, /Fixture\.pdf/);
+    assert.ok(following.includes(`href="/api/download/${fileId}"`));
+    assert.doesNotMatch(following, /Folder 199|Other principal folder|internal-fixture-key|Next page/);
+    assert.ok(!following.includes(token));
+    const failed = await (await get({ cookie }, `${origin}/?page=invalid`)).text();
+    assert.match(failed, /This folder didn't load/);
+    assert.doesNotMatch(failed, /Your drive is empty|Fixture\.pdf|Folder 100/);
+    await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(fileId).run();
+    const exhausted = await (await get({ cookie }, `${origin}${next[1]}`)).text();
+    assert.match(exhausted, /No more items\./);
+    assert.doesNotMatch(exhausted, /Your drive is empty/);
+    console.log('Generated Worker: root empty, bounded pages, download link, hidden metadata, load failure and exhausted continuation passed');
     const signedOut = await get(navigation, `${file}/?next=https://other.invalid`);
     assert.equal(signedOut.status, 303);
     assert.equal(signedOut.headers.get('location'), '/sign-in?next=%2F');
