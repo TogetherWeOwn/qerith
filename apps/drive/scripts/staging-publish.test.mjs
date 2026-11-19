@@ -129,45 +129,66 @@ test('command-line publisher refuses publication independently of the workflow',
   assert.match(run(['--publish'], '0'.repeat(32)).stderr, /staging publication remains disabled/);
 });
 
-/** @param {string} source */
-function* actionsExpressions(source) {
-  let offset = 0;
-  while ((offset = source.indexOf('${{', offset)) !== -1) {
-    const start = offset + 3;
-    let quoted = false;
-    for (offset = start; offset < source.length; offset++) {
-      if (source[offset] === "'") {
-        // Actions uses a doubled single quote to escape a quote inside a string.
-        if (quoted && source[offset + 1] === "'") offset++;
-        else quoted = !quoted;
-      } else if (!quoted && source.startsWith('}}', offset)) {
-        break;
-      }
-    }
-    assert.ok(offset < source.length, 'unterminated Actions expression');
-    yield source.slice(start, offset);
-    offset += 2;
-  }
+// Pin this final job until a separately reviewed enabling change. Comparing the
+// whole body rejects new YAML keys or values without trying to parse expressions.
+const disabledPublishJob = `    if: \${{ false }}
+    needs: preparation
+    concurrency:
+      group: drive-staging-d1-writer
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: \${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify source and lock
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+      - name: Install and build exact source
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Publish built staging Worker
+        run: node scripts/staging-publish.mjs
+`;
+
+/** @param {string} workflow */
+function assertDisabledPublishJob(workflow) {
+  const jobs = workflow.split('\n  publish:\n');
+  assert.equal(jobs.length, 2, 'expected exactly one publish job');
+  // Ignore job-level prose, but not comments inside scripts or changes to values.
+  assert.equal(jobs[1].replace(/^ {4}#[^\n]*\n/gm, '').trimEnd(), disabledPublishJob.trimEnd(),
+    'publish job must remain in its approved disabled shape');
 }
 
-test('scans quoted delimiters, escaped quotes and adjacent Actions expressions', () => {
-  const first = " format('it''s }}', github.sha) ";
-  const second = ' false ';
-  assert.deepEqual([...actionsExpressions('${{' + first + '}}${{' + second + '}}')], [first, second]);
-  assert.throws(() => [...actionsExpressions("${{ 'literal }}'")], /unterminated Actions expression/);
-});
+const stagingWorkflow = () => readFileSync(
+  new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8',
+);
 
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const job = workflow.split('\n  publish:\n')[1]?.split(/^ {2}(?:[\w-]+|'[^']+'|"[^"]+")[ \t]*:/m, 1)[0];
-  assert.ok(job);
-  assert.match(job, /\n    if: \$\{\{ false \}\}/);
-  assert.match(job, /needs: preparation/);
-  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
-  assert.doesNotMatch(job, /^ {4}(['"]?)environment\1[ \t]*:/m, 'publish job must not bind an environment');
-  for (const expression of actionsExpressions(job)) {
-    assert.doesNotMatch(expression, /\bsecrets\b/i, 'publish job must not reference secrets');
-  }
+  assertDisabledPublishJob(stagingWorkflow());
+});
+
+test('disabled publish job rejects environment and secret changes independently', () => {
+  const workflow = stagingWorkflow();
+  const withJobLine = (line) => workflow.replace('\n  publish:\n', `\n  publish:\n    ${line}\n`);
+  assert.doesNotThrow(() => assertDisabledPublishJob(withJobLine('# An open expression starts with ${{')));
+  assert.throws(() => assertDisabledPublishJob(withJobLine('environment: staging')), /approved disabled shape/);
+  assert.throws(() => assertDisabledPublishJob(withJobLine('env: { TOKEN: "${{ secrets.PLACEHOLDER }}" }')),
+    /approved disabled shape/);
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {
