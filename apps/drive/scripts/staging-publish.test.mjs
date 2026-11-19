@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,66 +130,31 @@ test('command-line publisher refuses publication independently of the workflow',
   assert.match(run(['--publish'], '0'.repeat(32)).stderr, /staging publication remains disabled/);
 });
 
-// Pin this final job until a separately reviewed enabling change. Comparing the
-// whole body rejects new YAML keys or values without trying to parse expressions.
-const disabledPublishJob = `    if: \${{ false }}
-    needs: preparation
-    concurrency:
-      group: drive-staging-d1-writer
-      cancel-in-progress: false
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: apps/drive
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: \${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '24.21.0'
-      - name: Verify source and lock
-        run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          bash scripts/reject-shrinkwrap.sh .
-          node scripts/verify-lock-age.mjs
-          test "$(npm --version)" = 11.19.0
-          test "$(npm config get min-release-age)" = 3
-          test "$(npm config get ignore-scripts)" = true
-      - name: Install and build exact source
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
-      - name: Publish built staging Worker
-        run: node scripts/staging-publish.mjs
-`;
+// Pin the complete reviewed source, including its comments, while publication is
+// disabled. Re-review the entire workflow before changing this pin; do not just
+// recompute it on failure. The enabling change must replace this temporary guard.
+const disabledWorkflowSha256 = 'f38c4e9017d90400701ac1aa175b2f73e25ad95ec5d5e3aa6bddf1ec8184cf10';
 
-/** @param {string} workflow */
-function assertDisabledPublishJob(workflow) {
-  const jobs = workflow.split('\n  publish:\n');
-  assert.equal(jobs.length, 2, 'expected exactly one publish job');
-  // Ignore job-level prose, but not comments inside scripts or changes to values.
-  assert.equal(jobs[1].replace(/^ {4}#[^\n]*\n/gm, '').trimEnd(), disabledPublishJob.trimEnd(),
-    'publish job must remain in its approved disabled shape');
+/** @param {string | Buffer} workflow */
+function assertDisabledStagingWorkflow(workflow) {
+  assert.equal(createHash('sha256').update(workflow).digest('hex'), disabledWorkflowSha256,
+    'staging preparation must match the reviewed disabled workflow');
 }
 
 const stagingWorkflow = () => readFileSync(
-  new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8',
+  new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url),
 );
 
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
-  assertDisabledPublishJob(stagingWorkflow());
+  assertDisabledStagingWorkflow(stagingWorkflow());
 });
 
-test('disabled publish job rejects environment and secret changes independently', () => {
-  const workflow = stagingWorkflow();
+test('disabled workflow rejects environment and secret changes independently', () => {
+  const workflow = stagingWorkflow().toString('utf8');
   const withJobLine = (line) => workflow.replace('\n  publish:\n', `\n  publish:\n    ${line}\n`);
-  assert.doesNotThrow(() => assertDisabledPublishJob(withJobLine('# An open expression starts with ${{')));
-  assert.throws(() => assertDisabledPublishJob(withJobLine('environment: staging')), /approved disabled shape/);
-  assert.throws(() => assertDisabledPublishJob(withJobLine('env: { TOKEN: "${{ secrets.PLACEHOLDER }}" }')),
-    /approved disabled shape/);
+  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('environment: staging')), /reviewed disabled workflow/);
+  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('env: { TOKEN: "${{ secrets.PLACEHOLDER }}" }')),
+    /reviewed disabled workflow/);
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {
