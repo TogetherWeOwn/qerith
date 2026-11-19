@@ -182,12 +182,9 @@ try {
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
   await captureRootListing(first, origin, DB);
   configuredStorage = true;
-  await captureRootUpload(first, origin, holdResponse, () => { failListing = true; });
+  await captureRootUpload(first, origin, holdResponse, () => { failListing = true; }, DB);
   configuredStorage = false;
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
-  await DB.prepare(`WITH RECURSIVE pages(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM pages WHERE n < 100)
-    INSERT INTO drive_entries (id, owner_id, name, kind)
-    SELECT printf('00000000-0000-4000-8000-%012d', n), 'fixture-owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
   await first.goto(origin);
   const next = first.getByRole('link', { name: 'Next page' });
   const target = await next.getAttribute('href');

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { flushSync } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import RootUpload from './RootUpload.svelte';
@@ -11,18 +12,20 @@
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
   let busy = $state(false);
+  let header: HTMLElement;
   let refreshVersion = 0, appliedVersion = 0;
 
   async function refresh() {
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
     const response = await fetch(`/api/root-listing${query}`, { redirect: 'error' });
-    if (!response.ok) throw new Error('Root listing unavailable');
-    const next: RootListingResult = await response.json();
-    if (next.status !== 'ok') throw new Error('Root listing unavailable');
+    const next: RootListingResult | null = response.ok ? await response.json() : null;
+    if (next?.status !== 'ok') throw new Error('Root listing unavailable');
     if (version < appliedVersion) return;
     appliedVersion = version;
-    refreshed = next;
+    const focused = document.activeElement;
+    flushSync(() => { refreshed = next; });
+    if (focused && !focused.isConnected && document.activeElement === document.body) header.querySelector('button')?.focus();
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
@@ -32,7 +35,7 @@
   })) : []);
 </script>
 
-<header>
+<header bind:this={header}>
   <h1>My Drive</h1>
   {#if uploadConfigured && result.status === 'ok'}
     <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
@@ -54,10 +57,10 @@
     <EmptyFolder root={true} />
   {/if}
   {#if page || result.folder.nextPage}
-    <nav aria-label="My Drive pages" inert={busy}>
-      {#if page}<a data-sveltekit-reload href="/">Back to first page</a>{/if}
+    <nav aria-label="My Drive pages" data-sveltekit-reload inert={busy}>
+      {#if page}<a href="/">Back to first page</a>{/if}
       {#if result.folder.nextPage}
-        <a data-sveltekit-reload href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>
+        <a href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>
       {/if}
     </nav>
   {/if}

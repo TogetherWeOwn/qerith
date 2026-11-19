@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 
-export async function captureRootUpload(page, origin, holdResponse, failRefresh) {
+export async function captureRootUpload(page, origin, holdResponse, failRefresh, db) {
   const listingPath = '/api/root-listing';
   const name = 'Drive round-trip.bin';
   const buffer = Buffer.from(Uint8Array.from({ length: 8193 }, (_, i) => (i ^ (i >> 5)) & 255));
@@ -117,9 +117,26 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh)
   assert.equal(await inspect(`document.activeElement === ${button}`), true);
   assert.equal(await link.count(), 1, 'a failed refresh leaves the previous listing mounted');
   assert.equal(requests, 9, 'a failed listing refresh does not replay the upload');
-  await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({
+  const proof = {
     keyboard: 'Tab then Enter opened the single-file picker', statusRegions: 1, focusPreserved: true,
-    documentsDuringRefresh: 0, refresh503PreservedUpload: true, responses, bytes: downloaded.length,
+    documentsDuringRefresh: 0, refresh503PreservedUpload: true, responses: [...responses], bytes: downloaded.length,
     sha256: createHash('sha256').update(downloaded).digest('hex'), byteIdentical: true,
-  }, null, 2));
+  };
+
+  await db.prepare(`WITH RECURSIVE pages(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM pages WHERE n < 99)
+    INSERT INTO drive_entries (id, owner_id, name, kind)
+    SELECT printf('00000000-0000-4000-8000-%012d', n), 'fixture-owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
+  await page.goto(origin);
+  await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute('aria-disabled') === 'false', 'main > header > button');
+  const releaseDisplacement = holdResponse(path => path === listingPath);
+  try {
+    await Promise.all([page.waitForRequest(request => new URL(request.url()).pathname === listingPath),
+      choose({ ...file, name: 'A.bin' })]);
+    await link.focus();
+    assert.equal(await link.evaluate(el => document.activeElement === el), true);
+  } finally { releaseDisplacement(); }
+  await page.getByRole('link', { name: 'A.bin', exact: true }).waitFor();
+  assert.equal(await link.count(), 0, 'the old download link moved to page two');
+  assert.equal(await inspect(`document.activeElement === ${button}`), true, 'focus returns to Upload when the focused row leaves the page');
+  await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({ ...proof, focusRestored: true }, null, 2));
 }

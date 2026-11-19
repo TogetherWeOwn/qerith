@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { uploadToRoot } from './root-upload';
   import './tokens.css';
 
@@ -7,18 +6,15 @@
     announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
   } = $props();
   const id = $props.id();
-  let picker: HTMLInputElement;
+  let picker = $state<HTMLInputElement>();
   let selected = $state<{ name: string; size: number }>();
-  let ready = $state(false);
   let acceptedBytes = $state(0);
   let message = $state('');
   let published = $state(false);
   let selection = 0;
 
-  onMount(() => { ready = true; });
-
   function openPicker() {
-    if (ready && !busy) picker.click();
+    if (!busy) picker?.click();
   }
 
   async function upload(event: Event) {
@@ -28,10 +24,6 @@
     if (!file || busy) return;
     busy = true;
     const attempt = ++selection;
-    const report = (next: string) => {
-      message = next;
-      announce(`${file.name}: ${next}`);
-    };
     selected = { name: file.name, size: file.size };
     acceptedBytes = 0;
     published = false;
@@ -42,25 +34,26 @@
       const result = await uploadToRoot(file, () => { acceptedBytes = file.size; });
       if (result.status === 'published') {
         published = true;
-        report('Uploaded.');
+        message = 'Uploaded.';
         // A slow listing read must not keep a completed upload busy or replace newer feedback.
         void refresh().catch(() => {
-          if (attempt === selection) report(paginated
-            ? 'Uploaded. Go back to the first page to refresh My Drive.'
-            : 'Uploaded. Refresh My Drive to see it.');
+          if (attempt !== selection) return;
+          message = paginated ? 'Uploaded. Go back to the first page to refresh My Drive.' : 'Uploaded. Refresh My Drive to see it.';
+          announce(`${file.name}: ${message}`);
         });
       } else if (result.status === 'name-taken') {
-        report('An item with this name already exists in My Drive.');
+        message = 'An item with this name already exists in My Drive.';
       } else {
-        report('Upload interrupted.');
+        message = 'Upload interrupted.';
       }
+      announce(`${file.name}: ${message}`);
     } finally {
       busy = false;
     }
   }
 </script>
 
-<button type="button" aria-disabled={!ready || busy} onclick={openPicker}>Upload</button>
+<button type="button" aria-disabled={!picker || busy} onclick={openPicker}>Upload</button>
 <input type="file" hidden bind:this={picker} onchange={upload} />
 {#if selected}
   <section aria-labelledby={`${id}-uploads`}>
