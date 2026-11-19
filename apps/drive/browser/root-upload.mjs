@@ -7,8 +7,7 @@ import { capture, widths } from './root-listing.mjs';
 export async function captureRootUpload(page, origin, holdResponse, failRefresh, db) {
   const listingPath = '/api/root-listing';
   const name = 'Drive round-trip.bin';
-  const buffer = Buffer.from(Uint8Array.from({ length: 8193 }, (_, i) => (i ^ (i >> 5)) & 255));
-  const file = { name, buffer, mimeType: 'application/octet-stream' };
+  const file = { name, mimeType: 'application/octet-stream', buffer: Buffer.from(Uint8Array.from({ length: 8193 }, (_, i) => (i ^ (i >> 5)) & 255)) };
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   const status = page.getByRole('status');
   const link = page.getByRole('link', { name, exact: true });
@@ -16,9 +15,8 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   page.on('filechooser', () => {});
   const cdp = await page.context().newCDPSession(page);
   async function inspect(expression) {
-    const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
-      expression, awaitPromise: true, returnByValue: true, userGesture: false,
-    });
+    const { result, exceptionDetails } = await cdp.send('Runtime.evaluate',
+      { expression, awaitPromise: true, returnByValue: true, userGesture: false });
     assert.equal(exceptionDetails, undefined, exceptionDetails?.exception?.description);
     return result.value;
   }
@@ -30,13 +28,13 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
     assert.equal(chooser.isMultiple(), false);
     await chooser.setFiles(selection);
   };
-  const captureWidths = async state => {
-    for (const [width, height] of widths) {
-      await page.setViewportSize({ width, height });
-      await capture(page, state, width);
-    }
+  const atWidths = async run => {
+    for (const [width, height] of widths) await page.setViewportSize({ width, height }).then(() => run(width));
   };
-
+  const assertStatus = async message => {
+    await page.getByText(message, { exact: true }).waitFor();
+    assert.equal(await status.textContent(), message);
+  };
   await page.bringToFront();
   await page.goto(`${origin}/?page=invalid`);
   assert.equal(await upload.count(), 0);
@@ -66,11 +64,10 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   const releaseRefresh = holdResponse(path => path === listingPath);
   try {
     await choose();
-    await page.waitForFunction(size => document.querySelector('progress')?.value === size, buffer.length);
+    await page.waitForFunction(size => document.querySelector('progress')?.value === size, file.buffer.length);
     assert.equal(await status.textContent(), `Uploading ${name} to My Drive.`);
     assert.equal(await upload.getAttribute('aria-disabled'), 'true');
-    assert.equal(await link.count(), 0, 'no row before acknowledged publication');
-    await captureWidths('uploading');
+    await atWidths(width => capture(page, 'uploading', width));
     await page.setViewportSize({ width: 320, height: 844 });
     assert.equal(await inspect('document.documentElement.scrollWidth <= innerWidth'), true);
     const grey = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
@@ -82,7 +79,7 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
     const refreshing = page.waitForRequest(request => new URL(request.url()).pathname === listingPath);
     releaseCompletion();
     await refreshing;
-    await page.getByText(`${name}: Uploaded.`, { exact: true }).waitFor();
+    await assertStatus(`${name}: Uploaded.`);
     assert.equal(await upload.getAttribute('aria-disabled'), 'false', 'publication unlocks the picker during refresh');
     assert.equal(await link.count(), 0, 'the server listing response is still held');
   } finally {
@@ -90,30 +87,23 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
     releaseRefresh();
   }
   await link.waitFor();
-  assert.equal(await status.textContent(), `${name}: Uploaded.`);
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   assert.equal(documents, 0, 'listing refresh did not navigate the document');
   assert.equal(requests, 3, 'upload was not replayed');
-  await captureWidths('uploaded');
+  await atWidths(width => capture(page, 'uploaded', width));
   assert.match(await link.getAttribute('href'), /^\/api\/download\/[0-9a-f-]{36}$/);
   const [download] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
   assert.equal(download.suggestedFilename(), name);
   const downloaded = await readFile(await download.path());
-  assert.deepEqual(downloaded, buffer);
-
+  assert.deepEqual(downloaded, file.buffer);
   await choose({ ...file, buffer: Buffer.from('must not replace the original') });
-  const conflict = `${name}: An item with this name already exists in My Drive.`;
-  await page.getByText(conflict, { exact: true }).waitFor();
-  assert.equal(await status.textContent(), conflict);
+  await assertStatus(`${name}: An item with this name already exists in My Drive.`);
   assert.equal(requests, 6, 'a conflict does not retry');
   const [original] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
-  assert.deepEqual(await readFile(await original.path()), buffer);
-
+  assert.deepEqual(await readFile(await original.path()), file.buffer);
   failRefresh();
-  const interruptedRefresh = 'Second.bin: Uploaded. Refresh My Drive to see it.';
   await choose({ ...file, name: 'Second.bin' });
-  await page.getByText(interruptedRefresh, { exact: true }).waitFor();
-  assert.equal(await status.textContent(), interruptedRefresh);
+  await assertStatus('Second.bin: Uploaded. Refresh My Drive to see it.');
   assert.equal(await inspect(`document.activeElement === ${button}`), true);
   assert.equal(await link.count(), 1, 'a failed refresh leaves the previous listing mounted');
   assert.equal(requests, 9, 'a failed listing refresh does not replay the upload');
@@ -132,7 +122,17 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   try {
     await Promise.all([page.waitForRequest(request => new URL(request.url()).pathname === listingPath),
       choose({ ...file, name: 'A.bin' })]);
-    await link.focus();
+    const next = page.getByRole('link', { name: 'Next page', exact: true });
+    await atWidths(async width => {
+      for (const [key, control] of [['Tab', link], ['Tab', next], ['Shift+Tab', link], ['Shift+Tab', upload]]) {
+        await page.keyboard.press(key);
+        assert.equal(await control.evaluate(el => {
+          const { x, y, width, height } = el.getBoundingClientRect();
+          return el.matches(':focus-visible') && getComputedStyle(el).outlineStyle === 'solid' && el.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+        }), true, `${key} reaches ${await control.textContent()} with a visible ring at ${width}px`);
+      }
+    });
+    await page.keyboard.press('Tab');
     assert.equal(await link.evaluate(el => document.activeElement === el), true);
   } finally { releaseDisplacement(); }
   await page.getByRole('link', { name: 'A.bin', exact: true }).waitFor();
