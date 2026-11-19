@@ -69,14 +69,12 @@ export async function captureRootListing(page, origin, db) {
     await page.emulateMedia({ reducedMotion: null, forcedColors: null });
   }
   assert.equal(await page.evaluate(async href => (await fetch(href)).status, href), 503);
-  const [redirect] = await Promise.all([page.waitForResponse(origin + href), download.press('Enter')]);
-  assert.equal(redirect.status(), 303);
-  // Start a new navigation: the synthetic Playwright relay only intercepts the first request in a redirect chain.
-  await root((await redirect.headerValue('location')).slice(1));
-  const notice = page.getByText('The file didn’t download. Try again.', { exact: true });
-  await notice.waitFor();
-  await page.reload();
-  assert.equal(await notice.count(), 0);
+  // Chromium proves link activation; runtime-smoke checks the redirect and one-shot notice on the Worker.
+  const [activation] = await Promise.all([
+    page.waitForResponse(response => response.url() === origin + href && response.request().isNavigationRequest()),
+    download.press('Enter'),
+  ]);
+  assert.equal(activation.request().method(), 'GET');
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
     await root('?page=invalid');
