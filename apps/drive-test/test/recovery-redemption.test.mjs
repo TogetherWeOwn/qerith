@@ -6,14 +6,14 @@ import { RecoveryRedemption } from '../../drive/src/lib/server/identity/recovery
 import { RecoveryTokens } from '../../drive/src/lib/server/identity/recovery.ts';
 import { PasskeyLogin } from '../../drive/src/lib/server/identity/login.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
-import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
+import { fixture, rpID, origin, userHandle } from '../../drive/tests/ceremony-fixture.ts';
 
 let owner, recovery, challenges, redemption, sessions;
 beforeEach(async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec(`DELETE FROM drive_bound_ceremonies; DELETE FROM drive_recovery_tokens;
     DELETE FROM drive_sessions; DELETE FROM drive_credentials; DELETE FROM drive_principals;
-    INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')`);
+    INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')`);
   sessions = new Sessions(env.DB);
   owner = (await sessions.issue('owner')).token;
   recovery = new RecoveryTokens(env.DB);
@@ -30,7 +30,7 @@ async function prepared() {
 
 it('replaces credentials and sessions, fences login, and consumes competing tokens atomically', async () => {
   const oldSession = (await sessions.issue('member')).token;
-  await env.DB.prepare("INSERT INTO drive_credentials VALUES ('old', 'member', x'01', 0, '[]')").run();
+  await env.DB.prepare("INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES ('old', 'member', x'01', 0, '[]')").run();
   const login = new PasskeyLogin(env.DB, rpID, origin);
   const loginChallenge = await login.issueChallenge('old-login');
   const generation = (await env.DB.prepare("SELECT generation FROM drive_login_generations WHERE principal_id = 'member'").first()).generation;
@@ -112,7 +112,7 @@ it('fails closed if the token or challenge changes before commit', async () => {
 
 it('rolls back replacement and competing-token cleanup when final redemption fails', async () => {
   const oldSession = (await sessions.issue('member')).token;
-  await env.DB.prepare("INSERT INTO drive_credentials VALUES ('old', 'member', x'01', 0, '[]')").run();
+  await env.DB.prepare("INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES ('old', 'member', x'01', 0, '[]')").run();
   const competing = await prepared();
   const { issued, challenge, signed } = await prepared();
   const generation = (await env.DB.prepare("SELECT generation FROM drive_login_generations WHERE principal_id = 'member'").first()).generation;
@@ -135,8 +135,9 @@ it('rejects an in-flight login that verified before recovery committed', async (
   const login = new PasskeyLogin(env.DB, rpID, origin);
   const loginChallenge = await login.issueChallenge('login-race');
   const assertion = await fixture('authentication', { challenge: loginChallenge });
-  await env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
-    .bind(assertion.credential.id, 'member', Array.from(assertion.credential.publicKey), 0, '[]').run();
+  await env.DB.prepare("UPDATE drive_principals SET webauthn_user_handle = ? WHERE id = 'member'").bind(userHandle).run();
+  await env.DB.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
+    VALUES (?, 'member', ?, 0, '[]', ?)`).bind(assertion.credential.id, Array.from(assertion.credential.publicKey), userHandle).run();
   const { issued, challenge, signed } = await prepared();
   const db = {
     prepare: sql => env.DB.prepare(sql),
@@ -151,11 +152,11 @@ it('rejects an in-flight login that verified before recovery committed', async (
 
 it('rejects an unverified registration and rolls back all writes on credential conflict', async () => {
   const oldSession = (await sessions.issue('member')).token;
-  await env.DB.prepare("INSERT INTO drive_credentials VALUES ('old', 'member', x'01', 0, '[]')").run();
+  await env.DB.prepare("INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES ('old', 'member', x'01', 0, '[]')").run();
   const { issued, challenge, signed } = await prepared();
   const bad = await fixture('registration', { challenge, uv: false });
   await expect(redemption.redeem(issued.token, challenge, bad.registration)).rejects.toThrow();
-  await env.DB.exec("INSERT INTO drive_credentials VALUES ('conflict', 'owner', x'01', 0, '[]')");
+  await env.DB.exec("INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES ('conflict', 'owner', x'01', 0, '[]')");
   // The fixture uses a stable credential ID. Reserve it for a different principal.
   await env.DB.prepare('UPDATE drive_credentials SET id = ? WHERE id = ?').bind(signed.registration.id, 'conflict').run();
   await expect(redemption.redeem(issued.token, challenge, signed.registration)).rejects.toThrow();

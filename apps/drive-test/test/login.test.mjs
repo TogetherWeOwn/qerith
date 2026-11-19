@@ -3,18 +3,19 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { PasskeyLogin } from '../../drive/src/lib/server/identity/login.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
-import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
+import { fixture, rpID, origin, userHandle } from '../../drive/tests/ceremony-fixture.ts';
 
 async function setup(options = {}) {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec(`DELETE FROM drive_sessions; DELETE FROM drive_bound_ceremonies;
-    DELETE FROM drive_credentials; DELETE FROM drive_principals;
-    INSERT INTO drive_principals VALUES ('member', 'member', 'active');`);
+    DELETE FROM drive_credentials; DELETE FROM drive_principals;`);
+  await env.DB.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
+    VALUES ('member', 'member', 'active', ?)`).bind(userHandle).run();
   const login = new PasskeyLogin(env.DB, rpID, origin);
   const challenge = await login.issueChallenge('transaction');
   const signed = await fixture('authentication', { challenge, ...options });
-  await env.DB.prepare('INSERT INTO drive_credentials VALUES (?, ?, ?, ?, ?)')
-    .bind(signed.credential.id, 'member', Array.from(signed.credential.publicKey), 0, '[]').run();
+  await env.DB.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
+    VALUES (?, 'member', ?, 0, '[]', ?)`).bind(signed.credential.id, Array.from(signed.credential.publicKey), userHandle).run();
   return { login, challenge, signed };
 }
 
@@ -60,13 +61,15 @@ it('consumes the challenge when assertion parsing or credential lookup fails', a
   }
 });
 
-it('rechecks membership and counter when committing a verified assertion', async () => {
-  for (const state of ['revoked', 'reactivated', 'counter']) {
+it('rechecks membership, counter and both handle bindings when committing a verified assertion', async () => {
+  for (const state of ['revoked', 'reactivated', 'counter', 'credential-handle', 'principal-handle']) {
     const { challenge, signed } = await setup();
     const db = {
       prepare: sql => env.DB.prepare(sql),
       async batch(statements) {
         if (state === 'counter') await env.DB.prepare('UPDATE drive_credentials SET counter = 2').run();
+        else if (state === 'credential-handle') await env.DB.exec('UPDATE drive_credentials SET webauthn_user_handle = NULL');
+        else if (state === 'principal-handle') await env.DB.exec('UPDATE drive_principals SET webauthn_user_handle = NULL');
         else {
           await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
           if (state === 'reactivated') await env.DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'member'").run();

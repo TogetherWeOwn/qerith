@@ -1,6 +1,7 @@
 export const rpID = 'example.test';
 export const origin = `https://${rpID}`;
 export const challenge = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+export const userHandle = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE';
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 const decode = (value: string) => Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0));
 const join = (...parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((part) => Array.from(part)));
@@ -21,8 +22,8 @@ function der(raw: Uint8Array) {
   return join(bytes(0x30, body.length), body);
 }
 
-export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string } = {}) {
-  const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string; key?: CryptoKeyPair } = {}) {
+  const key = options.key ?? await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', key.publicKey);
   const cose = join(bytes(0xa5, 1, 2, 3, 0x26, 0x20, 1, 0x21, 0x58, 0x20), decode(jwk.x!), bytes(0x22, 0x58, 0x20), decode(jwk.y!));
   const id = bytes(1, 2, 3, 4);
@@ -39,6 +40,6 @@ export async function fixture(kind: 'registration' | 'authentication', options: 
     bytes(0xa3), cborText('fmt'), cborText('packed'), cborText('authData'), cborBytes(authData),
     cborText('attStmt'), bytes(0xa2), cborText('alg'), bytes(0x26), cborText('sig'), cborBytes(signature),
   )) } };
-  const authentication = { ...common, response: { clientDataJSON: encode(clientData), authenticatorData: encode(authData), signature: encode(signature) } };
+  const authentication = { ...common, response: { clientDataJSON: encode(clientData), authenticatorData: encode(authData), signature: encode(signature), userHandle } };
   return { registration, authentication, credential: { id: encode(id), publicKey: cose, counter: 0 } };
 }

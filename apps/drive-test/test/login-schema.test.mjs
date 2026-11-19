@@ -16,7 +16,7 @@ it('upgrades seeded members and replays the real migration directory', async () 
   expect(after.slice(0, before.length)).toEqual(before);
   expect(after.map(({ name }) => name)).toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
   expect(await env.DB.prepare("SELECT generation FROM drive_login_generations WHERE principal_id = 'member'").first()).toEqual(generation);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('new-member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('new-member', 'member', 'active')");
   const newGeneration = await env.DB.prepare("SELECT generation FROM drive_login_generations WHERE principal_id = 'new-member'").first();
   expect(newGeneration.generation).toMatch(/^[a-f0-9]{64}$/);
   await env.DB.exec(`INSERT INTO drive_bound_ceremonies VALUES ('login', 'authentication', 'auth', 9999999999999);
