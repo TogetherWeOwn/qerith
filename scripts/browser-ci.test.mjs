@@ -61,8 +61,17 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     await verifyEvidence(dir, head);
     await assert.rejects(verifyEvidence(dir, head, true), { code: 'ENOENT' });
     await assert.rejects(verifyEvidence(dir, head, false, true), /root-upload-round-trip\.json/);
-    await writeFile(join(dir, 'root-upload-round-trip.json'), '{}');
-    await assert.rejects(verifyEvidence(dir, head, false, true), /Invalid upload evidence/);
+    const proof = { byteIdentical: true, bytes: 8193, statusRegions: 1, documentsDuringRefresh: 0, focusPreserved: true,
+      refresh503PreservedUpload: true, keyboard: 'Tab then Enter opened the single-file picker', sha256: '0'.repeat(64),
+      responses: [['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 200], ['POST', 201], ['PUT', 204], ['POST', 409], ['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 503]] };
+    const proofPath = join(dir, 'root-upload-round-trip.json');
+    await writeFile(proofPath, JSON.stringify(proof));
+    await assert.rejects(verifyEvidence(dir, head, false, true), { message: 'Invalid upload evidence' });
+    proof.sha256 = '2d18045cc77c707b09f9b436b44e5b90923bfdee7b80fec763479b0e1ef88c0a';
+    await writeFile(proofPath, JSON.stringify(proof));
+    await writeFile(join(dir, 'root-uploading-390.png'), Buffer.from('89504e470d0a1a0a0000000d4948445200000500000003200802000000000000000000000049454e44ae426082', 'hex'));
+    await writeFile(join(dir, 'axe-root-uploading-390.json'), '{"violations":[]}');
+    await assert.rejects(verifyEvidence(dir, head, false, true), { message: 'Invalid upload evidence: root-uploading-390' });
     await assert.rejects(verifyEvidence(dir, base), /does not match/);
     await writeFile(join(dir, 'axe-1280x800.json'), '{"violations":[{}]}');
     await assert.rejects(verifyEvidence(dir, head), /Invalid axe/);

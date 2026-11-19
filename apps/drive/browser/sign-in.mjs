@@ -25,6 +25,7 @@ globalThis.fetch = storageFetch;
 export default { fetch(request, env, ctx) {
   const input = new Request(request);
   if (input.headers.has('x-fixture-navigation')) input.headers.set('sec-fetch-mode', 'navigate');
+  if (input.headers.has('x-fixture-navigation')) input.headers.set('sec-fetch-dest', 'document');
   input.headers.delete('x-fixture-navigation');
   if (!input.headers.has('x-fixture-storage')) return worker.fetch(input, env, ctx);
   input.headers.delete('x-fixture-storage');

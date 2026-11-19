@@ -23,16 +23,14 @@ export async function verifyEvidence(dir, tested, root = false, upload = false) 
       ['POST', 409], ['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 503]];
     if (proof?.byteIdentical !== true || proof.bytes !== 8193 || proof.statusRegions !== 1 ||
         proof.documentsDuringRefresh !== 0 || proof.focusPreserved !== true || proof.refresh503PreservedUpload !== true ||
-        proof.keyboard !== 'Tab then Enter opened the single-file picker' || !/^[0-9a-f]{64}$/.test(proof.sha256) ||
-        JSON.stringify(proof.responses) !== JSON.stringify(responses)) {
-      throw new Error('Invalid upload evidence');
-    }
+        proof.keyboard !== 'Tab then Enter opened the single-file picker' || JSON.stringify(proof.responses) !== JSON.stringify(responses) ||
+        proof.sha256 !== '2d18045cc77c707b09f9b436b44e5b90923bfdee7b80fec763479b0e1ef88c0a') throw new Error('Invalid upload evidence');
     for (const width of [390, 1280]) for (const state of ['uploading', 'uploaded']) {
       const label = `root-${state}-${width}`;
       const screenshot = await readFile(join(dir, `${label}.png`));
       const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
-      if (!screenshot.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ||
-          !screenshot.subarray(-8).equals(Buffer.from('49454e44ae426082', 'hex')) ||
+      if (!screenshot.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
+          screenshot.length < 45 || screenshot.readUInt32BE(16) !== width || !screenshot.subarray(-8).equals(Buffer.from('49454e44ae426082', 'hex')) ||
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid upload evidence: ${label}`);
     }
   }
