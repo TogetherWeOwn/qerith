@@ -31,13 +31,24 @@
     return !!checkLayoutOnOpen && !trigger.getClientRects().length;
   }
 
+  const scrollAtOpen = new Map<Document | Element, readonly [number, number]>();
+
+  function scrollPosition(target: Document | Element): readonly [number, number] {
+    return target instanceof Element ? [target.scrollLeft, target.scrollTop] : [window.scrollX, window.scrollY];
+  }
+
   function onScroll(event: Event) {
     const target = event.target;
-    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target))) && !hiddenByParent()) {
-      const restore = menu.contains(document.activeElement);
-      close();
-      if (restore) trigger.focus({ preventScroll: true });
-    }
+    if (!open || !menu) return;
+    if (target !== document && !(target instanceof Element && target.contains(trigger) && !menu.contains(target))) return;
+    if (hiddenByParent()) return;
+    // A scroll can move the page before opening but deliver its event afterward.
+    const initial = scrollAtOpen.get(target);
+    const [left, top] = scrollPosition(target);
+    if (initial && initial[0] === left && initial[1] === top) return;
+    const restore = menu.contains(document.activeElement);
+    close();
+    if (restore) trigger.focus({ preventScroll: true });
   }
 
   function onResize() {
@@ -55,6 +66,10 @@
     compact = window.matchMedia('(max-width: 820px)').matches;
     if (!open) {
       checkLayoutOnOpen?.('next-frame');
+      scrollAtOpen.set(document, scrollPosition(document));
+      for (let ancestor = trigger.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        scrollAtOpen.set(ancestor, scrollPosition(ancestor));
+      }
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('pointerdown', outside);
       window.addEventListener('resize', onResize);
@@ -88,6 +103,7 @@
   function close(restore = false) {
     ++opening;
     if (open) {
+      scrollAtOpen.clear();
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('pointerdown', outside);
       window.removeEventListener('resize', onResize);

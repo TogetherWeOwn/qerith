@@ -718,6 +718,7 @@ try {
       assert.equal(queued.atOpen, 10, `${source} must scroll before opening`);
       assert.equal(queued.deliveredAt, queued.atOpen, `${source} must deliver the queued scroll without moving again`);
       assert.equal(queued.focusedText, 'Download', `${source} scroll queued before opening must not dismiss the focused menu`);
+      console.log(`Queued ${source} scroll preserved Download focus`);
     }
     await menu.waitFor();
     const scroll = source === 'document' ? page.locator('html') : source === 'ancestor' ? page.locator('main > div').first() : menu;
