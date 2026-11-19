@@ -35,7 +35,10 @@ On the matching head, CI also builds the real generated Worker and runs
 is separate from `staging-root-round-trip.json`: the latter uses the exact staging
 origin, a disposable D1, and synthetic storage with no sign-in fixture flag or
 remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
-without navigation, full and range byte equality, and admission denials.
+without navigation, full and range byte equality, and admission denials. For
+notice recovery, the relay seeds one synthetic Worker document request at a time
+and checks the Worker's expiration header; Chromium checks the rendered notice
+and focus, not cookie-jar deletion.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended

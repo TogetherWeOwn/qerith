@@ -74,19 +74,29 @@ try {
   } });
 
   const assets = new Set();
-  let holdRefresh;
+  let holdRefresh, pendingNotice;
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
+    let seededNotice;
     if (request.isNavigationRequest()) {
       headers['x-fixture-navigation'] = '1';
-      // The relay may omit Fetch Metadata for the test's direct notice navigation.
-      if (url.pathname === '/' && url.searchParams.has('download')) headers['sec-fetch-site'] ??= 'none';
+      if (pendingNotice && url.pathname === '/' && url.search === `?download=${pendingNotice.nonce}`) {
+        // Seed this Worker document request only; the relay is not a browser cookie transport.
+        seededNotice = pendingNotice;
+        pendingNotice = undefined;
+        headers['sec-fetch-site'] = 'same-origin';
+        headers.cookie = `${headers.cookie}; ${seededNotice.name}=${seededNotice.value}`;
+      }
     }
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
+    if (seededNotice) {
+      seededNotice.expired = response.headers.getSetCookie().some(value =>
+        value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
+    }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
     if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
@@ -137,13 +147,10 @@ try {
   const listingRetry = page.getByRole('link', { name: 'Try again', exact: true });
   async function visitWithNotice(value = failedDownload.split('/').at(-1)) {
     const nonce = crypto.randomUUID(), name = `__Host-drive-download-failed-${nonce}`;
-    await context.addCookies([{ name, value, url: `${origin}/`, secure: true, httpOnly: true }]);
-    assert.ok((await context.cookies(origin)).some(cookie => cookie.name === name));
+    const seeded = pendingNotice = { nonce, name, value, expired: false };
     const document = await page.goto(`${origin}/?download=${nonce}`);
     assert.equal(document?.status(), 200);
-    assert.ok((await document.headerValues('set-cookie')).some(value => value.startsWith(`${name}=;`) && /Max-Age=0/i.test(value)),
-      'the Worker expired the one-time notice cookie');
-    assert.ok(!(await context.cookies(origin)).some(cookie => cookie.name === name), 'Chromium removed the one-time notice cookie');
+    assert.ok(seeded.expired, 'the Worker sent an expiration header for the synthetic notice cookie');
   }
   await visitWithNotice();
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
@@ -210,7 +217,7 @@ try {
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
     noticePreservedOnRefresh: true, noticePreservedOnListingFailure: true, focusRestoredOnListingFailure: true,
-    oneTimeNoticeCookieRemoved: true, distinctRetryLinks: true, nonRetryableNoticeHasNoLink: true,
+    workerExpiresSyntheticNoticeCookie: true, distinctRetryLinks: true, nonRetryableNoticeHasNoLink: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,
