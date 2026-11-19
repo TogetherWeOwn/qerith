@@ -5,23 +5,32 @@ scratch=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gitleaks-ci.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 
 scan() {
-  local repo=$1 report=${2:-"$scratch/history.json"} status=0
+  local repo=$1 fixture_report=${2:-} status=0
+  local report="$scratch/history.json" diagnostics="$scratch/history.log"
   # Force text patches and compare merges to their first parent without
   # restricting history traversal to the first-parent chain.
   # Also emit content when a file is renamed out of an allowed path.
-  # Scanner diagnostics can echo raw policy input even with --redact.
-  "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 \
+  # Gitleaks 8.30.1 can log a Git read error and still exit 0. Keep error
+  # diagnostics private and fail the scan if it emitted any.
+  "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 --no-banner --log-level error \
     --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent --no-renames HEAD --' \
     --config "$scratch/.gitleaks.toml" --gitleaks-ignore-path "$scratch/.gitleaksignore" \
-    --report-format json --report-path "$report" >/dev/null 2>&1 || status=$?
-  if (( status == 0 )); then
-    printf '%s\n' 'Gitleaks history scan passed; no findings reported'
-  elif jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
-    printf 'Gitleaks reported findings (exit %s); review privately\n' "$status" >&2
-  else
-    printf 'Gitleaks history scan failed (exit %s); diagnostics withheld\n' "$status" >&2
+    --report-format json --report-path "$report" > "$diagnostics" 2>&1 || status=$?
+  if [[ ! -s "$diagnostics" ]]; then
+    if (( status == 0 )) && jq -e 'type == "array" and length == 0' "$report" >/dev/null 2>&1; then
+      printf '%s\n' 'Gitleaks history scan passed; no findings reported'
+      return 0
+    elif (( status == 1 )) && jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
+      if [[ -n "$fixture_report" ]]; then cp -- "$report" "$fixture_report"; fi
+      printf '%s\n' 'Gitleaks reported findings; review privately' >&2
+      return 1
+    fi
   fi
-  return "$status"
+  printf '%s\n' 'Gitleaks history scan failed; diagnostics withheld' >&2
+  if jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
+    printf '%s\n' 'Gitleaks reported findings during the failed scan; review privately' >&2
+  fi
+  return "$(( status == 0 ? 1 : status ))"
 }
 
 validate_config() {
@@ -51,8 +60,10 @@ validate_rules() {
   validate_config "$config" || return 1
   # An empty directory loads the policy without scanning repository data.
   # SARIF inventories the effective rules, including built-ins after extension.
-  mkdir -p "$scratch/empty"
+  mkdir -p "$scratch/empty" || return 1
+  : > "$scratch/empty.ignore" || return 1
   if ! "${GITLEAKS_BIN:?}" dir "$scratch/empty" --config "$config" --redact \
+    --gitleaks-ignore-path "$scratch/empty.ignore" \
     --report-format sarif --report-path "$report" >/dev/null 2>&1; then
     printf '%s gitleaks policy could not be loaded\n' "$label" >&2
     return 1
@@ -125,9 +136,9 @@ assert_invalid_config() {
   local base=$1 script=$2 content=$3 message=$4
   shift 4
   local event
-  printf '%s\n' "$content" > .gitleaks.toml
-  git add .gitleaks.toml
-  git commit -qm 'Change synthetic policy'
+  printf '%s\n' "$content" > .gitleaks.toml || return 1
+  git add .gitleaks.toml || return 1
+  git commit -qm 'Change synthetic policy' || return 1
   for event in "$@"; do
     if GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse --verify HEAD)" \
       bash "$script" scan > "$scratch/policy-test.log" 2>&1; then
@@ -139,7 +150,7 @@ assert_invalid_config() {
 }
 
 self_test() {
-  local label repo script
+  local label repo script blob
   script=$(realpath -- "${BASH_SOURCE[0]}")
   for label in no-diff merge-resolution rename; do
     repo="$scratch/$label"
@@ -216,6 +227,33 @@ self_test() {
       fi
     )
   done
+
+  repo="$scratch/incomplete-history"
+  git init -q -b main "$repo"
+  (
+    cd "$repo"
+    git config user.name 'Gitleaks self-test'
+    git config user.email 'gitleaks-fixture@example.invalid'
+    git config commit.gpgsign false
+    printf 'ordinary historical content\n' > missing.txt
+    git add missing.txt
+    git commit -qm 'Add historical content'
+    blob=$(git rev-parse --verify HEAD:missing.txt)
+    git rm -q missing.txt
+    git commit -qm 'Remove historical content'
+    GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" bash "$script" scan
+    rm -- ".git/objects/${blob:0:2}/${blob:2}"
+    if GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" \
+      bash "$script" scan > "$scratch/incomplete.log" 2>&1; then
+      printf '%s\n' 'Expected incomplete history scan to fail' >&2
+      exit 1
+    fi
+    if ! cmp -s "$scratch/incomplete.log" <(printf '%s\n' 'Gitleaks history scan failed; diagnostics withheld'); then
+      printf '%s\n' 'Expected only a safe incomplete-scan summary' >&2
+      exit 1
+    fi
+    printf '%s\n' 'Rejected incomplete history scan without printing diagnostics'
+  )
 }
 
 printf '[extend]\nuseDefault = true\n' > "$scratch/.gitleaks.toml"
