@@ -10,10 +10,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: drive-production-release
-  cancel-in-progress: false
-
 jobs:
   preflight:
     if: github.repository == 'TogetherWeOwn/qerith'
@@ -46,6 +42,9 @@ jobs:
     # requires a new reviewed change and independent production acceptance.
     if: ${{ false }}
     environment: production
+    concurrency:
+      group: drive-production-release
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

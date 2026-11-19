@@ -10,10 +10,13 @@ QUALIFICATION = "drive-staging-qualification.yml"
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
-def github_get(path):
+def github_get(path, *, paginate=False):
+    args = ["gh", "api", "--method", "GET", f"repos/{REPO}/{path}"]
+    if paginate:
+        args += ["--paginate", "--slurp"]
     try:
         result = subprocess.run(
-            ["gh", "api", "--method", "GET", f"repos/{REPO}/{path}"],
+            args,
             check=True,
             capture_output=True,
             timeout=15,
@@ -50,7 +53,7 @@ def preflight(accepted, reviewer, get=github_get):
     rules = [r for r in env["protection_rules"] if r["type"] == "required_reviewers"]
     require(
         env["name"] == "production"
-        and env["can_admins_bypass"] is False
+        and env.get("can_admins_bypass") is False
         and policy["custom_branch_policies"] is True
         and policy["protected_branches"] is False
         and len(rules) == 1
@@ -71,23 +74,24 @@ def preflight(accepted, reviewer, get=github_get):
         "Production environment must allow only the main branch and no tags.",
     )
 
-    receipt = f"drive-staging-qualification-{accepted}"
-    runs = get(
+    path = f".github/workflows/{QUALIFICATION}"
+    pages = get(
         f"actions/workflows/{QUALIFICATION}/runs?branch=main&event=workflow_dispatch"
-        f"&status=success&head_sha={accepted}&per_page=10"
+        f"&status=success&head_sha={accepted}&per_page=100",
+        paginate=True,
     )
-    for run in runs["workflow_runs"]:
+    for run in (run for page in pages for run in page["workflow_runs"]):
         if not (
-            run["path"] == f".github/workflows/{QUALIFICATION}"
+            run["path"] in (path, f"{path}@main", f"{path}@refs/heads/main")
             and run["event"] == "workflow_dispatch"
             and run["head_branch"] == "main"
             and run["head_sha"] == accepted
             and run["conclusion"] == "success"
             and run["head_repository"]["full_name"] == REPO
-            and type(run["id"]) is int
-            and run["id"] > 0
+            and all(type(run[k]) is int and run[k] > 0 for k in ("id", "run_attempt"))
         ):
             continue
+        receipt = f"drive-staging-qualification-{accepted}-attempt-{run['run_attempt']}"
         artifacts = get(f"actions/runs/{run['id']}/artifacts?name={receipt}&per_page=2")
         if any(
             a["name"] == receipt and a["expired"] is False

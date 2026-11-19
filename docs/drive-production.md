@@ -19,14 +19,13 @@ of the exact SHA. Never reuse staging storage or credentials.
 - The only trigger is a manual dispatch from `main`. `accepted_sha` must be a
   lowercase full commit SHA reachable from protected `main`, not merely the
   latest main tip or the commit that supplied the release workflow.
-- The staging qualification producer must publish the artifact
-  `drive-staging-qualification-<tested-sha>` only after the actual staging
-  verification and cleanup succeed, from the same-repo, main-only
-  `drive-staging-qualification.yml` dispatch whose head is that tested SHA.
-  Preflight checks GitHub run and artifact metadata for this exact reference;
-  it does not download the artifact, own its payload schema, or confer
-  production approval. A missing producer, skipped qualification, expired
-  artifact, or unavailable API is a stop, not an override.
+- Only after staging verification and cleanup succeed, publish
+  `drive-staging-qualification-<tested-sha>-attempt-<GITHUB_RUN_ATTEMPT>`
+  from the same-repo, main-only `drive-staging-qualification.yml` dispatch at
+  that tested SHA. Never publish on failure or skip.
+  Preflight checks GitHub metadata for the successful attempt's unexpired
+  receipt; it does not read its payload or confer production approval. Missing
+  evidence, including an unavailable API, is a stop.
 - Use the [staging runbook](drive-staging.md): pipeline-owned on-demand startup
   and SHA-bound readiness, a bounded active window and native cleanup/expiry on
   success, failure or cancellation. Verify zero recurring idle staging/preview
