@@ -193,14 +193,33 @@ it('composes with immutable full and range GETs without storage calls for denied
     if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
   }
   const setRole = (role) => sql("UPDATE drive_principals SET role = ? WHERE id = 'owner-read-stream'", role).run();
-  let firstLookup = true;
+  let onLookup = async (row) => {
+    await setRole('member');
+    return row;
+  };
   const DB = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
     const row = await env.DB.withSession(mode).prepare(query).bind(...args).first();
-    if (firstLookup) { firstLookup = false; await setRole('member'); }
-    return row;
+    return onLookup(row);
   } }) }) }) };
-  expect((await get({}, token, { ...storage, DB })).status).toBe(404);
-  expect(fetch).toHaveBeenCalledTimes(16); // No provider dispatch after the initial lookup.
+  const fakePrimary = { ...storage, DB };
+  expect((await get({}, token, fakePrimary)).status).toBe(404);
+  await setRole('owner');
+  expect((await get({ range: 'bytes=-' }, token, fakePrimary)).status).toBe(404);
+  await setRole('owner');
+  onLookup = (row) => ({ ...row, remainingMs: 0 });
+  expect((await get({}, token, fakePrimary)).status).toBe(404);
+  const disconnect = new AbortController(), stalled = Promise.withResolvers();
+  let lookups = 0;
+  onLookup = (row) => {
+    if (++lookups === 1) return row;
+    disconnect.abort();
+    return stalled.promise;
+  };
+  try {
+    expect((await get({ range: 'bytes=-' }, token, fakePrimary, disconnect.signal)).status).toBe(404);
+    expect(lookups).toBe(2);
+  } finally { stalled.resolve(null); }
+  expect(fetch).toHaveBeenCalledTimes(16); // No provider dispatch from a stale lookup.
   for (const conditional of [false, true]) {
     await setRole('owner');
     fetch.mockImplementationOnce(async () => {

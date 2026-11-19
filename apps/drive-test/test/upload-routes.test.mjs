@@ -1,10 +1,14 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
+import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
+import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
+import { postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
-import { config, epoch, migrations, response, sessions, sql } from './fixtures/upload-completion.mjs';
-import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
+import { config, epoch, evidence, migrations, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
+import { etag, headOk, qualified, setup } from './fixtures/upload-publication-generation.mjs';
 const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
@@ -84,6 +88,42 @@ it('publishes a verified sparse upload without duplicate part or completion send
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
 });
 
+it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation (%s)', async (change) => {
+  await applyD1Migrations(env.DB, migrations);
+  const principal = crypto.randomUUID(), states = [], calls = [];
+  const row = () => sql('SELECT * FROM drive_upload_intents WHERE owner_id = ?', principal).first();
+  const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'owner', 'active')", principal).run();
+  try {
+    const { token } = await sessions.issue(principal);
+    const request = new Request(`${stagingOrigin}/api/uploads`, { method: 'POST', body: '{"size":7}',
+      headers: { origin: stagingOrigin, cookie: `__Host-drive-session=${token}`, 'content-type': 'application/json' } });
+    const result = await postUploadIntent(request, { DB: env.DB, DRIVE_ORIGIN: stagingOrigin,
+      DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
+      DRIVE_UPLOAD_VERIFIER: { completionTimeoutMs: () => 5000, async isQualified(id) {
+        const state = (await row())?.state ?? null;
+        states.push(state);
+        if (change === (state === null ? 'claim' : 'send')) await demote();
+        return qualified(id);
+      } } }, { timeoutMs: 5000, async fetch(request) {
+      calls.push(request.method);
+      return new Response(`<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key>` +
+        `<UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
+    } });
+    const allowed = change === 'owner', claimed = change !== 'claim';
+    expect(await sessions.lookup(token)).toEqual({ id: principal, role: allowed ? 'owner' : 'member' });
+    expect(states).toEqual(claimed ? [null, 'initiating'] : [null]);
+    expect(calls).toEqual(allowed ? ['POST'] : []);
+    const intent = await row();
+    expect(intent).toEqual(claimed ? expect.objectContaining({
+      state: allowed ? 'allocated' : 'created', version: 2, upload_id: allowed ? uploadId : null
+    }) : null);
+    expect(result.status).toBe(allowed ? 201 : claimed ? 503 : 401);
+    if (allowed) expect(await result.json()).toEqual({ id: intent.id });
+    else expect(await result.text()).toBe('');
+  } finally { await demote(); }
+});
+
 it.each(['part claim', 'parts verification', 'completion claim', 'publication send', 'generation HEAD'])('keeps staging upload owner-only after %s', async (change) => {
   let principal;
   const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
@@ -102,18 +142,82 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
     if (change === 'generation HEAD') await demote();
   } });
   ({ principal } = upload);
-  expect((await upload.send(1, { auth: upload.foreign })).status).toBe(403);
-  const partDenied = change === 'part claim';
-  expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
-  expect((await upload.send()).status).toBe(partDenied ? 403 : 404);
-  expect(await upload.generation()).toBeNull();
-  const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
-    'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
-  expect(upload.calls).toEqual(expected[change]);
-  if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
-    USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
-  if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
-    JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
+  try {
+    expect((await upload.send(1, { auth: upload.foreign })).status).toBe(404);
+    const partDenied = change === 'part claim';
+    expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
+    expect((await upload.send()).status).toBe(404);
+    expect(await upload.generation()).toBeNull();
+    const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
+      'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
+    expect(upload.calls).toEqual(expected[change]);
+    if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
+      USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
+    if (change === 'parts verification') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
+      JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.owner_id = ?`, principal).first()).toBeNull();
+    if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
+      JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
+  } finally { await demote(); }
+});
+
+it.each(['owner', 'member'])('checks the staging role %s again before the next multipart page', async (role) => {
+  await applyD1Migrations(env.DB, migrations);
+  const operation = crypto.randomUUID(), owner = `owner-${operation}`;
+  const { token, key } = await seed(operation);
+  const setRole = (value) => sql('UPDATE drive_principals SET role = ? WHERE id = ?', value, owner).run();
+  const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
+  const calls = [];
+  const open = `<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key><UploadId>upload/+id</UploadId>`;
+  const fetch = async (request) => {
+    const marker = new URL(request.url).searchParams.get('part-number-marker');
+    calls.push([request.method, marker]);
+    if (request.method === 'POST') return response(key);
+    if (marker === '2') return new Response(`${open}<IsTruncated>false</IsTruncated></ListPartsResult>`);
+    if (role === 'member') await setRole(role);
+    return new Response(`${open}<IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>` +
+      '<Part><PartNumber>2</PartNumber><Size>7</Size><ETag>"part-&amp;-ÿ"</ETag></Part></ListPartsResult>');
+  };
+  const { DRIVE_UPLOAD_VERIFIER: verifier } = wireUploadStorage({
+    DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+    DRIVE_S3_STORAGE_EPOCH: epoch, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey,
+    DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId, region: config.region,
+      sourceSha: 'a'.repeat(40), runId: '123', runAttempt: 1, completionTimeoutMs: 5000 })
+  }, fetch);
+  await setRole('owner');
+  try {
+    let idleMs = 5000;
+    const streamBudget = role === 'owner' ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
+    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, true);
+    idleMs = 0;
+    const allowed = role === 'owner';
+    expect(await service.complete(token, operation)).toBe(allowed ? 'recorded' : 'not-admitted');
+    expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
+    expect(calls).toEqual(allowed ? [['GET', null], ['GET', '2'], ['POST', null]] : [['GET', null]]);
+    expect(Boolean(await evidence('receipts', operation))).toBe(allowed);
+    if (!allowed) expect(await evidence('dispatches', operation)).toBeNull();
+  } finally { await setRole('member'); }
+});
+
+it('validates owner-only upload transports at construction without I/O', () => {
+  const fetch = vi.fn(), verifier = { isQualified: vi.fn(), verifyParts: vi.fn() };
+  const streamBudget = Object.create({ idleMs: 0, totalMs: 5000 });
+  for (const options of [{ fetch, timeoutMs: 0 }, { fetch, timeoutMs: 5000, streamBudget }]) {
+    expect(() => createUploadCompletionReceipts(env.DB, epoch, config, options, verifier, true)).toThrow('Invalid S3 timeout');
+    expect(() => createTrustedUploadPublication(env.DB, epoch, config, options, qualified, true)).toThrow('Invalid S3 timeout');
+  }
+  for (const mock of [fetch, verifier.isQualified, verifier.verifyParts]) expect(mock).not.toHaveBeenCalled();
+});
+
+it('rechecks publication qualification after the caller hook, before HEAD', async () => {
+  const { complete, publish } = await setup(crypto.randomUUID());
+  expect(await complete()).toBe('recorded');
+  let current = true;
+  const fetch = vi.fn(headOk), streamBudget = Object.create({ idleMs: 5000, totalMs: 5000 });
+  const service = createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget,
+    async beforeSend() { current = await Promise.resolve(false); return true; } }, (id) => current && qualified(id));
+  expect(await publish(service)).toBeNull();
+  expect(current).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {

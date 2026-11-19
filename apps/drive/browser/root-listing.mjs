@@ -3,14 +3,14 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
-const widths = [[390, 844], [1280, 800]];
+export const widths = [[390, 844], [1280, 800]];
 const axe = await readFile(createRequire(import.meta.url).resolve('axe-core/axe.min.js'), 'utf8');
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
 const file = 'Résumé 2026.pdf';
 const id = '00000000-0000-4000-8000-000000000002';
 const href = `/api/download/${id}`;
 
-async function capture(page, state, width, audit = true) {
+export async function capture(page, state, width, audit = true) {
   const label = `root-${state}-${width}`;
   await page.screenshot({ path: resolve(output, `${label}.png`), fullPage: true });
   if (!audit) return;
@@ -24,6 +24,7 @@ async function capture(page, state, width, audit = true) {
 
 export async function captureSignedOut(page) {
   await page.getByRole('button', { name: 'Sign in with a passkey' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
     await capture(page, 'signed-out', width);
@@ -98,5 +99,6 @@ export async function captureRootListing(page, origin, db) {
   } finally {
     await db.prepare(index.sql).run();
   }
+  await db.prepare('DELETE FROM drive_entries WHERE id = ?').bind(id).run();
   console.log('Generated My Drive route: signed-out, empty, listed, recovery, axe, keyboard and responsive evidence captured');
 }

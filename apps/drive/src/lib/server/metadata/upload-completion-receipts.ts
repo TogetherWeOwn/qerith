@@ -37,6 +37,7 @@ interface UploadPublicationVerifier {
     objectKey: string;
     uploadId: string;
     intentVersion: number;
+    beforeSend?: () => Promise<boolean>;
   }>): Promise<readonly CompletedPart[] | null>;
 }
 
@@ -92,6 +93,13 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const allocated = `${sealed} ${requireActiveOwner(ownerOnly, 'o.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
+  const { streamBudget, ...options } = transport;
+  const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
+  const makeComplete = (checkOwner?: () => Promise<boolean>) => createMultipartComplete(settings, { ...options,
+    streamBudget: budget, beforeSend: async () => await verifier?.isQualified(storageConfigId) === true &&
+      (!checkOwner || await checkOwner()) });
+  const completeMultipart = makeComplete();
+
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
       SELECT d.operation_id FROM drive_upload_completion_dispatches d
@@ -140,8 +148,9 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
         await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
+      const checkOwner = ownerOnly ? () => new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId) : undefined;
       const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
-        objectKey, uploadId, intentVersion: upload.intent_version }));
+        objectKey, uploadId, intentVersion: upload.intent_version, ...(checkOwner && { beforeSend: checkOwner }) }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
       const parts = verified.map(({ partNumber, etag, size }) => ({ partNumber, etag, size }));
       let manifest: Uint8Array<ArrayBuffer>;
@@ -149,6 +158,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
       if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
+      const complete = checkOwner ? makeComplete(checkOwner) : completeMultipart;
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {
@@ -162,9 +172,6 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {
-        const complete = createMultipartComplete(settings, { ...transport,
-          beforeSend: async () => await verifier.isQualified(storageConfigId) === true &&
-            (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) });
         const response = await complete(objectKey, uploadId, parts);
         const receipt = { etag: response.etag, response_checksums: JSON.stringify(response.checksums ?? {}),
           evidence_revision: crypto.randomUUID() };
