@@ -70,15 +70,31 @@ export default { fetch(request, env, ctx) {
     await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
-    for (const name of ['0001_identity.sql', '0002_private_metadata.sql', '0009_sessions.sql', '0015_folder_listing_order.sql']) {
+    for (const name of ['0001_identity.sql', '0002_private_metadata.sql', '0009_sessions.sql', '0015_folder_listing_order.sql', '0033_owner_registration.sql']) {
       const sql = await readFile(`migrations/${name}`, 'utf8');
       await DB.batch(unstable_splitSqlQuery(sql).map((statement) => DB.prepare(statement)));
     }
-    const token = randomBytes(32).toString('base64url');
-    const cookie = `__Host-drive-session=${token}`;
-    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'member', 'active'), ('other', 'member', 'active')").run();
-    await DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'fixture', ?)")
-      .bind(createHash('sha256').update(token).digest('hex'), Date.now() + 60_000).run();
+    const session = async (id, role) => {
+      const token = randomBytes(32).toString('base64url');
+      await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(id, role).run();
+      await DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
+        .bind(createHash('sha256').update(token).digest('hex'), id, Date.now() + 60_000).run();
+      return `__Host-drive-session=${token}`;
+    };
+    const assertProvisioningUnavailable = async (cookie, role) => {
+      for (const path of ['/owner/bootstrap', '/api/owner/provisioning']) {
+        const response = await worker.fetch(`${origin}${path}`, {
+          method: 'POST', redirect: 'manual', headers: { cookie, origin, 'content-type': 'application/json' },
+          body: JSON.stringify({ operation: 'challenge' })
+        });
+        assert.equal(response.status, 404, `${path} must not expose provisioning to a ${role} session`);
+      }
+      assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
+    };
+    const cookie = await session('fixture', 'member');
+    // Probe before an existing owner would make the bootstrap operation refuse by itself.
+    await assertProvisioningUnavailable(cookie, 'member');
+    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('other', 'member', 'active')").run();
 
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
@@ -114,10 +130,10 @@ export default { fetch(request, env, ctx) {
     assert.ok(following.includes(`href="/api/download/${fileId}"`));
     assert.doesNotMatch(following, /data-action-row|<th[^>]*>(?:Size|Modified|Actions)<\/th>/);
     assert.doesNotMatch(following, /Folder 199|Other principal folder|internal-fixture-key|Next page/);
-    assert.ok(!following.includes(token));
+    assert.ok(!following.includes(cookie.split('=')[1]));
     const invalid = await (await get({ cookie }, `${origin}/?page=invalid`)).text();
     assert.match(invalid, /This page is no longer available\./);
-    assert.match(invalid, /href="\/">Back to first page/);
+    assert.match(invalid, /<a\b[^>]*\shref="\/"[^>]*>Back to first page<\/a>/);
     assert.doesNotMatch(invalid, /Your drive is empty|Fixture\.pdf|Folder 100/);
     await DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(fileId).run();
     const exhausted = await (await get({ cookie }, `${origin}${next[1]}`)).text();
@@ -130,7 +146,8 @@ export default { fetch(request, env, ctx) {
     try {
       const failed = await (await get({ cookie }, `${origin}${next[1]}`)).text();
       assert.match(failed, /This folder didn't load/);
-      assert.ok(failed.includes(`href="${next[1]}">Try again</a>`), 'retry stays on the failed page');
+      const retry = failed.match(/<a\b[^>]*\shref="([^"\s]+)"[^>]*>Try again<\/a>/);
+      assert.equal(retry?.[1], next[1], 'retry stays on the failed page');
     } finally {
       await DB.prepare(index.sql).run();
     }
@@ -179,6 +196,7 @@ export default { fetch(request, env, ctx) {
     const revoked = await get({ cookie, range: 'bytes=1-' });
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);
+    await assertProvisioningUnavailable(await session('owner-fixture', 'owner'), 'owner');
   } finally {
     await harness.close();
   }
