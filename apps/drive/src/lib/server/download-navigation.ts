@@ -1,6 +1,7 @@
+export { entryId } from '../download-id';
+
 export const downloadRoute = '/api/download/[fileId]';
 export const downloadNoticeCookie = (nonce: string) => `__Host-drive-download-failed-${nonce}`;
-export const entryId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 // Until folder routes are admitted, return to the canonical Drive root. No
 // path from a request or from a failed/denied file lookup becomes a destination.
