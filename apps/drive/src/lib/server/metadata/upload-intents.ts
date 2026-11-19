@@ -6,6 +6,9 @@ interface Statement {
   all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
+export interface UploadAllocationDatabase extends Database {
+  batch<T>(statements: Statement[]): Promise<{ results: T[] }[]>;
+}
 
 type State = 'created' | 'initiating' | 'allocated' | 'completing' | 'uncertain' | 'acknowledged';
 export interface UploadIntent {
@@ -32,8 +35,28 @@ function validateVersion(version: number): void {
   }
 }
 
-export class UploadIntents {
-  constructor(private readonly db: Database) {}
+export class UploadIntents<DB extends Database = Database> {
+  constructor(private readonly db: DB) {}
+
+  // Bind the namespace before claiming on the same transaction that checks live authority.
+  async claimNewAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
+    size: number, endpoint: string, bucket: string, epoch: string): Promise<UploadIntent | null> {
+    if (!Number.isSafeInteger(size) || size < 0) throw new TypeError('Invalid declared upload size');
+    const id = crypto.randomUUID(), key = crypto.randomUUID();
+    const [, , claim] = await this.db.batch<UploadIntent>([
+      this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
+        SELECT ?, ?, ?, 'created', ? WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions
+          WHERE token_hash = ? AND principal_id = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER))`)
+        .bind(id, principalId, key, size, principalId, sessionHash, principalId),
+      this.db.prepare(`INSERT INTO drive_upload_storage_bindings (intent_id, endpoint, bucket, storage_epoch)
+        SELECT id, ?, ?, ? FROM drive_upload_intents WHERE id = ? AND object_key = ?`)
+        .bind(endpoint, bucket, epoch, id, key),
+      // Only the brand-new row can match; its ID and key cannot be reused.
+      this.db.prepare(`UPDATE drive_upload_intents SET state = 'initiating', version = 1
+        WHERE id = ? AND object_key = ? AND state = 'created' AND version = 0 RETURNING ${columns}`).bind(id, key)
+    ]);
+    return claim.results[0] ?? null;
+  }
 
   async create(principalId: string): Promise<UploadIntent | null> {
     return this.insert(principalId, null);
