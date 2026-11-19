@@ -6,7 +6,8 @@ import { stagingOrigin } from '../src/lib/server/request-auth';
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
 const signIn = '/_app/immutable/nodes/sign-in.js';
-const root = '/_app/immutable/assets/root.css';
+const root = '/_app/immutable/nodes/root.js';
+const data = '/__data.json?x-sveltekit-invalidated=01';
 const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]) };
 const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
@@ -40,6 +41,7 @@ const publicRoutes = [
 ] as const;
 const protectedRoutes = [
   ['/?after=cursor', ['GET', 'HEAD'], { kind: 'root' }],
+  [data, ['GET'], { kind: 'root-data' }],
   [root, ['GET', 'HEAD'], { kind: 'private-asset' }],
   [`/api/download/${id}`, ['GET'], { kind: 'download' }],
   ['/api/uploads', ['POST'], { kind: 'upload' }],
@@ -74,8 +76,9 @@ test('preview admits only the declared methods and exact routes or assets', asyn
 test('unlisted paths fail before authentication, including framework paths and noncanonical variants', async () => {
   const { env, reads } = runtime();
   for (const path of ['/shared', '/people', `/f/${id}`, '/invite', '/recover', '/sign-in/', '/sign-in.html',
-    '/__data.json', '/sign-in/__data.json', '/_app/env.js', '/_app/version.json', '/_app/immutable/chunks/other.js',
-    '/_app/immutable/assets/%72oot.css', '/_app/immutable/assets/root.css.map', '/api/uploads/', '/api/uploads/list',
+    '/__data.json/', '/%5f_data.json', '/index.html__data.json', '/sign-in/__data.json', '/shared/__data.json',
+    '/_app/env.js', '/_app/version.json', '/_app/immutable/chunks/other.js',
+    '/_app/immutable/nodes/%72oot.js', `${root}.map`, '/api/uploads/', '/api/uploads/list',
     '/api/sign-in/enroll', '/api/sign-in/%76erify', `/api/download/${id}/`, `/api/download/${id}%2F`,
     '/api/owner/invitations', `/api/owner/invitations/${id}/cancel`, `/api/owner/members/${id}/revoke`,
     `/api/uploads/${id}/complete/`, `/api/uploads/${id}/abort`, `/api/uploads/${id}/parts/1/`,
@@ -137,7 +140,8 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
   const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
   const { env, reads, revoke } = runtime();
   for (const [req, status] of [
-    [request('/__data.json'), 404],
+    [request(data, 'HEAD'), 404],
+    [request(data, 'GET', {}), 401],
     [request('/sign-in.html'), 404],
     [request('/api/uploads/list', 'POST'), 404],
     [request('/api/sign-in/verify', 'GET'), 404],
@@ -180,7 +184,7 @@ test('the staged sign-in probe reports a live owner without dispatching the root
   }
 });
 
-test('admitted traffic reaches one handler; assets cannot carry CDN cache overrides', async () => {
+test('admitted traffic reaches one handler; assets and root data cannot carry CDN cache overrides', async () => {
   const { env } = runtime();
   const cacheHeaders = ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control'];
   for (const [path, [method], target] of [...publicRoutes, ...protectedRoutes]) {
@@ -192,7 +196,7 @@ test('admitted traffic reaches one handler; assets cannot carry CDN cache overri
     });
     const expected = target.kind === 'ceremony' ? `ceremony:${target.step}` : target.kind.endsWith('-asset') ? 'asset' : 'adapter';
     assert.deepEqual(calls, [expected]);
-    if (expected !== 'asset') continue;
+    if (expected !== 'asset' && target.kind !== 'root-data') continue;
     assert.equal(result.headers.get('cache-control'), 'private, no-store');
     for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
   }

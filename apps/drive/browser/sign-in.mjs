@@ -224,3 +224,6 @@ try {
   await browser?.close();
   await harness.close();
 }
+
+// Run the separate staging-origin scenario only after the original fixture has closed.
+await import('./staging-root.mjs');

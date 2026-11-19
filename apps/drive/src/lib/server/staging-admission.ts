@@ -11,7 +11,7 @@ interface PreviewAssets {
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
-type Target = { kind: 'sign-in' | 'public-asset' | 'download' | 'upload' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'private-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
@@ -24,6 +24,7 @@ function route(method: string, path: string, assets: PreviewAssets): Target | nu
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/sign-in') return { kind: 'sign-in' };
     if (path === '/') return { kind: 'root' };
+    if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
     // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
     if (path.startsWith('/_app/immutable/')) {
       if (assets.signIn.has(path)) return { kind: 'public-asset' };
@@ -104,9 +105,10 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'ceremony':
       return dispatch.ceremony(request, target.step);
     case 'public-asset':
-    case 'private-asset': {
-      const asset = await dispatch.asset(request);
-      const response = new Response(asset.body, asset);
+    case 'private-asset':
+    case 'root-data': {
+      const result = await (target.kind === 'root-data' ? dispatch.adapter(request) : dispatch.asset(request));
+      const response = new Response(result.body, result);
       response.headers.set('cache-control', 'private, no-store');
       for (const name of ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control']) {
         response.headers.delete(name);

@@ -59,6 +59,16 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, file), content);
     }
     await verifyEvidence(dir, head);
+    const stagingPath = join(dir, 'staging-root-round-trip.json');
+    await assert.rejects(verifyEvidence(dir, head, false, false, true), /staging-root-round-trip\.json/);
+    const staging = { mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations: 0,
+      refresh: { method: 'GET', path: '/__data.json', status: 200 }, fullDownload: { bytes: 6, byteIdentical: true },
+      rangeDownload: { status: 206, contentRange: 'bytes 1-3/6', byteIdentical: true },
+      denied: { signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404 } };
+    await writeFile(stagingPath, JSON.stringify({ ...staging, navigations: 1 }));
+    await assert.rejects(verifyEvidence(dir, head, false, false, true), /Invalid staging evidence/);
+    await writeFile(stagingPath, JSON.stringify(staging));
+    await verifyEvidence(dir, head, false, false, true);
     await assert.rejects(verifyEvidence(dir, head, true), { code: 'ENOENT' });
     await assert.rejects(verifyEvidence(dir, head, false, true), /root-upload-round-trip\.json/);
     const proof = { byteIdentical: true, bytes: 8193, statusRegions: 1, documentsDuringRefresh: 0, focusPreserved: true,

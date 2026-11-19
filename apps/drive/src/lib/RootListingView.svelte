@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { flushSync } from 'svelte';
+  import { invalidate } from '$app/navigation';
+  import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import RootUpload from './RootUpload.svelte';
@@ -7,15 +8,32 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadConfigured }: { result: RootListingResult; page: string | null; uploadConfigured: boolean } = $props();
+  let { result: initial, page, uploadConfigured, staging }: {
+    result: RootListingResult; page: string | null; uploadConfigured: boolean; staging: boolean;
+  } = $props();
   let status = $state('');
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
   let busy = $state(false);
   let header: HTMLElement;
+  let recovery = $state<HTMLAnchorElement>();
   let refreshVersion = 0, appliedVersion = 0;
 
+  $effect.pre(() => {
+    if (!staging) return;
+    // The user may have moved focus while the data request was in flight.
+    const focused = document.activeElement;
+    const next = initial.status;
+    void tick().then(() => restoreFocus(focused, next));
+  });
+
   async function refresh() {
+    if (staging) {
+      await invalidate('drive:root-listing');
+      await tick();
+      if (initial.status !== 'ok') throw new Error('Root listing unavailable');
+      return;
+    }
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
     const response = await fetch(`/api/root-listing${query}`, { redirect: 'error' });
@@ -25,7 +43,13 @@
     appliedVersion = version;
     const focused = document.activeElement;
     flushSync(() => { refreshed = next; });
-    if (focused && !focused.isConnected && document.activeElement === document.body) header.querySelector('button')?.focus();
+    restoreFocus(focused);
+  }
+
+  function restoreFocus(focused: Element | null, next: RootListingResult['status'] = 'ok') {
+    if (focused && !focused.isConnected && document.activeElement === document.body) {
+      (next === 'ok' ? header?.querySelector('button') : recovery)?.focus();
+    }
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
@@ -41,13 +65,13 @@
     <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
 </header>
-<p class="status" role="status">{status}</p>
+<p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
-  <a data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
+  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
-  <a data-sveltekit-reload href="/">Back to first page</a>
+  <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {:else}
   {#if items.length}
     <FileList folder="My Drive" preview announceChanges={false} {items} />

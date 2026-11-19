@@ -232,7 +232,17 @@ export default { fetch(request, env, ctx) {
       const listing = await get('/', { cookie });
       const html = await listing.text();
       assert.match(html, /Your drive is empty/);
-      assert.doesNotMatch(html, /type="file"|<script\b/);
+      assert.match(html, /type="file"/, 'the staging owner gets the upload picker');
+      assert.match(html, /<script\b/, 'the staging root can hydrate');
+      const notice = '00000000-0000-4000-8000-000000000001';
+      const document = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin',
+        cookie: `${cookie}; __Host-drive-download-failed-${notice}=unavailable` };
+      const refresh = await get(`/__data.json?download=${notice}&x-sveltekit-trailing-slash=1&x-sveltekit-invalidated=01`, document);
+      assert.deepEqual([refresh.status, refresh.headers.get('cache-control'), refresh.headers.get('set-cookie')],
+        [200, 'private, no-store', null], 'root data cannot consume a download notice');
+      const noticePage = await get(`/?download=${notice}`, document);
+      assert.match(noticePage.headers.get('set-cookie'), /Max-Age=0/);
+      assert.match(await noticePage.text(), /didn’t download/);
       const styles = [...html.matchAll(/href="((?:\.\/|\/)?_app\/immutable\/[^"\s]+\.css)"/g)].map(([, path]) => new URL(path, origin));
       let privateAsset;
       for (const asset of styles) {

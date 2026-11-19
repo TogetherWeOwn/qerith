@@ -8,7 +8,7 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-export async function verifyEvidence(dir, tested, root = false, upload = false) {
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -34,6 +34,15 @@ export async function verifyEvidence(dir, tested, root = false, upload = false) 
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid upload evidence: ${label}`);
     }
   }
+  if (staging) {
+    const proof = JSON.parse(await readFile(join(dir, 'staging-root-round-trip.json'), 'utf8'));
+    const denied = { signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404 };
+    if (proof?.mode !== 'staging-origin' || proof.signIn !== 'passkey' || proof.picker !== 'Tab then Enter' || proof.navigations !== 0 ||
+        proof.refresh?.method !== 'GET' || proof.refresh.path !== '/__data.json' || proof.refresh.status !== 200 ||
+        proof.fullDownload?.bytes !== 6 || proof.fullDownload.byteIdentical !== true || proof.rangeDownload?.status !== 206 ||
+        proof.rangeDownload.contentRange !== 'bytes 1-3/6' || proof.rangeDownload.byteIdentical !== true ||
+        Object.entries(denied).some(([key, status]) => proof.denied?.[key] !== status)) throw new Error('Invalid staging evidence');
+  }
   for (const size of ['1280x800', '390x844']) {
     const png = await readFile(join(dir, `${size}.png`));
     if (!png.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
@@ -57,7 +66,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     throw new Error('Missing provenance context');
   }
   const root = process.env.ROOT_EVIDENCE === 'true';
-  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true');
+  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
