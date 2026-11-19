@@ -62,18 +62,14 @@ it('denies absent, wrong-origin, and revoked sessions rather than returning an e
   const principalId = 'revocation-member';
   await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')")
     .bind(principalId).run();
-  const { token, expiresAt } = await new Sessions(env.DB).issue(principalId);
+  const { token } = await new Sessions(env.DB).issue(principalId);
   const unavailable = { status: 'unavailable' };
   expect(await loadRootListing(request(token), auth, [])).toEqual({ status: 'ok', folder: { entries: [], nextPage: null } });
   expect(await loadRootListing(request(token), {}, [])).toEqual(unavailable);
   for (const denied of [request(), request(token, 'https://other.example.test'), request(token, origin, 'https://other.example.test'), request(token, origin, origin, 'POST')]) {
     expect(await loadRootListing(denied, auth, [])).toEqual(unavailable);
   }
-  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?")
-    .bind(principalId).run();
-  // Independently verify the live membership check even if a session row survives.
-  await env.DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
-    .bind(await tokenHash(token), principalId, expiresAt).run();
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(principalId).run();
   expect(await loadRootListing(request(token), auth, [])).toEqual(unavailable);
 });
 
@@ -86,36 +82,33 @@ it.each(['session revoked', 'session expired', 'membership revoked'])('denies a 
       .bind(principalId, principalId)
   ]);
   const sessions = new Sessions(env.DB);
-  const { token } = await sessions.issue(principalId);
+  const { token, expiresAt } = await sessions.issue(principalId);
   let lookedUp;
   let listed = false;
-  const db = {
-    prepare(sql) {
-      return {
-        bind(...values) {
-          const statement = env.DB.prepare(sql).bind(...values);
-          return {
-            async all() {
-              const result = await statement.all();
-              listed = true;
-              return result;
-            },
-            async first() {
-              const row = await statement.first();
-              lookedUp = row?.id;
-              if (change === 'session revoked') await sessions.revoke(token);
-              else if (change === 'session expired') {
-                await env.DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = ?').bind(principalId).run();
-              } else {
-                await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(principalId).run();
-              }
-              return row;
-            }
-          };
+  const db = { prepare: (sql) => ({ bind(...values) {
+    const statement = env.DB.prepare(sql).bind(...values);
+    return {
+      async all() {
+        const result = await statement.all();
+        listed = true;
+        return result;
+      },
+      async first() {
+        const row = await statement.first();
+        lookedUp = row?.id;
+        if (change === 'session revoked') await sessions.revoke(token);
+        else if (change === 'session expired') {
+          await env.DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = ?').bind(principalId).run();
+        } else {
+          await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(principalId).run();
+          // Restore the fixture session so only the membership check can deny the read.
+          await env.DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
+            .bind(await tokenHash(token), principalId, expiresAt).run();
         }
-      };
-    }
-  };
+        return row;
+      }
+    };
+  } }) };
   expect(await loadRootListing(request(token), { ...auth, DB: db }, [])).toEqual({ status: 'unavailable' });
   expect(lookedUp).toBe(principalId);
   expect(listed).toBe(true);
