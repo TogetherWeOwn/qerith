@@ -42,41 +42,25 @@ does not replace exact-SHA qualification.
 
 ## Staging fixtures and migration admission
 
-Use synthetic data only. Tag test-owned D1 rows and R2 objects with their
-originating run ID. Normal success and failure cleanup, trusted main-only
-completion cleanup, and a sweep of older tagged leftovers before the next run's
-writes are required, as is the staging-only absolute-deadline admission guard.
-A leftover row is a recorded cleanup defect, not an admission gate. The reported
-R2 lifecycle rule applies only to `drive-qualification/` and expires objects
-after three days; the existing seven-day multipart-abort rule is retained. These
-are requirements and a reported provider receipt, not proof that cleanup ran.
+Use only synthetic fixtures tagged with the originating run ID in D1 and R2.
+Enforce the staging-only absolute deadline, clean up on success and failure and
+via a trusted main-only completion workflow, and sweep older tags before new
+writes. Record leftover rows as cleanup defects, not admission gates. Reported
+R2 expiry covers only `drive-qualification/` (three days); the seven-day
+multipart-abort rule remains. Neither proves that qualification cleanup ran.
 
-The preparation workflow does not attach the `staging` environment, read its
-secrets, run remote migrations, or publish. The staging config dry run and
-synthetic command tests do not establish live containment. A separately reviewed
-enabling change must gate publication and migration on trusted main dispatch,
-the `staging` environment, and source and target validation. It must also verify
-that cancelling the local runner stops the launcher and its descendants; an
-already accepted provider request can still have an uncertain outcome.
+The dry run and fake tests do not prove live containment. Enablement requires
+exact-head Actions, Security then QA, trusted main dispatch in `staging`, and
+source and target validation. Verify cancellation stops the local launcher and
+its descendants; an accepted provider request can still have an uncertain outcome.
+The shared Actions concurrency group does not fence external writers or stale
+dispatches. Verify deployed SHA readiness and configure the actual HTTPS
+`DRIVE_ORIGIN` before qualification; private requests otherwise fail closed.
 
-Staging migrations use Wrangler's native `d1_migrations` ledger. Log the
-pre-apply Time Travel bookmark and pending lists before and after apply for the
-exact SHA; the final list must be empty. An uncertain apply requires restoring the
-bookmark or recreating the disposable database from migrations before retry.
-A recreated database has a new UUID: update both the staging Wrangler binding and
-the publisher's fixed database ID via normal review before dispatching the new SHA;
-never relax the target check. Worker rollback is separate from database recovery. The staging lifecycle shares
-one Actions concurrency group; it does not fence external writers. The pending
-lists are not a content-digest history of migrations already applied, and an
-empty pending list is not proof that the database schema matches the source. The
-source manifest inventories committed inputs; it does not attest to the bytes
-Wrangler applied. Concurrency also does not prevent an older queued main dispatch
-from publishing after main advances; confirm the deployed SHA before qualification.
-
-Before live qualification, establish readiness for the deployed SHA, record the
-previous Worker version or its absence, and implement bounded fixture cleanup.
-The staging configuration does not set `DRIVE_ORIGIN`; private requests fail
-closed until the actual HTTPS staging origin is established and configured. Do
-not guess an origin. The current draft does not establish these controls or
-authorize live use.
-Exact-head Actions and independent Security then QA review remain required.
+Use Wrangler's native `d1_migrations` ledger. Log the exact SHA, pre-apply Time
+Travel bookmark and before/after pending lists; the final list must be empty.
+Neither the lists nor the source manifest attest applied bytes or schema. On an
+uncertain apply, restore the bookmark or recreate the staging DB before retry.
+Recreation requires reviewed updates to the Wrangler binding and publisher UUID
+pin before dispatching the new SHA; do not relax validation. Record the previous
+Worker version or its absence; Worker rollback is separate from D1 recovery.

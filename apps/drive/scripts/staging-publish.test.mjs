@@ -144,8 +144,9 @@ test('publisher terminates launcher descendants on overflow and timeout', async 
   const source = readFileSync(new URL('./staging-publish.mjs', import.meta.url), 'utf8');
   assert.ok(source.includes('setTimeout(stop, 110000)'));
   const script = join(root, 'publisher.mjs');
-  writeFileSync(script, source.replace('setTimeout(stop, 110000)', 'setTimeout(stop, 1000)'));
   for (const mode of ['overflow', 'timeout']) {
+    // Only the timeout case may kill the child before its marker via the deadline.
+    writeFileSync(script, mode === 'timeout' ? source.replace('setTimeout(stop, 110000)', 'setTimeout(stop, 1000)') : source);
     const marker = join(root, mode);
     const result = spawnSync(process.execPath, ['--input-type=module', '-e',
       'const { publishStaging } = await import(process.argv[2]); await publishStaging(process.cwd());', 'test-driver', script], {
