@@ -131,8 +131,9 @@
 
   // The caller supplies authorized URLs and already-sorted display values.
   export let folder: string;
-  export let timeZone: string;
+  export let timeZone: string | undefined = undefined;
   // The caller pages and orders folders before files, by binary name within each group.
+  export let preview = false;
   export let direction: 'asc' | 'desc' = 'asc';
   export let total: number | undefined = undefined;
   export let hasMore = false;
@@ -142,14 +143,28 @@
   export let onSort: ((direction: 'asc' | 'desc') => void) | undefined = undefined;
   export let onMore: (() => void) | undefined = undefined;
   $: orderDescription = direction === 'asc' ? 'A to Z' : 'Z to A';
-  $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${orderDescription} (binary order). Times in ${timeZone}.`;
+  $: nameOrder = preview ? 'in binary order' : `${orderDescription} (binary order)`;
+  $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${!preview && timeZone ? ` Times in ${timeZone}.` : ''}`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
   export let inlineDetails = false;
-  export let items: { id: string; name: string; href: string; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
+  export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
 </script>
 
+{#snippet entryName(item: (typeof items)[number])}
+  {@const folder = item.glyph === 'folder' || item.glyph === 'folder-shared'}
+  <span class="name">
+    <KindGlyph kind={item.glyph} />
+    {#if item.href}
+      <a href={item.href} data-sveltekit-reload={item.reload ? '' : undefined} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class="entry-name" class:folder>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>
+    {:else}
+      <span dir="auto" class="entry-name" class:folder>{item.name}{#if !item.name.trim()} (Whitespace-only name){/if}</span>
+    {/if}
+    {#if item.shared}<span class="tag">Shared</span>{/if}
+  </span>
+{/snippet}
+
 <svelte:window on:keydown={escapeDetails} />
-<div class="listing">
+<div class="listing" class:preview>
 {#if onSort}
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
@@ -157,23 +172,27 @@
 <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th><th scope="col" class="size">Size</th><th scope="col">Modified</th><th scope="col">Kind</th><th scope="col" class="actions">Actions</th></tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
-        <td><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></td>
-        <td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td><td>{item.kind}</td>
-        <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
+        <td>{@render entryName(item)}</td>
+        {#if !preview}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
+        {#if !preview}
+          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
+        {/if}
       </tr>
-      {#if detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
+      {#if !preview && detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
     {/each}
   </tbody>
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li class="with-actions" on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div><span class="name"><KindGlyph kind={item.glyph} /><a href={item.href} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class:folder={item.glyph === 'folder' || item.glyph === 'folder-shared'}>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>{#if item.shared}<span class="tag">Shared</span>{/if}</span></div><div class="details">{item.kind} · {#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time></div>
-      <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
-      {#if detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
+    <li class:with-actions={!preview} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
+      {#if !preview}
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
+      {/if}
+      {#if !preview && detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
   {/each}
 </ul>
@@ -195,13 +214,16 @@
   thead { background: var(--drive-color-bg-surface); }
   th { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); font-weight: var(--drive-font-weight-medium); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; }
   td { vertical-align: baseline; }
-  th:nth-child(2) { width: var(--drive-size-column-size); } th:nth-child(3) { width: var(--drive-size-column-modified); } th:nth-child(4) { width: var(--drive-size-column-kind); }
+  th.size { width: var(--drive-size-column-size); }
+  .listing:not(.preview) th:nth-child(3) { width: var(--drive-size-column-modified); }
+  th.kind { width: var(--drive-size-column-kind); }
+  .preview a { text-decoration: underline; }
   th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
   a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
   .name :global(svg) { margin-top: var(--drive-space-2); }
-  .name a { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; }
+  .entry-name { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; unicode-bidi: plaintext; }
   .folder { font-weight: var(--drive-font-weight-medium); }
   .tag { color: var(--drive-color-text-secondary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-label); letter-spacing: var(--drive-tracking-label); text-transform: uppercase; padding: var(--drive-space-inset-tag-y) var(--drive-space-inset-tag-x); border-radius: var(--drive-radius-s); box-shadow: inset 0 0 0 var(--drive-size-line) var(--drive-color-line-hairline-strong); }
   @media (forced-colors: active) { .tag { outline: var(--drive-size-line) solid transparent; outline-offset: calc(-1 * var(--drive-size-line)); } }
