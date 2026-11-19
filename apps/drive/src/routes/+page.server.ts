@@ -22,7 +22,6 @@ async function readDownloadNotice({ cookies, locals, request, url }: Parameters<
 
 export const load: PageServerLoad = async (event) => {
   const preview = admitsSignInFixture(env);
-  if (preview) event.depends('drive:root-listing');
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   return { listing, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };

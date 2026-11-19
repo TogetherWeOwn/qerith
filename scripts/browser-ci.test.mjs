@@ -60,6 +60,9 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     }
     await verifyEvidence(dir, head);
     await assert.rejects(verifyEvidence(dir, head, true), { code: 'ENOENT' });
+    await assert.rejects(verifyEvidence(dir, head, false, true), /root-upload-round-trip\.json/);
+    await writeFile(join(dir, 'root-upload-round-trip.json'), '{}');
+    await assert.rejects(verifyEvidence(dir, head, false, true), /Invalid upload evidence/);
     await assert.rejects(verifyEvidence(dir, base), /does not match/);
     await writeFile(join(dir, 'axe-1280x800.json'), '{"violations":[{}]}');
     await assert.rejects(verifyEvidence(dir, head), /Invalid axe/);

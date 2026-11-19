@@ -4,7 +4,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 
-export async function captureRootUpload(page, origin, holdResponse) {
+export async function captureRootUpload(page, origin, holdResponse, failRefresh) {
+  const listingPath = '/api/root-listing';
   const name = 'Drive round-trip.bin';
   const buffer = Buffer.from(Uint8Array.from({ length: 8193 }, (_, i) => (i ^ (i >> 5)) & 255));
   const file = { name, buffer, mimeType: 'application/octet-stream' };
@@ -25,7 +26,7 @@ export async function captureRootUpload(page, origin, holdResponse) {
   }
   const buttonSelector = 'main > header > button[type="button"]';
   const button = `document.querySelector(${JSON.stringify(buttonSelector)})`;
-  const choose = async () => {
+  const choose = async (selection = file) => {
     assert.equal(await inspect(`document.hasFocus() && document.activeElement === ${button}`), true);
     let chooser;
     try {
@@ -34,7 +35,7 @@ export async function captureRootUpload(page, origin, holdResponse) {
       throw new Error(`Enter did not open the picker; page errors: ${JSON.stringify(pageErrors)}`, { cause });
     }
     assert.equal(chooser.isMultiple(), false);
-    await chooser.setFiles(file);
+    await chooser.setFiles(selection);
   };
 
   const deniedAssets = [];
@@ -70,13 +71,13 @@ export async function captureRootUpload(page, origin, holdResponse) {
   });
   page.on('response', response => {
     const path = new URL(response.url()).pathname;
-    if (path.startsWith('/api/uploads') || path === '/__data.json') {
+    if (path.startsWith('/api/uploads') || path === listingPath) {
       responses.push([response.request().method(), response.status()]);
     }
   });
 
   const releaseCompletion = holdResponse(path => path.startsWith('/api/uploads/') && path.endsWith('/complete'));
-  const releaseRefresh = holdResponse(path => path === '/__data.json');
+  const releaseRefresh = holdResponse(path => path === listingPath);
   try {
     await choose();
     await page.getByText(`Uploading ${name} to My Drive.`, { exact: true }).waitFor();
@@ -88,7 +89,7 @@ export async function captureRootUpload(page, origin, holdResponse) {
       await page.setViewportSize({ width, height });
       await capture(page, 'uploading', width);
     }
-    const refreshing = page.waitForRequest(request => new URL(request.url()).pathname === '/__data.json');
+    const refreshing = page.waitForRequest(request => new URL(request.url()).pathname === listingPath);
     releaseCompletion();
     await refreshing;
     await page.getByText(`${name}: Uploaded.`, { exact: true }).waitFor();
@@ -117,16 +118,31 @@ export async function captureRootUpload(page, origin, holdResponse) {
   assert.deepEqual(downloaded, buffer);
 
   await inspect(`${button}.focus()`);
-  await choose();
+  const differentBytes = { ...file, buffer: Buffer.from('must not replace the original') };
+  await choose(differentBytes);
   const conflict = `${name}: An item with this name already exists in My Drive.`;
   await page.getByText(conflict, { exact: true }).waitFor();
   assert.equal(await status.textContent(), conflict);
   assert.equal(await link.count(), 1);
   assert.deepEqual(requests, ['POST', 'PUT', 'POST', 'POST', 'PUT', 'POST']);
   assert.deepEqual(responses.slice(4), [['POST', 201], ['PUT', 204], ['POST', 409]], 'a conflict neither refreshes nor retries');
+  const [original] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
+  assert.deepEqual(await readFile(await original.path()), buffer);
+
+  await inspect(`${button}.focus()`);
+  failRefresh();
+  const interruptedRefresh = 'Second.bin: Uploaded. Refresh My Drive to see it.';
+  await choose({ ...file, name: 'Second.bin' });
+  await page.getByText(interruptedRefresh, { exact: true }).waitFor();
+  assert.equal(await status.textContent(), interruptedRefresh);
+  assert.equal(await inspect(`document.activeElement === ${button}`), true);
+  assert.equal(await link.count(), 1, 'a failed refresh leaves the previous listing mounted');
+  assert.deepEqual(requests.slice(6), ['POST', 'PUT', 'POST']);
+  assert.deepEqual(responses.slice(7), [['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 503]]);
+
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({
     keyboard: 'Tab then Enter opened the single-file picker', statusRegions: 1, focusPreserved: true,
-    documentsDuringRefresh: 0, responses, bytes: downloaded.length,
+    documentsDuringRefresh: 0, refresh503PreservedUpload: true, responses, bytes: downloaded.length,
     sha256: createHash('sha256').update(downloaded).digest('hex'), byteIdentical: true,
   }, null, 2));
   console.log('Generated My Drive upload: keyboard picker, one status, publication refresh, byte-identical download and explicit conflict passed');

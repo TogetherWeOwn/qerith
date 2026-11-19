@@ -3,7 +3,7 @@
   import { uploadToRoot } from './root-upload';
   import './tokens.css';
 
-  let { announce, refresh }: { announce: (message: string) => void; refresh: () => Promise<void> } = $props();
+  let { announce, refresh, paginated }: { announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean } = $props();
   const id = $props.id();
   let picker: HTMLInputElement;
   let selected = $state<{ name: string; size: number }>();
@@ -44,7 +44,9 @@
         report('Uploaded.');
         // A slow listing read must not keep a completed upload busy or replace newer feedback.
         void refresh().catch(() => {
-          if (attempt === selection) report('Uploaded. Refresh My Drive to see it.');
+          if (attempt === selection) report(paginated
+            ? 'Uploaded. Go back to the first page to refresh My Drive.'
+            : 'Uploaded. Refresh My Drive to see it.');
         });
       } else if (result.status === 'name-taken') {
         report('An item with this name already exists in My Drive.');

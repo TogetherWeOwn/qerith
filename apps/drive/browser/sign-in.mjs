@@ -106,6 +106,7 @@ try {
   const traffic = [];
   let loseNext = false;
   let configuredStorage = false;
+  let failListing = false;
   let proof;
   const held = new Map();
   function holdResponse(matches) {
@@ -121,6 +122,10 @@ try {
     if (configuredStorage) headers['x-fixture-storage'] = '1';
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
+    if (failListing && url.pathname === '/api/root-listing') {
+      failListing = false;
+      return route.fulfill({ status: 503, headers: { 'cache-control': 'private, no-store' } });
+    }
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
     if (url.pathname.startsWith(endpoint)) traffic.push([url.pathname.slice(endpoint.length), response.status]);
     if (loseNext && url.pathname === `${endpoint}challenge` && response.status === 200) {
@@ -175,11 +180,25 @@ try {
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
   await captureRootListing(first, origin, DB);
   configuredStorage = true;
-  await captureRootUpload(first, origin, holdResponse);
+  await captureRootUpload(first, origin, holdResponse, () => { failListing = true; });
   configuredStorage = false;
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
+  await DB.prepare(`WITH RECURSIVE pages(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM pages WHERE n < 100)
+    INSERT INTO drive_entries (id, owner_id, name, kind)
+    SELECT printf('00000000-0000-4000-8000-%012d', n), 'fixture-owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
+  await first.goto(origin);
+  const next = first.getByRole('link', { name: 'Next page' });
+  const target = await next.getAttribute('href');
+  await next.click();
+  await first.getByRole('link', { name: 'Second.bin' }).waitFor();
+  await first.getByRole('link', { name: 'Back to first page' }).click();
+  await first.getByRole('button', { name: 'Upload', exact: true }).and(first.locator('[aria-disabled="false"]')).waitFor();
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
+  assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
+  await next.click();
+  await primary(first).waitFor();
+  assert.equal(new URL(first.url()).searchParams.get('next'), target);
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
   assert.equal(await privateStatus(), 401);

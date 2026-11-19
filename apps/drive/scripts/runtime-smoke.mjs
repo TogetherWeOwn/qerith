@@ -140,6 +140,9 @@ export default { fetch(request, env, ctx) {
       const response = await worker.fetch(new URL(path, origin), { headers: { cookie } });
       assert.equal(response.status, preview ? 200 : 503);
     }
+    const listing = await worker.fetch(`${origin}/api/root-listing`, { headers: { cookie } });
+    assert.equal(listing.status, preview ? 200 : 404);
+    assert.equal(listing.headers.get('cache-control'), 'private, no-store');
     const fileId = '00000000-0000-4000-8000-000000000002';
     if (preview) {
       assert.match(html, /Your drive is empty\./);

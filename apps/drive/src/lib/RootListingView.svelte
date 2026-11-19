@@ -1,6 +1,4 @@
 <script lang="ts">
-  import { invalidate } from '$app/navigation';
-  import { tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import RootUpload from './RootUpload.svelte';
@@ -8,13 +6,20 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result, page }: { result: RootListingResult; page: string | null } = $props();
+  let { result: initial, page }: { result: RootListingResult; page: string | null } = $props();
   let status = $state('');
+  let refreshed = $state<RootListingResult>();
+  let result = $derived(refreshed ?? initial);
+  let refreshVersion = 0;
 
   async function refresh() {
-    await invalidate('drive:root-listing');
-    await tick();
-    if (result.status !== 'ok') throw new Error('Root listing unavailable');
+    const version = ++refreshVersion;
+    const query = page ? `?${new URLSearchParams({ page })}` : '';
+    const response = await fetch(`/api/root-listing${query}`, { redirect: 'error' });
+    if (!response.ok) throw new Error('Root listing unavailable');
+    const next: RootListingResult = await response.json();
+    if (next.status !== 'ok') throw new Error('Root listing unavailable');
+    if (version === refreshVersion) refreshed = next;
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
@@ -26,7 +31,9 @@
 
 <header>
   <h1>My Drive</h1>
-  <RootUpload announce={(message) => { status = message; }} {refresh} />
+  {#if result.status === 'ok'}
+    <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} />
+  {/if}
 </header>
 <p class="status" role="status">{status}</p>
 {#if result.status === 'unavailable'}
@@ -34,7 +41,7 @@
   <a data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
-  <a href="/">Back to first page</a>
+  <a data-sveltekit-reload href="/">Back to first page</a>
 {:else}
   {#if items.length}
     <FileList folder="My Drive" preview announceChanges={false} {items} />
@@ -45,9 +52,9 @@
   {/if}
   {#if page || result.folder.nextPage}
     <nav aria-label="My Drive pages">
-      {#if page}<a href="/">Back to first page</a>{/if}
+      {#if page}<a data-sveltekit-reload href="/">Back to first page</a>{/if}
       {#if result.folder.nextPage}
-        <a href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>
+        <a data-sveltekit-reload href={`/?${new URLSearchParams({ page: result.folder.nextPage })}`}>Next page</a>
       {/if}
     </nav>
   {/if}

@@ -83,6 +83,7 @@ export async function captureRootListing(page, origin, db) {
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
     await root('?page=invalid');
+    assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
     await page.getByRole('link', { name: 'Back to first page' }).waitFor();
     await capture(page, 'invalid-page', width);
     await root(`?page=${id}`);
