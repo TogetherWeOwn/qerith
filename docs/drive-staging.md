@@ -50,17 +50,17 @@ R2 expiry covers only `drive-qualification/` (three days); the seven-day
 multipart-abort rule remains. Neither proves that qualification cleanup ran.
 
 The dry run and fake tests do not prove live containment. Enablement requires
-exact-head Actions, Security then QA, trusted main dispatch in `staging`, and
-source and target validation. Verify cancellation stops the local launcher and
-its descendants; an accepted provider request can still have an uncertain outcome.
+exact-head Actions, independent Security then QA review, trusted main dispatch
+in `staging`, and source and target validation. Verify cancellation stops the
+launcher and descendants; accepted provider requests can still have uncertain outcomes.
 The shared Actions concurrency group does not fence external writers or stale
 dispatches. Verify deployed SHA readiness and configure the actual HTTPS
 `DRIVE_ORIGIN` before qualification; private requests otherwise fail closed.
 
 Use Wrangler's native `d1_migrations` ledger. Log the exact SHA, pre-apply Time
 Travel bookmark and before/after pending lists; the final list must be empty.
-Neither the lists nor the source manifest attest applied bytes or schema. On an
-uncertain apply, restore the bookmark or recreate the staging DB before retry.
+Neither the lists nor the source manifest attest applied bytes or schema. Before
+retrying an uncertain apply, restore the bookmark or rebuild from committed migrations.
 Recreation requires reviewed updates to the Wrangler binding and publisher UUID
 pin before dispatching the new SHA; do not relax validation. Record the previous
 Worker version or its absence; Worker rollback is separate from D1 recovery.

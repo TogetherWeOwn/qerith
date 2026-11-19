@@ -54,8 +54,8 @@ function migrationFixture(t) {
   const wrangler = join(root, 'node_modules/.bin/wrangler');
   writeFileSync(wrangler, `#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
-if [ "${'${HANG_IGNORE_TERM:-}'}" = 1 ]; then trap '' TERM; while :; do :; done; fi
 if [ "${'${CHILD_MODE:-}'}" != '' ]; then
+  if [ "$CHILD_MODE" = timeout ]; then trap '' TERM; fi
   (sleep 2; printf escaped > "$CHILD_MARKER") &
   if [ "$CHILD_MODE" = overflow ]; then /usr/bin/yes x | /usr/bin/head -c 100000; fi
   wait
@@ -97,10 +97,13 @@ test('migration workflow records the native ledger and fails closed on a pending
   assert.ok(firstApply.stdout.length < 65536, 'apply progress must not appear in the log');
   assert.doesNotMatch(firstApply.stdout, /\0/);
   assert.match(calls(), /d1 migrations apply qerith-drive-staging --remote --config wrangler\.staging\.json/);
-  const stillPending = run({ AFTER_LIST: pending });
-  assert.equal(stillPending.status, 1);
-  assert.match(stillPending.stderr, /Migration apply or post-list failed/);
-  assert.match(stillPending.stdout, /Pending migrations before apply:[\s\S]*✅ No migrations to apply![\s\S]*Pending migrations after apply:[\s\S]*Migrations to be applied:/);
+  const empty = '✅ No migrations to apply!';
+  for (const after of [pending, `${empty}\n${pending}`, `${empty}\n${empty}`]) {
+    const result = run({ AFTER_LIST: after });
+    assert.equal(result.status, 1, after);
+    assert.match(result.stderr, /Migration apply or post-list failed/);
+    assert.ok(result.stdout.includes(after), 'the post-list was recorded');
+  }
   const guarded = run({ BEFORE_LIST: '::warning::untrusted output\n✅ No migrations to apply!' });
   assert.equal(guarded.status, 0, guarded.stderr);
   assert.match(guarded.stdout, /::stop-commands::([a-f0-9]{64})\n::warning::untrusted output\n✅ No migrations to apply!\n\n::\1::/);
@@ -115,10 +118,6 @@ test('migration workflow records the native ledger and fails closed on a pending
 
 test('migration capture terminates process groups on overflow and timeout', async (t) => {
   const { root, run, calls } = migrationFixture(t);
-  const hung = run({ HANG_IGNORE_TERM: '1' }, true);
-  assert.equal(hung.error, undefined, 'capture must kill a Wrangler process that ignores SIGTERM');
-  assert.equal(hung.status, 1);
-  assert.doesNotMatch(calls(), /migrations apply/);
   for (const mode of ['timeout', 'overflow']) {
     const marker = join(root, `child-${mode}`);
     const result = run({ CHILD_MODE: mode, CHILD_MARKER: marker }, mode === 'timeout');
