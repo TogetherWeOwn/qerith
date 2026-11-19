@@ -88,7 +88,7 @@ it('denies unqualified, foreign, mismatched, uncertain and revoked completions',
 
 it.each(['identity', 'cursor'])('does not dispatch completion when a later ListParts page has the wrong %s', async (mismatch) => {
   await applyD1Migrations(env.DB, migrations);
-  const id = 'listing-identity', { token, key } = await seed(id);
+  const id = `listing-${mismatch}`, { token, key } = await seed(id);
   const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
   const requests = [];
   const fetch = vi.fn(async (request) => {
