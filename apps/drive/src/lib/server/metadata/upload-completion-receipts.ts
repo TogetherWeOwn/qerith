@@ -38,6 +38,11 @@ interface UploadPublicationVerifier {
   }>): Promise<readonly CompletedPart[] | null>;
 }
 
+export const availableUploadDestination = (owner: 'i.owner_id' | 'o.owner_id' | 'c.owner_id') =>
+  `(? IS NULL OR EXISTS (SELECT 1 FROM drive_entries p WHERE p.id = ? AND p.owner_id = ${owner} AND p.kind = 'folder'))
+  AND NOT EXISTS (SELECT 1 FROM drive_entries s WHERE s.owner_id = ${owner}
+    AND COALESCE(s.parent_id, '') = COALESCE(?, '') AND s.name = ?)`;
+
 const utf8 = new TextEncoder();
 const allocated = `FROM drive_upload_sealed_candidates o
   WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?
@@ -80,7 +85,8 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const complete = createMultipartComplete(settings, { ...transport });
+  const complete = createMultipartComplete(settings, { ...transport,
+    beforeSend: async () => await verifier?.isQualified(storageConfigId) === true });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
@@ -113,7 +119,8 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
 
   return {
     storageConfigId,
-    async complete(token: string, operationId: string): Promise<'recorded' | 'not-admitted' | 'uncertain'> {
+    async complete(token: string, operationId: string, target?: { parentId: string | null; name: string }):
+      Promise<'recorded' | 'not-admitted' | 'uncertain'> {
       if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
       const operation = uploadIdentityBytes(operationId);
       const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
@@ -128,7 +135,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       } catch { return 'not-admitted'; }
       if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
-        !await verifier.isQualified(storageConfigId)) return 'not-admitted';
+        await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
       const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
         objectKey, uploadId, intentVersion: upload.intent_version }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
@@ -137,14 +144,16 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       try { manifest = new Uint8Array(completionXml(parts)); } catch { return 'not-admitted'; }
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
+      if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {
+        const destination = target ? [target.parentId, target.parentId, target.parentId, target.name] : [];
         const claim = await db.prepare(`INSERT INTO drive_upload_completion_dispatches
           (operation_id, endpoint, bucket, claim_version, manifest_digest, session_hash)
           SELECT o.operation_id, o.endpoint, o.bucket, o.intent_version + 1, ?, o.session_hash ${allocated}
-          RETURNING operation_id`)
-          .bind(manifestDigest, ...admission).first();
+          ${target ? `AND ${availableUploadDestination('o.owner_id')}` : ''} RETURNING operation_id`)
+          .bind(manifestDigest, ...admission, ...destination).first();
         if (!claim) return 'not-admitted';
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
