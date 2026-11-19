@@ -1,20 +1,19 @@
 let fragment = '';
 let receive: ((token: string) => void) | undefined;
 
-function capture() {
-  if (location.pathname !== '/invite' || !location.hash) return;
-  // Strip the fragment before the router can retain it in history metadata.
+function capture(traversed = false) {
+  if (location.pathname !== '/invite' || (!location.hash && !traversed)) return;
+  // Revisiting a scrubbed history entry must not reuse the last invite.
   const token = location.hash.slice(1);
-  history.replaceState(history.state, '', '/invite');
+  if (location.hash) history.replaceState(history.state, '', '/invite');
   if (receive) receive(token);
   else fragment = token;
 }
 
 export function captureInviteLink() {
   capture();
-  // A second link to the same path can navigate without mounting a new page.
-  window.addEventListener('popstate', capture, true);
-  window.addEventListener('hashchange', capture, true);
+  window.addEventListener('popstate', () => capture(true), true);
+  window.addEventListener('hashchange', () => capture(), true);
 }
 
 export function observeInviteLinks(onToken: (token: string) => void) {

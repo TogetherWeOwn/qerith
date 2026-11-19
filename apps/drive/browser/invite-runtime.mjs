@@ -40,12 +40,30 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(page.url(), `${origin}/invite`);
     assert.equal(await page.evaluate(tokens => tokens.some(token => JSON.stringify(history.state).includes(token)),
       [first.token, token]), false);
+    const dead = page.getByRole('heading', { name: "This link doesn't work any more" });
+    await page.goBack();
+    await dead.waitFor();
+    await page.goForward();
+    await dead.waitFor();
+    await page.evaluate(token => { location.hash = token; }, token);
+    await note.waitFor();
     for (const [width, height] of widths) {
       await page.setViewportSize({ width, height });
       await capture(page, 'valid', width, true, 'generated-invite');
     }
-    const enrolled = page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/enroll');
-    await field.press('Enter');
+    const pending = Promise.withResolvers();
+    await page.route('**/api/invite/enroll', async route => { await pending.promise; await relay(route); }, { times: 1 });
+    const enrollPath = message => new URL(message.url()).pathname === '/api/invite/enroll';
+    const dispatched = page.waitForRequest(enrollPath);
+    const enrolled = page.waitForResponse(enrollPath);
+    try {
+      await field.press('Enter');
+      await dispatched;
+      await page.evaluate(token => { location.hash = token; }, first.token);
+      await page.waitForFunction(() => location.hash === '');
+      await page.getByRole('button', { name: 'Saving your passkey…' }).waitFor();
+      assert.equal(await field.inputValue(), 'Pell');
+    } finally { pending.resolve(); }
     const result = await enrolled;
     assert.equal(result.status(), 204);
     assert.equal((await result.allHeaders())['set-cookie'], undefined);
@@ -54,14 +72,22 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
     await open();
-    await page.getByRole('heading', { name: "This link doesn't work any more" }).waitFor();
+    await dead.waitFor();
+    await page.route('**/api/invite/present', route => route.fulfill({ status: 503 }), { times: 1 });
+    await page.evaluate(token => { location.hash = token; }, first.token);
+    await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
     const signIn = () => page.getByRole('button', { name: 'Sign in with a passkey' }).click();
-    await page.goto(`${origin}/sign-in`);
+    await page.getByRole('link', { name: 'Sign in', exact: true }).click();
     await signIn();
     await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
+    await open();
+    await page.getByRole('heading', { name: "You're signed in" }).waitFor();
     const id = await DB.prepare("SELECT id FROM drive_principals WHERE role = 'member'").first('id');
     const members = new Membership(DB);
     assert.equal(await members.setStatus(ownerToken, id, (await members.get(ownerToken, id)).generation, 'revoked'), true);
+    await page.evaluate(token => { location.hash = token; }, first.token);
+    await field.waitFor();
+    assert.equal(await field.inputValue(), 'Rook');
     assert.equal(await page.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
     await page.goto(`${origin}/sign-in`);
     await signIn();

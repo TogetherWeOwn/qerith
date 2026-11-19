@@ -107,6 +107,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     } catch {
       return refuse(503);
     }
+    if (invitePage && request.method === 'HEAD') {
+      return new Response(null, { status: session ? 204 : 200,
+        headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
+    }
     if (staging && session && session.principal.role !== 'owner') {
       return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
     }

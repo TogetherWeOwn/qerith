@@ -3,9 +3,7 @@
   import { observeInviteLinks } from '../../lib/invite-link';
   import InviteAcceptance, { type InviteAcceptanceView, type InvitePasskeyPhase } from '../../lib/InviteAcceptance.svelte';
   import SignInPage from '../../lib/SignInPage.svelte';
-  import type { PageData } from './$types';
 
-  let { data }: { data: PageData } = $props();
   let view = $state<InviteAcceptanceView>();
   let phase = $state<InvitePasskeyPhase>('valid');
   let committing = $state(false);
@@ -32,11 +30,12 @@
       token = '';
     };
     const stop = observeInviteLinks(next => {
+      // The new fragment is already stripped. Finish the in-flight save first.
+      if (committing) return;
       reset();
       token = next;
       view = undefined;
       phase = 'valid';
-      committing = false;
       load = new AbortController();
       void present(load.signal);
     });
@@ -44,9 +43,12 @@
   });
 
   async function present(signal: AbortSignal) {
-    if (data.signedIn) { view = { kind: 'signed-in' }; return; }
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) { view = { kind: 'dead-link' }; return; }
     try {
+      const session = await fetch('/invite', { method: 'HEAD', cache: 'no-store', redirect: 'error', signal });
+      signal.throwIfAborted();
+      if (session.status === 204) { view = { kind: 'signed-in' }; return; }
+      if (session.status !== 200) throw new Error('Invite session unavailable');
       const response = await post('present', {}, signal);
       signal.throwIfAborted();
       if (response.status === 404) { view = { kind: 'dead-link' }; return; }
@@ -88,8 +90,8 @@
       const redeemed = await post('enroll', { challenge: options.challenge, response: credential.toJSON() });
       if (attempt !== current) return;
       if (redeemed.status === 204) { window.location.replace('/sign-in'); return; }
-      if (redeemed.status === 404) { view = { kind: 'dead-link' }; return; }
-      throw new Error('Invite redemption unavailable');
+      // A rejected ceremony does not tell us whether the invitation itself remains usable.
+      view = { kind: 'unavailable' };
     } catch (error) {
       if (attempt !== current) return;
       if (!committing && (signal.aborted || (error instanceof DOMException && error.name === 'NotAllowedError'))) {

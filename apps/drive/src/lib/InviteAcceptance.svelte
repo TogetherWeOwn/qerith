@@ -36,7 +36,9 @@
   // The preparation latch lasts only until the caller changes the view kind or phase.
   $: { kind; phase; pending = undefined; }
   $: shown = pending ? 'waiting' : phase;
-  $: status = shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
+  $: saving = shown === 'waiting' && !cancellable;
+  $: status = saving ? 'Saving your passkey…' :
+    shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
   $: unavailable = shown !== 'valid' && shown !== 'cancelled';
   $: updateFocus(kind, shown);
 
@@ -93,7 +95,7 @@
       <p id="invite-description">Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one.</p>
     {:else if view.kind === 'unavailable'}
       <p id="invite-description">Try signing in if you saved a passkey. Otherwise, open the invite again and try again.</p>
-      <a class="ghost" href="/sign-in">Sign in</a>
+      <a class="ghost" data-sveltekit-reload href="/sign-in">Sign in</a>
     {:else if view.kind === 'signed-in'}
       <p id="invite-description">This invite is for someone else, so it wasn't used.</p>
       <a class="ghost" href="/">Go to My Drive</a>
@@ -108,7 +110,7 @@
         <button class="primary" class:quiet={shown === 'unsupported' || shown === 'rate-limited'} type="submit"
           bind:this={primary} disabled={!ready} aria-disabled={unavailable} aria-busy={shown === 'waiting'}
           aria-describedby={status ? 'invite-status' : undefined}>
-          {shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
+          {saving ? status : shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
         </button>
         <p id="invite-status" class:notice={shown === 'unsupported'}>{status ?? ''}</p>
         {#if shown === 'waiting'}<button class="cancel" type="button" aria-disabled={!cancellable} on:click={cancelSetup}>Cancel</button>{/if}
