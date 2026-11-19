@@ -18,7 +18,7 @@ const insertIntent = (op) => run(`INSERT INTO drive_upload_intents
   (id, owner_id, object_key, upload_id, version, state) VALUES (?, ?, ?, ?, ?, 'allocated')`,
   op.intentId, op.ownerId, op.objectKey, op.uploadId, op.intentVersion);
 async function seed(op) {
-  await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", op.ownerId);
+  await run("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", op.ownerId);
   await insertIntent(op);
 }
 const ledger = () => new UploadPartOperationEvidence(env.DB);
@@ -58,7 +58,7 @@ it('records evidence only for a live exact allocation and does not fence existin
 it('admits and reconciles the maximum UTF-8 width of a journal upload ID', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const ownerId = 'owner-wide-upload-id';
-  await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", ownerId);
+  await run("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", ownerId);
   const intents = new UploadIntents(env.DB);
   const created = await intents.create(ownerId);
   const claim = await intents.claim(ownerId, created.id, created.version, 'allocation');
@@ -84,7 +84,7 @@ it('matches inherited SQLite text by its exact bytes without changing legacy wri
     ownerId: new Uint8Array([0x62, 0x81]), objectKey: new Uint8Array([0x63, 0x82]),
     uploadId: new Uint8Array([0x64, 0x83]) };
   await migrate();
-  await run("INSERT INTO drive_principals VALUES (CAST(x'6281' AS TEXT), 'member', 'active')");
+  await run("INSERT INTO drive_principals (id, role, status) VALUES (CAST(x'6281' AS TEXT), 'member', 'active')");
   await run(`INSERT INTO drive_upload_intents (id, owner_id, object_key, upload_id, version, state)
     VALUES (CAST(x'610080' AS TEXT), CAST(x'6281' AS TEXT), CAST(x'6382' AS TEXT), CAST(x'6483' AS TEXT), 2, 'allocated')`);
   await run(`INSERT INTO ${operations} SELECT ?, id, owner_id, object_key, ?, upload_id, version, 1, 5

@@ -1,9 +1,14 @@
 interface Statement {
   bind(...values: string[]): Statement;
   first<T>(): Promise<T | null>;
+  all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
 
+export interface ReadGrantRecipient { recipientId: string }
+export interface ReadGrantPage { recipients: ReadGrantRecipient[]; nextCursor: string | null }
+
+const pageSize = 100;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
 
 async function sessionHash(token: string): Promise<string | null> {
@@ -15,7 +20,36 @@ async function sessionHash(token: string): Promise<string | null> {
 // Server-only primitives. The token is an authenticated session credential, not
 // a principal ID. All authorization is checked in the same statement as use.
 export class ReadGrants {
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database & { withSession(constraint: 'first-primary'): Database }) {}
+
+  // Null means the entry is unavailable; an empty page means the owner has no
+  // more explicit grants. The cursor is only a seek boundary, never authority.
+  async listPage(token: string, entryId: string, afterId: string | null = null): Promise<ReadGrantPage | null> {
+    const hash = await sessionHash(token);
+    if (!hash) return null;
+    if (afterId !== null && typeof afterId !== 'string') throw new TypeError('Invalid grant page cursor');
+    // Use the grant PK's (entry_id, recipient_id) order. The sentinel separates
+    // an authorized empty page from denial without a second D1 operation.
+    const { results } = await this.db.withSession('first-primary').prepare(`WITH owned AS (
+      SELECT e.id, e.owner_id FROM drive_sessions s
+      JOIN drive_principals owner ON owner.id = s.principal_id AND owner.status = 'active'
+      JOIN drive_entries e ON e.id = ? AND e.owner_id = owner.id
+      WHERE s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+    ), page AS (
+      SELECT g.recipient_id AS recipientId FROM drive_read_grants g
+      WHERE g.entry_id = (SELECT id FROM owned) AND g.recipient_id > ?
+        AND g.recipient_id != (SELECT owner_id FROM owned)
+        AND EXISTS (SELECT 1 FROM drive_principals recipient WHERE recipient.id = g.recipient_id
+          AND recipient.status = 'active' AND recipient.role = 'member')
+      ORDER BY g.recipient_id LIMIT ${pageSize + 1}
+    ) SELECT recipientId FROM page UNION ALL
+      SELECT NULL FROM owned ORDER BY recipientId`)
+      .bind(entryId, hash, afterId ?? '').all<ReadGrantRecipient | { recipientId: null }>();
+    if (!results.some(row => row.recipientId === null)) return null;
+    const items = results.filter(row => row.recipientId !== null);
+    const recipients = items.slice(0, pageSize);
+    return { recipients, nextCursor: items.length > pageSize ? recipients[pageSize - 1].recipientId : null };
+  }
 
   async create(token: string, entryId: string, recipientId: string): Promise<boolean> {
     const hash = await sessionHash(token);

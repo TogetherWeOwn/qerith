@@ -5,7 +5,7 @@ import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts'
 
 it('lists private root and nested pages with indexed keyset boundaries', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
   const insert = (id, owner, parent, name, kind = 'folder') => env.DB.prepare(`INSERT INTO drive_entries
     (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, owner, parent, name, kind, kind === 'file' ? `object-${id}` : null, kind === 'file' ? 0 : null);
