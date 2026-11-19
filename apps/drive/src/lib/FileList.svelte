@@ -134,6 +134,7 @@
   export let timeZone: string | undefined = undefined;
   // The caller pages and orders folders before files, by binary name within each group.
   export let preview = false;
+  export let announceChanges = true;
   export let direction: 'asc' | 'desc' = 'asc';
   export let total: number | undefined = undefined;
   export let hasMore = false;
@@ -169,7 +170,9 @@
   <div class="compact-sort"><label>Sort <select aria-label="Sort" bind:this={compactSort} value={direction} on:change={(event) => { const next = event.currentTarget.value as 'asc' | 'desc'; event.currentTarget.value = direction; onSort?.(next); }}><option value="asc">Name, A to Z</option><option value="desc">Name, Z to A</option></select></label></div>
   <p class="order-note">Folders appear first, then files. Names use binary order, not locale or numeric order.</p>
 {/if}
-<p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
+{#if announceChanges}
+  <p class="status" role="status">{#if onSort}Folders first, then files, each sorted by name, {orderDescription}, in binary order.{/if}{#if usedPaging} {total === undefined ? `${items.length.toLocaleString()} shown.` : `${items.length.toLocaleString()} of ${total.toLocaleString()} shown.`}{/if}</p>
+{/if}
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
   <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>

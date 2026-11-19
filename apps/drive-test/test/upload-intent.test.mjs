@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
-import { createUploadIntent, maxUploadIntentBytes } from '../../drive/src/lib/server/upload-intent.ts';
+import { createUploadIntent, maxUploadIntentBytes, postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 
 const origin = 'https://drive.example';
 const config = { endpoint: 'https://storage.example', bucket: 'drive-test', region: 'us-east-1', accessKeyId: 'fixture-key', secretAccessKey: 'fixture-secret' };
@@ -13,15 +13,85 @@ async function fixture() {
   await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   const sessions = new Sessions(db), { token } = await sessions.issue(owner);
   const bindings = { DB: db, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
-    DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true) } };
+    DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true), completionTimeoutMs: () => 5000 } };
   const request = (source = origin, cookie = `__Host-drive-session=${token}`, target = origin) =>
-    new Request(`${target}/intents`, { method: 'POST', headers: { ...(source ? { origin: source } : {}), cookie } });
-  const fetch = vi.fn();
+    new Request(`${target}/api/uploads`, { method: 'POST', headers: { ...(source ? { origin: source } : {}), cookie } });
+  const fetch = vi.fn(), transport = { fetch, timeoutMs: 5000 };
   const create = (req = request(), size = 4, overrides = {}) =>
-    createUploadIntent(req, size, { ...bindings, ...overrides }, { fetch, timeoutMs: 5000 });
+    createUploadIntent(req, size, { ...bindings, ...overrides }, transport);
+  const post = (body, { req = request(), headers = {}, overrides = {}, signal } = {}) =>
+    postUploadIntent(new Request(req, {
+      body, headers: { ...Object.fromEntries(req.headers), 'content-type': 'application/json', ...headers }, signal,
+    }), { ...bindings, ...overrides }, transport);
   const row = () => db.prepare('SELECT * FROM drive_upload_intents WHERE owner_id = ?').bind(owner).first();
-  return { db, bindings, request, fetch, create, row, owner, revoke: () => sessions.revoke(token) };
+  return { db, bindings, request, fetch, create, post, row, owner, revoke: () => sessions.revoke(token) };
 }
+
+it('allocates from a browser JSON body and returns only the intent ID', async () => {
+  const { post, row, fetch } = await fixture();
+  fetch.mockImplementation(async () => new Response(
+    `<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`));
+  const response = await post(JSON.stringify({ size: maxUploadIntentBytes }));
+  const intent = await row();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(intent).toMatchObject({ declared_size: maxUploadIntentBytes, state: 'allocated' });
+  expect(response.status).toBe(201);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(await response.json()).toEqual({ id: intent.id });
+});
+
+it('rejects malformed, oversized and truncated JSON before claiming or dispatching', async () => {
+  const { post, row, fetch, bindings } = await fixture();
+  const valid = '{"size":4}';
+  for (const [body, headers] of [
+    [null], ['{"size":'], ['null'], ['{"size":"4"}'], ['{"size":4,"name":"file"}'],
+    ['{"size":-1}'], ['{"size":1.5}'], ['{"size":1.0000000000000001}'], ['{"size":1e0}'],
+    ['{"size":1,"size":4}'], [JSON.stringify({ size: maxUploadIntentBytes + 1 })],
+    [new Uint8Array([0xff])], [valid.padEnd(65)], [valid, { 'content-type': 'text/plain' }],
+    [valid, { 'content-length': '65' }], [valid, { 'content-length': String(valid.length + 1) }],
+    [valid, { 'content-length': String(valid.length - 1) }],
+  ]) expect((await post(body, { headers })).status).toBe(400);
+  expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).not.toHaveBeenCalled();
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['cancellation', 'timeout'])('stops reading on %s without dispatching a parseable prefix', async (stop) => {
+  const { post, row, fetch } = await fixture();
+  const controller = new AbortController();
+  const cancel = vi.fn();
+  const body = new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode('{"size":4}')); }, cancel });
+  const response = post(body, { signal: controller.signal });
+  if (stop === 'cancellation') controller.abort();
+  expect((await response).status).toBe(400);
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+}, 10_000);
+
+it('refuses unauthenticated, revoked and unconfigured HTTP requests before dispatch', async () => {
+  const { post, request, row, db, owner, fetch } = await fixture();
+  const body = '{"size":4}';
+  for (const source of ['', 'https://other.example']) expect((await post(body, { req: request(source) })).status).toBe(403);
+  expect((await post(body, { req: request(origin, '') })).status).toBe(401);
+  for (const key of ['DB', 'DRIVE_ORIGIN', 'DRIVE_UPLOAD_EPOCH', 'DRIVE_UPLOAD_S3', 'DRIVE_UPLOAD_VERIFIER'])
+    expect((await post(body, { overrides: { [key]: undefined } })).status).toBe(503);
+  await db.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(owner).run();
+  expect((await post(body)).status).toBe(401);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('does not claim against qualified storage without a usable completion budget', async () => {
+  const { post, row, fetch, bindings } = await fixture();
+  for (const completionTimeoutMs of [undefined, () => null, () => 0, () => 1.5, () => 0x80000000]) {
+    const verifier = { ...bindings.DRIVE_UPLOAD_VERIFIER, completionTimeoutMs };
+    expect((await post('{"size":4}', { overrides: { DRIVE_UPLOAD_VERIFIER: verifier } })).status).toBe(503);
+  }
+  expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).toHaveBeenCalledTimes(5);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
 
 it('requires exact configured target and source origins, a live cookie and qualified storage', async () => {
   const { create, request, fetch, row, revoke } = await fixture();

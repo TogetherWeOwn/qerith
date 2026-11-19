@@ -6,6 +6,8 @@ import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 import { captureRootListing, captureSignedOut } from './root-listing.mjs';
+import { proveOwnerEnrollment } from './owner-enrollment.mjs';
+import { captureRootUpload } from './root-upload.mjs';
 
 const origin = 'https://drive.example.test';
 const rpID = new URL(origin).hostname;
@@ -16,12 +18,19 @@ const config = JSON.parse(await readFile('../wrangler.build.jsonc', 'utf8'));
 const configPath = resolve(dir.path, 'wrangler.json');
 const main = resolve(dir.path, 'navigation.mjs');
 // The test relay's Fetch implementation replaces Sec-Fetch-Mode; restore it only in this fixture.
-await writeFile(main, `import worker from ${JSON.stringify(resolve('../.svelte-kit/cloudflare/_worker.js'))};
+await writeFile(main, `import { withEnv } from 'cloudflare:workers';
+import worker from ${JSON.stringify(resolve('../.svelte-kit/cloudflare/_worker.js'))};
+import { storage, storageFetch } from ${JSON.stringify(resolve('upload-storage.mjs'))};
+globalThis.fetch = storageFetch;
 export default { fetch(request, env, ctx) {
   const input = new Request(request);
   if (input.headers.has('x-fixture-navigation')) input.headers.set('sec-fetch-mode', 'navigate');
+  if (input.headers.has('x-fixture-navigation')) input.headers.set('sec-fetch-dest', 'document');
   input.headers.delete('x-fixture-navigation');
-  return worker.fetch(input, env, ctx);
+  if (!input.headers.has('x-fixture-storage')) return worker.fetch(input, env, ctx);
+  input.headers.delete('x-fixture-storage');
+  const configured = { ...env, ...storage };
+  return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
 await writeFile(configPath, JSON.stringify({ ...config, main,
   assets: { ...config.assets, directory: resolve('..', config.assets.directory) },
@@ -54,11 +63,25 @@ try {
   });
   for (const step of ['challenge', 'restart', 'verify']) assert.equal((await post(step, { origin: 'https://other.example.test' })).status, 403);
   const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
-  const head = headers => worker.fetch(`${origin}/?return=1`, { method: 'HEAD', headers, redirect: 'manual' });
-  const redirect = await head(navigation);
-  assert.equal(redirect.status, 303);
-  assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
-  assert.equal((await head({ ...navigation, range: 'bytes=0-' })).status, 401);
+  const visit = (method, headers) => worker.fetch(`${origin}/?return=1`, { method, headers, redirect: 'manual' });
+  for (const site of ['same-origin', 'none', 'same-site', 'cross-site']) {
+    const headers = { ...navigation, 'sec-fetch-site': site };
+    for (const method of ['GET', 'HEAD']) {
+      const redirect = await visit(method, headers);
+      assert.equal(redirect.status, 303, `${method} from ${site}`);
+      assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F%3Freturn%3D1');
+      assert.equal(redirect.headers.get('cache-control'), 'private, no-store');
+    }
+  }
+  const crossSite = { ...navigation, 'sec-fetch-site': 'cross-site' };
+  for (const method of ['GET', 'HEAD']) {
+    for (const headers of [{ ...crossSite, range: 'bytes=0-' }, { ...crossSite, 'if-none-match': '"previous"' },
+      { 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', 'sec-fetch-site': 'cross-site' }]) {
+      const denied = await visit(method, headers);
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get('location'), null);
+    }
+  }
   const blocked = await worker.fetch(`${origin}/`, { headers: { ...navigation, origin: 'https://other.example.test' } });
   assert.equal(blocked.status, 403);
   assert.equal(blocked.headers.get('cache-control'), 'private, no-store');
@@ -84,13 +107,28 @@ try {
   const deliver = Promise.withResolvers();
   const traffic = [];
   let loseNext = false;
+  let configuredStorage = false;
+  let failListing = false;
   let proof;
+  const held = new Map();
+  function holdResponse(matches) {
+    const release = Promise.withResolvers();
+    held.set(matches, release.promise);
+    return () => { held.delete(matches); release.resolve(); };
+  }
   await context.route(`${origin}/**`, async route => {
     const request = route.request();
     const url = new URL(request.url());
     const headers = await request.allHeaders();
     if (request.isNavigationRequest()) headers['x-fixture-navigation'] = '1';
-    const response = await worker.fetch(url, { method: request.method(), headers, body: request.postDataBuffer(), redirect: 'manual' });
+    if (configuredStorage) headers['x-fixture-storage'] = '1';
+    const body = request.postDataBuffer();
+    if (body) headers['content-length'] ??= String(body.length);
+    if (failListing && url.pathname === '/api/root-listing') {
+      failListing = false;
+      return route.fulfill({ status: 503, headers: { 'cache-control': 'private, no-store' } });
+    }
+    const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
     if (url.pathname.startsWith(endpoint)) traffic.push([url.pathname.slice(endpoint.length), response.status]);
     if (loseNext && url.pathname === `${endpoint}challenge` && response.status === 200) {
       loseNext = false;
@@ -103,6 +141,7 @@ try {
       verified.resolve();
       await deliver.promise;
     }
+    for (const [matches, release] of held) if (matches(url.pathname)) await release;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   });
   const signInFrom = async (page, path) => {
@@ -133,15 +172,38 @@ try {
   assert.equal(traffic.filter(([step]) => step === 'verify').length, 1);
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure && session.sameSite === 'Lax');
+  const signedIn = await visit('HEAD', { ...crossSite, cookie: `${sessionName}=${session.value}` });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.headers.get('location'), null);
   const tokenHash = createHash('sha256').update(session.value).digest('hex');
   assert.equal((await DB.prepare('SELECT principal_id FROM drive_sessions WHERE token_hash = ?').bind(tokenHash).first()).principal_id, 'fixture-owner');
   const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
   assert.equal(await privateStatus(), 200);
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
   await captureRootListing(first, origin, DB);
+  configuredStorage = true;
+  await captureRootUpload(first, origin, holdResponse, () => { failListing = true; }, DB);
+  configuredStorage = false;
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
+  await first.goto(origin);
+  const next = first.getByRole('link', { name: 'Next page' });
+  const target = await next.getAttribute('href');
+  assert.match(target, /^\/\?page=/);
+  await next.click();
+  await first.waitForURL(origin + target);
+  await first.getByRole('table').getByRole('link', { name: 'Second.bin', exact: true }).waitFor();
+  await first.getByRole('link', { name: 'Back to first page' }).click();
+  await first.waitForURL(`${origin}/`);
+  assert.equal(await first.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
+  assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing/', { redirect: 'error' })).status), 401);
+  // Assert the Worker's redirect, not Chromium following it beyond the fixture relay.
+  const [expiredPage] = await Promise.all([first.waitForResponse(response =>
+    response.url() === origin + target && response.request().isNavigationRequest()), next.click()]);
+  assert.equal(expiredPage.status(), 303);
+  assert.equal((await expiredPage.allHeaders()).location, `/sign-in?${new URLSearchParams({ next: target })}`);
+  await signInFrom(first, target);
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
   assert.equal(await privateStatus(), 401);
@@ -156,7 +218,8 @@ try {
   assert.equal(denial.status, 401);
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
-  console.log('Generated Worker + Chromium + D1: restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  console.log('Generated Worker + Chromium + D1: cross-site navigation, restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  await proveOwnerEnrollment(browser);
 } finally {
   await browser?.close();
   await harness.close();

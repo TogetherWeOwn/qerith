@@ -337,6 +337,9 @@ jobs:
       - name: Test staging publish orchestration
         if: hashFiles('apps/drive/scripts/staging-publish.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-publish.test.mjs
+      - name: Test staging migration workflow
+        if: hashFiles('apps/drive/scripts/staging-migration-workflow.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migration-workflow.test.mjs
       - name: Test migration source ledger
         if: hashFiles('apps/drive/scripts/staging-migrations.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migrations.test.mjs
@@ -442,6 +445,7 @@ jobs:
           test ! -e .svelte-kit/adapter-wrangler.json
           test -s .svelte-kit/cloudflare/_worker.js
           npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run --outdir "$RUNNER_TEMP/drive-staging"
           npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
       - name: Exercise Workers runtime
         run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
@@ -525,7 +529,7 @@ jobs:
           npm test --prefix apps/drive/browser
           git diff --exit-code
           git diff --cached --exit-code
-      - name: Exercise generated sign-in and My Drive in Chromium with local D1
+      - name: Exercise generated sign-in in Chromium with local D1
         if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD
         env:
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
@@ -533,21 +537,12 @@ jobs:
           test -f apps/drive/browser/sign-in.mjs
           npm run build --prefix apps/drive
           (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
-          for width in 390 1280; do
-            for state in signed-out empty listed invalid-page exhausted unavailable; do
-              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-$state-$width.png"
-              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/axe-root-$state-$width.json"
-            done
-            for sample in greyscale forced-colours-focus; do
-              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-$sample-$width.png"
-            done
-            test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-keyboard-$width.json"
-          done
-          test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-listed-320.png"
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+          ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
+          UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

@@ -9,11 +9,14 @@ export function driveNext(value: string | null): string {
   return url.href.slice(url.origin.length);
 }
 
-export function isDrivePageNavigation(request: Request): boolean {
+export function isTopLevelDocumentNavigation(request: Request): boolean {
   const { headers } = request;
-  const site = headers.get('sec-fetch-site');
+  // The link's source site does not determine whether the request is a document navigation.
   return (request.method === 'GET' || request.method === 'HEAD') &&
-    (site === 'same-origin' || site === 'none') &&
     headers.get('sec-fetch-mode') === 'navigate' && headers.get('sec-fetch-dest') === 'document' &&
-    !conditionalHeaders.some((name) => headers.has(name)) && drivePage.test(new URL(request.url).pathname);
+    !conditionalHeaders.some((name) => headers.has(name));
+}
+
+export function isDrivePageNavigation(request: Request): boolean {
+  return isTopLevelDocumentNavigation(request) && drivePage.test(new URL(request.url).pathname);
 }

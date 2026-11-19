@@ -2,12 +2,14 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeAll, expect, it, vi } from 'vitest';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
-import { PrivateDeletion } from '../../drive/src/lib/server/metadata/private-deletion.ts';
+import { createAuthorizedPrivateDeletion, MAX_DELETION_DEPTH, MAX_DELETION_ENTRIES, PrivateDeletion } from '../../drive/src/lib/server/metadata/private-deletion.ts';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 import { ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
+import { config, epoch } from './fixtures/upload-completion.mjs';
+import { seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
 const sql = (text, ...args) => env.DB.prepare(text).bind(...args);
 const sessions = () => new Sessions(env.DB);
@@ -88,6 +90,82 @@ it('rolls back the deletion ledger when removal fails', async () => {
   await expect(new PrivateDeletion(env.DB).delete(token, 'rollback-file')).rejects.toThrow(/missing owner usage/);
   expect((await evidence(owner)).results).toEqual([]);
   expect(await new ReadAccess(env.DB).get(token, 'rollback-file')).not.toBeNull();
+});
+
+const authorized = (db = env.DB, settings = config, storageEpoch = epoch) => createAuthorizedPrivateDeletion(db, storageEpoch, settings);
+const liveCount = (owner) => sql('SELECT COUNT(*) AS n FROM drive_entries WHERE owner_id = ?', owner).first('n');
+
+it('journals a three-level tree only for the active owner and exact generation scope', async () => {
+  const owner = 'owner-authorized-tree';
+  const { id, token } = await seedBoundPublication('authorized-tree');
+  const other = await member('other-deleter');
+  await entry('authorized-root', owner);
+  await entry('authorized-child', owner, 'authorized-root');
+  await new PrivateMetadata(env.DB).move(owner, id, 'authorized-child', 'published');
+  const remove = (service = authorized(), auth = token) => service.delete(auth, 'authorized-root');
+  expect(await authorized().delete(token, 'missing')).toBeNull();
+  expect(await remove(authorized(), other)).toBeNull();
+  expect(await remove(authorized(env.DB, { ...config, endpoint: 'https://other.example' }))).toBeNull();
+  expect(await remove(authorized(env.DB, { ...config, bucket: 'other-bucket' }))).toBeNull();
+  expect(await remove(authorized(env.DB, config, 'other-epoch'))).toBeNull();
+  await entry('unpinned-file', owner, 'authorized-root', 'unpinned-key');
+  expect(await remove()).toBeNull();
+  expect(await liveCount(owner)).toBe(4);
+  expect((await evidence(owner)).results).toEqual([]);
+  await new PrivateMetadata(env.DB).move(owner, 'unpinned-file', null, 'unpinned');
+
+  const revokeAtWrite = {
+    prepare: (query) => env.DB.prepare(query),
+    async batch(statements) {
+      await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner).run();
+      return env.DB.batch(statements);
+    },
+  };
+  expect(await remove(authorized(revokeAtWrite))).toBeNull();
+  expect(await liveCount(owner)).toBe(4);
+  expect((await evidence(owner)).results).toEqual([]);
+  await sql("UPDATE drive_principals SET status = 'active' WHERE id = ?", owner).run();
+  const current = (await sessions().issue(owner)).token;
+  const receipt = await remove(authorized(), current);
+  expect(receipt).toEqual({ deletionId: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+  expect(await sql('SELECT COUNT(*) AS n FROM drive_deleted_entries WHERE deletion_id = ?', receipt.deletionId).first('n')).toBe(3);
+  expect(await liveCount(owner)).toBe(1);
+  expect(await sql('SELECT entry_id FROM drive_object_deletion_jobs WHERE entry_id = ?', id).first()).toEqual({ entry_id: id });
+  expect(await remove(authorized(), current)).toBeNull();
+});
+
+it.each([
+  ['count', MAX_DELETION_ENTRIES, false],
+  ['depth', MAX_DELETION_DEPTH + 1, true],
+])('rejects one over the %s limit without truncation and accepts the exact limit', async (limit, count, chain) => {
+  const owner = `boundary-${limit}`;
+  const node = (i) => `${limit}-node-${i}`;
+  const token = await member(owner);
+  const remove = () => authorized().delete(token, node(0));
+  await env.DB.batch(Array.from({ length: count + 1 }, (_, i) => sql(
+    "INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES (?, ?, ?, ?, 'folder')",
+    node(i), owner, i === 0 ? null : node(chain ? i - 1 : 0), node(i))));
+  expect(await remove()).toBeNull();
+  expect(await liveCount(owner)).toBe(count + 1);
+  expect((await evidence(owner)).results).toEqual([]);
+  await sql('DELETE FROM drive_entries WHERE id = ?', node(count)).run();
+  const receipt = await remove();
+  expect(receipt).toEqual({ deletionId: expect.any(String) });
+  expect(await liveCount(owner)).toBe(0);
+  expect(await sql('SELECT COUNT(*) AS n FROM drive_deleted_entries WHERE deletion_id = ?', receipt.deletionId).first('n')).toBe(count);
+});
+
+it('rolls back the authorized journal, job and metadata on an injected D1 deletion error', async () => {
+  const owner = 'owner-authorized-rollback';
+  const { id, token, intent } = await seedBoundPublication('authorized-rollback');
+  await entry('rollback-root', owner);
+  await new PrivateMetadata(env.DB).move(owner, id, 'rollback-root', 'published');
+  await sql('DELETE FROM drive_owner_usage WHERE owner_id = ?', owner).run();
+  await expect(authorized().delete(token, 'rollback-root')).rejects.toThrow(/missing owner usage/);
+  expect(await liveCount(owner)).toBe(2);
+  expect((await evidence(owner)).results).toEqual([]);
+  expect(await sql('SELECT entry_id FROM drive_object_deletion_jobs WHERE entry_id = ?', id).first()).toBeNull();
+  expect(await sql('SELECT intent_id FROM drive_upload_publication_tombstones WHERE intent_id = ?', intent).first()).toBeNull();
 });
 
 it('fences an in-flight upload whose destination is deleted without creating cleanup authority', async () => {

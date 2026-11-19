@@ -1,5 +1,6 @@
-import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempDisposableSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,8 +24,10 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, assetsPath, 'isDirectory');
   const config = JSON.parse(readFileSync(resolve(root, configPath), 'utf8'));
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
-      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,d1_databases,main,name' ||
+      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,compatibility_flags,d1_databases,main,name' ||
       config.compatibility_date !== '2026-07-30' ||
+      !Array.isArray(config.compatibility_flags) || config.compatibility_flags.length !== 2 ||
+      config.compatibility_flags[0] !== 'nodejs_compat' || config.compatibility_flags[1] !== 'enable_request_signal' ||
       !Array.isArray(config.d1_databases) || config.d1_databases.length !== 1 ||
       !config.d1_databases[0] || typeof config.d1_databases[0] !== 'object' ||
       Object.keys(config.d1_databases[0]).sort().join(',') !== 'binding,database_id,database_name,migrations_dir' ||
@@ -42,27 +45,74 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
 }
 
-export function publishStaging(root, run = execFileSync, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
+function enrollmentForRelease(grant, sha, preflight) {
+  if (!grant) return '';
+  const expiresAt = Number(grant.slice(41, 54));
+  const now = Date.now();
+  if (grant.length !== 98 || !/^[a-f0-9]{40}:\d{13}:[A-Za-z0-9_-]{43}$/.test(grant) ||
+      !grant.startsWith(`${sha}:`) || expiresAt > now + 300_000 || (preflight && expiresAt <= now)) {
+    throw new Error('invalid, mismatched or expired staging enrollment authorization');
+  }
+  // A grant that expires during migrations must not prevent publishing the compatible Worker.
+  return expiresAt > now ? grant : '';
+}
+
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, grant = '', sha = '') {
   validateStagingTarget(root, accountId);
-  try {
-    run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
-      cwd: root,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 65536,
-      timeout: 120000,
-      killSignal: 'SIGKILL',
+  return deploy(root, run, enrollmentForRelease(grant, sha, false), sha);
+}
+
+async function deploy(root, run, enrollment, sha) {
+  // Wrangler inherits prior secrets. An inactive publish must explicitly disarm them.
+  const args = ['deploy', entryPath, '--config', configPath, '--var',
+    `DRIVE_OWNER_ENROLLMENT_RELEASE:${enrollment ? sha : 'disabled'}`];
+  using secretDir = enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
+  if (secretDir) {
+    const file = resolve(secretDir.path, 'secrets.json');
+    writeFileSync(file, JSON.stringify({ DRIVE_OWNER_ENROLLMENT: enrollment }), { mode: 0o600, flag: 'wx' });
+    args.push('--secrets-file', file);
+  }
+  const env = { ...process.env };
+  delete env.DRIVE_OWNER_ENROLLMENT;
+  await new Promise((resolveRun, reject) => {
+    const child = run(resolve(root, 'node_modules/.bin/wrangler'), args, {
+      cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
-  } catch {
+    let failed = false;
+    const stop = () => {
+      failed = true;
+      if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+    };
+    const timer = setTimeout(stop, 110000);
+    for (const stream of [child.stdout, child.stderr]) {
+      let bytes = 0;
+      stream.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) stop(); });
+      stream.on('error', stop);
+    }
+    child.on('error', stop);
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (failed || code !== 0) reject(); else resolveRun();
+    });
+  }).catch(() => {
     // Provider diagnostics are untrusted and may include sensitive information.
     throw new Error('staging Worker publication failed');
-  }
+  });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
+    enrollmentForRelease(process.env.DRIVE_OWNER_ENROLLMENT, process.env.GITHUB_SHA, true);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
-    throw new Error('staging publication remains disabled until the migration workflow is reviewed');
+    const env = process.env;
+    if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'publish' ||
+        env.GITHUB_REPOSITORY !== 'TogetherWeOwn/qerith' || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+        env.GITHUB_REF !== 'refs/heads/main' || !/^[0-9a-f]{40}$/.test(env.GITHUB_SHA ?? '') ||
+        !env.CLOUDFLARE_API_TOKEN) {
+      throw new Error('publication requires the protected staging dispatch job');
+    }
+    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT, env.GITHUB_SHA);
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { uploadToRoot } from '../src/lib/root-upload';
 
-const intent = () => Response.json({ id: 'opaque-intent' }, { status: 201 });
+const intentId = '87654321-dddd-eeee-ffff-123456789000';
+const intent = () => Response.json({ id: intentId }, { status: 201 });
 const part = () => new Response(null, { status: 204 });
 const entryId = '12345678-aaaa-bbbb-cccc-123456789000';
 const file = new File([new Uint8Array([0, 255, 12])], 'résumé 日本.bin');
@@ -24,7 +25,7 @@ test('posts one intent, the original file as part one, then the root destination
   assert.deepEqual(await uploadToRoot(file, () => milestones.push(calls.length), fetcher), { status: 'published', id: entryId });
   assert.deepEqual(milestones, [2]);
   assert.deepEqual(calls.map(({ path, init }) => [path, init?.method]), [
-    ['/api/uploads', 'POST'], ['/api/uploads/opaque-intent/parts/1', 'PUT'], ['/api/uploads/opaque-intent/complete', 'POST'],
+    ['/api/uploads', 'POST'], [`/api/uploads/${intentId}/parts/1`, 'PUT'], [`/api/uploads/${intentId}/complete`, 'POST'],
   ]);
   for (const { init } of calls) {
     assert.equal(init?.mode, 'same-origin');
@@ -67,7 +68,9 @@ test('only the explicit completion conflict is distinct; no failure is replayed'
     [[intent(), part(), conflict()], 'name-taken'],
   ] as const) {
     const { fetcher, calls } = replies(...responses);
-    assert.deepEqual(await uploadToRoot(file, () => {}, fetcher), { status: expected });
+    const milestones: number[] = [];
+    assert.deepEqual(await uploadToRoot(file, () => milestones.push(calls.length), fetcher), { status: expected });
+    assert.deepEqual(milestones, responses.length === 3 ? [2] : []);
     assert.equal(calls.length, responses.length);
   }
 });

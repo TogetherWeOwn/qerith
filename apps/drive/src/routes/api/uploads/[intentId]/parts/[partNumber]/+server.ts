@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { wireUploadStorage } from '../../../../../../lib/server/storage-runtime';
 import { uploadRoutes } from '../../../../../../lib/server/upload-routes';
 import type { RequestHandler } from './$types';
 
@@ -6,4 +7,4 @@ import type { RequestHandler } from './$types';
 export const trailingSlash = 'ignore';
 
 export const PUT: RequestHandler = ({ request, params, locals }) =>
-  uploadRoutes(env).part(request, locals.driveSession, params.intentId, params.partNumber);
+  uploadRoutes(wireUploadStorage(env)).part(request, locals.driveSession, params.intentId, params.partNumber);

@@ -8,6 +8,11 @@ export function uploadStorageEvidence(config: S3Config, epoch: string) {
   return { settings, storageConfigId: JSON.stringify([endpoint, bucket, epoch]) };
 }
 
+export function uploadCompletionBudget(verifier: { completionTimeoutMs?(id: string): number | null }, id: string): number | null {
+  const ms = verifier.completionTimeoutMs?.(id);
+  return typeof ms === 'number' && Number.isInteger(ms) && ms >= 1 && ms <= 0x7fffffff ? ms : null;
+}
+
 export function uploadIdentityBytes(value: string): ArrayBuffer {
   if (typeof value !== 'string' || !value || value.length > 196608 || !value.isWellFormed() || value.includes('\0')) throw new TypeError('Invalid upload identity');
   const bytes = new TextEncoder().encode(value);

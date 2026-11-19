@@ -72,9 +72,14 @@ async function remove(row: GenerationRow, resolve: ResolveObjectDeleter, leaseDe
   }
 }
 
-/** Unwired server primitive. Absence, conflict and uncertainty never settle a job. */
-export async function reconcilePrivateObjectDeletions(db: Database, resolve?: ResolveObjectDeleter): Promise<number> {
-  if (!resolve) return 0;
+/** Server primitive. Omit the scope only for a separately admitted cleanup driver. */
+export async function reconcilePrivateObjectDeletions(db: Database, resolve?: ResolveObjectDeleter,
+  scope?: Readonly<{ deletionId: string }>): Promise<number> {
+  const deletionId = scope?.deletionId;
+  if (!resolve || (scope !== undefined && (typeof deletionId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(deletionId)))) return 0;
+  const scopedClaim = deletionId === undefined ? '' :
+    'AND entry_id IN (SELECT entry_id FROM drive_deleted_entries WHERE deletion_id = ?)';
   const session = db.withSession('first-primary');
   let completed = 0;
   for (let i = 0; i < batchLimit; i++) {
@@ -82,9 +87,10 @@ export async function reconcilePrivateObjectDeletions(db: Database, resolve?: Re
     const claim = await session.prepare(`UPDATE drive_object_deletion_jobs
       SET lease_token = ?, available_at = unixepoch() + ?
       WHERE entry_id = (SELECT entry_id FROM drive_object_deletion_jobs
-        WHERE completed_at IS NULL AND available_at <= unixepoch()
+        WHERE completed_at IS NULL AND available_at <= unixepoch() ${scopedClaim}
         ORDER BY available_at, entry_id LIMIT 1)
-      RETURNING entry_id`).bind(token, leaseSeconds).first<{ entry_id: string }>();
+      RETURNING entry_id`).bind(token, leaseSeconds, ...(deletionId === undefined ? [] : [deletionId]))
+      .first<{ entry_id: string }>();
     if (!claim) break;
     const readStarted = performance.now();
     const row = await session.prepare(`SELECT g.endpoint, g.bucket, g.storage_epoch, hex(g.object_key) AS key_hex,

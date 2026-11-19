@@ -13,11 +13,14 @@ interface Database {
 
 const lifetimeMs = 5 * 60 * 1000;
 
+export class OwnerCeremonyDenied extends Error {}
+
 // Server-only primitive: both methods require an independently authorized caller.
 // It is not a provisioning endpoint or an authorization mechanism.
 export class OwnerBootstrap {
   readonly #verifier: ReturnType<typeof createCeremonyVerifier>;
-  constructor(private readonly db: Database, private readonly rpID: string, origin: string) {
+  constructor(private readonly db: Database, private readonly rpID: string, origin: string,
+    private readonly authorizationExpiry = Number.MAX_SAFE_INTEGER) {
     this.#verifier = createCeremonyVerifier(rpID, origin);
   }
 
@@ -30,20 +33,22 @@ export class OwnerBootstrap {
     });
     const issued = await this.db.prepare(`INSERT INTO drive_owner_registration
       (singleton, challenge, principal_id, webauthn_user_handle, expires_at)
-      SELECT 1, ?, ?, ?, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?
-      WHERE NOT EXISTS (SELECT 1 FROM drive_principals WHERE role = 'owner')
+      SELECT 1, ?, ?, ?, MIN(CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?, ?)
+      WHERE ? > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        AND NOT EXISTS (SELECT 1 FROM drive_principals WHERE role = 'owner')
       ON CONFLICT (singleton) DO UPDATE SET challenge = excluded.challenge,
         principal_id = excluded.principal_id, webauthn_user_handle = excluded.webauthn_user_handle,
         expires_at = excluded.expires_at
-      RETURNING challenge`).bind(options.challenge, principal, options.user.id, lifetimeMs).first();
-    if (!issued) throw new Error('Owner already exists');
+      RETURNING challenge`).bind(options.challenge, principal, options.user.id, lifetimeMs,
+        this.authorizationExpiry, this.authorizationExpiry).first();
+    if (!issued) throw new OwnerCeremonyDenied('Owner bootstrap unavailable');
     return options;
   }
 
   async enroll(challenge: string, response: RegistrationResponseJSON): Promise<void> {
-    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new TypeError('Invalid challenge');
-    const result = await this.#verifier.registration(response, challenge);
-    if (!result.verified || !result.registrationInfo) throw new Error('Registration not verified');
+    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new OwnerCeremonyDenied('Invalid challenge');
+    const result = await this.#verifier.registration(response, challenge).catch(() => null);
+    if (!result?.verified || !result.registrationInfo) throw new OwnerCeremonyDenied('Registration not verified');
     const credential = result.registrationInfo.credential;
     // These statements share a transaction. Each dependent write requires the
     // preceding write to succeed; uniqueness errors roll back the entire batch.
@@ -51,7 +56,8 @@ export class OwnerBootstrap {
       this.db.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
         SELECT principal_id, 'owner', 'active', webauthn_user_handle FROM drive_owner_registration
         WHERE singleton = 1 AND challenge = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-          AND NOT EXISTS (SELECT 1 FROM drive_principals WHERE role = 'owner')`).bind(challenge),
+          AND ? > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+          AND NOT EXISTS (SELECT 1 FROM drive_principals WHERE role = 'owner')`).bind(challenge, this.authorizationExpiry),
       this.db.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
         SELECT ?, principal_id, ?, ?, ?, webauthn_user_handle FROM drive_owner_registration
         WHERE singleton = 1 AND challenge = ? AND changes() = 1`)
@@ -61,6 +67,6 @@ export class OwnerBootstrap {
         RETURNING challenge`).bind(challenge),
     ]);
     // D1's change metadata can include the principal's login-generation trigger.
-    if (batch[2].results?.[0]?.challenge !== challenge) throw new Error('Owner or challenge unavailable');
+    if (batch[2].results?.[0]?.challenge !== challenge) throw new OwnerCeremonyDenied('Owner or challenge unavailable');
   }
 }

@@ -34,7 +34,7 @@ export class RevokedPasskey extends Error {}
 // or request parameter. This service exposes no HTTP endpoint or cookie policy.
 export class PasskeyLogin {
   readonly #verifier: ReturnType<typeof createCeremonyVerifier>;
-  constructor(private readonly db: Database, rpID: string, origin: string) {
+  constructor(private readonly db: Database, rpID: string, origin: string, private readonly ownerOnly = false) {
     this.#verifier = createCeremonyVerifier(rpID, origin);
   }
 
@@ -81,8 +81,9 @@ export class PasskeyLogin {
         FROM drive_credentials c JOIN drive_principals p ON p.id = c.principal_id
         JOIN drive_login_generations g ON g.principal_id = p.id
         WHERE c.id = ? AND c.principal_id = ? AND c.public_key = ? AND c.counter = ?
-          AND c.webauthn_user_handle = ? AND p.webauthn_user_handle = ? AND p.status = 'active' AND g.generation = ?`)
-        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter, handle, handle, row.generation),
+          AND c.webauthn_user_handle = ? AND p.webauthn_user_handle = ? AND p.status = 'active' AND g.generation = ?
+          AND (? = 0 OR p.role = 'owner')`)
+        .bind(hash, 12 * 60 * 60 * 1000, row.id, row.principal_id, key, row.counter, handle, handle, row.generation, Number(this.ownerOnly)),
       this.db.prepare(`UPDATE drive_credentials SET counter = ? WHERE id = ?
         AND EXISTS (SELECT 1 FROM drive_sessions WHERE token_hash = ?)`)
         .bind(result.authenticationInfo.newCounter, row.id, hash),

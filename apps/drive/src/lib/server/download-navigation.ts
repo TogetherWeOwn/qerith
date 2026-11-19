@@ -1,3 +1,5 @@
+import { isTopLevelDocumentNavigation } from '../drive-navigation';
+
 export { entryId } from '../download-id';
 
 export const downloadRoute = '/api/download/[fileId]';
@@ -8,13 +10,14 @@ export const downloadNoticeCookie = (nonce: string) => `__Host-drive-download-fa
 export const downloadFolder = '/';
 export const downloadSignIn = `/sign-in?${new URLSearchParams({ next: downloadFolder })}`;
 
+export function isDownloadDocumentNavigation(request: Request) {
+  return request.method === 'GET' && isTopLevelDocumentNavigation(request);
+}
+
 export function isDownloadNavigation(request: Request) {
-  const { headers } = request;
-  const site = headers.get('sec-fetch-site');
-  return request.method === 'GET' && (site === 'same-origin' || site === 'none') &&
-    headers.get('sec-fetch-mode') === 'navigate' && headers.get('sec-fetch-dest') === 'document' &&
-    !['range', 'if-range', 'if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since']
-      .some((name) => headers.has(name));
+  // Keep the authenticated download failure notice scoped to same-origin and direct visits.
+  const site = request.headers.get('sec-fetch-site');
+  return (site === 'same-origin' || site === 'none') && isDownloadDocumentNavigation(request);
 }
 
 export function downloadRedirect(location: string) {
