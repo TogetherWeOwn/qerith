@@ -58,9 +58,17 @@ pre-apply Time Travel bookmark and pending lists before and after apply for the
 exact SHA; the final list must be empty. An uncertain apply requires restoring the
 bookmark or recreating the disposable database from migrations before retry.
 Worker rollback is separate from database recovery. The staging lifecycle shares
-one Actions concurrency group; it does not fence external writers.
+one Actions concurrency group; it does not fence external writers. The pending
+lists are not a content-digest history of migrations already applied, and an
+empty pending list is not proof that the database schema matches the source. The
+source manifest inventories committed inputs; it does not attest to the bytes
+Wrangler applied. Concurrency also does not prevent an older queued main dispatch
+from publishing after main advances; confirm the deployed SHA before qualification.
 
 Before live qualification, establish readiness for the deployed SHA, record the
 previous Worker version or its absence, and implement bounded fixture cleanup.
-The current draft does not establish these controls or authorize live use.
+The staging configuration does not set `DRIVE_ORIGIN`; private requests fail
+closed until the actual HTTPS staging origin is established and configured. Do
+not guess an origin. The current draft does not establish these controls or
+authorize live use.
 Exact-head Actions and independent Security then QA review remain required.

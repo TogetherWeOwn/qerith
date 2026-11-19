@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 test('publish job confines secrets to staging and gates publication on migration', () => {
@@ -73,7 +73,7 @@ case "$*" in
 esac
 `);
   chmodSync(wrangler, 0o700);
-  const env = { PATH: '/usr/bin:/bin', RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40),
+  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40),
     GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', CALLS: join(root, 'calls'),
     LIST_OUTPUT: '✅ No migrations to apply!', BOOKMARK_RESPONSE: '{"bookmark":"test-bookmark"}' };
   const run = (extra) => spawnSync('/bin/bash', ['-c', script], {
