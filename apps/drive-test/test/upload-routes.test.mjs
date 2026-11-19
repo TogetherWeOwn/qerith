@@ -5,6 +5,7 @@ import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metad
 import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
+import { postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
 import { config, epoch, evidence, migrations, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
@@ -85,6 +86,44 @@ it('publishes a verified sparse upload without duplicate part or completion send
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
+});
+
+it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation (%s)', async (change) => {
+  await applyD1Migrations(env.DB, migrations);
+  const principal = crypto.randomUUID(), states = [], calls = [];
+  const row = () => sql('SELECT * FROM drive_upload_intents WHERE owner_id = ?', principal).first();
+  const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'owner', 'active')", principal).run();
+  try {
+    const { token } = await sessions.issue(principal);
+    const request = new Request(`${stagingOrigin}/api/uploads`, { method: 'POST', body: '{"size":7}',
+      headers: { origin: stagingOrigin, cookie: `__Host-drive-session=${token}`, 'content-type': 'application/json' } });
+    const result = await postUploadIntent(request, { DB: env.DB, DRIVE_ORIGIN: stagingOrigin,
+      DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
+      DRIVE_UPLOAD_VERIFIER: { completionTimeoutMs: () => 5000, async isQualified(id) {
+        const state = (await row())?.state ?? null;
+        states.push(state);
+        if (change === (state === null ? 'claim' : 'send')) await demote();
+        return qualified(id);
+      } } }, { timeoutMs: 5000, async fetch(request) {
+      calls.push(request.method);
+      return new Response(`<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key>` +
+        `<UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
+    } });
+    expect(await sessions.lookup(token)).toEqual({ id: principal, role: change === 'owner' ? 'owner' : 'member' });
+    expect(states).toEqual(change === 'claim' ? [null] : [null, 'initiating']);
+    expect(calls).toEqual(change === 'owner' ? ['POST'] : []);
+    const intent = await row();
+    if (change === 'owner') {
+      expect(result.status).toBe(201);
+      expect(intent).toMatchObject({ state: 'allocated', version: 2, upload_id: uploadId });
+      expect(await result.json()).toEqual({ id: intent.id });
+    } else {
+      expect([result.status, await result.text()]).toEqual([change === 'claim' ? 401 : 503, '']);
+      if (change === 'claim') expect(intent).toBeNull();
+      else expect(intent).toMatchObject({ state: 'created', version: 2, upload_id: null });
+    }
+  } finally { await demote(); }
 });
 
 it.each(['part claim', 'parts verification', 'completion claim', 'publication send', 'generation HEAD'])('keeps staging upload owner-only after %s', async (change) => {
