@@ -61,6 +61,8 @@ try {
   browser = await chromium.launch();
   const context = await browser.newContext();
   const page = await context.newPage();
+  // Keep interception armed across documents and chooser events, as in the sign-in fixture.
+  page.on('filechooser', () => {});
   const authenticator = await context.newCDPSession(page);
   await authenticator.send('WebAuthn.enable');
   const { authenticatorId } = await authenticator.send('WebAuthn.addVirtualAuthenticator', { options: {
@@ -156,7 +158,8 @@ try {
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   await upload.focus();
-  const [nextChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+  await upload.and(page.locator(':focus')).waitFor();
+  const [nextChooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5_000 }), page.keyboard.press('Enter')]);
   const held = Promise.withResolvers();
   holdRefresh = held.promise;
   try {
@@ -179,6 +182,9 @@ try {
   const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
   await failedRefreshChooser.setFiles({ ...file, name: 'B.bin' });
   await listingRetry.and(page.locator(':focus')).waitFor();
+  const receipt = page.getByRole('status').filter({ hasText: 'B.bin: Uploaded. Refresh My Drive to see it.' });
+  assert.ok((await receipt.boundingBox())?.height > 1, 'the upload receipt remains visible');
+  assert.equal(await page.getByRole('link', { name: 'A.bin', exact: true }).count(), 0, 'stale rows are removed');
   assert.equal(await listingRetry.getAttribute('href'), '/');
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload, 'an unavailable listing preserves the document notice');
   await visitWithNotice();
@@ -217,6 +223,7 @@ try {
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
     noticePreservedOnRefresh: true, noticePreservedOnListingFailure: true, focusRestoredOnListingFailure: true,
+    uploadReceiptVisibleOnListingFailure: true,
     workerExpiresSyntheticNoticeCookie: true, distinctRetryLinks: true, nonRetryableNoticeHasNoLink: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {

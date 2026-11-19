@@ -65,7 +65,7 @@
     <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
 </header>
-<p class="status" role="status">{status}</p>
+<p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
   <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
