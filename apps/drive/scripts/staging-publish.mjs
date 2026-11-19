@@ -76,7 +76,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
-    throw new Error('live staging publication is disabled');
+    const env = process.env;
+    if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'publish' ||
+        env.GITHUB_REPOSITORY !== 'TogetherWeOwn/qerith' || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+        env.GITHUB_REF !== 'refs/heads/main' || !/^[0-9a-f]{40}$/.test(env.GITHUB_SHA ?? '') ||
+        !env.CLOUDFLARE_API_TOKEN) {
+      throw new Error('publication requires the protected staging dispatch job');
+    }
+    await publishStaging(process.cwd());
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }

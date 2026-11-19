@@ -51,9 +51,9 @@ jobs:
         run: node --test apps/drive/scripts/staging-manifest.test.mjs
 
   publish:
-    # Keep provider operations out of this preparation-only workflow.
-    if: ${{ false }}
+    if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: preparation
+    environment: staging
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -90,14 +90,16 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
-      - name: Record staging migration and rollback evidence
-        # The synthetic regression exercises this block with fake Wrangler only.
-        if: ${{ false }}
+      - name: Migrate and publish staging Worker
         shell: bash
         env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
           NO_COLOR: '1'
         run: |
           set -euo pipefail
+          : "${CLOUDFLARE_API_TOKEN:?missing staging deploy token}"
+          node scripts/staging-publish.mjs --check-target
           # The native ledger is the staging authority. Keep the bookmark and
           # before/after lists in the Actions log for this exact dispatch SHA.
           wrangler=node_modules/.bin/wrangler
@@ -139,6 +141,17 @@ jobs:
               });
             ' "$@"
           }
+          # Provider output is data, not a GitHub Actions workflow command.
+          log_capture() {
+            local token
+            token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+            printf '::stop-commands::%s\n' "$token"
+            cat "$1"
+            printf '\n::%s::\n' "$token"
+          }
+          printf '%s\n' 'Pending migrations before apply:'
+          capture "$capture_dir/before" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config"
+          log_capture "$capture_dir/before"
           capture "$bookmark_file" 45s keep "$wrangler" d1 time-travel info qerith-drive-staging --json --config "$config"
           node -e '
             const fs = require("node:fs");
@@ -151,17 +164,6 @@ jobs:
               process.exitCode = 1;
             }
           ' "$bookmark_file"
-          # Provider output is data, not a GitHub Actions workflow command.
-          log_capture() {
-            local token
-            token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
-            printf '::stop-commands::%s\n' "$token"
-            cat "$1"
-            printf '\n::%s::\n' "$token"
-          }
-          printf '%s\n' 'Pending migrations before apply:'
-          capture "$capture_dir/before" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config"
-          log_capture "$capture_dir/before"
           apply_status=0
           capture "$capture_dir/apply" 120s discard "$wrangler" d1 migrations apply qerith-drive-staging --remote --config "$config" || apply_status=$?
           if (( apply_status == 0 )); then log_capture "$capture_dir/apply"; fi
@@ -175,3 +177,4 @@ jobs:
             printf '%s\n' 'Migration apply or post-list failed; restore the bookmark or recreate the staging database before retry.' >&2
             exit 1
           fi
+          node scripts/staging-publish.mjs --publish

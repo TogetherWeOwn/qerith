@@ -1,21 +1,26 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
-test('preparation has no staging credentials or live mutation step', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /\n  publish:\n(?:    #[^\n]*\n)*    if: \$\{\{ false \}\}/);
-  assert.match(workflow, /- name: Record staging migration and rollback evidence\n(?:        #[^\n]*\n)*        if: \$\{\{ false \}\}/);
-  assert.doesNotMatch(workflow, /\benvironment:|\bsecrets\b\s*(?:\.|\[)|CLOUDFLARE_API_TOKEN|staging-publish\.mjs|\bwrangler deploy\b/);
+const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
+const publishStep = '      - name: Migrate and publish staging Worker\n';
+
+test('staging credentials are scoped to the main-only dispatch mutation step', () => {
+  assert.match(workflow, /\non:\n  workflow_dispatch:\n\npermissions:/);
   assert.match(workflow, /\nconcurrency:\n  group: drive-staging-lifecycle\n  cancel-in-progress: false/);
-  assert.match(workflow, /on:\n  workflow_dispatch:\n/);
+  const [before, mutation] = workflow.split(publishStep);
+  assert.ok(mutation);
+  assert.doesNotMatch(before, /\bsecrets\b\s*(?:\.|\[)|CLOUDFLARE_API_TOKEN/);
+  assert.match(before, /\n  publish:\n    if: github\.repository == 'TogetherWeOwn\/qerith' && github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'\n    needs: preparation\n    environment: staging\n/);
+  assert.match(before.split('\n  publish:\n')[1], /ref: \$\{\{ github\.sha \}\}\n          persist-credentials: false/);
+  assert.deepEqual([...mutation.matchAll(/\bsecrets\.(\w+)/g)].map(match => match[1]).sort(),
+    ['QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID', 'QERITH_STAGING_CLOUDFLARE_API_TOKEN']);
 });
 
 test('workflow rejects mismatched source, SHA and checkout', (t) => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
   const step = workflow.split('      - name: Verify staging source\n')[1]?.split('      - uses: actions/setup-node@')[0];
   assert.ok(step);
   const script = step.split('        run: |\n')[1];
@@ -43,14 +48,16 @@ test('workflow rejects mismatched source, SHA and checkout', (t) => {
 });
 
 function migrationFixture(t) {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const step = workflow.split('      - name: Record staging migration and rollback evidence\n')[1]
-    ?.split('      - name: Publish built staging Worker')[0];
-  const script = step?.split('        run: |\n')[1];
+  const script = workflow.split(publishStep)[1]?.split('        run: |\n')[1];
   assert.ok(script);
   const root = mkdtempSync(join(tmpdir(), 'drive-migrations-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  mkdirSync(join(root, 'node_modules/.bin'), { recursive: true });
+  for (const dir of ['node_modules/.bin', 'scripts', '.svelte-kit/cloudflare']) {
+    mkdirSync(join(root, dir), { recursive: true });
+  }
+  copyFileSync(new URL('./staging-publish.mjs', import.meta.url), join(root, 'scripts/staging-publish.mjs'));
+  copyFileSync(new URL('../wrangler.staging.json', import.meta.url), join(root, 'wrangler.staging.json'));
+  writeFileSync(join(root, '.svelte-kit/cloudflare/_worker.js'), 'synthetic bundle');
   const wrangler = join(root, 'node_modules/.bin/wrangler');
   writeFileSync(wrangler, `#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
@@ -66,6 +73,7 @@ case "$*" in
     printf '%s\\n' "\${ERROR_OUTPUT:-}" >&2
     if grep -q 'migrations apply' "$CALLS"; then
       printf '%s\\n' "$AFTER_LIST"
+      exit "\${AFTER_STATUS:-0}"
     else
       printf '%s\\n' "$BEFORE_LIST"
     fi ;;
@@ -76,6 +84,9 @@ esac
   const calls = join(root, 'calls');
   const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40),
     GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', CALLS: calls,
+    GITHUB_ACTIONS: 'true', GITHUB_JOB: 'publish', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith',
+    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
+    CLOUDFLARE_ACCOUNT_ID: '209cf7dd678adfb683947dd7874d05af', CLOUDFLARE_API_TOKEN: 'synthetic',
     BEFORE_LIST: '✅ No migrations to apply!', AFTER_LIST: '✅ No migrations to apply!',
     BOOKMARK_RESPONSE: '{"bookmark":"test-bookmark"}' };
   const run = (extra, shortenDeadline = false) => {
@@ -96,24 +107,45 @@ test('migration workflow records the native ledger and fails closed on a pending
   assert.match(firstApply.stdout, /Pending migrations before apply:[\s\S]*Migrations to be applied:[\s\S]*Pending migrations after apply:[\s\S]*✅ No migrations to apply!/);
   assert.ok(firstApply.stdout.length < 65536, 'apply progress must not appear in the log');
   assert.doesNotMatch(firstApply.stdout, /\0/);
-  assert.match(calls(), /d1 migrations apply qerith-drive-staging --remote --config wrangler\.staging\.json/);
+  const target = 'qerith-drive-staging';
+  const config = '--config wrangler.staging.json';
+  assert.deepEqual(calls().trim().split('\n'), [
+    `d1 migrations list ${target} --remote ${config}`,
+    `d1 time-travel info ${target} --json ${config}`,
+    `d1 migrations apply ${target} --remote ${config}`,
+    `d1 migrations list ${target} --remote ${config}`,
+    `deploy .svelte-kit/cloudflare/_worker.js ${config}`,
+  ]);
+  assert.ok(firstApply.stdout.indexOf('Pending migrations before apply:') < firstApply.stdout.indexOf('Pre-apply Time Travel bookmark:'));
   const empty = '✅ No migrations to apply!';
   for (const after of [pending, `${empty}\n${pending}`, `${empty}\n${empty}`]) {
     const result = run({ AFTER_LIST: after });
     assert.equal(result.status, 1, after);
     assert.match(result.stderr, /Migration apply or post-list failed/);
     assert.ok(result.stdout.includes(after), 'the post-list was recorded');
+    assert.doesNotMatch(calls(), /^deploy /m);
   }
   const guarded = run({ BEFORE_LIST: '::warning::untrusted output\n✅ No migrations to apply!' });
   assert.equal(guarded.status, 0, guarded.stderr);
   assert.match(guarded.stdout, /::stop-commands::([a-f0-9]{64})\n::warning::untrusted output\n✅ No migrations to apply!\n\n::\1::/);
-  assert.notEqual(run({ APPLY_STATUS: '1' }).status, 0);
+  for (const failure of [{ APPLY_STATUS: '1' }, { AFTER_STATUS: '1' }]) {
+    assert.equal(run(failure).status, 1);
+    assert.doesNotMatch(calls(), /^deploy /m);
+  }
   for (const response of ['sensitive-provider-text', '{}', '{"bookmark":""}', '{"bookmark":"bad\\nvalue"}']) {
     const result = run({ BOOKMARK_RESPONSE: response });
     assert.notEqual(result.status, 0);
     assert.doesNotMatch(result.stderr, /sensitive-provider-text/);
     assert.doesNotMatch(calls(), /migrations apply/);
   }
+});
+
+test('migration workflow refuses missing credentials or an unexpected account before Wrangler', (t) => {
+  const { run, calls } = migrationFixture(t);
+  assert.match(run({ CLOUDFLARE_API_TOKEN: '' }).stderr, /missing staging deploy token/);
+  assert.equal(calls(), '');
+  assert.match(run({ CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) }).stderr, /invalid staging Cloudflare account/);
+  assert.equal(calls(), '');
 });
 
 test('migration capture terminates process groups on overflow and timeout', async (t) => {
@@ -124,7 +156,8 @@ test('migration capture terminates process groups on overflow and timeout', asyn
     assert.equal(result.error, undefined, `${mode} must terminate the launcher and child`);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Wrangler command or bounded capture failed/);
-    assert.match(calls(), /time-travel info/);
+    assert.match(calls(), /^d1 migrations list /);
+    assert.doesNotMatch(calls(), /time-travel info|migrations apply|^deploy /m);
     await new Promise(resolve => setTimeout(resolve, 2300));
     assert.equal(existsSync(marker), false, `${mode} child survived capture`);
   }
