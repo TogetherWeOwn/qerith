@@ -4,7 +4,8 @@ import { downloadFile } from '../src/lib/server/download';
 import { createImmutableS3Reader, createS3Objects } from '../src/lib/server/s3/objects';
 
 const fileId = 'opaque-file';
-const generation = { key: 'private-key', etag: '"stored"', sizeBytes: 4, storageConfigId: 'config-a', evidenceRevision: 'receipt-a' };
+const generation = { name: 'résumé; "a".txt', key: 'private-key', etag: '"stored"', sizeBytes: 4,
+  storageConfigId: 'config-a', evidenceRevision: 'receipt-a' };
 const request = (headers?: HeadersInit) => new Request('https://example.test/api/download/opaque-file', { headers });
 
 function setup(reply: () => Response) {
@@ -63,7 +64,7 @@ test('streams full and single-range responses with the stored validator and allo
     assert.equal(response.headers.get('content-range'), ranged ? 'bytes 2-3/4' : null);
     assert.equal(response.headers.get('content-length'), length);
     assert.equal(response.headers.get('cache-control'), 'private, no-store');
-    assert.equal(response.headers.get('content-disposition'), 'attachment');
+    assert.equal(response.headers.get('content-disposition'), `attachment; filename="rsum; a.txt"; filename*=UTF-8''r%C3%A9sum%C3%A9%3B%20%22a%22.txt`);
     assert.equal(response.headers.get('x-storage-key'), null);
     assert.equal(pulls, 0);
     assert.equal(await response.text(), ranged ? 'ta' : 'data');
@@ -86,6 +87,32 @@ test('does not read without trusted evidence or downgrade a conditional range', 
   assert.equal((await downloadFile(request({ range: 'bytes=-0' }), fileId, deps)).status, 416);
   assert.equal((await downloadFile(request({ range: 'bytes=0-0,2-3' }), fileId, deps)).status, 400);
   assert.equal(deps.reads.length, 0);
+});
+
+test('checks strong If-Match before weak If-None-Match and evaluates both before Range', async () => {
+  let reply = () => new Response(null, { headers: { etag: generation.etag, 'content-length': '4' } });
+  const deps = setup(() => reply());
+  const headers = { 'if-none-match': `"tag,with,commas", W/${generation.etag}`, range: 'bytes=20-' };
+  const fresh = await downloadFile(request(headers), fileId, deps);
+  assert.equal(fresh.status, 304);
+  assert.equal(fresh.headers.get('etag'), generation.etag);
+  assert.equal(fresh.headers.get('content-range'), null);
+  assert.equal(fresh.headers.get('content-disposition'), null);
+  assert.equal(fresh.body, null);
+  assert.equal((await downloadFile(request({ ...headers, 'if-match': '"stale"' }), fileId, deps)).status, 412);
+  for (const response of [await downloadFile(request(headers), fileId, { ...deps, authorize: async () => null }),
+    await downloadFile(request(headers), fileId, { ...deps, readerFor: () => null })]) {
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('etag'), null);
+  }
+  assert.deepEqual(deps.reads.map((read) => [read.method, read.headers.get('if-match'), read.headers.get('range')]),
+    [['HEAD', generation.etag, null]]);
+  for (const [status, length] of [[404, '4'], [412, '4'], [200, '5']] as const) {
+    reply = () => new Response(null, { status, headers: { etag: generation.etag, 'content-length': length } });
+    const missing = await downloadFile(request(headers), fileId, deps);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('etag'), null);
+  }
 });
 
 test('suppresses upstream failures and contradictory evidence without retrying', async () => {
