@@ -84,7 +84,7 @@
     <h1 id="invite-title" tabindex="-1" aria-describedby={invite ? undefined : 'invite-description'} bind:this={heading}>
       {#if view.kind === 'dead-link'}{deadTitle}
       {:else if view.kind === 'unavailable'}Drive unavailable
-      {:else if view.kind === 'signed-in'}You're signed in{#if view.signedInName} as <bdi>{view.signedInName}</bdi>{/if}
+      {:else if view.kind === 'signed-in'}You're signed in{#if view.signedInName}{' as '}<bdi>{view.signedInName}</bdi>{/if}
       {:else if view.inviter}<bdi>{view.inviter}</bdi> invited you to Drive
       {:else}You're invited to Drive{/if}
     </h1>

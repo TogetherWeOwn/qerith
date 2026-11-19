@@ -5,6 +5,7 @@ import { capture, widths } from './root-listing.mjs';
 
 export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken }) {
   const invites = new Invitations(DB);
+  const first = await invites.issue(ownerToken, { displayName: 'Rook' });
   const { token } = await invites.issue(ownerToken, { displayName: 'Pell', note: 'Welcome to Drive!' });
   const context = await browser.newContext({ serviceWorkers: 'block' });
   try {
@@ -17,15 +18,23 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       isUserVerified: true, automaticPresenceSimulation: true,
     } });
     const open = () => page.goto(`${origin}/invite#${token}`);
-    const document = await open();
+    const document = await page.goto(`${origin}/invite#${first.token}`);
     assert.equal(document.status(), 200);
-    assert.equal((await document.allHeaders())['referrer-policy'], 'no-referrer');
+    const headers = await document.allHeaders();
+    assert.equal(headers['referrer-policy'], 'no-referrer');
+    assert.equal(headers['cache-control'], 'private, no-store');
     const field = page.getByRole('textbox', { name: 'Your name' });
     await field.waitFor();
+    assert.equal(await field.inputValue(), 'Rook');
+    assert.equal(page.url(), `${origin}/invite`);
+    await field.fill('Unsaved name');
+    await page.evaluate(token => { location.hash = token; }, token);
+    const note = page.getByText('Welcome to Drive!', { exact: true });
+    await note.waitFor();
     assert.equal(await field.inputValue(), 'Pell');
-    assert.equal(await page.locator('blockquote').innerText(), 'Welcome to Drive!');
-    assert.equal(page.url() === `${origin}/invite`, true);
-    assert.equal(await page.evaluate(token => JSON.stringify(history.state).includes(token), token), false);
+    assert.equal(page.url(), `${origin}/invite`);
+    assert.equal(await page.evaluate(tokens => tokens.some(token => JSON.stringify(history.state).includes(token)),
+      [first.token, token]), false);
     for (const [width, height] of widths) {
       await page.setViewportSize({ width, height });
       await capture(page, 'valid', width, true, 'generated-invite');

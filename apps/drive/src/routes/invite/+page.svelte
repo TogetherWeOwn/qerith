@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { takeInviteToken } from '../../lib/invite-link';
+  import { observeInviteLinks } from '../../lib/invite-link';
   import InviteAcceptance, { type InviteAcceptanceView, type InvitePasskeyPhase } from '../../lib/InviteAcceptance.svelte';
   import SignInPage from '../../lib/SignInPage.svelte';
   import type { PageData } from './$types';
@@ -23,10 +23,24 @@
   }
 
   onMount(() => {
-    token = takeInviteToken();
-    const load = new AbortController();
-    void present(load.signal);
-    return () => { load.abort(); attempt?.abort(); attempt = undefined; clearTimeout(retry); };
+    let load: AbortController | undefined;
+    const reset = () => {
+      load?.abort();
+      attempt?.abort();
+      attempt = undefined;
+      clearTimeout(retry);
+      token = '';
+    };
+    const stop = observeInviteLinks(next => {
+      reset();
+      token = next;
+      view = undefined;
+      phase = 'valid';
+      committing = false;
+      load = new AbortController();
+      void present(load.signal);
+    });
+    return () => { stop(); reset(); };
   });
 
   async function present(signal: AbortSignal) {
@@ -34,9 +48,11 @@
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) { view = { kind: 'dead-link' }; return; }
     try {
       const response = await post('present', {}, signal);
+      signal.throwIfAborted();
       if (response.status === 404) { view = { kind: 'dead-link' }; return; }
       if (!response.ok) throw new Error('Invite presentation unavailable');
       const { displayName, note } = await response.json();
+      signal.throwIfAborted();
       if (typeof PublicKeyCredential === 'undefined' || !navigator.credentials ||
           typeof PublicKeyCredential.parseCreationOptionsFromJSON !== 'function' ||
           typeof PublicKeyCredential.prototype.toJSON !== 'function') phase = 'unsupported';
