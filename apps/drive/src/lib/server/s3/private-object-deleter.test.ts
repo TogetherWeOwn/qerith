@@ -48,14 +48,18 @@ test('rejects invalid storage bindings and never dispatches invalid conditions o
   assert.throws(() => createS3ObjectDeleter({ ...config, endpoint: 'http://localhost', allowLocalHttp: true }, epoch, { ...options, fetch }), /HTTPS/);
   assert.throws(() => createS3ObjectDeleter({ ...config, bucket: 'invalid/bucket' }, epoch, { ...options, fetch }), /configuration/);
   assert.throws(() => createS3ObjectDeleter(config, '', { ...options, fetch }), /epoch/);
+  assert.throws(() => createS3ObjectDeleter(config, epoch, { ...options, fetch, timeoutMs: 0x80000000 }), /timeout/);
   const deleter = bind(fetch);
   const signal = new AbortController().signal;
-  for (const etag of ['*', 'W/"tag"', 'plain', '"one", "two"', '"tag"\r\n']) {
+  let coercions = 0;
+  const changingValidator = { toString: () => ++coercions === 1 ? '"tag"' : '*' } as unknown as string;
+  for (const etag of ['*', 'W/"tag"', 'plain', '"one", "two"', '"tag"\r\n', changingValidator]) {
     assert.equal(await deleter.deleteIfMatch({ ...target, etag }, signal), 'unconfirmed');
   }
-  for (const key of ['', 'a/../b', 'a/./b', 'a\0b']) {
+  for (const key of ['', 'a/../b', 'a/./b', 'a\0b', 1 as unknown as string]) {
     assert.equal(await deleter.deleteIfMatch({ ...target, key }, signal), 'unconfirmed');
   }
+  assert.equal(coercions, 0);
   assert.equal(calls, 0);
 });
 
@@ -68,14 +72,14 @@ test('leaves absent, stale, failed and ambiguous results unconfirmed without a s
     [204, { ...confirmedHeaders, 'x-amz-version-id': 'version' }],
     [307, { ...confirmedHeaders, location: 'https://elsewhere.example/object' }]
   ] as const) {
-    let calls = 0;
+    const sent: Request[] = [];
     const deleter = bind(async (input) => {
-      calls++;
-      assert.equal((input as Request).redirect, 'manual');
+      sent.push(input as Request);
       return new Response(null, { status, headers: new Headers(Object.entries(headers)) });
     });
     assert.equal(await deleter.deleteIfMatch(target, signal), 'unconfirmed', `status ${status}`);
-    assert.equal(calls, 1, `status ${status}`);
+    assert.equal(sent.length, 1, `status ${status}`);
+    assert.equal(sent[0].redirect, 'manual');
   }
   const withoutQualification = createS3ObjectDeleter(config, epoch, { timeoutMs: 1000, fetch: async () => {
     throw new Error('unqualified configuration must not dispatch');

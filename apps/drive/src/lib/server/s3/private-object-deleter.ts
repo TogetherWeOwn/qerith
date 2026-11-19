@@ -14,15 +14,18 @@ type DeleteOptions = Parameters<typeof createS3Transport>[1] & {
 export function createS3ObjectDeleter(config: S3Config, epoch: string, options: DeleteOptions): ResolveObjectDeleter {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { fetch, timeoutMs, now, confirmsRemoval } = options;
+  if (timeoutMs > 0x7fffffff) throw new Error('Invalid S3 timeout');
   const request = createS3Transport(settings, { fetch, timeoutMs, now });
   if (typeof confirmsRemoval !== 'function') return () => null;
   const deleter: NonNullable<ReturnType<ResolveObjectDeleter>> = Object.freeze({
     storageConfigId,
-    async deleteIfMatch({ key, etag }, signal): Promise<'deleted' | 'unconfirmed'> {
-      if (signal.aborted || !key || key.includes('\0') || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) {
-        return 'unconfirmed';
-      }
+    async deleteIfMatch(target, signal): Promise<'deleted' | 'unconfirmed'> {
       try {
+        const { key, etag } = target;
+        if (signal.aborted || typeof key !== 'string' || !key || key.includes('\0') ||
+            typeof etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) {
+          return 'unconfirmed';
+        }
         const response = await request({ method: 'DELETE', key, headers: { 'if-match': etag }, signal, maxResponseBytes: 8192 });
         // An accepted-but-pending operation or a version/delete marker cannot prove permanent removal.
         return !signal.aborted && (response.status === 200 || response.status === 204) &&
