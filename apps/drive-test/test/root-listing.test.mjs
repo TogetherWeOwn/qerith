@@ -55,17 +55,20 @@ it('lists bounded pages of only the session owner’s root and projects client-s
 
 it('denies absent, wrong-origin, and revoked sessions rather than returning an empty drive', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active')");
-  const { token, expiresAt } = await new Sessions(env.DB).issue('member');
+  const principalId = 'revocation-member';
+  await env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')")
+    .bind(principalId).run();
+  const { token, expiresAt } = await new Sessions(env.DB).issue(principalId);
   const unavailable = { status: 'unavailable' };
   expect(await loadRootListing(request(token), auth, [])).toEqual({ status: 'ok', folder: { entries: [], nextPage: null } });
   expect(await loadRootListing(request(token), {}, [])).toEqual(unavailable);
   for (const denied of [request(), request(token, 'https://other.example.test'), request(token, origin, 'https://other.example.test'), request(token, origin, origin, 'POST')]) {
     expect(await loadRootListing(denied, auth, [])).toEqual(unavailable);
   }
-  await env.DB.exec("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'");
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?")
+    .bind(principalId).run();
   // Independently verify the live membership check even if a session row survives.
-  await env.DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'member', ?)")
-    .bind(await tokenHash(token), expiresAt).run();
+  await env.DB.prepare('INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, ?, ?)')
+    .bind(await tokenHash(token), principalId, expiresAt).run();
   expect(await loadRootListing(request(token), auth, [])).toEqual(unavailable);
 });
