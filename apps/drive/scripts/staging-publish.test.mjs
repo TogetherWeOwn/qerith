@@ -60,6 +60,25 @@ test('publishes the validated staging bundle with the pinned runner', async (t) 
   assert.equal(called, 1);
 });
 
+test('passes the ephemeral authorization as a Worker secret file, not via argv or child env', async (t) => {
+  const { root } = fixture(t);
+  const value = `${Date.now() + 60_000}:${'a'.repeat(43)}`;
+  let file;
+  await publish(root, (_binary, args, options) => {
+    assert.equal(args.at(-2), '--secrets-file');
+    file = args.at(-1);
+    assert.ok(!args.includes(value) && !Object.hasOwn(options.env, 'DRIVE_OWNER_ENROLLMENT'));
+    assert.ok(JSON.parse(readFileSync(file, 'utf8')).DRIVE_OWNER_ENROLLMENT === value);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    process.nextTick(() => child.emit('close', 0));
+    return child;
+  }, accountId, value);
+  assert.equal(existsSync(file), false);
+  await assert.rejects(publish(root, () => assert.fail('runner invoked'), accountId, `1000000000000:${'a'.repeat(43)}`),
+    /invalid or expired staging enrollment authorization/);
+});
+
 test('rejects missing and wrong inputs before invoking Wrangler', (t) => {
   const { root, config, save } = fixture(t);
   const never = () => assert.fail('runner invoked');

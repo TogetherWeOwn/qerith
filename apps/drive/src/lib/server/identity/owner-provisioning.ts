@@ -1,8 +1,8 @@
 import type { PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import type { OwnerBootstrap } from './owner-bootstrap';
 
-// This protocol is not an authorization boundary. Only a separately authenticated,
-// deployer-only transport may call it; do not expose it through the app's fetch handler.
+// This protocol is not an authorization boundary. Only the authenticated
+// deployer transport may call it.
 export class OwnerProvisioning {
   constructor(private readonly bootstrap: OwnerBootstrap) {}
 

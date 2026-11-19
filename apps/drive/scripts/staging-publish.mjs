@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { mkdtempDisposableSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,11 +45,30 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
 }
 
-export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, enrollment = '') {
   validateStagingTarget(root, accountId);
-  return new Promise((resolveRun, reject) => {
-    const child = run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
-      cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  return deploy(root, run, enrollment);
+}
+
+async function deploy(root, run, enrollment) {
+  const args = ['deploy', entryPath, '--config', configPath];
+  using secretDir = enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
+  if (secretDir) {
+    const expiresAt = Number(enrollment.slice(0, 13));
+    const now = Date.now();
+    if (enrollment.length !== 57 || !/^\d{13}:[A-Za-z0-9_-]{43}$/.test(enrollment) ||
+        expiresAt <= now || expiresAt > now + 300_000) {
+      throw new Error('invalid or expired staging enrollment authorization');
+    }
+    const file = resolve(secretDir.path, 'secrets.json');
+    writeFileSync(file, JSON.stringify({ DRIVE_OWNER_ENROLLMENT: enrollment }), { mode: 0o600, flag: 'wx' });
+    args.push('--secrets-file', file);
+  }
+  const env = { ...process.env };
+  delete env.DRIVE_OWNER_ENROLLMENT;
+  await new Promise((resolveRun, reject) => {
+    const child = run(resolve(root, 'node_modules/.bin/wrangler'), args, {
+      cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let failed = false;
     const stop = () => {
@@ -83,7 +103,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         !env.CLOUDFLARE_API_TOKEN) {
       throw new Error('publication requires the protected staging dispatch job');
     }
-    await publishStaging(process.cwd());
+    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT);
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }

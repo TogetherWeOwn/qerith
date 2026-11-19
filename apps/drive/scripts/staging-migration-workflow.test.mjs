@@ -23,8 +23,10 @@ test('staging credentials are scoped to the main-only dispatch mutation step', (
     .map(match => match.slice(1)), [
     ['CLOUDFLARE_ACCOUNT_ID', 'QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID'],
     ['CLOUDFLARE_API_TOKEN', 'QERITH_STAGING_CLOUDFLARE_API_TOKEN'],
+    ['DRIVE_OWNER_ENROLLMENT', 'QERITH_STAGING_OWNER_ENROLLMENT'],
   ]);
-  assert.equal([...mutation.matchAll(/\bsecrets\b\s*(?:\.|\[)/g)].length, 2);
+  assert.equal([...mutation.matchAll(/\bsecrets\b\s*(?:\.|\[)/g)].length, 3);
+  assert.match(mutation, /unset DRIVE_OWNER_ENROLLMENT[\s\S]*DRIVE_OWNER_ENROLLMENT="\$enrollment" node scripts\/staging-publish\.mjs --publish/);
 });
 
 test('workflow rejects mismatched source, SHA and checkout', (t) => {
