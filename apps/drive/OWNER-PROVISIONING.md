@@ -10,20 +10,26 @@ A future integrator must supply and independently test a deployer-only execution
 path that authenticates **every** challenge and enrollment operation before
 calling the component, connects to the intended D1 binding, and fixes the RP ID
 and origin to the deployed Drive. The app and infrastructure owners must agree on
-that boundary before wiring it. The component accepts only `{ operation:
-'challenge' }` and `{ operation: 'enroll', challenge, response }`, where
-`response` is a WebAuthn registration response. It delegates verification and
-atomic one-time persistence to `OwnerBootstrap`. Any failure returns only
-`{ ok: false }`; success never returns the owner ID or credential material.
+that boundary before wiring it. `{ operation: 'challenge' }` returns
+`{ ok: true, options }`. The trusted browser client must pass those options
+unchanged to `createOwnerEnrollment` on the configured RP origin. In particular,
+it must not substitute a `user.id` or reconstruct options from the challenge.
+Send the resulting `{ operation: 'enroll', challenge, response }` through the
+private path. WebAuthn registration does not attest `user.id`; the server uses
+only its pending ceremony to choose the principal and binding. `OwnerBootstrap`
+writes the matching principal and credential and consumes the ceremony in one
+transaction. Failures return only `{ ok: false }`; enrollment success returns
+only `{ ok: true }`.
 The transport must itself bound input sizes, prevent caching, avoid logging request
 bodies, responses and credentials, and protect any deployer authentication secret
 from arguments, shell history, logs and browser exposure. Never commit such a
 secret or print it as diagnostic output. Revoke any temporary authorization after
 use. This component does not create or manage secrets.
 
-The owner must register using a browser on the configured RP origin. The missing
-private transport and browser handoff remain a real integration gap: this slice
-alone cannot provision an owner. Before a real run, verify the target and its
+The private transport is still unwired: this slice alone cannot provision an
+owner. Issuing new options supersedes the pending ceremony, which expires after
+five minutes. Older credentials stay unbound; this is not a re-enrollment
+mechanism. Before a real run, verify the target and its
 migration ledger, use the approved deployment and release process, and retain the
 existing forward-only migration policy. Do not use direct SQL inserts or treat a
 failed ceremony as permission to bypass verification. A completed or revoked
