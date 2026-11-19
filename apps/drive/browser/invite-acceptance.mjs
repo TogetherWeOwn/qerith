@@ -37,34 +37,33 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         assert.equal(results.violations.length, 0, `axe violations for ${evidence}: ${JSON.stringify(results.violations)}`);
       }
 
-      if (width === 320) {
-        await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
-        await load('long-note');
-        const modes = await page.evaluate(() => ({
-          reflow: document.documentElement.scrollWidth <= innerWidth,
-          forcedColors: matchMedia('(forced-colors: active)').matches,
-          reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches && !document.getAnimations().length
-        }));
-        assert.deepEqual(modes, { reflow: true, forcedColors: true, reducedMotion: true });
-        await page.keyboard.press('Tab');
-        await focused(field);
-        assert.equal(await field.evaluate(el => {
-          const { outlineStyle, outlineWidth } = getComputedStyle(el);
-          return el.matches(':focus-visible') && outlineStyle === 'solid' && parseFloat(outlineWidth) > 0;
-        }), true);
-        assert.equal(await button.isVisible(), true);
-        assert.equal(await button.evaluate(el => {
-          const { borderTopStyle, borderTopWidth } = getComputedStyle(el);
-          return borderTopStyle === 'solid' && parseFloat(borderTopWidth) > 0;
-        }), true);
-        await capture('forced-colours-focus');
-        // Drive's checklist audits the authored palette separately from UA forced colours.
-        await page.emulateMedia({ forcedColors: 'none' });
-        await audit(await capture('long-note'));
-        await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
-        await capture('greyscale');
-        continue;
-      }
+      await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
+      await load('long-note');
+      const modes = await page.evaluate(() => ({
+        reflow: document.documentElement.scrollWidth <= innerWidth,
+        forcedColors: matchMedia('(forced-colors: active)').matches,
+        reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches && !document.getAnimations().length
+      }));
+      assert.deepEqual(modes, { reflow: true, forcedColors: true, reducedMotion: true });
+      await page.keyboard.press('Tab');
+      await focused(field);
+      assert.equal(await field.evaluate(el => {
+        const { outlineStyle, outlineWidth } = getComputedStyle(el);
+        return el.matches(':focus-visible') && outlineStyle === 'solid' && parseFloat(outlineWidth) > 0;
+      }), true);
+      assert.equal(await button.isVisible(), true);
+      assert.equal(await button.evaluate(el => {
+        const { borderTopStyle, borderTopWidth } = getComputedStyle(el);
+        return borderTopStyle === 'solid' && parseFloat(borderTopWidth) > 0;
+      }), true);
+      await capture('forced-colours-focus');
+      // Drive's checklist audits the authored palette separately from UA forced colours.
+      await page.emulateMedia({ forcedColors: 'none' });
+      if (width === 320) await audit(await capture('long-note'));
+      await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+      await capture('greyscale');
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      if (width === 320) continue;
 
       for (const variant of variants) {
         await load(variant);
@@ -72,6 +71,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         await page.evaluate(() => document.fonts.ready);
         assert.equal(await page.title(), 'Accept invite · Drive');
         assert.equal(await page.getByRole('navigation').count(), 0);
+        assert.equal(await page.getByRole('status').count(), 1);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         switch (variant) {
           case 'valid':
@@ -102,6 +102,8 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
           case 'waiting':
             assert.equal(await waiting.getAttribute('aria-busy'), 'true');
             assert.equal(await cancel.isVisible(), true);
+            assert.equal(await status.isVisible(), true);
+            assert.equal(await page.getByRole('status').textContent(), await status.textContent());
             break;
           case 'cancelled':
             assert.equal(await page.getByRole('alert').filter({ hasText: "Nothing was saved. Try again when you're ready." }).count(), 1);
@@ -119,7 +121,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         await audit(await capture(variant));
       }
 
-      await load('valid');
+      await load('delayed');
       await page.keyboard.press('Tab');
       await focused(field);
       await field.fill('   ');
@@ -136,7 +138,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       await field.fill('  Péll  ');
       await page.keyboard.press('Tab');
       await focused(button);
-      await page.keyboard.press('Enter');
+      await page.locator('form').evaluate(form => { form.requestSubmit(); form.requestSubmit(); });
       await focused(waiting);
       assert.equal(await dataset('name'), 'Péll');
       assert.equal(await field.getAttribute('readonly'), '');
@@ -147,17 +149,25 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       await focused(cancel);
       await page.keyboard.press('Enter');
       await focused(button);
+      await page.getByRole('alert').filter({ hasText: "Nothing was saved. Try again when you're ready." }).waitFor();
+      assert.equal(await field.isEditable(), true);
       assert.equal(await field.inputValue(), '  Péll  ');
       await page.keyboard.press('Enter');
       await focused(waiting);
       assert.equal(await dataset('attempts'), '2');
+      await page.evaluate(async () => {
+        window.dispatchEvent(new Event('fixture-finish-setup'));
+        await new Promise(requestAnimationFrame);
+      });
+      assert.equal(await waiting.getAttribute('aria-busy'), 'true');
       await page.evaluate(() => window.dispatchEvent(new Event('fixture-expire-invite')));
       await focused(heading);
       assert.equal(await field.count(), 0);
       assert.equal(await page.locator('blockquote').count(), 0);
       await writeFile(resolve(output, `invite-keyboard-${width}x${height}.json`), JSON.stringify({
         focusOrder: ['Your name', 'Set up a passkey', 'Cancel', 'Set up a passkey', "This link doesn't work any more"],
-        blankRejected: true, duplicateWhileWaitingRejected: true, retryKeepsEditedName: true
+        blankRejected: true, duplicateWhileWaitingRejected: true, retryKeepsEditedName: true,
+        cancelBeforePreparationSettled: true, stalePreparationDidNotClearRetry: true
       }, null, 2));
       await load('long-note');
       const sanitizedName = '🙂'.repeat(40) + 'Pell';
@@ -178,12 +188,6 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       await page.getByRole('status').filter({ hasText: "This link doesn't work any more" }).waitFor();
       assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
 
-      await load('delayed');
-      await page.locator('form').evaluate(form => { form.requestSubmit(); form.requestSubmit(); });
-      await waiting.waitFor();
-      assert.equal(await dataset('attempts'), '1');
-      await page.evaluate(() => window.dispatchEvent(new Event('fixture-finish-setup')));
-      assert.equal(await waiting.getAttribute('aria-busy'), 'true');
       console.log(`Invite acceptance: ${variants.length} screenshot/axe states and keyboard flow passed at ${width}x${height}`);
     } finally {
       await context.close();

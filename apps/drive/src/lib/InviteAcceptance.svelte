@@ -27,13 +27,16 @@
   let announcement = '';
   let nameError = '';
   let ready = false;
-  let pending = false;
+  let pending: symbol | undefined;
   const deadTitle = "This link doesn't work any more";
+  $: kind = view.kind;
   $: invite = view.kind === 'invite' ? view : null;
+  // The preparation latch lasts only until the caller changes the view kind or phase.
+  $: { kind; phase; pending = undefined; }
   $: shown = pending ? 'waiting' : phase;
   $: status = shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
   $: unavailable = shown !== 'valid' && shown !== 'cancelled';
-  $: updateFocus(view.kind, shown);
+  $: updateFocus(kind, shown);
 
   onMount(() => { ready = true; });
 
@@ -60,9 +63,15 @@
     const displayName = field.value.trim();
     nameError = !displayName ? 'Type a name.' : Array.from(displayName).length > 64 ? 'Use 64 characters or fewer.' : '';
     if (nameError) { field.focus(); return; }
-    pending = true;
+    const attempt = Symbol();
+    pending = attempt;
     try { await onSetup(displayName); }
-    finally { pending = false; }
+    finally { if (pending === attempt) pending = undefined; }
+  }
+
+  function cancelSetup() {
+    pending = undefined;
+    onCancel();
   }
 </script>
 
@@ -74,7 +83,7 @@
       {:else if view.inviter}<bdi>{view.inviter}</bdi> invited you to Drive
       {:else}You're invited to Drive{/if}
     </h1>
-    <p class="sr-only" role="status">{announcement}</p>
+    <p class="sr-only" role="status" aria-live="polite">{invite ? status ?? '' : announcement}</p>
     {#if view.kind === 'dead-link'}
       <p id="invite-description">Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one.</p>
     {:else if view.kind === 'signed-in'}
@@ -93,8 +102,8 @@
           aria-describedby={status ? 'invite-status' : undefined}>
           {shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
         </button>
-        <p id="invite-status" class:notice={shown === 'unsupported'} role="status">{status ?? ''}</p>
-        {#if shown === 'waiting'}<button class="cancel" type="button" on:click={onCancel}>Cancel</button>{/if}
+        <p id="invite-status" class:notice={shown === 'unsupported'}>{status ?? ''}</p>
+        {#if shown === 'waiting'}<button class="cancel" type="button" on:click={cancelSetup}>Cancel</button>{/if}
         {#if shown === 'cancelled'}<p class="notice info" role="alert">{signInCopy.cancelled.notice}</p>{/if}
       </form>
       <p class="explanation">Your device asks to save a passkey for this site. That's how you sign in from now on.</p>
