@@ -51,6 +51,7 @@ async function exercisePrivateBoundary(main) {
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
+if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
