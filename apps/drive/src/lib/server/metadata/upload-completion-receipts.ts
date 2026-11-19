@@ -94,7 +94,8 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { streamBudget, ...options } = transport;
-  const transportOptions = { ...options, streamBudget: streamBudget && { ...streamBudget } };
+  const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
+  const transportOptions = { ...options, streamBudget: budget };
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)

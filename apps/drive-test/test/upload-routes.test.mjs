@@ -191,9 +191,10 @@ it.each([
   }, fetch);
   await setRole('owner');
   try {
-    const streamBudget = { idleMs: 5000, totalMs: 5000 };
+    let idleMs = 5000;
+    const streamBudget = mutateBudget ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
     const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, true);
-    if (mutateBudget) streamBudget.idleMs = 0;
+    idleMs = 0;
     const result = await service.complete(token, operation);
     expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
     if (role === 'member') {
@@ -212,6 +213,9 @@ it.each([
 it('validates owner-only publication transport at construction', () => {
   expect(() => createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 0 }, qualified, true))
     .toThrow('Invalid S3 timeout');
+  const streamBudget = Object.create({ idleMs: 5000, totalMs: 5000 });
+  expect(() => createTrustedUploadPublication(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, qualified, true))
+    .not.toThrow();
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {

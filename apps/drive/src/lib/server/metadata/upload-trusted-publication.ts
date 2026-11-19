@@ -29,7 +29,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { beforeSend, streamBudget, ...options } = transport;
-  const budget = streamBudget && { ...streamBudget };
+  const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
   const makeReader = (checkOwner?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
     streamBudget: budget, beforeSend: async () => await isQualified?.(storageConfigId) === true &&
       (!beforeSend || await beforeSend() === true) && (!checkOwner || await checkOwner()) }));
