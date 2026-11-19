@@ -7,7 +7,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 scan() {
   local repo=$1 fixture_report=${2:-} status=0
   local report="$scratch/history.json" diagnostics="$scratch/history.log" git_bin
-  local triage='Send Security only the run link and head/base SHAs for a private rerun with the same pinned scanner, wrapper and policy.'
+  local triage='Send Security only the run link, head SHA, and base SHA (PR/merge group only) for a private rerun with the same pinned scanner, wrapper and policy.'
   # Gitleaks 8.30.1 can swallow a nonzero git log exit. Require success from
   # the actual child that supplied patches, not from a second traversal.
   git_bin=$(type -P git) || return 1
@@ -131,7 +131,7 @@ assert_detected() {
   GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse --verify HEAD)" \
     bash "$script" scan "$report" > "$log" 2>&1 || status=$?
   if ! grep -Fq -- 'Gitleaks reported findings' "$log" ||
-    ! grep -Fq -- 'Send Security only the run link and head/base SHAs' "$log" ||
+    ! grep -Fq -- 'Send Security only the run link, head SHA, and base SHA (PR/merge group only)' "$log" ||
     grep -Fq -- 'synthetic-ignore-diagnostic-' "$log"; then
     printf 'Expected a safe finding summary in %s\n' "$label" >&2
     return 1
@@ -260,14 +260,20 @@ self_test() {
 #!/usr/bin/env bash
 if [[ ${1:-} == -C && ${3:-} == log ]]; then
   "$FIXTURE_GIT" "$1" "$2" log -1 "${@:4}" || exit "$?"
+  : > "$FIXTURE_GIT_INTERRUPTED" || exit "$?"
   exit 7
 fi
 exec "$FIXTURE_GIT" "$@"
 SH
     chmod +x "$scratch/interrupted/git"
-    if FIXTURE_GIT="$(type -P git)" GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" \
+    if FIXTURE_GIT="$(type -P git)" FIXTURE_GIT_INTERRUPTED="$scratch/interrupted/ran" \
+      GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" \
       bash -c 'export PATH="$1:$PATH"; source "$2" scan' _ "$scratch/interrupted" "$script" > "$scratch/interrupted.log" 2>&1; then
       printf '%s\n' 'Expected silent Git traversal failure to fail the scan' >&2
+      exit 1
+    fi
+    if [[ ! -f "$scratch/interrupted/ran" ]]; then
+      printf '%s\n' 'Expected fixture Git to finish writing the partial patch stream' >&2
       exit 1
     fi
     cmp "$scratch/interrupted.log" <(printf '%s\n' 'Gitleaks history scan failed; diagnostics withheld')
