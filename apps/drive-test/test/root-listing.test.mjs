@@ -1,0 +1,71 @@
+import { applyD1Migrations } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
+import { expect, it } from 'vitest';
+import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
+import { loadRootListing } from '../../drive/src/lib/server/root-listing.ts';
+
+const origin = 'https://drive.example.test';
+const auth = { DB: env.DB, DRIVE_ORIGIN: origin };
+function request(token, source, url = origin, method = 'GET') {
+  const headers = new Headers();
+  if (token) headers.set('cookie', `__Host-drive-session=${token}`);
+  if (source) headers.set('origin', source);
+  // A caller-supplied identity has no effect on the owner being listed.
+  return new Request(`${url}/?principal=other`, { headers, method });
+}
+
+it('lists bounded pages of only the session owner’s root and projects client-safe fields', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active'), ('other', 'owner', 'active')");
+  const insert = (id, owner, parent, name, key = null) => env.DB.prepare(`INSERT INTO drive_entries
+    (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(id, owner, parent, name, key ? 'file' : 'folder', key, key ? 1 : null);
+  await env.DB.batch([
+    insert('file', 'member', null, 'first.txt', 'test-storage-key'),
+    ...Array.from({ length: 98 }, (_, n) => insert(`f${n}`, 'member', null, `folder-${String(n).padStart(2, '0')}`)),
+    insert('boundary', 'member', null, 'á-👩🏽‍💻.pdf', 'test-boundary-key'),
+    insert('last', 'member', null, 'Ω.txt', 'test-last-key'),
+    insert('nested', 'member', 'f0', 'hidden'),
+    insert('other-file', 'other', null, '界.txt', 'test-other-key')
+  ]);
+  const sessions = new Sessions(env.DB);
+  const { token } = await sessions.issue('member');
+  const { token: otherToken } = await sessions.issue('other');
+  const first = await loadRootListing(request(token), auth, []);
+  expect(first.status).toBe('ok');
+  expect(first.folder.entries).toHaveLength(100);
+  expect(first.folder.entries[0]).toEqual({ id: 'file', name: 'first.txt', kind: 'file' });
+  expect(first.folder.entries.at(-1)).toEqual({ id: 'boundary', name: 'á-👩🏽‍💻.pdf', kind: 'file' });
+  expect(first.folder.nextPage).toMatch(/^[A-Za-z0-9_-]+$/);
+  expect(JSON.stringify(first)).not.toContain(token);
+  expect(JSON.stringify(first)).not.toContain('test-storage-key');
+  expect(JSON.stringify(first)).not.toContain('hidden');
+
+  const page = first.folder.nextPage;
+  expect(await loadRootListing(request(token), auth, [page])).toEqual({
+    status: 'ok', folder: { entries: [{ id: 'last', name: 'Ω.txt', kind: 'file' }], nextPage: null }
+  });
+  expect(await loadRootListing(request(otherToken), auth, [page])).toEqual({
+    status: 'ok', folder: { entries: [{ id: 'other-file', name: '界.txt', kind: 'file' }], nextPage: null }
+  });
+  for (const invalid of [[''], ['not+url-safe'], ['a'.repeat(4097)], [page, page]]) {
+    expect(await loadRootListing(request(token), auth, invalid)).toEqual({ status: 'unavailable' });
+  }
+});
+
+it('denies absent, wrong-origin, and revoked sessions rather than returning an empty drive', async () => {
+  await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active')");
+  const { token, expiresAt } = await new Sessions(env.DB).issue('member');
+  const unavailable = { status: 'unavailable' };
+  expect(await loadRootListing(request(token), auth, [])).toEqual({ status: 'ok', folder: { entries: [], nextPage: null } });
+  expect(await loadRootListing(request(token), {}, [])).toEqual(unavailable);
+  for (const denied of [request(), request(token, 'https://other.example.test'), request(token, origin, 'https://other.example.test'), request(token, origin, origin, 'POST')]) {
+    expect(await loadRootListing(denied, auth, [])).toEqual(unavailable);
+  }
+  await env.DB.exec("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'");
+  // Independently verify the live membership check even if a session row survives.
+  await env.DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'member', ?)")
+    .bind(await tokenHash(token), expiresAt).run();
+  expect(await loadRootListing(request(token), auth, [])).toEqual(unavailable);
+});
