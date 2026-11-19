@@ -25,6 +25,10 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         const evidence = `invite-${variant}-${width}x${height}`;
         await page.screenshot({ path: resolve(output, `${evidence}.png`), fullPage: true });
         await writeFile(resolve(output, `${evidence}-tree.txt`), await page.getByRole('main').ariaSnapshot());
+        return evidence;
+      }
+
+      async function audit(evidence) {
         await page.evaluate(axe);
         const results = await page.evaluate(() => window.axe.run(document, {
           runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] }
@@ -44,9 +48,19 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
         assert.deepEqual(modes, { reflow: true, forcedColors: true, reducedMotion: true });
         await page.keyboard.press('Tab');
         await focused(field);
-        assert.equal(await field.evaluate(el => el.matches(':focus-visible') && parseFloat(getComputedStyle(el).outlineWidth) > 0), true);
+        assert.equal(await field.evaluate(el => {
+          const { outlineStyle, outlineWidth } = getComputedStyle(el);
+          return el.matches(':focus-visible') && outlineStyle === 'solid' && parseFloat(outlineWidth) > 0;
+        }), true);
+        assert.equal(await button.isVisible(), true);
+        assert.equal(await button.evaluate(el => {
+          const { borderTopStyle, borderTopWidth } = getComputedStyle(el);
+          return borderTopStyle === 'solid' && parseFloat(borderTopWidth) > 0;
+        }), true);
         await capture('forced-colours-focus');
+        // Drive's checklist audits the authored palette separately from UA forced colours.
         await page.emulateMedia({ forcedColors: 'none' });
+        await audit(await capture('long-note'));
         await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
         await capture('greyscale');
         continue;
@@ -102,7 +116,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
             break;
           }
         }
-        await capture(variant);
+        await audit(await capture(variant));
       }
 
       await load('valid');
@@ -114,7 +128,7 @@ export async function exerciseInviteAcceptance(browser, origin, axe, output) {
       assert.equal(await field.getAttribute('aria-invalid'), 'true');
       await page.getByRole('alert').filter({ hasText: 'Type a name.' }).waitFor();
       assert.equal(await dataset('attempts'), undefined);
-      await capture('name-error');
+      await audit(await capture('name-error'));
       await field.fill('🙂'.repeat(65));
       await field.press('Enter');
       await page.getByRole('alert').filter({ hasText: 'Use 64 characters or fewer.' }).waitFor();
