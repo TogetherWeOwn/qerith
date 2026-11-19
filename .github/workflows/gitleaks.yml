@@ -1,0 +1,53 @@
+name: gitleaks
+
+# Keep the job name stable for the default-branch ruleset.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'merge_group' }}
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned gitleaks
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          # Release checksum for the Linux x64 archive; update with the version.
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d "$RUNNER_TEMP/gitleaks-install.XXXXXX")
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 30 --retry 3 -o "$scratch/$asset" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$asset"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$scratch/$asset" | sha256sum --check -
+          tar -xzf "$scratch/$asset" -C "$scratch" gitleaks
+          install -m 0755 "$scratch/gitleaks" "$GITLEAKS_BIN"
+          "$GITLEAKS_BIN" version
+      - name: Test full-history scan regressions
+        run: bash scripts/gitleaks-ci.sh self-test
+      - name: Scan the full history
+        env:
+          SCAN_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/gitleaks-ci.sh scan
