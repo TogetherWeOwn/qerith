@@ -34,6 +34,7 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS drive_webauthn_challenges;
     DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_owner_registration;
     DROP TABLE IF EXISTS drive_credentials;
     DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
