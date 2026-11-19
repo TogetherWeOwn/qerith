@@ -204,6 +204,7 @@ try {
     response.url() === origin + target && response.request().isNavigationRequest()), next.click()]);
   assert.equal(expiredPage.status(), 303);
   assert.equal((await expiredPage.allHeaders()).location, `/sign-in?${new URLSearchParams({ next: target })}`);
+  await signInFrom(first, target);
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
   assert.equal(await privateStatus(), 401);
