@@ -11,8 +11,30 @@ export async function captureRootUpload(page, origin, holdResponse) {
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   const status = page.getByRole('status');
   const link = page.getByRole('link', { name, exact: true });
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  // Keep Chromium's async chooser interception enabled before either keypress.
+  const keepChooserIntercepted = () => {};
+  page.on('filechooser', keepChooserIntercepted);
   const choose = async () => {
-    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+    await upload.evaluate(button => {
+      const activation = [];
+      button.dataset.fixtureActivation = JSON.stringify(activation);
+      const record = source => event => {
+        activation.push([source, event.type, event.isTrusted, navigator.userActivation.isActive]);
+        button.dataset.fixtureActivation = JSON.stringify(activation);
+      };
+      button.addEventListener('keydown', record('button'), { once: true });
+      button.addEventListener('click', record('button'), { once: true });
+      document.querySelector('input[type="file"]').addEventListener('click', record('input'), { once: true });
+    });
+    let chooser;
+    try {
+      [chooser] = await Promise.all([page.waitForEvent('filechooser', { timeout: 5_000 }), page.keyboard.press('Enter')]);
+    } catch (cause) {
+      const activation = await upload.getAttribute('data-fixture-activation');
+      throw new Error(`Enter did not open the picker; activation: ${activation}; page errors: ${JSON.stringify(pageErrors)}`, { cause });
+    }
     assert.equal(chooser.isMultiple(), false);
     await chooser.setFiles(file);
   };
