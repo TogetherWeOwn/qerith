@@ -74,27 +74,15 @@ try {
   } });
 
   const assets = new Set();
-  let holdRefresh, noticeFixture;
+  let holdRefresh;
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
-    let seededNotice;
-    if (request.isNavigationRequest()) {
-      headers['x-fixture-navigation'] = '1';
-      if (noticeFixture && url.pathname === '/' && url.search === `?download=${noticeFixture.nonce}`) {
-        // Seed only this Worker document request, not a persistent browser cookie.
-        seededNotice = noticeFixture;
-        noticeFixture = undefined;
-        headers['sec-fetch-site'] = 'same-origin';
-        headers.cookie = `${headers.cookie}; ${seededNotice.name}=${seededNotice.id}`;
-      }
-    }
+    if (request.isNavigationRequest()) headers['x-fixture-navigation'] = '1';
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
-    if (seededNotice) assert.ok(response.headers.getSetCookie().some(value => value.startsWith(`${seededNotice.name}=;`)),
-      'the Worker consumed the synthetic document notice');
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
     if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
@@ -140,15 +128,19 @@ try {
     INSERT INTO drive_entries (id, owner_id, name, kind)
     SELECT printf('00000000-0000-4000-8000-%012d', n), 'owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
   const failedDownload = await row.getAttribute('href');
-  const noticeRetry = page.getByRole('alert').getByRole('link', { name: 'Try again' });
-  async function visitWithNotice() {
+  const notice = page.getByRole('alert');
+  const noticeRetry = notice.getByRole('link', { name: 'Retry download', exact: true });
+  const listingRetry = page.getByRole('link', { name: 'Try again', exact: true });
+  async function visitWithNotice(value = failedDownload.split('/').at(-1)) {
     const nonce = crypto.randomUUID(), name = `__Host-drive-download-failed-${nonce}`;
-    noticeFixture = { nonce, name, id: failedDownload.split('/').at(-1) };
+    await context.addCookies([{ name, value, url: `${origin}/`, secure: true, httpOnly: true }]);
+    assert.ok((await context.cookies(origin)).some(cookie => cookie.name === name));
     const document = await page.goto(`${origin}/?download=${nonce}`);
     assert.equal(document?.status(), 200);
-    assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
+    assert.ok(!(await context.cookies(origin)).some(cookie => cookie.name === name), 'Chromium removed the one-time notice cookie');
   }
   await visitWithNotice();
+  assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   await upload.focus();
   const [nextChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -173,11 +165,16 @@ try {
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
   await failedRefreshChooser.setFiles({ ...file, name: 'B.bin' });
-  const listingRetry = page.getByRole('link', { name: 'Try again', exact: true }).and(page.locator('a[href="/"]'));
-  await page.getByText("This folder didn't load.", { exact: false }).waitFor();
   await listingRetry.and(page.locator(':focus')).waitFor();
+  assert.equal(await listingRetry.getAttribute('href'), '/');
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload, 'an unavailable listing preserves the document notice');
   await visitWithNotice();
+  await page.getByText("This folder didn't load.", { exact: false }).waitFor();
+  assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
+  await visitWithNotice('unavailable');
+  await notice.getByText('The file didn’t download.', { exact: true }).waitFor();
+  assert.equal(await notice.getByRole('link').count(), 0);
+  assert.equal(await listingRetry.getAttribute('href'), '/');
 
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
@@ -207,6 +204,7 @@ try {
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
     noticePreservedOnRefresh: true, noticePreservedOnListingFailure: true, focusRestoredOnListingFailure: true,
+    oneTimeNoticeCookieRemoved: true, distinctRetryLinks: true, nonRetryableNoticeHasNoLink: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,
