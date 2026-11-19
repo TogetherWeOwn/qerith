@@ -21,16 +21,29 @@ test('retains only canonical Drive paths and preserves ordinary query strings', 
   }
 });
 
+const documentMetadata = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+
+test('recognizes GET and HEAD Drive document navigations regardless of source site', () => {
+  for (const site of ['cross-site', 'same-site', 'same-origin', 'none', undefined]) {
+    const headers = new Headers(documentMetadata);
+    if (site !== undefined) headers.set('sec-fetch-site', site);
+    for (const method of ['GET', 'HEAD']) {
+      for (const path of pages) {
+        const request = new Request(`https://drive.example${path}${query}`, { method, headers });
+        assert.equal(isDrivePageNavigation(request), true, `${method} ${path} from ${site}`);
+      }
+    }
+  }
+});
+
 test('classifies only explicit GET or HEAD Drive document navigations without range or preconditions', () => {
-  const metadata = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
+  const metadata = { ...documentMetadata, 'sec-fetch-site': 'cross-site' };
   const request = (path = '/', method = 'GET', headers: HeadersInit = metadata) =>
     new Request(`https://drive.example${path}`, { method, headers });
-  for (const path of pages) assert.equal(isDrivePageNavigation(request(path + query)), true, path);
-  assert.equal(isDrivePageNavigation(request('/people', 'HEAD', { ...metadata, 'sec-fetch-site': 'none' })), true);
   for (const path of nonPages) assert.equal(isDrivePageNavigation(request(path)), false, path);
   assert.equal(isDrivePageNavigation(request('/', 'POST')), false);
   for (const [name, value] of Object.entries({
-    'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site',
+    'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'iframe',
   })) {
     const headers = new Headers(metadata);
     headers.delete(name);

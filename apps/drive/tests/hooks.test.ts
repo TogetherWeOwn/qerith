@@ -6,7 +6,7 @@ const origin = 'https://example.test';
 const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
-function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable') {
+function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable', routeId?: string) {
   let lookups = 0;
   let resolved = false;
   const env = { DRIVE_ORIGIN: configuredOrigin, DB: fault === 'unbound' ? undefined : { prepare: () => {
@@ -14,7 +14,7 @@ function request(url: string, init?: RequestInit, configuredOrigin = origin, fau
     if (fault === 'unavailable') throw new Error('database unavailable');
     return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
   } } };
-  const event = { request: new Request(url, init), locals: {} };
+  const event = { request: new Request(url, init), locals: {}, route: { id: routeId ?? null } };
   const handle = privateRequests(env);
   return handle({ event, resolve: async () => {
     resolved = true;
@@ -59,6 +59,30 @@ test('absent, malformed and ambiguous session cookies never resolve a route', as
     const result = await request(`${origin}/private`, { headers: { cookie: value } });
     assert.equal(result.response.status, 401);
     assert.equal(result.lookups, 0);
+    assert.equal(result.resolved, false);
+  }
+});
+
+test('signed-out cross-site download links redirect without changing API or conditional responses', async () => {
+  const path = '/api/download/file-1';
+  const routeId = '/api/download/[fileId]';
+  const metadata = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  const visit = (init: RequestInit) => request(origin + path, init, origin, undefined, routeId);
+
+  const { response, lookups, resolved } = await visit({ headers: metadata });
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('location'), '/sign-in?next=%2F');
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(lookups, 0);
+  assert.equal(resolved, false);
+
+  for (const init of [{ headers: { ...metadata, 'sec-fetch-mode': 'cors' } },
+    { method: 'HEAD', headers: metadata },
+    { headers: { ...metadata, range: 'bytes=0-1' } },
+    { headers: { ...metadata, 'if-none-match': '"previous"' } }]) {
+    const result = await visit(init);
+    assert.equal(result.response.status, 401);
+    assert.equal(result.response.headers.get('location'), null);
     assert.equal(result.resolved, false);
   }
 });
