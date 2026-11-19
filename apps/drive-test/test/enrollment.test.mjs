@@ -5,6 +5,7 @@ import { Invitations } from '../../drive/src/lib/server/identity/invitations.ts'
 import { InvitationEnrollment } from '../../drive/src/lib/server/identity/enrollment.ts';
 import { PasskeyLogin } from '../../drive/src/lib/server/identity/login.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
+import { handleInviteAcceptance } from '../../drive/src/lib/server/invite-acceptance.ts';
 import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
 
 async function setup() {
@@ -64,7 +65,10 @@ it('rejects bad ceremonies and unavailable invitations and challenges without pa
     if (state === 'cancelled') await invitations.cancel(owner, invite.id);
     if (state === 'invite-expired') await env.DB.prepare('UPDATE drive_invitations SET expires_at = 1 WHERE id = ?').bind(invite.id).run();
     if (state === 'challenge-expired') await env.DB.prepare('UPDATE drive_bound_ceremonies SET expires_at = 1 WHERE challenge = ?').bind(challenge).run();
-    if (state === 'replaced') expect((await enrollment.issueOptions(invite.token)).user.id).not.toBe(user.id);
+    if (state === 'replaced') {
+      await env.DB.prepare('UPDATE drive_bound_ceremonies SET expires_at = expires_at - 10000 WHERE challenge = ?').bind(challenge).run();
+      expect((await enrollment.issueOptions(invite.token)).user.id).not.toBe(user.id);
+    }
     if (state === 'unbound') await env.DB.prepare('UPDATE drive_bound_ceremonies SET webauthn_user_handle = NULL WHERE challenge = ?').bind(challenge).run();
     const target = state === 'different-invite' ? await invitations.issue(owner) : invite;
     if (target !== invite) await enrollment.issueOptions(target.token);
@@ -73,6 +77,36 @@ it('rejects bad ceremonies and unavailable invitations and challenges without pa
   }
   expect((await env.DB.prepare("SELECT count(*) AS n FROM drive_principals WHERE role = 'member'").first()).n).toBe(0);
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_credentials').first()).n).toBe(0);
+});
+
+it('composes the HTTP boundary with real invitation enrollment without issuing a session', async () => {
+  const { owner, invitations } = await setup();
+  const send = (step, body) => handleInviteAcceptance(new Request(`${origin}/api/invites/${step}`, {
+    method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), step, { DRIVE_ORIGIN: origin, DB: env.DB });
+  const invite = await invitations.issue(owner, { displayName: 'Guest' });
+  expect(await (await send('present', { token: invite.token })).json()).toEqual({ displayName: 'Guest', note: null });
+  const starts = await Promise.all([send('challenge', { token: invite.token }), send('challenge', { token: invite.token })]);
+  expect(starts.map((result) => result.status).sort()).toEqual([200, 429]);
+  expect(starts.find((result) => result.status === 429).headers.get('retry-after')).toBe('60');
+  const started = starts.find((result) => result.status === 200);
+  const { options: { challenge } } = await started.json();
+  const { registration } = await fixture('registration', { challenge });
+  const body = { token: invite.token, challenge, response: registration };
+  const attempts = await Promise.all([send('enroll', body), send('enroll', body)]);
+  expect(attempts.map((result) => result.status).sort()).toEqual([204, 404]);
+  for (const result of attempts) {
+    expect(result.headers.get('set-cookie')).toBeNull();
+    expect(result.headers.get('cache-control')).toBe('private, no-store');
+  }
+  expect((await send('challenge', { token: invite.token })).status).toBe(404);
+  for (const state of ['cancelled', 'expired']) {
+    const other = await invitations.issue(owner);
+    if (state === 'cancelled') await invitations.cancel(owner, other.id);
+    else await env.DB.prepare('UPDATE drive_invitations SET expires_at = 1 WHERE id = ?').bind(other.id).run();
+    expect((await send('present', { token: other.token })).status).toBe(404);
+    expect((await send('challenge', { token: other.token })).status).toBe(404);
+  }
 });
 
 it('rolls back invitation, challenge and principal when a credential is not unique', async () => {

@@ -2,6 +2,7 @@ import { generateRegistrationOptions } from '@simplewebauthn/server';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { BoundChallenges } from './challenges';
 import { createCeremonyVerifier } from './ceremony';
+import { InvitationUnavailable } from './invitations';
 
 interface Statement {
   bind(...values: (string | number | number[])[]): Statement;
@@ -31,35 +32,40 @@ export class InvitationEnrollment {
     const invitation = await this.db.prepare(`SELECT id FROM drive_invitations WHERE token_hash = ?
       AND cancelled_at IS NULL AND redeemed_at IS NULL
       AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`).bind(hash).first();
-    if (!invitation) throw new Error('Invitation unavailable');
+    if (!invitation) throw new InvitationUnavailable();
     const principalId = crypto.randomUUID();
     const options = await generateRegistrationOptions({
       rpID: this.rpID, rpName: 'Drive', userName: 'Drive member',
       userID: crypto.getRandomValues(new Uint8Array(32)),
       authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
     });
-    await new BoundChallenges(this.db).issueRegistration(`invitation:${hash}`, options.challenge, principalId, options.user.id);
+    await new BoundChallenges(this.db).issueRegistration(`invitation:${hash}`, options.challenge, principalId, options.user.id, 10_000);
     return options;
   }
 
   async enroll(token: string, challenge: string, response: RegistrationResponseJSON): Promise<string> {
     const hash = await invitationHash(token);
-    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new TypeError('Invalid challenge');
-    const result = await this.#verifier.registration(response, challenge);
-    if (!result.verified || !result.registrationInfo) throw new Error('Registration not verified');
-    const credential = result.registrationInfo.credential;
+    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new InvitationUnavailable();
     const context = `invitation:${hash}`;
+    // Reject unbound traffic before calling the verifier. The transaction below
+    // repeats these predicates; this read does not authorize the write.
+    const liveRegistration = `FROM drive_bound_ceremonies
+      WHERE context = ? AND purpose = 'registration' AND challenge = ?
+        AND principal_id IS NOT NULL AND webauthn_user_handle IS NOT NULL
+        AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+        AND EXISTS (SELECT 1 FROM drive_invitations
+          WHERE token_hash = ? AND cancelled_at IS NULL AND redeemed_at IS NULL
+            AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
+    const pending = await this.db.prepare(`SELECT 1 ${liveRegistration}`).bind(context, challenge, hash).first();
+    if (!pending) throw new InvitationUnavailable();
+    const result = await this.#verifier.registration(response, challenge).catch(() => null);
+    if (!result?.verified || !result.registrationInfo) throw new InvitationUnavailable();
+    const credential = result.registrationInfo.credential;
     // Read identity only from the matching server-owned ceremony. Dependent
     // writes run in the same transaction; uniqueness failures roll them back.
     const batch = await this.db.batch([
       this.db.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
-        SELECT principal_id, 'member', 'active', webauthn_user_handle FROM drive_bound_ceremonies
-        WHERE context = ? AND purpose = 'registration' AND challenge = ?
-          AND principal_id IS NOT NULL AND webauthn_user_handle IS NOT NULL
-          AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-          AND EXISTS (SELECT 1 FROM drive_invitations
-            WHERE token_hash = ? AND cancelled_at IS NULL AND redeemed_at IS NULL
-              AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER))`).bind(context, challenge, hash),
+        SELECT principal_id, 'member', 'active', webauthn_user_handle ${liveRegistration}`).bind(context, challenge, hash),
       this.db.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
         SELECT ?, principal_id, ?, ?, ?, webauthn_user_handle FROM drive_bound_ceremonies
         WHERE context = ? AND purpose = 'registration' AND challenge = ? AND changes() = 1`)
@@ -72,7 +78,7 @@ export class InvitationEnrollment {
         RETURNING principal_id`).bind(context, challenge),
     ]);
     const enrolled = batch[3].results?.[0];
-    if (!enrolled) throw new Error('Invitation or challenge unavailable');
+    if (!enrolled) throw new InvitationUnavailable();
     return enrolled.principal_id;
   }
 }

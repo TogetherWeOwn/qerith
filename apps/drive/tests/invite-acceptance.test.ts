@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { CeremonyCapacityReached } from '../src/lib/server/identity/challenges';
 import { inviteAcceptance, type InviteRegistration } from '../src/lib/server/invite-acceptance';
 
 const origin = 'https://drive.example.test';
@@ -14,7 +15,7 @@ const response = { id: 'key', rawId: 'key', type: 'public-key', clientExtensionR
 const request = (init: RequestInit = {}, url = `${origin}/invite`) =>
   new Request(url, { method: 'POST', headers, body: JSON.stringify({ token }), ...init });
 
-function fixture(state: 'live' | 'missing' | 'fault' | 'member' = 'live') {
+function fixture(state: 'live' | 'missing' | 'fault' | 'member' | 'throttled' = 'live') {
   const calls: unknown[] = [];
   const prepare = (sql: string) => ({
     bind() { return this; },
@@ -27,7 +28,11 @@ function fixture(state: 'live' | 'missing' | 'fault' | 'member' = 'live') {
     async all<T>(): Promise<{ results: T[] }> { throw new Error('Unexpected database call'); },
   });
   const registration: InviteRegistration = {
-    async issueOptions(value) { calls.push(['challenge', value]); return state === 'live' ? options : null; },
+    async issueOptions(value) {
+      calls.push(['challenge', value]);
+      if (state === 'throttled') throw new CeremonyCapacityReached();
+      return state === 'live' ? options : null;
+    },
     async enroll(...args) { calls.push(['enroll', ...args]); return state === 'live'; },
   };
   const run = (req: Request, step: Parameters<typeof inviteAcceptance>[1] = 'present') =>
@@ -91,4 +96,10 @@ void test('refuses live or ambiguous sessions and separates invite denial from d
   assertPolicy(await fixture('missing').run(request(), 'challenge'), 404);
   assertPolicy(await fixture('missing').run(request({ body }), 'enroll'), 404);
   assertPolicy(await fixture('fault').run(request()), 503);
+});
+
+void test('translates challenge throttling to a non-cacheable retry response', async () => {
+  const result = await fixture('throttled').run(request(), 'challenge');
+  assertPolicy(result, 429);
+  assert.equal(result.headers.get('retry-after'), '60');
 });
