@@ -1,12 +1,11 @@
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
-import { downloadFile } from '../../drive/src/lib/server/download.ts';
 import { PrivateDeletion } from '../../drive/src/lib/server/metadata/private-deletion.ts';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
 import { createPublishedReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
-import { createImmutableS3Reader, createS3Objects } from '../../drive/src/lib/server/s3/objects.ts';
+import { publishedDownload } from '../../drive/src/lib/server/published-download.ts';
 import { config, epoch, parts, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
@@ -99,28 +98,30 @@ it('preserves opaque evidence and fails closed on malformed evidence or a primar
 
 it('composes with immutable full and range GETs without storage calls for denied or unbound reads', async () => {
   const { id, token } = await seedBoundPublication('read-stream');
-  const { resolveGeneration } = createPublishedReadAccess(env.DB, epoch, config);
+  const storage = { DB: env.DB, DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket,
+    DRIVE_S3_REGION: config.region, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId,
+    DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey, DRIVE_S3_STORAGE_EPOCH: epoch };
   const fetch = vi.fn(async (request) => request.headers.has('range')
     ? new Response('bc', { status: 206, headers: { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' } })
     : new Response('abcdefg', { headers: { etag, 'content-length': '7' } }));
-  const reader = createImmutableS3Reader(createS3Objects(config, { fetch, timeoutMs: 5000 }));
-  const readerFor = vi.fn((generationConfig) => generationConfig === expectedConfigId ? reader : null);
-  const get = (headers = {}, auth = token, resolve = resolveGeneration) => downloadFile(new Request('https://drive.example/file', { headers }), id, {
-    authorize: async () => auth, resolveGeneration: resolve, readerFor,
-  });
+  const onReadError = vi.fn();
+  const get = (headers = {}, auth = token, bindings = storage, signal) => publishedDownload(
+    new Request('https://drive.example/file', { headers, signal }), id, auth, bindings, onReadError, fetch);
   for (const response of [await get({}, 'a'.repeat(43)), await get({}, token,
-    createPublishedReadAccess(env.DB, 'different-epoch', config).resolveGeneration)]) {
+    { ...storage, DRIVE_S3_STORAGE_EPOCH: 'different-epoch' })]) {
     expect(response.status).toBe(404);
     expect(await response.text()).toBe('');
     expect(response.headers.get('etag')).toBeNull();
   }
-  expect(readerFor).not.toHaveBeenCalled();
+  expect(onReadError).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
   const full = await get();
   expect(full.status).toBe(200);
+  expect(full.headers.get('content-length')).toBe('7');
   expect(await full.text()).toBe('abcdefg');
   const range = await get({ range: 'bytes=1-2' });
   expect(range.status).toBe(206);
+  expect(range.headers.get('content-length')).toBe('2');
   expect(await range.text()).toBe('bc');
   const url = `${config.endpoint}/${config.bucket}/key-read-stream`;
   expect(fetch.mock.calls.map(([request]) => [request.method, request.url, request.headers.get('if-match'), request.headers.get('range')]))
@@ -134,5 +135,64 @@ it('composes with immutable full and range GETs without storage calls for denied
     expect(denied.status).toBe(404);
     expect(await denied.text()).toBe('');
   }
-  expect(fetch).toHaveBeenCalledTimes(6);
+  expect(onReadError).not.toHaveBeenCalled();
+  fetch.mockResolvedValueOnce(new Response(null, { headers: { etag, 'content-length': '7' } }));
+  const empty = await get();
+  expect(empty.status).toBe(404);
+  expect(empty.headers.get('content-disposition')).toBeNull();
+  expect(onReadError).toHaveBeenCalledTimes(1);
+  const singleHeaders = { etag, 'content-range': 'bytes 1-1/7', 'content-length': '1' };
+  fetch.mockResolvedValueOnce(new Response('b', { status: 206, headers: singleHeaders }));
+  expect(await (await get({ range: 'bytes=1-1' })).text()).toBe('b');
+  fetch.mockResolvedValueOnce(new Response(new ReadableStream({ start(output) {
+    output.enqueue(new Uint8Array([98]));
+  }, pull(output) { output.error(new Error('EOF unavailable')); } }, { highWaterMark: 0 }),
+  { status: 206, headers: singleHeaders }));
+  expect((await get({ range: 'bytes=1-1' })).status).toBe(404);
+  for (const range of [null, 'bytes=1-2']) {
+    fetch.mockResolvedValueOnce(new Response('b', { status: range ? 206 : 200, headers: range
+      ? { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' } : { etag, 'content-length': '7' } }));
+    const truncated = await get(range ? { range } : {});
+    expect(truncated.status).toBe(range ? 206 : 200);
+    await expect(truncated.arrayBuffer()).rejects.toThrow();
+  }
+  for (const stop of ['provider', 'client', 'backpressure', 'final-byte', 'single-byte']) {
+    const single = stop === 'single-byte', afterEof = single || stop === 'final-byte';
+    const cancelled = vi.fn();
+    const abort = new AbortController();
+    const cutoff = new AbortController();
+    const eof = Promise.withResolvers();
+    let source;
+    const pendingEof = new ReadableStream({ start(output) {
+      source = output;
+      output.enqueue(new TextEncoder().encode(single ? 'b' : 'abcdefg'));
+    }, pull(output) {
+      if (afterEof) output.close();
+      eof.resolve();
+    }, cancel: cancelled }, { highWaterMark: 0 });
+    fetch.mockResolvedValueOnce(new Response(pendingEof, single
+      ? { status: 206, headers: singleHeaders } : { headers: { etag, 'content-length': '7' } }));
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(cutoff.signal);
+    const client = (await get(single ? { range: 'bytes=1-1' } : {}, token, storage, abort.signal)
+      .finally(() => timeout.mockRestore())).body.getReader();
+    if (stop === 'backpressure') {
+      cutoff.abort();
+      expect(cancelled).toHaveBeenCalledOnce(); // Before any client read relieves backpressure.
+    } else {
+      if (!single) expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
+      await eof.promise;
+      if (afterEof) {
+        await scheduler.wait(0); // Let the verified final byte reach the native writer, not the client.
+        cutoff.abort();
+      } else if (stop === 'client') abort.abort();
+      else source.error(new Error('EOF unavailable'));
+    }
+    await expect(client.read(), stop).rejects.toThrow();
+    if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
+  }
+  await sessions.revoke(token);
+  const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
+  expect(revoked.status).toBe(404);
+  expect(revoked.headers.get('content-range')).toBeNull();
+  expect(fetch).toHaveBeenCalledTimes(16);
 });

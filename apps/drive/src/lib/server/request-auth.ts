@@ -1,4 +1,5 @@
 import type { Handle } from '@sveltejs/kit/hooks';
+import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
 
 export interface DriveAuthEnv {
@@ -68,7 +69,8 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     } catch {
       return deny(503);
     }
-    if (!session) return deny(401);
+    if (!session) return event.route?.id === downloadRoute && isDownloadNavigation(event.request)
+      ? downloadRedirect(downloadSignIn) : deny(401);
     event.locals.driveSession = session;
 
     const response = await resolve(event);

@@ -48,9 +48,20 @@ async function exercisePrivateBoundary(main) {
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
   const configPath = resolve(join(fixture.path, 'wrangler.json'));
+  const entry = resolve(join(fixture.path, 'navigation.mjs'));
+  // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
+  await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
+export default { fetch(request, env, ctx) {
+  const mode = request.headers.get('x-test-fetch-mode');
+  if (mode === null) return app.fetch(request, env, ctx);
+  const input = new Request(request);
+  input.headers.delete('x-test-fetch-mode');
+  input.headers.set('sec-fetch-mode', mode);
+  return app.fetch(input, env, ctx);
+} };`);
   await writeFile(configPath, JSON.stringify({
     ...config,
-    main: resolve(main),
+    main: entry,
     assets: { ...config.assets, directory: resolve(config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'drive-smoke', database_id: '00000000-0000-4000-8000-000000000001' }]
   }));
@@ -90,8 +101,49 @@ async function exercisePrivateBoundary(main) {
       });
       assert.equal(response.status, 404, `${path} must not expose provisioning to an owner session`);
     }
+    const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
+    const file = `${origin}/api/download/00000000-0000-4000-8000-000000000002`;
+    const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
+    const signedOut = await get(navigation, `${file}/?next=https://other.invalid`);
+    assert.equal(signedOut.status, 303);
+    assert.equal(signedOut.headers.get('location'), '/sign-in?next=%2F');
+    assert.equal(signedOut.headers.get('set-cookie'), null);
+    for (const [name, value] of [
+      ['range', 'bytes=1-'], ['if-range', '"old"'], ['if-match', '"old"'], ['if-none-match', '"old"'],
+      ['if-modified-since', 'Wed, 21 Oct 2015 07:28:00 GMT'], ['if-unmodified-since', 'Wed, 21 Oct 2015 07:28:00 GMT']
+    ]) {
+      for (const [auth, status] of [[{}, 401], [{ cookie }, 503]]) {
+        const response = await get({ ...navigation, ...auth, [name]: value }, `${file}/`);
+        assert.equal(response.status, status);
+        assert.equal(response.headers.get('location'), null);
+        assert.equal(response.headers.get('content-range'), null);
+      }
+    }
+    const failures = [];
+    for (let tab = 0; tab < 2; tab++) {
+      const unavailable = await get({ ...navigation, cookie });
+      assert.equal(unavailable.status, 303);
+      const location = unavailable.headers.get('location');
+      assert.match(location, /^\/\?download=[a-f0-9-]{36}$/);
+      const name = `__Host-drive-download-failed-${location.split('=')[1]}`;
+      assert.equal(unavailable.headers.get('set-cookie').split(';')[0], `${name}=unavailable`);
+      failures.push({ location, name });
+    }
+    assert.notEqual(failures[0].name, failures[1].name);
+    const notices = (pending) => ({ ...navigation, cookie: [cookie, ...pending.map(({ name }) => `${name}=unavailable`)].join('; ') });
+    assert.doesNotMatch(await (await access({ headers: notices(failures) })).text(), /didn’t download/);
+    for (const [index, { location, name }] of failures.entries()) {
+      const notice = await get(notices(failures.slice(index)), `${origin}${location}`);
+      assert.match(await notice.text(), /The file didn’t download\. Try again\./);
+      assert.ok(notice.headers.get('set-cookie').startsWith(`${name}=`));
+      assert.match(notice.headers.get('set-cookie'), /Max-Age=0/i);
+      assert.doesNotMatch(await (await get(notices(failures.slice(index + 1)), `${origin}${location}`)).text(), /didn’t download/);
+    }
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
+    const revoked = await get({ cookie, range: 'bytes=1-' });
+    assert.equal(revoked.status, 401);
+    assert.equal(revoked.headers.get('location'), null);
   } finally {
     await harness.close();
   }
