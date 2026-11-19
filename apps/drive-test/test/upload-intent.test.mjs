@@ -64,12 +64,36 @@ it('does not dispatch when the last qualification check consumes the deadline', 
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it('times out an unresponsive qualification preflight before creating an intent', async () => {
+it('does not dispatch if the session expires while the final lookup returns', async () => {
+  const { bindings, request, row, fetch } = await fixture();
+  const original = Sessions.prototype.lookupWithRemainingLifetime;
+  let clock = 0;
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  const lookup = vi.spyOn(Sessions.prototype, 'lookupWithRemainingLifetime').mockImplementation(async function (token) {
+    const session = await original.call(this, token);
+    if (bindings.DRIVE_UPLOAD_VERIFIER.isQualified.mock.calls.length === 2 && session) clock += session.remaining_ms;
+    return session;
+  });
+  try {
+    const response = await createUploadIntent(request(), 4, bindings, { fetch, timeoutMs: 24 * 60 * 60 * 1000 });
+    expect(response.status).toBe(503);
+  } finally { lookup.mockRestore(); now.mockRestore(); }
+  expect(clock).toBeGreaterThan(0);
+  expect(await row()).toMatchObject({ state: 'created', upload_id: null });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['timeout', 'caller cancellation'])('stops an unresponsive qualification preflight: %s', async (stop) => {
   const { bindings, fetch, request, row } = await fixture();
   const check = bindings.DRIVE_UPLOAD_VERIFIER.isQualified;
-  let approve;
-  check.mockImplementation(() => new Promise(resolve => { approve = resolve; }));
-  const response = await createUploadIntent(request(), 4, bindings, { fetch, timeoutMs: 20 });
+  const controller = new AbortController();
+  let approve, onStart;
+  const started = new Promise(resolve => { onStart = resolve; });
+  check.mockImplementation(() => new Promise(resolve => { approve = resolve; onStart(); }));
+  const pending = createUploadIntent(new Request(request(), { signal: controller.signal }), 4, bindings,
+    { fetch, timeoutMs: stop === 'timeout' ? 20 : 5000 });
+  if (stop === 'caller cancellation') { await started; controller.abort(); }
+  const response = await pending;
   expect(response.status).toBe(503);
   expect(check).toHaveBeenCalledTimes(1);
   expect(check.mock.calls[0][1].aborted).toBe(true);
@@ -85,7 +109,7 @@ it.each(['confirmed', 'malformed', 'wrong key', 'post-dispatch session read fail
     receiver = this;
     inFlight = await row();
     if (outcome === 'post-dispatch session read failure')
-      lookup = vi.spyOn(Sessions.prototype, 'lookup').mockRejectedValueOnce(new Error('D1 unavailable'));
+      lookup = vi.spyOn(Sessions.prototype, 'lookupWithRemainingLifetime').mockRejectedValueOnce(new Error('D1 unavailable'));
     const key = outcome === 'wrong key' ? 'different-key' : inFlight.object_key;
     return new Response(outcome === 'malformed' ? 'unknown outcome' :
       `<InitiateMultipartUploadResult><Key>${key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);

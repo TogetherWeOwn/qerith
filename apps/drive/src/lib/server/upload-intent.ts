@@ -32,13 +32,20 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     if (!config || !epoch || !verifier) return reply(503);
     const { token, principal: { id: owner } } = session;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
-    const live = async () => (await new Sessions(db).lookup(token))?.id === owner;
+    const sessionDeadline = async () => {
+      // Charge the entire D1 round trip against its remaining lifetime; no shared clock required.
+      const started = performance.now();
+      const live = await new Sessions(db).lookupWithRemainingLifetime(token);
+      return live?.id === owner ? started + live.remaining_ms : 0;
+    };
     const { fetch, timeoutMs } = transport;
     let deadline = 0;
     const allocate = createMultipartCreate(settings, { timeoutMs, async fetch(input) {
       if (!(input instanceof Request) || input.signal.aborted ||
-        await verifier.isQualified(storageConfigId, input.signal) !== true || !await live() ||
-        input.signal.aborted || request.signal.aborted || performance.now() >= deadline) throw new Error('Allocation not admitted');
+        await verifier.isQualified(storageConfigId, input.signal) !== true) throw new Error('Allocation not admitted');
+      const expires = await sessionDeadline();
+      if (input.signal.aborted || request.signal.aborted ||
+        !(performance.now() < Math.min(deadline, expires))) throw new Error('Allocation not admitted');
       sent = true;
       return fetch(input);
     } });
@@ -76,7 +83,8 @@ export async function createUploadIntent(request: Request, size: number, env: Up
       await record.catch(() => {});
       return reply(sent ? 409 : 503);
     }
-    return await live() ? Response.json({ id }, { status: 201, headers }) : reply(401);
+    const expires = await sessionDeadline();
+    return performance.now() < expires ? Response.json({ id }, { status: 201, headers }) : reply(401);
   } catch {
     // After dispatch, a failure to return the ID is not a pre-dispatch outage.
     return reply(sent ? 409 : 503);
