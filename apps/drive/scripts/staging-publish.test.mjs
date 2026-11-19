@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,14 +130,31 @@ test('command-line publisher refuses publication independently of the workflow',
   assert.match(run(['--publish'], '0'.repeat(32)).stderr, /staging publication remains disabled/);
 });
 
+// Pin the complete reviewed source, including its comments, while publication is
+// disabled. Re-review the entire workflow before changing this pin; do not just
+// recompute it on failure. The enabling change must replace this temporary guard.
+const disabledWorkflowSha256 = 'f38c4e9017d90400701ac1aa175b2f73e25ad95ec5d5e3aa6bddf1ec8184cf10';
+
+/** @param {string | Buffer} workflow */
+function assertDisabledStagingWorkflow(workflow) {
+  assert.equal(createHash('sha256').update(workflow).digest('hex'), disabledWorkflowSha256,
+    'staging preparation must match the reviewed disabled workflow');
+}
+
+const stagingWorkflow = () => readFileSync(
+  new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url),
+);
+
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const job = workflow.split('\n  publish:\n')[1];
-  assert.ok(job);
-  assert.match(job, /\n    if: \$\{\{ false \}\}/);
-  assert.match(job, /needs: preparation/);
-  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
-  if (!job.includes('\n    environment: staging')) assert.doesNotMatch(job, /secrets\./);
+  assertDisabledStagingWorkflow(stagingWorkflow());
+});
+
+test('disabled workflow rejects environment and secret changes independently', () => {
+  const workflow = stagingWorkflow().toString('utf8');
+  const withJobLine = (line) => workflow.replace('\n  publish:\n', `\n  publish:\n    ${line}\n`);
+  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('environment: staging')), /reviewed disabled workflow/);
+  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('env: { TOKEN: "${{ secrets.PLACEHOLDER }}" }')),
+    /reviewed disabled workflow/);
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {

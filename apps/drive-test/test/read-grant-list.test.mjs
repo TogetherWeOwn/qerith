@@ -12,7 +12,7 @@ async function setup() {
     env.DB.prepare('DELETE FROM drive_sessions'),
     env.DB.prepare('DELETE FROM drive_credentials'),
     env.DB.prepare('DELETE FROM drive_principals'),
-    env.DB.prepare(`INSERT INTO drive_principals VALUES
+    env.DB.prepare(`INSERT INTO drive_principals (id, role, status) VALUES
       ('admin', 'owner', 'active'), ('alice', 'member', 'active'), ('bob', 'member', 'active'),
       ('carol', 'member', 'active'), ('disabled', 'member', 'revoked')`),
     env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES
@@ -90,7 +90,7 @@ it('seeks a bounded grant page even after the cursor grant is removed', async ()
   const { grants, sessions, alice, admin } = await setup();
   const ids = Array.from({ length: 103 }, (_, i) => `recipient-${String(i).padStart(3, '0')}`);
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO drive_principals SELECT value, 'member', 'active' FROM json_each(?)")
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) SELECT value, 'member', 'active' FROM json_each(?)")
       .bind(JSON.stringify([...ids].reverse())),
     env.DB.prepare("INSERT INTO drive_read_grants SELECT 'folder', value FROM json_each(?)")
       .bind(JSON.stringify([...ids].reverse())),
