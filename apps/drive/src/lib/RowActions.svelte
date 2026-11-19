@@ -38,9 +38,10 @@
   }
 
   function onScroll(event: Event) {
-    const target = event.target;
-    if (!open || !menu) return;
-    if (target !== document && !(target instanceof Element && target.contains(trigger) && !menu.contains(target))) return;
+    const source = event.target;
+    const target = source === document ? document : source instanceof Element ? source : null;
+    if (!open || !menu || !target) return;
+    if (target instanceof Element && (!target.contains(trigger) || menu.contains(target))) return;
     if (hiddenByParent()) return;
     // A scroll can move the page before opening but deliver its event afterward.
     const initial = scrollAtOpen.get(target);
