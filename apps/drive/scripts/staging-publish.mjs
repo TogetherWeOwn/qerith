@@ -14,7 +14,10 @@ function requireContained(root, relative, type) {
   }
 }
 
-export function publishStaging(root, run = execFileSync) {
+export function validateStagingTarget(root, accountId) {
+  if (accountId !== '209cf7dd678adfb683947dd7874d05af') {
+    throw new Error('invalid staging Cloudflare account');
+  }
   requireContained(root, configPath, 'isFile');
   requireContained(root, entryPath, 'isFile');
   requireContained(root, assetsPath, 'isDirectory');
@@ -37,13 +40,30 @@ export function publishStaging(root, run = execFileSync) {
     throw new Error('invalid staging Worker configuration');
   }
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
-  run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
-    cwd: root,
-    stdio: 'inherit',
-  });
+}
+
+export function publishStaging(root, run = execFileSync, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
+  validateStagingTarget(root, accountId);
+  try {
+    run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 65536,
+      timeout: 120000,
+      killSignal: 'SIGKILL',
+    });
+  } catch {
+    // Provider diagnostics are untrusted and may include sensitive information.
+    throw new Error('staging Worker publication failed');
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 2) throw new Error('publish accepts no arguments');
-  throw new Error('staging publication is disabled until migration admission is implemented and reviewed');
+  if (process.argv.length === 3 && process.argv[2] === '--check-target') {
+    validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
+  } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
+    throw new Error('staging publication remains disabled until the migration workflow is reviewed');
+  } else {
+    throw new Error('unrecognized staging publisher arguments');
+  }
 }
