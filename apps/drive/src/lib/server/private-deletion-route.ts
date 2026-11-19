@@ -30,7 +30,11 @@ async function confirmed(request: Request): Promise<boolean> {
 export async function deletePrivateEntry(request: Request, entryId: string, env: DeletionEnv): Promise<Response> {
   const fixture = privateDeletionFixtures.get(request);
   privateDeletionFixtures.delete(request);
-  if (request.method !== 'POST') return reply(405);
+  if (request.method !== 'POST') {
+    const response = reply(405);
+    response.headers.set('allow', 'POST');
+    return response;
+  }
   const origin = authOrigin(env.DRIVE_ORIGIN);
   const db = env.DB;
   if (!origin || !db) return reply(503);

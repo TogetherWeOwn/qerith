@@ -69,9 +69,13 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   for (const [headers, status, body] of [
     [{ 'x-test-deletion': null }, 404], [{ cookie: null }, 401], [{ cookie: revoked }, 401], [{ cookie: other }, 404],
     [{ origin: null }, 403], [{ origin: 'https://other.example.test' }, 403],
-    [{}, 400, '{}'], [{}, 400, '{"confirm":"permanent-delete","extra":true}'], [{}, 400, ' '.repeat(129)],
+    [{}, 400, '{}'], [{}, 400, '{"confirm":"permanent-DELETE"}'],
+    [{}, 400, '{"confirm":"permanent-delete","extra":true}'], [{}, 400, ' '.repeat(129)],
   ]) await remove(selected.root, status, headers, body);
   await remove('not-an-opaque-id', 400);
+  const wrongMethod = await worker.fetch(`${origin}/api/entries/${selected.root}/delete`, { headers: { cookie } });
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get('allow'), 'POST');
   assert.deepEqual(await snapshot(), before);
 
   for (const [limit, chain] of [[128, false], [33, true]]) {
@@ -91,7 +95,9 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     sql('INSERT INTO drive_deleted_entries VALUES (?, ?, ?, ?)', unrelated.file, randomUUID(), owner, 'unrelated'),
     sql('DELETE FROM drive_entries WHERE id = ?', unrelated.file),
   ]);
-  const untouched = await job(unrelated.file);
+  const unrelatedJob = () => sql('SELECT * FROM drive_object_deletion_jobs WHERE entry_id = ?', unrelated.file).first();
+  const untouched = await unrelatedJob();
+  assert.ok(untouched);
   const checkCapture = async ({ root, child, file }) => {
     const { results } = await sql('SELECT entry_id, deletion_id FROM drive_deleted_entries WHERE entry_id IN (?, ?, ?)', root, child, file).all();
     assert.equal(results.length, 3);
@@ -105,7 +111,7 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   await remove(ambiguous.root, 202);
   await checkCapture(ambiguous);
   assert.deepEqual(await job(ambiguous.file), { completed_at: null, completion_token: null, lease_token: null });
-  assert.deepEqual(await job(unrelated.file), untouched);
+  assert.deepEqual(await unrelatedJob(), untouched);
   const { results: calls } = await DB.prepare('SELECT * FROM smoke_deletion_calls ORDER BY key').all();
   assert.deepEqual(calls, ['ambiguous', 'selected'].map((key) => ({ key: `/${bucket}/${key}`, method: 'DELETE', etag })));
 
