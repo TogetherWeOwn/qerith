@@ -38,4 +38,29 @@ unsupported control is a prerequisite, not a successful cleanup result.
 A recurring always-on exception requires explicit dated owner authorization
 recording the resource and environment, recurring cost and expiry or review
 date. This requirement authorizes neither new spend nor weaker security, and it
-does not replace exact-SHA qualification or the physical fixture-retention gate.
+does not replace exact-SHA qualification.
+
+## Staging fixtures and migration admission
+
+Use synthetic data only. Tag test-owned D1 rows and R2 objects with their
+originating run ID. Normal success and failure cleanup, trusted main-only
+completion cleanup, and a sweep of older tagged leftovers before the next run's
+writes are required, as is the staging-only absolute-deadline admission guard.
+A leftover row is a recorded cleanup defect, not an admission gate. The reported
+R2 lifecycle rule applies only to `drive-qualification/` and expires objects
+after three days; the existing seven-day multipart-abort rule is retained. These
+are requirements and a reported provider receipt, not proof that cleanup ran.
+
+The staging publish job runs only on a trusted main dispatch in the `staging`
+environment, after source and target validation. Staging migrations use Wrangler's
+native `d1_migrations` ledger. Log the
+pre-apply Time Travel bookmark and pending lists before and after apply for the
+exact SHA; the final list must be empty. An uncertain apply requires restoring the
+bookmark or recreating the disposable database from migrations before retry.
+Worker rollback is separate from database recovery. The staging lifecycle shares
+one Actions concurrency group; it does not fence external writers.
+
+Before live qualification, establish readiness for the deployed SHA, record the
+previous Worker version or its absence, and implement bounded fixture cleanup.
+The current draft does not establish these controls or authorize live use.
+Exact-head Actions and independent Security then QA review remain required.

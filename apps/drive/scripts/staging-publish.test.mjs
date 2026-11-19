@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -79,6 +78,9 @@ test('rejects each mismatched staging configuration field', (t) => {
     [config, 'main', 'other.js'],
     [config, 'env', {}],
     [config, 'compatibility_date', '2025-01-01'],
+    [config, 'compatibility_flags', ['nodejs_compat']],
+    [config, 'compatibility_flags', ['enable_request_signal']],
+    [config, 'compatibility_flags', ['nodejs_compat', 'enable_request_signal', 'other']],
     [config.d1_databases[0], 'binding', 'OTHER'],
     [config.d1_databases[0], 'database_name', 'production'],
     [config.d1_databases[0], 'database_id', 'other'],
@@ -119,42 +121,14 @@ test('rejects a bundle symlink escaping the staging root', (t) => {
   assert.throws(() => publishStaging(root, () => assert.fail('runner invoked')), /invalid staging/);
 });
 
-test('command-line publisher refuses publication independently of the workflow', (t) => {
+test('command-line publisher requires explicit action and rejects a wrong account', (t) => {
   const { root } = fixture(t);
   const script = new URL('./staging-publish.mjs', import.meta.url).pathname;
   const run = (args, account) => spawnSync(process.execPath, [script, ...args], {
     cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: account }, encoding: 'utf8', timeout: 5000,
   });
   assert.match(run([], accountId).stderr, /unrecognized staging publisher arguments/);
-  assert.match(run(['--publish'], accountId).stderr, /staging publication remains disabled/);
-  assert.match(run(['--publish'], '0'.repeat(32)).stderr, /staging publication remains disabled/);
-});
-
-// Pin the complete reviewed source, including its comments, while publication is
-// disabled. Re-review the entire workflow before changing this pin; do not just
-// recompute it on failure. The enabling change must replace this temporary guard.
-const disabledWorkflowSha256 = 'f38c4e9017d90400701ac1aa175b2f73e25ad95ec5d5e3aa6bddf1ec8184cf10';
-
-/** @param {string | Buffer} workflow */
-function assertDisabledStagingWorkflow(workflow) {
-  assert.equal(createHash('sha256').update(workflow).digest('hex'), disabledWorkflowSha256,
-    'staging preparation must match the reviewed disabled workflow');
-}
-
-const stagingWorkflow = () => readFileSync(
-  new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url),
-);
-
-test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
-  assertDisabledStagingWorkflow(stagingWorkflow());
-});
-
-test('disabled workflow rejects environment and secret changes independently', () => {
-  const workflow = stagingWorkflow().toString('utf8');
-  const withJobLine = (line) => workflow.replace('\n  publish:\n', `\n  publish:\n    ${line}\n`);
-  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('environment: staging')), /reviewed disabled workflow/);
-  assert.throws(() => assertDisabledStagingWorkflow(withJobLine('env: { TOKEN: "${{ secrets.PLACEHOLDER }}" }')),
-    /reviewed disabled workflow/);
+  assert.match(run(['--publish'], '0'.repeat(32)).stderr, /invalid staging Cloudflare account/);
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {

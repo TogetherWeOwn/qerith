@@ -23,8 +23,10 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, assetsPath, 'isDirectory');
   const config = JSON.parse(readFileSync(resolve(root, configPath), 'utf8'));
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
-      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,d1_databases,main,name' ||
+      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,compatibility_flags,d1_databases,main,name' ||
       config.compatibility_date !== '2026-07-30' ||
+      !Array.isArray(config.compatibility_flags) || config.compatibility_flags.length !== 2 ||
+      config.compatibility_flags[0] !== 'nodejs_compat' || config.compatibility_flags[1] !== 'enable_request_signal' ||
       !Array.isArray(config.d1_databases) || config.d1_databases.length !== 1 ||
       !config.d1_databases[0] || typeof config.d1_databases[0] !== 'object' ||
       Object.keys(config.d1_databases[0]).sort().join(',') !== 'binding,database_id,database_name,migrations_dir' ||
@@ -62,7 +64,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
-    throw new Error('staging publication remains disabled until the migration workflow is reviewed');
+    publishStaging(process.cwd());
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }
