@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 
