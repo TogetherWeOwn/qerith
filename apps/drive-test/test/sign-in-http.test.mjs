@@ -36,7 +36,8 @@ it('rejects missing, sibling and wrong destination origins before touching D1', 
     const request = new Request(url, { method: 'POST', headers: source ? { origin: source } : {} });
     for (const step of ['challenge', 'restart', 'verify']) expect((await signIn(request, step, authEnv())).status).toBe(403);
   }
-  expect((await signIn(new Request(origin), 'verify', authEnv())).status).toBe(403);
+  const wrongOrigin = new Request(origin, { headers: { origin: 'https://sub.example.test' } });
+  expect((await signIn(wrongOrigin, 'verify', authEnv())).status).toBe(403);
   const wrongMethod = await signIn(new Request(origin, { headers: { origin } }), 'verify', authEnv());
   expect(wrongMethod.status).toBe(405);
   expect(wrongMethod.headers.get('allow')).toBe('POST');

@@ -11,6 +11,8 @@ test('retains only canonical Drive paths and preserves ordinary query strings', 
     assert.equal(driveNext(path), path);
     assert.equal(driveNext(path + query), path + query);
   }
+  const location = driveNext('/people?find=会議&filter=A%2FB');
+  assert.equal(new Headers({ location }).get('location'), '/people?find=%E4%BC%9A%E8%AD%B0&filter=A%2FB');
   for (const value of [null, '', ...nonPages, 'f/folder', 'https://drive.example/f/folder', '//example.test/f/folder',
     '/f/', '/shared/', '/f/a/b', '/shared//f/a', '/f/..', '/f/./a', '/x/../people', '/f/a\\b', '/\\example.test',
     '/f/a%2fb', '/f/a%5Cb', '/f/a%252fb', '/f/%2e%2e', '/f/%61', '/f/%', '/f/a?bad=%XX',

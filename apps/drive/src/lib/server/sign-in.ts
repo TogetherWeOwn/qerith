@@ -31,6 +31,7 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
   }, assertionReadMs);
   try {
     let length = 0;
+    let reads = 0;
     while (true) {
       const { value, done } = await reader.read();
       if (timedOut) return null;
@@ -45,6 +46,8 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
       }
       bytes.set(value, length);
       length += value.length;
+      // Ready reads (including empty chunks) must not starve the Workers timer.
+      if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
     if (data?.type !== 'public-key' || !base64url(data.id) || data.rawId !== data.id ||
