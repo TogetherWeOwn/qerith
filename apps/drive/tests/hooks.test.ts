@@ -89,3 +89,14 @@ test('database failure is unavailable and never reaches the private route', asyn
   assert.equal(await result.response.text(), '');
   assert.equal(result.resolved, false);
 });
+
+test('page navigation gets a private human response when D1 is unavailable', async () => {
+  const headers = { cookie, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  for (const fault of ['unbound', 'unavailable'] as const) {
+    const { response, resolved } = await request(`${origin}/`, { headers }, origin, fault);
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    assert.match(await response.text(), /<title>Drive unavailable · Drive<\/title>/);
+    assert.equal(resolved, false);
+  }
+});
