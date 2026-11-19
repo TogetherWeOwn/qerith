@@ -7,6 +7,7 @@ import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 import { captureRootListing, captureSignedOut } from './root-listing.mjs';
 import { proveOwnerEnrollment } from './owner-enrollment.mjs';
+import { proveInvite } from './invite-runtime.mjs';
 import { captureRootUpload } from './root-upload.mjs';
 
 const origin = 'https://drive.example.test';
@@ -116,7 +117,7 @@ try {
     held.set(matches, release.promise);
     return () => { held.delete(matches); release.resolve(); };
   }
-  await context.route(`${origin}/**`, async route => {
+  const relay = async route => {
     const request = route.request();
     const url = new URL(request.url());
     const headers = await request.allHeaders();
@@ -143,7 +144,8 @@ try {
     }
     for (const [matches, release] of held) if (matches(url.pathname)) await release;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
-  });
+  };
+  await context.route(`${origin}/**`, relay);
   const signInFrom = async (page, path) => {
     const response = await worker.fetch(`${origin}${path}`, { headers: navigation, redirect: 'manual' });
     assert.equal(response.status, 303);
@@ -195,6 +197,7 @@ try {
   await first.getByRole('link', { name: 'Back to first page' }).click();
   await first.waitForURL(`${origin}/`);
   assert.equal(await first.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
+  await proveInvite(browser, { origin, relay, worker, DB, ownerToken: session.value });
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);
   assert.equal(await first.evaluate(async () => (await fetch('/api/root-listing/', { redirect: 'error' })).status), 401);

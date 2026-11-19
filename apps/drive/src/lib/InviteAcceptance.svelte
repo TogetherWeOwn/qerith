@@ -2,7 +2,8 @@
   export type InviteAcceptanceView =
     | { kind: 'invite'; inviter?: string; displayName?: string; note?: string }
     | { kind: 'dead-link' }
-    | { kind: 'signed-in'; signedInName: string };
+    | { kind: 'unavailable' }
+    | { kind: 'signed-in'; signedInName?: string };
   export type InvitePasskeyPhase = 'valid' | 'waiting' | 'cancelled' | 'unsupported' | 'rate-limited';
 </script>
 
@@ -17,6 +18,7 @@
   // Return a promise while preparing the ceremony, or set the waiting phase synchronously.
   export let onSetup: (displayName: string) => void | Promise<void>;
   export let onCancel: () => void;
+  export let cancellable = true;
 
   let heading: HTMLHeadingElement;
   let card: HTMLElement;
@@ -46,7 +48,8 @@
     const active = typeof document === 'undefined' ? null : document.activeElement;
     const focused = card?.contains(active) ? active : null;
     if (kind !== rendered) {
-      announcement = rendered === 'invite' && kind === 'dead-link' && !focused ? deadTitle : '';
+      announcement = rendered === 'invite' && !focused
+        ? kind === 'dead-link' ? deadTitle : kind === 'unavailable' ? 'Drive unavailable' : '' : '';
       rendered = kind;
       nameError = '';
     }
@@ -70,6 +73,7 @@
   }
 
   function cancelSetup() {
+    if (!cancellable) return;
     pending = undefined;
     onCancel();
   }
@@ -79,13 +83,17 @@
   <section aria-labelledby="invite-title" bind:this={card}>
     <h1 id="invite-title" tabindex="-1" aria-describedby={invite ? undefined : 'invite-description'} bind:this={heading}>
       {#if view.kind === 'dead-link'}{deadTitle}
-      {:else if view.kind === 'signed-in'}You're signed in as <bdi>{view.signedInName}</bdi>
+      {:else if view.kind === 'unavailable'}Drive unavailable
+      {:else if view.kind === 'signed-in'}You're signed in{#if view.signedInName} as <bdi>{view.signedInName}</bdi>{/if}
       {:else if view.inviter}<bdi>{view.inviter}</bdi> invited you to Drive
       {:else}You're invited to Drive{/if}
     </h1>
     <p class="sr-only" role="status" aria-live="polite">{invite ? status ?? '' : announcement}</p>
     {#if view.kind === 'dead-link'}
       <p id="invite-description">Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one.</p>
+    {:else if view.kind === 'unavailable'}
+      <p id="invite-description">Try signing in if you saved a passkey. Otherwise, open the invite again and try again.</p>
+      <a class="ghost" href="/sign-in">Sign in</a>
     {:else if view.kind === 'signed-in'}
       <p id="invite-description">This invite is for someone else, so it wasn't used.</p>
       <a class="ghost" href="/">Go to My Drive</a>
@@ -103,7 +111,7 @@
           {shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
         </button>
         <p id="invite-status" class:notice={shown === 'unsupported'}>{status ?? ''}</p>
-        {#if shown === 'waiting'}<button class="cancel" type="button" on:click={cancelSetup}>Cancel</button>{/if}
+        {#if shown === 'waiting'}<button class="cancel" type="button" aria-disabled={!cancellable} on:click={cancelSetup}>Cancel</button>{/if}
         {#if shown === 'cancelled'}<p class="notice info" role="alert">{signInCopy.cancelled.notice}</p>{/if}
       </form>
       <p class="explanation">Your device asks to save a passkey for this site. That's how you sign in from now on.</p>

@@ -10,8 +10,8 @@ const file = 'Résumé 2026.pdf';
 const id = '00000000-0000-4000-8000-000000000002';
 const href = `/api/download/${id}`;
 
-export async function capture(page, state, width, audit = true) {
-  const label = `root-${state}-${width}`;
+export async function capture(page, state, width, audit = true, scope = 'root') {
+  const label = `${scope}-${state}-${width}`;
   await page.screenshot({ path: resolve(output, `${label}.png`), fullPage: true });
   if (!audit) return;
   await page.evaluate(axe);

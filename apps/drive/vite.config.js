@@ -46,7 +46,11 @@ function generatedAssets(builder) {
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/+page.svelte'));
-  return { signIn, root: [...assets] };
+  const root = [...assets];
+  assets.clear();
+  visited.clear();
+  include(leaf('/src/routes/invite/+page.svelte'));
+  return { signIn, root, invite: [...assets] };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -67,6 +71,7 @@ const buildAdapter = {
       // The adapter can answer before the hook. Gate preview dispatch here.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
@@ -76,12 +81,13 @@ import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
-const fixtureAssets = new Set([...generated.signIn, ...generated.root]);
+const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite]);
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root.filter(path => /\\.(css|woff2)$/.test(path)))
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
+const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;
 const unavailable = () => new Response('Service unavailable', {
   status: 503,
   headers: { 'cache-control': 'no-store' }
@@ -114,6 +120,8 @@ export default {
     if (admitsSignInFixture(env)) {
       const step = signInStep.exec(url.pathname)?.[1];
       if (step) return signIn(request, step, env);
+      const invite = inviteStep.exec(url.pathname)?.[1];
+      if (invite) return handleInviteAcceptance(request, invite, env);
       if (fixtureAssets.has(url.pathname) && env.ASSETS &&
           (request.method === 'GET' || request.method === 'HEAD') && allowsOrigin(request, env.DRIVE_ORIGIN)) {
         const asset = await env.ASSETS.fetch(request);
