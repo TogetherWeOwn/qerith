@@ -63,7 +63,7 @@
   button:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
   button[aria-disabled='true'] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
-  section { box-sizing: border-box; max-width: var(--drive-layout-rail-max); margin-block: var(--drive-space-3); padding: var(--drive-space-3); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
+  section { grid-column: 1 / -1; box-sizing: border-box; max-width: var(--drive-layout-rail-max); margin-block: var(--drive-space-3); padding: var(--drive-space-3); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
   h2, p { margin: 0 0 var(--drive-space-2); }
   h2 { font-size: var(--drive-font-size-ui); }
   .bytes { color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-small); }

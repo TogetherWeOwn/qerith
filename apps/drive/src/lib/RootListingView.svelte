@@ -1,11 +1,21 @@
 <script lang="ts">
+  import { invalidate } from '$app/navigation';
+  import { tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
+  import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
   let { result, page }: { result: RootListingResult; page: string | null } = $props();
+  let status = $state('');
+
+  async function refresh() {
+    await invalidate('drive:root-listing');
+    await tick();
+    if (result.status !== 'ok') throw new Error('Root listing unavailable');
+  }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
@@ -14,7 +24,11 @@
   })) : []);
 </script>
 
-<h1>My Drive</h1>
+<header>
+  <h1>My Drive</h1>
+  <RootUpload announce={(message) => { status = message; }} {refresh} />
+</header>
+<p class="status" role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
   <a data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
@@ -23,7 +37,7 @@
   <a href="/">Back to first page</a>
 {:else}
   {#if items.length}
-    <FileList folder="My Drive" preview {items} />
+    <FileList folder="My Drive" preview announceChanges={false} {items} />
   {:else if page}
     <p>No more items.</p>
   {:else}
@@ -40,7 +54,10 @@
 {/if}
 
 <style>
-  h1 { margin-block: 0 var(--drive-space-4); font-family: var(--drive-font-ui); }
+  header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--drive-space-3); margin-bottom: var(--drive-space-4); }
+  h1 { margin: 0; font-family: var(--drive-font-ui); }
+  .status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  @media (max-width: 820px) { header { grid-template-columns: minmax(0, 1fr); } }
   nav { display: flex; flex-wrap: wrap; gap: var(--drive-space-4); }
   a { display: inline-block; padding-block: var(--drive-space-2); color: inherit; }
   a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }

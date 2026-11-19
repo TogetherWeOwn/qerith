@@ -149,7 +149,7 @@ export default { fetch(request, env, ctx) {
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
     const unadmitted = await (await access({ headers: { cookie } })).text();
     assert.match(unadmitted, /Service unavailable\./);
-    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder/);
+    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder|type="file"|<script\b/);
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
     const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
