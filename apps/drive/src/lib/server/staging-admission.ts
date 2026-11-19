@@ -1,10 +1,8 @@
 import { entryId } from '../download-id';
-import { isDrivePageNavigation } from '../drive-navigation';
-import { downloadRedirect } from './download-navigation';
-import { allowsOrigin, readSession, type DriveAuthEnv } from './request-auth';
+import { isTopLevelDocumentNavigation } from '../drive-navigation';
+import { downloadRedirect, downloadSignIn } from './download-navigation';
+import { allowsOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadIdPattern } from './upload-part';
-
-export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
 
 interface PreviewAssets {
   signIn: ReadonlySet<string>;
@@ -50,7 +48,7 @@ function deny(status: number): Response {
   return new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
 }
 
-// The generated Worker will call this before dispatch. Storage readiness comes from
+// The generated Worker calls this before dispatch. Storage readiness comes from
 // the live storage composition, never a fixture flag or request-supplied value.
 export async function admitStagingRequest(request: Request, env: DriveAuthEnv, storageReady: boolean,
   assets: PreviewAssets): Promise<Target | Response> {
@@ -60,16 +58,21 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const target = route(request.method, pathname, assets);
   if (!target) return deny(404);
   const site = request.headers.get('sec-fetch-site');
-  if (site !== null && site !== 'same-origin' && site !== 'none') return deny(403);
+  const navigation = isTopLevelDocumentNavigation(request);
+  const signInRedirect = () => downloadRedirect(`/sign-in?${new URLSearchParams({ next: pathname + search })}`);
+  if (site !== null && site !== 'same-origin' && site !== 'none') {
+    // A cross-site document visit may reach sign-in, but never reads private state.
+    if (navigation && target.kind === 'root') return signInRedirect();
+    if (!(navigation && target.kind === 'sign-in')) return deny(403);
+  }
   if (target.kind === 'sign-in' || target.kind === 'ceremony' || target.kind === 'public-asset') return target;
 
   try {
     const session = await readSession(request, env.DB);
     if (session?.principal.role === 'owner') return target;
     if (session) return deny(403);
-    if (target.kind === 'root' && isDrivePageNavigation(request)) {
-      return downloadRedirect(`/sign-in?${new URLSearchParams({ next: pathname + search })}`);
-    }
+    if (navigation && target.kind === 'root') return signInRedirect();
+    if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
     return deny(401);
   } catch {
     return deny(503);

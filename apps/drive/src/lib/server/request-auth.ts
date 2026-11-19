@@ -9,6 +9,8 @@ export interface DriveAuthEnv {
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
 
+export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
+
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
@@ -84,8 +86,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     if (!allowsOrigin(request, origin.origin)) return refuse(403);
 
     const fixture = admitsSignInFixture(env);
+    const staging = origin.origin === stagingOrigin;
     const signInPage = event.route?.id === '/sign-in';
-    if ((signInPage && (!fixture || !/^\/sign-in\/?$/.test(pathname))) ||
+    if ((signInPage && !(staging ? pathname === '/sign-in' : fixture && /^\/sign-in\/?$/.test(pathname))) ||
         /^\/(?:invite|recover|api\/sign-in)(?:\/|$)/.test(pathname)) return deny(404);
 
     let session;
@@ -94,6 +97,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     } catch {
       return refuse(503);
     }
+    if (staging && session && session.principal.role !== 'owner') return deny(403);
     if (!session && !signInPage) {
       if (event.route?.id === downloadRoute) {
         const downloadNavigation = fixture ? isDownloadDocumentNavigation(request) : isDownloadNavigation(request);

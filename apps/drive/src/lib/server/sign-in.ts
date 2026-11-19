@@ -69,7 +69,6 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
   }
 }
 
-// Unwired: the Worker still exposes no public sign-in or provisioning endpoint.
 export async function signIn(
   request: Request,
   step: 'challenge' | 'restart' | 'verify',

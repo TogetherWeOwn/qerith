@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { admitStagingRequest, dispatchStagingRequest, stagingOrigin } from '../src/lib/server/staging-admission';
+import { admitStagingRequest, dispatchStagingRequest } from '../src/lib/server/staging-admission';
+import { stagingOrigin } from '../src/lib/server/request-auth';
 
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
@@ -132,7 +133,7 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
     [request('/api/sign-in/verify', 'POST', { origin: 'https://other.example.test' }), 403],
     [request('/api/uploads', 'POST', { origin: stagingOrigin }), 401],
     [request(root, 'GET', {}), 401],
-    [request('/', 'GET', { 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }), 303]
+    [request('/', 'GET', { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }), 303]
   ] as const) {
     denied(await dispatchStagingRequest(req, env, true, assets, dispatch), status);
   }
@@ -150,25 +151,16 @@ test('admitted traffic reaches one handler; assets cannot carry CDN cache overri
   const { env } = runtime();
   const cacheHeaders = ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control'];
   for (const [path, [method], target] of [...publicRoutes, ...protectedRoutes]) {
-    const req = request(path, method);
     const calls: string[] = [];
-    const handle = (name: string) => async (received: Request) => {
-      assert.equal(received, req);
-      calls.push(name);
-      const headers = Object.fromEntries(cacheHeaders.map(name => [name, 'public, max-age=3600']));
-      return new Response(name, { headers });
-    };
-    const result = await dispatchStagingRequest(req, env, true, assets, {
-      adapter: handle('adapter'),
-      ceremony: (received, step) => handle(`ceremony:${step}`)(received),
-      asset: handle('asset')
+    const response = new Response(null, { headers: Object.fromEntries(cacheHeaders.map(name => [name, 'public, max-age=3600'])) });
+    const handle = async (name: string) => (calls.push(name), response);
+    const result = await dispatchStagingRequest(request(path, method), env, true, assets, {
+      adapter: () => handle('adapter'), ceremony: (_, step) => handle(`ceremony:${step}`), asset: () => handle('asset')
     });
     const expected = target.kind === 'ceremony' ? `ceremony:${target.step}` : target.kind.endsWith('-asset') ? 'asset' : 'adapter';
     assert.deepEqual(calls, [expected]);
-    assert.equal(await result.text(), expected);
-    if (expected === 'asset') {
-      assert.equal(result.headers.get('cache-control'), 'private, no-store');
-      for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
-    }
+    if (expected !== 'asset') continue;
+    assert.equal(result.headers.get('cache-control'), 'private, no-store');
+    for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
   }
 });

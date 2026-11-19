@@ -43,8 +43,8 @@ async function exercise(args, assertions) {
   }
 }
 
-async function exercisePrivateBoundary(main, preview = false) {
-  const origin = 'https://drive.example.test';
+async function exercisePrivateBoundary(main, staging = false) {
+  const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
   const configPath = resolve(join(fixture.path, 'wrangler.json'));
@@ -66,7 +66,12 @@ export default { fetch(request, env, ctx) {
     assets: { ...config.assets, directory: resolve(config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'drive-smoke', database_id: '00000000-0000-4000-8000-000000000001' }]
   }));
-  const vars = { DRIVE_ORIGIN: origin, ...(preview ? { DRIVE_SIGN_IN_FIXTURE: '1' } : {}) };
+  const vars = staging ? {
+    DRIVE_ORIGIN: origin, DRIVE_S3_ENDPOINT: 'https://storage.example.test', DRIVE_S3_BUCKET: 'fixture',
+    DRIVE_S3_REGION: 'test-1', DRIVE_S3_ACCESS_KEY_ID: 'fixture', DRIVE_S3_SECRET_ACCESS_KEY: 'fixture', DRIVE_S3_STORAGE_EPOCH: 'fixture',
+    DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, region: 'test-1', completionTimeoutMs: 100,
+      storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: 'a'.repeat(40), runId: '1', runAttempt: 1 })
+  } : { DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' };
   const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
@@ -93,17 +98,39 @@ export default { fetch(request, env, ctx) {
       }
       assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
     };
-    const cookie = await session('fixture', 'member');
+    const member = await session('member-fixture', 'member');
     // Probe before an existing owner would make the bootstrap operation refuse by itself.
-    await assertProvisioningUnavailable(cookie, 'member');
+    await assertProvisioningUnavailable(member, 'member');
+    const cookie = await session('fixture', staging ? 'owner' : 'member');
     await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('other', 'member', 'active')").run();
 
     const access = (init) => worker.fetch(`${origin}/`, init);
-    assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
-    if (!preview) {
-      assert.equal((await worker.fetch(`${origin}/sign-in`)).status, 404);
-      assert.equal((await worker.fetch(`${origin}/api/sign-in/challenge`, { method: 'POST', headers: { origin } })).status, 404);
-      assert.equal((await worker.fetch(`${origin}/%73ign-in`, { headers: { cookie }, redirect: 'manual' })).status, 404);
+    assert.equal((await access()).status, 401, 'root requires a session');
+    if (staging) {
+      const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
+      for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list']) {
+        assert.equal((await get(path, { cookie })).status, 404, path);
+      }
+      const redirected = await get('/', { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' });
+      assert.deepEqual([redirected.status, redirected.headers.get('location')], [303, '/sign-in?next=%2F']);
+      assert.equal((await get('/sign-in')).status, 200);
+      assert.equal((await get('/', { cookie: member })).status, 403);
+      const verify = await worker.fetch(`${origin}/api/sign-in/verify`, { method: 'POST', headers: { origin } });
+      assert.deepEqual([verify.status, await verify.json()], [401, { code: 'denied' }]);
+      const listing = await get('/', { cookie });
+      const html = await listing.text();
+      assert.match(html, /Your drive is empty/);
+      const styles = [...html.matchAll(/href="((?:\.\/|\/)?_app\/immutable\/[^"\s]+\.css)"/g)].map(([, path]) => new URL(path, origin));
+      let privateAsset;
+      for (const asset of styles) {
+        assert.equal((await worker.fetch(asset, { headers: { cookie } })).status, 200);
+        if ((await worker.fetch(asset)).status === 401) privateAsset = asset;
+      }
+      assert.ok(privateAsset, 'root must reference owner-only CSS');
+      assert.equal((await worker.fetch(`${origin}/api/uploads`, { method: 'POST', headers: { cookie, origin } })).status, 400);
+      await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
+      assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
+      return;
     }
     const mutation = await access({ method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
     assert.equal(mutation.status, 403, 'mutation needs the exact Origin');
@@ -138,18 +165,11 @@ export default { fetch(request, env, ctx) {
     assert.ok(styles.length, 'root HTML references its styles');
     for (const [, path] of styles) {
       const response = await worker.fetch(new URL(path, origin), { headers: { cookie } });
-      assert.equal(response.status, preview ? 200 : 503);
+      assert.equal(response.status, 200);
     }
     const fileId = '00000000-0000-4000-8000-000000000002';
-    if (preview) {
-      assert.match(html, /Your drive is empty\./);
-      await exerciseRootPages(DB, worker, origin, cookie, fileId);
-      return;
-    }
-    await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
-    const unadmitted = await (await access({ headers: { cookie } })).text();
-    assert.match(unadmitted, /Service unavailable\./);
-    assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder/);
+    assert.match(html, /Your drive is empty\./);
+    await exerciseRootPages(DB, worker, origin, cookie, fileId);
     const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
     const file = `${origin}/api/download/${fileId}`;
     const get = (headers, url = file) => worker.fetch(url, { redirect: 'manual', headers });
