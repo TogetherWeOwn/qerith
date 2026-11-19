@@ -45,21 +45,29 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
 }
 
-export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, enrollment = '') {
-  validateStagingTarget(root, accountId);
-  return deploy(root, run, enrollment);
+function enrollmentForRelease(grant, sha, preflight) {
+  if (!grant) return '';
+  const expiresAt = Number(grant.slice(41, 54));
+  const now = Date.now();
+  if (grant.length !== 98 || !/^[a-f0-9]{40}:\d{13}:[A-Za-z0-9_-]{43}$/.test(grant) ||
+      !grant.startsWith(`${sha}:`) || expiresAt > now + 300_000 || (preflight && expiresAt <= now)) {
+    throw new Error('invalid, mismatched or expired staging enrollment authorization');
+  }
+  // A grant that expires during migrations must not prevent publishing the compatible Worker.
+  return expiresAt > now ? grant : '';
 }
 
-async function deploy(root, run, enrollment) {
-  const args = ['deploy', entryPath, '--config', configPath];
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, grant = '', sha = '') {
+  validateStagingTarget(root, accountId);
+  return deploy(root, run, enrollmentForRelease(grant, sha, false), sha);
+}
+
+async function deploy(root, run, enrollment, sha) {
+  // Wrangler inherits prior secrets. An inactive publish must explicitly disarm them.
+  const args = ['deploy', entryPath, '--config', configPath, '--var',
+    `DRIVE_OWNER_ENROLLMENT_RELEASE:${enrollment ? sha : 'disabled'}`];
   using secretDir = enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
   if (secretDir) {
-    const expiresAt = Number(enrollment.slice(0, 13));
-    const now = Date.now();
-    if (enrollment.length !== 57 || !/^\d{13}:[A-Za-z0-9_-]{43}$/.test(enrollment) ||
-        expiresAt <= now || expiresAt > now + 300_000) {
-      throw new Error('invalid or expired staging enrollment authorization');
-    }
     const file = resolve(secretDir.path, 'secrets.json');
     writeFileSync(file, JSON.stringify({ DRIVE_OWNER_ENROLLMENT: enrollment }), { mode: 0o600, flag: 'wx' });
     args.push('--secrets-file', file);
@@ -95,6 +103,7 @@ async function deploy(root, run, enrollment) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
+    enrollmentForRelease(process.env.DRIVE_OWNER_ENROLLMENT, process.env.GITHUB_SHA, true);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
     const env = process.env;
     if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'publish' ||
@@ -103,7 +112,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         !env.CLOUDFLARE_API_TOKEN) {
       throw new Error('publication requires the protected staging dispatch job');
     }
-    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT);
+    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT, env.GITHUB_SHA);
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }

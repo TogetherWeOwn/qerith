@@ -22,18 +22,21 @@ export default { fetch(request, env, ctx) {
   const step = /^\\/api\\/sign-in\\/(challenge|verify)$/.exec(new URL(request.url).pathname)?.[1];
   if (step) return signIn(request, step, env);
   const mode = request.headers.get('x-owner-fixture-mode');
-  if (mode === 'missing' || mode === 'expired') return worker.fetch(request, { ...env,
-    DRIVE_OWNER_ENROLLMENT: mode === 'missing' ? undefined : '1000000000000:' + env.DRIVE_OWNER_ENROLLMENT.split(':')[1],
+  return worker.fetch(request, { ...env,
+    DRIVE_OWNER_ENROLLMENT_RELEASE: mode === 'inactive' ? 'disabled' : env.DRIVE_OWNER_ENROLLMENT_RELEASE,
+    DRIVE_OWNER_ENROLLMENT: mode === 'missing' ? undefined : mode === 'expired' ?
+      env.DRIVE_OWNER_ENROLLMENT.replace(/:\\d{13}:/, ':1000000000000:') : env.DRIVE_OWNER_ENROLLMENT,
   }, ctx);
-  return worker.fetch(request, env, ctx);
 } };`);
   await writeFile(configPath, JSON.stringify({ ...config, main,
     assets: { ...config.assets, directory: resolve('..', config.assets.directory) },
     d1_databases: [{ binding: 'DB', database_name: 'owner-enrollment-fixture', database_id: '00000000-0000-4000-8000-000000000002' }],
   }));
   const bearer = `Bearer ${randomBytes(32).toString('base64url')}`;
+  const sha = 'a'.repeat(40);
   const harness = createTestHarness({ workers: [{ configPath, vars: {
-    DRIVE_ORIGIN: origin, DRIVE_OWNER_ENROLLMENT: `${Date.now() + 300_000}:${bearer.slice(7)}`,
+    DRIVE_ORIGIN: origin, DRIVE_OWNER_ENROLLMENT_RELEASE: sha,
+    DRIVE_OWNER_ENROLLMENT: `${sha}:${Date.now() + 300_000}:${bearer.slice(7)}`,
   } }] });
   const context = await browser.newContext();
   try {
@@ -57,9 +60,14 @@ export default { fetch(request, env, ctx) {
     await expect(attempt(challenge, { authorization: `Bearer ${'a'.repeat(43)}` }), 403);
     await expect(attempt(challenge, { ...authorization, origin: 'https://wrong.example.test' }), 403);
     await expect(attempt(challenge, { ...authorization, 'x-owner-fixture-mode': 'missing' }), 503);
+    await expect(attempt(challenge, { ...authorization, 'x-owner-fixture-mode': 'inactive' }), 503);
     await expect(attempt(challenge, { ...authorization, 'x-owner-fixture-mode': 'expired' }), 503);
     await expect(attempt({ ...challenge, padding: 'a'.repeat(32 * 1024) }), 400);
     assert.equal(await DB.prepare('SELECT 1 FROM drive_owner_registration').first(), null);
+    await DB.prepare(`CREATE TRIGGER fixture_failure BEFORE INSERT ON drive_owner_registration
+      BEGIN SELECT RAISE(ABORT, 'fixture write denied'); END`).run();
+    await expect(attempt(challenge), 503);
+    await DB.prepare('DROP TRIGGER fixture_failure').run();
 
     // Never contact live staging: Playwright fulfills only a synthetic document on the pinned RP origin.
     await context.route('**/*', route => route.request().url() === `${origin}/`

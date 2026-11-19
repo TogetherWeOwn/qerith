@@ -13,6 +13,8 @@ interface Database {
 
 const lifetimeMs = 5 * 60 * 1000;
 
+export class OwnerCeremonyDenied extends Error {}
+
 // Server-only primitive: both methods require an independently authorized caller.
 // It is not a provisioning endpoint or an authorization mechanism.
 export class OwnerBootstrap {
@@ -39,14 +41,14 @@ export class OwnerBootstrap {
         expires_at = excluded.expires_at
       RETURNING challenge`).bind(options.challenge, principal, options.user.id, lifetimeMs,
         this.authorizationExpiry, this.authorizationExpiry).first();
-    if (!issued) throw new Error('Owner bootstrap unavailable');
+    if (!issued) throw new OwnerCeremonyDenied('Owner bootstrap unavailable');
     return options;
   }
 
   async enroll(challenge: string, response: RegistrationResponseJSON): Promise<void> {
-    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new TypeError('Invalid challenge');
-    const result = await this.#verifier.registration(response, challenge);
-    if (!result.verified || !result.registrationInfo) throw new Error('Registration not verified');
+    if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new OwnerCeremonyDenied('Invalid challenge');
+    const result = await this.#verifier.registration(response, challenge).catch(() => null);
+    if (!result?.verified || !result.registrationInfo) throw new OwnerCeremonyDenied('Registration not verified');
     const credential = result.registrationInfo.credential;
     // These statements share a transaction. Each dependent write requires the
     // preceding write to succeed; uniqueness errors roll back the entire batch.
@@ -65,6 +67,6 @@ export class OwnerBootstrap {
         RETURNING challenge`).bind(challenge),
     ]);
     // D1's change metadata can include the principal's login-generation trigger.
-    if (batch[2].results?.[0]?.challenge !== challenge) throw new Error('Owner or challenge unavailable');
+    if (batch[2].results?.[0]?.challenge !== challenge) throw new OwnerCeremonyDenied('Owner or challenge unavailable');
   }
 }

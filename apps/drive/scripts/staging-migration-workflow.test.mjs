@@ -134,7 +134,7 @@ test('migration workflow records the native ledger and fails closed on a pending
     `d1 time-travel info ${target} --json ${config}`,
     `d1 migrations apply ${target} --remote ${config}`,
     `d1 migrations list ${target} --remote ${config}`,
-    `deploy .svelte-kit/cloudflare/_worker.js ${config}`,
+    `deploy .svelte-kit/cloudflare/_worker.js ${config} --var DRIVE_OWNER_ENROLLMENT_RELEASE:disabled`,
   ]);
   assert.ok(firstApply.stdout.indexOf('Pending migrations before apply:') < firstApply.stdout.indexOf('Pre-apply Time Travel bookmark:'));
   for (const after of [pending, `${emptyList}\n${pending}`, `${emptyList}\n✅ No migrations to apply!`,
@@ -166,6 +166,11 @@ test('migration workflow refuses missing credentials or an unexpected account be
   assert.equal(calls(), '');
   assert.match(run({ CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) }).stderr, /invalid staging Cloudflare account/);
   assert.equal(calls(), '');
+  for (const [sha, expiry] of [['b'.repeat(40), Date.now() + 60_000], ['a'.repeat(40), 1000000000000]]) {
+    const result = run({ DRIVE_OWNER_ENROLLMENT: `${sha}:${expiry}:${'a'.repeat(43)}` });
+    assert.match(result.stderr, /invalid, mismatched or expired staging enrollment authorization/);
+    assert.equal(calls(), '');
+  }
 });
 
 test('migration capture terminates process groups on overflow and timeout', async (t) => {

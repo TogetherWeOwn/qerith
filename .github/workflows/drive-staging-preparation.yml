@@ -108,7 +108,7 @@ jobs:
           enrollment="${DRIVE_OWNER_ENROLLMENT:-}"
           unset DRIVE_OWNER_ENROLLMENT
           : "${CLOUDFLARE_API_TOKEN:?missing staging deploy token}"
-          node scripts/staging-publish.mjs --check-target
+          DRIVE_OWNER_ENROLLMENT="$enrollment" node scripts/staging-publish.mjs --check-target
           # The native ledger is the staging authority. Keep the bookmark and
           # before/after lists in the Actions log for this exact dispatch SHA.
           wrangler=node_modules/.bin/wrangler

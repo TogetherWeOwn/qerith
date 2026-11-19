@@ -4,6 +4,7 @@ import { allowsOrigin, stagingOrigin } from './request-auth';
 
 interface EnrollmentEnv {
   DRIVE_OWNER_ENROLLMENT?: string;
+  DRIVE_OWNER_ENROLLMENT_RELEASE?: string;
   DB?: ConstructorParameters<typeof OwnerBootstrap>[0];
 }
 
@@ -47,16 +48,17 @@ async function enrollmentInput(request: Request): Promise<unknown> {
 
 export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Promise<Response> {
   const secret = env.DRIVE_OWNER_ENROLLMENT;
-  if (!env.DB || typeof secret !== 'string' || secret.length !== 57) return deny(503);
-  const grant = /^(\d{13}):([A-Za-z0-9_-]{43})$/.exec(secret);
-  const expiresAt = Number(grant?.[1]);
+  if (!env.DB || typeof secret !== 'string' || secret.length !== 98) return deny(503);
+  const grant = /^([a-f0-9]{40}):(\d{13}):([A-Za-z0-9_-]{43})$/.exec(secret);
+  const expiresAt = Number(grant?.[2]);
   const now = Date.now();
-  if (!grant || expiresAt <= now || expiresAt > now + maxAuthorizationMs) return deny(503);
+  if (!grant || grant[1] !== env.DRIVE_OWNER_ENROLLMENT_RELEASE ||
+      expiresAt <= now || expiresAt > now + maxAuthorizationMs) return deny(503);
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...headers, allow: 'POST' } });
   if (!allowsOrigin(request, stagingOrigin) || new URL(request.url).search) return deny(403);
   const authorization = request.headers.get('authorization');
   const bearer = authorization?.length === 50 && /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization);
-  if (!bearer || !subtle.timingSafeEqual(encoder.encode(bearer[1]), encoder.encode(grant[2]))) return deny(403);
+  if (!bearer || !subtle.timingSafeEqual(encoder.encode(bearer[1]), encoder.encode(grant[3]))) return deny(403);
 
   try {
     const input = await enrollmentInput(request);
