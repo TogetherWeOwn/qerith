@@ -7,7 +7,7 @@ import { createMultipartCreate } from './s3/multipart-create';
 
 // The first-upload preview fits in one existing bounded part.
 export const maxUploadIntentBytes = 16 * 1024 * 1024;
-interface UploadIntentEnv extends DriveAuthEnv {
+export interface UploadIntentEnv extends DriveAuthEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
@@ -15,6 +15,50 @@ interface UploadIntentEnv extends DriveAuthEnv {
 }
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers });
+
+const intentBodyLimit = 64;
+const intentReadMs = 2_000;
+
+async function readIntentSize(request: Request): Promise<number | null> {
+  const type = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  const length = request.headers.get('content-length');
+  if (type !== 'application/json' || !request.body || request.body.locked || request.signal.aborted ||
+      (length !== null && (!/^\d{1,2}$/.test(length) || +length < 1 || +length > intentBodyLimit))) return null;
+
+  const limit = length === null ? intentBodyLimit : +length;
+  const bytes = new Uint8Array(limit), reader = request.body.getReader();
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(intentReadMs)]);
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener('abort', cancel, { once: true });
+  const deadline = performance.now() + intentReadMs;
+  try {
+    let offset = 0, reads = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (signal.aborted || performance.now() >= deadline) { cancel(); return null; }
+      if (done) break;
+      if (value.length > limit - offset) { cancel(); return null; }
+      bytes.set(value, offset);
+      offset += value.length;
+      // Ready reads, including empty chunks, must not starve the deadline timer.
+      if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    if (length !== null && offset !== limit) return null;
+    const body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, offset)));
+    return body && Object.keys(body).length === 1 && Object.hasOwn(body, 'size') && typeof body.size === 'number'
+      ? body.size : null;
+  } catch { return null; }
+  finally {
+    signal.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+export async function postUploadIntent(request: Request, env: UploadIntentEnv,
+  transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
+  const size = await readIntentSize(request);
+  return size === null ? reply(400) : createUploadIntent(request, size, env, transport);
+}
 
 // Server-only; the caller supplies a parsed byte count and trusted Worker bindings.
 export async function createUploadIntent(request: Request, size: number, env: UploadIntentEnv,
