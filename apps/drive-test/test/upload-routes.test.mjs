@@ -102,18 +102,22 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
     if (change === 'generation HEAD') await demote();
   } });
   ({ principal } = upload);
-  expect((await upload.send(1, { auth: upload.foreign })).status).toBe(403);
-  const partDenied = change === 'part claim';
-  expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
-  expect((await upload.send()).status).toBe(partDenied ? 403 : 404);
-  expect(await upload.generation()).toBeNull();
-  const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
-    'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
-  expect(upload.calls).toEqual(expected[change]);
-  if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
-    USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
-  if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
-    JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
+  try {
+    expect((await upload.send(1, { auth: upload.foreign })).status).toBe(404);
+    const partDenied = change === 'part claim';
+    expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
+    expect((await upload.send()).status).toBe(404);
+    expect(await upload.generation()).toBeNull();
+    const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
+      'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
+    expect(upload.calls).toEqual(expected[change]);
+    if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
+      USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
+    if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
+      JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
+  } finally {
+    await demote();
+  }
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {
