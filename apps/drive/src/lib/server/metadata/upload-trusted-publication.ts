@@ -22,8 +22,9 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>) {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const reader = createImmutableS3Reader(createS3Objects(settings, { ...transport,
-    beforeSend: async () => await isQualified?.(storageConfigId) === true }));
+  const { beforeSend, ...options } = transport;
+  const reader = createImmutableS3Reader(createS3Objects(settings, { ...options,
+    beforeSend: async () => (!beforeSend || await beforeSend() === true) && await isQualified?.(storageConfigId) === true }));
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {

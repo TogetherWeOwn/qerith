@@ -5,7 +5,6 @@ import { privateRequests } from '../../drive/src/lib/server/request-auth.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
 import { config, epoch, migrations, response, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, qualified } from './fixtures/upload-publication-generation.mjs';
-
 const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
