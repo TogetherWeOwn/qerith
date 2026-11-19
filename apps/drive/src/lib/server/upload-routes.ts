@@ -1,4 +1,4 @@
-import { tokenHash } from './identity/sessions';
+import { Sessions, tokenHash } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
   occupiedUploadName } from './metadata/upload-completion-receipts';
@@ -81,10 +81,11 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       try {
         const access = await authorize(request, session, intentId);
         if (access instanceof Response) return access;
-        const { db, bindings, settings, epoch, ownerId, isQualified, storageConfigId } = access;
+        const { db, bindings, settings, epoch, ownerId, token, isQualified, storageConfigId } = access;
         const ledger = new UploadPartOperationEvidence(db);
         return await uploadPart(request, intentId, number, {
-          send: createMultipartUpload(settings, { ...transport, beforeSend: () => isQualified(storageConfigId) }),
+          send: createMultipartUpload(settings, { ...transport, beforeSend: async () => await isQualified(storageConfigId) === true &&
+            (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) }),
           async authorize() {
             const intent = await db.withSession('first-primary').prepare(`SELECT i.version ${allocated}`)
               .bind(...bindings).first<{ version: number }>();
@@ -154,7 +155,9 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             { ...transport, timeoutMs }, verifier, ownerOnly).complete(token, row.operation_id, target);
           checkName = result === 'dispatch-denied';
           if (result === 'recorded') {
-            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified, ownerOnly);
+            const publisher = createTrustedUploadPublication(db, epoch, settings, { ...transport,
+              beforeSend: ownerOnly ? () => new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId) : undefined
+            }, isQualified, ownerOnly);
             const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
             if (published) return Response.json({ id: published.id }, { status: 201, headers });
           }

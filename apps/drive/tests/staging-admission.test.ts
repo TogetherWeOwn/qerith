@@ -138,6 +138,10 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
     denied(await dispatchStagingRequest(req, env, true, assets, dispatch), status);
   }
   denied(await dispatchStagingRequest(request('/api/sign-in/challenge', 'POST'), env, false, assets, dispatch), 503);
+  denied(await dispatchStagingRequest(request('/', 'GET', {
+    cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document'
+  }), env, true, assets, dispatch), 303);
+  denied(await dispatchStagingRequest(request('/', 'HEAD'), runtime('member').env, true, assets, dispatch), 401);
   assert.equal(reads(), 0);
 
   revoke();

@@ -29,7 +29,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
   const { endpoint, bucket } = settings;
   const { beforeSend, ...options } = transport;
   const reader = createImmutableS3Reader(createS3Objects(settings, { ...options,
-    beforeSend: async () => (!beforeSend || await beforeSend() === true) && await isQualified?.(storageConfigId) === true }));
+    beforeSend: async () => await isQualified?.(storageConfigId) === true && (!beforeSend || await beforeSend() === true) }));
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {

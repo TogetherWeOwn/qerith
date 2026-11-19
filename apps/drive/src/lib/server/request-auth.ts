@@ -97,7 +97,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     } catch {
       return refuse(503);
     }
-    if (staging && session && session.principal.role !== 'owner') return deny(403);
+    if (staging && session && session.principal.role !== 'owner') {
+      return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
+    }
     if (!session && !signInPage) {
       if (event.route?.id === downloadRoute) {
         const downloadNavigation = fixture ? isDownloadDocumentNavigation(request) : isDownloadNavigation(request);

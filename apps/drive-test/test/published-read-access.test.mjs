@@ -192,7 +192,24 @@ it('composes with immutable full and range GETs without storage calls for denied
     await expect(client.read(), stop).rejects.toThrow();
     if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
   }
-  await sql("UPDATE drive_principals SET role = 'member' WHERE id = 'owner-read-stream'").run();
+  const setRole = (role) => sql("UPDATE drive_principals SET role = ? WHERE id = 'owner-read-stream'", role).run();
+  let firstLookup = true;
+  const DB = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
+    const row = await env.DB.withSession(mode).prepare(query).bind(...args).first();
+    if (firstLookup) { firstLookup = false; await setRole('member'); }
+    return row;
+  } }) }) }) };
+  expect((await get({}, token, { ...storage, DB })).status).toBe(404);
+  expect(fetch).toHaveBeenCalledTimes(16); // No provider dispatch after the initial lookup.
+  for (const conditional of [false, true]) {
+    await setRole('owner');
+    fetch.mockImplementationOnce(async () => {
+      await setRole('member');
+      return new Response(conditional ? null : 'abcdefg', { headers: { etag, 'content-length': '7' } });
+    });
+    const denied = await get(conditional ? { 'if-none-match': etag } : {});
+    expect([denied.status, denied.headers.get('etag'), await denied.text()]).toEqual([404, null, '']);
+  }
   expect(await sessions.lookup(token)).toMatchObject({ role: 'member' });
   expect((await get()).status).toBe(404);
   await sql("UPDATE drive_principals SET role = 'owner' WHERE id = 'owner-read-stream'").run();
@@ -200,5 +217,5 @@ it('composes with immutable full and range GETs without storage calls for denied
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
   expect(revoked.status).toBe(404);
   expect(revoked.headers.get('content-range')).toBeNull();
-  expect(fetch).toHaveBeenCalledTimes(16);
+  expect(fetch).toHaveBeenCalledTimes(18);
 });

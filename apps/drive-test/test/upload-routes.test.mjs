@@ -84,10 +84,18 @@ it('publishes a verified sparse upload without duplicate part or completion send
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
 });
 
-it.each(['none', 'parts verification', 'generation HEAD'])('keeps staging upload owner-only at %s', async (change) => {
+it.each(['part claim', 'parts verification', 'completion claim', 'publication send', 'generation HEAD'])('keeps staging upload owner-only after %s', async (change) => {
   let principal;
   const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
-  const upload = await fixture({ staging: true, async verify(_upload, parts) {
+  const claim = {
+    'part claim': 'drive_upload_part_operations',
+    'completion claim': 'drive_upload_completion_operations JOIN drive_upload_completion_dispatches USING (operation_id)',
+    'publication send': 'drive_upload_completion_operations JOIN drive_upload_completion_receipts USING (operation_id)'
+  }[change];
+  const upload = await fixture({ staging: true, async isQualified(id, intent) {
+    if (claim && await sql(`SELECT 1 FROM ${claim} WHERE intent_id = ?`, intent).first()) await demote();
+    return qualified(id);
+  }, async verify(_upload, parts) {
     if (change === 'parts verification') await demote();
     return parts;
   }, async beforeHead() {
@@ -95,16 +103,17 @@ it.each(['none', 'parts verification', 'generation HEAD'])('keeps staging upload
   } });
   ({ principal } = upload);
   expect((await upload.send(1, { auth: upload.foreign })).status).toBe(403);
-  expect((await upload.send(1)).status).toBe(204);
-  const result = await upload.send();
-  if (change === 'none') {
-    expect(result.status).toBe(201);
-    expect(await upload.generation()).toMatchObject({ entry_id: (await result.json()).id });
-  } else {
-    expect(result.status).toBe(404);
-    expect(await upload.generation()).toBeNull();
-  }
-  expect(upload.calls).toEqual(change === 'parts verification' ? ['PUT'] : ['PUT', 'POST', 'HEAD']);
+  const partDenied = change === 'part claim';
+  expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
+  expect((await upload.send()).status).toBe(partDenied ? 403 : 404);
+  expect(await upload.generation()).toBeNull();
+  const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
+    'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
+  expect(upload.calls).toEqual(expected[change]);
+  if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
+    USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
+  if (change === 'completion claim') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
+    JOIN drive_upload_completion_quarantine q USING (operation_id) WHERE o.owner_id = ?`, principal).first()).not.toBeNull();
 });
 
 it('applies exact origin, session, owner and next-request revocation to both mutations', async () => {

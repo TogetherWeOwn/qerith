@@ -86,6 +86,7 @@ it.each(['session revoked', 'session expired', 'membership revoked', 'owner demo
   const principalId = `listing-${change}`;
   const demoted = change === 'owner demoted', DRIVE_ORIGIN = demoted ? stagingOrigin : origin;
   await env.DB.batch([
+    ...(demoted ? [env.DB.prepare("UPDATE drive_principals SET role = 'member' WHERE id = 'other'")] : []),
     env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(principalId, demoted ? 'owner' : 'member'),
     env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Private', 'folder')")
       .bind(principalId, principalId)

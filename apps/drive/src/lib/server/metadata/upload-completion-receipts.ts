@@ -1,3 +1,4 @@
+import { Sessions } from '../identity/sessions';
 import { createMultipartComplete } from '../s3/multipart-complete';
 import { completionXml, type CompletedPart } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
@@ -91,9 +92,6 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   const allocated = `${sealed} ${requireActiveOwner(ownerOnly, 'o.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
-  const complete = createMultipartComplete(settings, { ...transport,
-    beforeSend: async () => await verifier?.isQualified(storageConfigId) === true });
-
   async function quarantine(operation: ArrayBuffer): Promise<void> {
     await db.prepare(`INSERT INTO drive_upload_completion_quarantine (operation_id)
       SELECT d.operation_id FROM drive_upload_completion_dispatches d
@@ -164,6 +162,9 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       } catch { return 'uncertain'; } // A durable claim without a receipt is already fenced.
 
       try {
+        const complete = createMultipartComplete(settings, { ...transport,
+          beforeSend: async () => await verifier.isQualified(storageConfigId) === true &&
+            (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) });
         const response = await complete(objectKey, uploadId, parts);
         const receipt = { etag: response.etag, response_checksums: JSON.stringify(response.checksums ?? {}),
           evidence_revision: crypto.randomUUID() };

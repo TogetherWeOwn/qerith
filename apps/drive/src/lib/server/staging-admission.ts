@@ -70,7 +70,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   try {
     const session = await readSession(request, env.DB);
     if (session?.principal.role === 'owner') return target;
-    if (session) return deny(403);
+    // An otherwise valid member cookie must not prevent the owner from signing in.
+    if (session) return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
     if (navigation && target.kind === 'root') return signInRedirect();
     if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
     return deny(401);

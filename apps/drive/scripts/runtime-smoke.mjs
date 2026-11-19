@@ -152,17 +152,24 @@ export default { fetch(request, env, ctx) {
       for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list']) {
         assert.equal((await get(path, { cookie })).status, 404, path);
       }
-      const redirected = await get('/', { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' });
-      assert.deepEqual([redirected.status, redirected.headers.get('location')], [303, '/sign-in?next=%2F']);
-      assert.equal((await get('/sign-in')).status, 200);
+      const crossSite = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' };
+      for (const headers of [crossSite, { ...crossSite, cookie }]) {
+        const redirected = await get('/', headers);
+        assert.deepEqual([redirected.status, redirected.headers.get('location'), redirected.headers.get('set-cookie'),
+          await redirected.text()], [303, '/sign-in?next=%2F', null, '']);
+        assert.equal((await get(redirected.headers.get('location'), headers)).status, 200);
+      }
       assert.equal((await get('/', { cookie: member })).status, 403);
+      const probe = (cookie, headers = {}) => access({ method: 'HEAD', headers: { cookie, ...headers } });
+      assert.equal((await probe(member)).status, 401);
+      assert.equal((await probe(member, { origin: 'https://other.example.test' })).status, 403);
       const post = (step, headers = {}, body) => worker.fetch(`${origin}/api/sign-in/${step}`, {
         method: 'POST', headers: { origin, ...headers }, body,
       });
       const verify = await post('verify');
       assert.deepEqual([verify.status, await verify.json()], [401, { code: 'denied' }]);
-      async function signIn(principalId) {
-        const issued = await post('challenge');
+      async function signIn(principalId, browserCookie) {
+        const issued = await post('challenge', browserCookie ? { cookie: browserCookie } : {});
         assert.equal(issued.status, 200);
         const { challenge, rpId: rpID } = await issued.json();
         const { authentication, credential } = await passkey('authentication', { challenge, origin, rpID });
@@ -170,7 +177,8 @@ export default { fetch(request, env, ctx) {
         await DB.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
           VALUES (?, ?, ?, 0, '[]', ?)`).bind(credential.id, principalId, Array.from(credential.publicKey), userHandle).run();
         return post('verify', {
-          cookie: issued.headers.get('set-cookie').split(';')[0], 'content-type': 'application/json',
+          cookie: [browserCookie, issued.headers.get('set-cookie').split(';')[0]].filter(Boolean).join('; '),
+          'content-type': 'application/json',
         }, JSON.stringify(authentication));
       }
       const deniedMember = await signIn('other');
@@ -181,12 +189,13 @@ export default { fetch(request, env, ctx) {
         DB.prepare("DELETE FROM drive_credentials WHERE principal_id = 'other'"),
         DB.prepare("UPDATE drive_principals SET webauthn_user_handle = NULL WHERE id = 'other'")
       ]);
-      const owner = await signIn('fixture');
+      const owner = await signIn('fixture', member);
       assert.equal(owner.status, 204);
       const cookies = owner.headers.getSetCookie();
       const sessionCookie = cookies.find(value => value.startsWith('__Host-drive-session='));
-      assert.ok(sessionCookie);
+      assert.match(sessionCookie, /; SameSite=Lax;/);
       cookie = sessionCookie.split(';')[0];
+      assert.equal((await probe(cookie)).status, 200);
       const listing = await get('/', { cookie });
       const html = await listing.text();
       assert.match(html, /Your drive is empty/);
