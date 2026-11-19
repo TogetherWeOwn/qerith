@@ -1,6 +1,6 @@
 import type { Handle } from '@sveltejs/kit/hooks';
 import { driveNext, isDrivePageNavigation } from '../drive-navigation';
-import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation } from './download-navigation';
+import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
 
 export interface DriveAuthEnv {
@@ -95,7 +95,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       return refuse(503);
     }
     if (!session && !signInPage) {
-      if (event.route?.id === downloadRoute && isDownloadDocumentNavigation(request)) return downloadRedirect(downloadSignIn);
+      if (event.route?.id === downloadRoute) {
+        const downloadNavigation = fixture ? isDownloadDocumentNavigation(request) : isDownloadNavigation(request);
+        if (downloadNavigation) return downloadRedirect(downloadSignIn);
+      }
       if (fixture && navigation) return downloadRedirect(`/sign-in?${new URLSearchParams({ next: driveNext(pathname + search) })}`);
       return deny(401);
     }

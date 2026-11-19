@@ -6,10 +6,10 @@ const origin = 'https://example.test';
 const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
-function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable', routeId?: string) {
+function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable', routeId?: string, fixture?: '1') {
   let lookups = 0;
   let resolved = false;
-  const env = { DRIVE_ORIGIN: configuredOrigin, DB: fault === 'unbound' ? undefined : { prepare: () => {
+  const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DB: fault === 'unbound' ? undefined : { prepare: () => {
     lookups++;
     if (fault === 'unavailable') throw new Error('database unavailable');
     return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
@@ -63,18 +63,34 @@ test('absent, malformed and ambiguous session cookies never resolve a route', as
   }
 });
 
-test('signed-out cross-site download links redirect without changing API or conditional responses', async () => {
-  const path = '/api/download/file-1';
-  const routeId = '/api/download/[fileId]';
-  const metadata = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
-  const visit = (init: RequestInit) => request(origin + path, init, origin, undefined, routeId);
+const fixtureOrigin = 'https://drive.example.test';
+const downloadPath = '/api/download/file-1';
+const downloadRouteId = '/api/download/[fileId]';
+const metadata = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
 
-  const { response, lookups, resolved } = await visit({ headers: metadata });
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/sign-in?next=%2F');
+test('signed-out cross-site downloads do not redirect when sign-in is closed', async () => {
+  const { response, lookups, resolved } = await request(fixtureOrigin + downloadPath, { headers: metadata }, fixtureOrigin, undefined, downloadRouteId);
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get('location'), null);
   assert.equal(response.headers.get('cache-control'), 'private, no-store');
   assert.equal(lookups, 0);
   assert.equal(resolved, false);
+});
+
+test('admitted signed-out cross-site download links redirect without changing API or conditional responses', async () => {
+  const visit = (init: RequestInit) => request(fixtureOrigin + downloadPath, init, fixtureOrigin, undefined, downloadRouteId, '1');
+
+  const { response, lookups, resolved } = await visit({ headers: metadata });
+  assert.equal(response.status, 303);
+  const location = response.headers.get('location');
+  assert.equal(location, '/sign-in?next=%2F');
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(lookups, 0);
+  assert.equal(resolved, false);
+
+  const signIn = await request(fixtureOrigin + location, { headers: metadata }, fixtureOrigin, undefined, '/sign-in', '1');
+  assert.equal(signIn.response.status, 200);
+  assert.equal(signIn.resolved, true);
 
   for (const init of [{ headers: { ...metadata, 'sec-fetch-mode': 'cors' } },
     { method: 'HEAD', headers: metadata },
