@@ -90,12 +90,18 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
+      - name: Dry-run the staging Worker package before migration
+        run: |
+          timeout --signal=TERM --kill-after=10s 90s node_modules/.bin/wrangler deploy \
+            .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run \
+            --outdir "$RUNNER_TEMP/drive-staging"
       - name: Migrate and publish staging Worker
         shell: bash
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
           NO_COLOR: '1'
+          WRANGLER_HIDE_BANNER: 'true'
         run: |
           set -euo pipefail
           : "${CLOUDFLARE_API_TOKEN:?missing staging deploy token}"
@@ -171,9 +177,13 @@ jobs:
           list_status=0
           capture "$after_file" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config" || list_status=$?
           if (( list_status == 0 )); then log_capture "$after_file"; fi
-          if (( apply_status != 0 || list_status != 0 )) ||
-             [[ "$(grep -Fxc '✅ No migrations to apply!' "$after_file" || true)" != 1 ]] ||
-             grep -Fq 'Migrations to be applied:' "$after_file"; then
+          # With the banner off, pinned Wrangler prints the location and result.
+          if (( apply_status != 0 || list_status != 0 )) || ! node -e '
+            const lines = require("node:fs").readFileSync(process.argv[1], "utf8")
+              .split(/\r?\n/).map(line => line.trimEnd()).filter(Boolean);
+            if (lines.length !== 2 || lines[0] !== "Resource location: remote" ||
+                lines[1] !== "✅ No migrations to apply!") process.exitCode = 1;
+          ' "$after_file"; then
             printf '%s\n' 'Migration apply or post-list failed; restore the bookmark or recreate the staging database before retry.' >&2
             exit 1
           fi
