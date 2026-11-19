@@ -11,8 +11,8 @@ interface PreviewAssets {
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root' | 'download' | 'upload' } |
-  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'private-asset'; deadline?: number };
+type Target = { kind: 'sign-in' | 'public-asset' | 'download' | 'upload' } |
+  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'private-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -75,7 +75,10 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
-      if (session.role === 'owner') return target.kind === 'private-asset' ? { ...target, deadline } : target;
+      if (session.role === 'owner') {
+        return target.kind === 'private-asset' || (target.kind === 'root' && request.method === 'HEAD')
+          ? { ...target, deadline } : target;
+      }
       // An otherwise valid member cookie must not prevent the owner from signing in.
       return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
     }
@@ -91,12 +94,17 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
   assets: PreviewAssets, dispatch: PreviewDispatch): Promise<Response> {
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
+  const rootProbe = target.kind === 'root' && request.method === 'HEAD';
+  if (target.kind === 'private-asset' || rootProbe) {
+    if (!(performance.now() < (target.deadline ?? 0))) return deny(401);
+    // The sign-in probe reports authorization, not whether the listing rendered.
+    if (rootProbe) return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
+  }
   switch (target.kind) {
     case 'ceremony':
       return dispatch.ceremony(request, target.step);
     case 'public-asset':
     case 'private-asset': {
-      if (target.kind === 'private-asset' && !(performance.now() < (target.deadline ?? 0))) return deny(401);
       const asset = await dispatch.asset(request);
       const response = new Response(asset.body, asset);
       response.headers.set('cache-control', 'private, no-store');

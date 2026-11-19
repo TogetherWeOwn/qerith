@@ -171,7 +171,15 @@ export default { fetch(request, env, ctx) {
       assert.equal((await bootstrap(grant)).status, 403, 'release-bound enrollment still needs the bearer');
       assert.equal((await bootstrap({ ...grant, authorization: `Bearer ${enrollmentToken}` })).status, 409,
         'release-bound enrollment remains available with qualified storage and refuses a second owner');
-      assert.equal((await get('/sign-in', grant)).status, 200, 'the enrollment release keeps sign-in available');
+      const signInPage = await get('/sign-in', grant);
+      assert.equal(signInPage.status, 200, 'the enrollment release keeps sign-in available');
+      const publicAssets = new Set([...(await signInPage.text()).matchAll(/["']((?:\.\/|\/)?_app\/immutable\/[\w./-]+\.(?:js|css|woff2))["']/g)]
+        .map(([, path]) => new URL(path, origin).pathname));
+      assert.ok([...publicAssets].some(path => path.endsWith('.js')), 'sign-in references a generated client entry');
+      for (const path of publicAssets) {
+        const asset = await get(path);
+        assert.deepEqual([asset.status, asset.headers.get('cache-control')], [200, 'private, no-store'], path);
+      }
       for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list',
         '/api/root-listing', '/api/deployer/owner-enrollment', '/api/entries/fixture/delete']) {
         assert.equal((await get(path, { cookie })).status, 404, path);

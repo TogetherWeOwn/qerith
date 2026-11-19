@@ -53,9 +53,10 @@ test('preview admits only the declared methods and exact routes or assets', asyn
       const { env, reads } = runtime();
       const result = await admitStagingRequest(request(path, method), env, true, assets);
       if ((allowed as readonly string[]).includes(method)) {
-        if (target.kind === 'private-asset') {
-          assert.ok(!(result instanceof Response) && result.kind === 'private-asset' &&
+        if (target.kind === 'private-asset' || (target.kind === 'root' && method === 'HEAD')) {
+          assert.ok(!(result instanceof Response) && (result.kind === 'private-asset' || result.kind === 'root') &&
             typeof result.deadline === 'number' && result.deadline > performance.now());
+          assert.equal(result.kind, target.kind);
         } else {
           assert.deepEqual(result, target, `${method} ${path}`);
         }
@@ -168,6 +169,15 @@ test('private assets are not dispatched when the session lifetime runs out durin
     adapter: unexpected, asset: unexpected, ceremony: unexpected,
   }), 401);
   assert.equal(reads(), 1);
+});
+
+test('the staged sign-in probe reports a live owner without dispatching the root page', async () => {
+  const unexpected = async () => assert.fail('sign-in probe reached downstream dispatch');
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
+  for (const [fixture, status] of [[runtime(), 200], [runtime('member'), 401], [runtime('owner', 1, 10), 401]] as const) {
+    denied(await dispatchStagingRequest(request('/', 'HEAD'), fixture.env, true, assets, dispatch), status);
+    assert.equal(fixture.reads(), 1);
+  }
 });
 
 test('admitted traffic reaches one handler; assets cannot carry CDN cache overrides', async () => {
