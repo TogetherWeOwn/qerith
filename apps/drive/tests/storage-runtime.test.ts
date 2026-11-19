@@ -75,7 +75,10 @@ const listPage = (parts: string, marker?: number) => new Response(
 );
 
 test('verification uses signed ListParts on the exact key and upload ID across pages', async () => {
-  const markers: Array<string | null> = [];
+  const events: Array<string | null> = [];
+  let pages = 0;
+  let allowedPages = 2;
+  const checkOwner = async () => { events.push('owner check'); return pages < allowedPages; };
   const verifier = wireUploadStorage(bindings(), async input => {
     assert.ok(input instanceof Request);
     const url = new URL(input.url);
@@ -84,16 +87,21 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     assert.ok(input.headers.has('authorization'));
     assert.equal(url.origin + url.pathname, 'https://storage.example.test/drive-staging/key%20one');
     assert.equal(url.searchParams.get('uploadId'), 'opaque+/=');
-    markers.push(url.searchParams.get('part-number-marker'));
-    const number = markers.length;
+    events.push(url.searchParams.get('part-number-marker'));
+    const number = ++pages;
     return listPage(listPart(number, number === 1 ? '"tag-1"' : '"tag-&amp;-ÿ"'), number === 1 ? 1 : undefined);
   }).DRIVE_UPLOAD_VERIFIER!;
-  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }), null);
-  assert.deepEqual(markers, []);
-  assert.deepEqual(await verifier.verifyParts(upload), [
+  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong', beforeSend: checkOwner }), null);
+  assert.deepEqual(events, []);
+  assert.deepEqual(await verifier.verifyParts({ ...upload, beforeSend: checkOwner }), [
     { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
-  assert.deepEqual(markers, [null, '1']);
+  assert.deepEqual(events, ['owner check', null, 'owner check', '1']);
+  for (allowedPages = 0; allowedPages < 2; allowedPages++) {
+    pages = events.length = 0;
+    assert.equal(await verifier.verifyParts({ ...upload, beforeSend: checkOwner }), null);
+    assert.deepEqual(events, allowedPages ? ['owner check', null, 'owner check'] : ['owner check']);
+  }
   const invalid = wireUploadStorage(bindings(), async () => new Response('<ListPartsResult/>')).DRIVE_UPLOAD_VERIFIER!;
   assert.equal(await invalid.verifyParts(upload), null);
 });

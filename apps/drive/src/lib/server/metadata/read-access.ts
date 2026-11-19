@@ -49,6 +49,13 @@ const access = `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
   ))
 )`;
 
+const ownerAccess = `WITH permitted AS (
+  SELECT e.id, s.expires_at - CAST(unixepoch('subsec') * 1000 AS INTEGER) AS remainingMs FROM drive_entries e
+  JOIN drive_sessions s ON s.principal_id = e.owner_id
+  JOIN drive_principals p ON p.id = s.principal_id AND p.status = 'active' AND p.role = 'owner'
+  WHERE e.id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+)`;
+
 export type PublishedReadReference = Readonly<ImmutableS3Reference & {
   name: string;
   storageConfigId: string;
@@ -62,10 +69,12 @@ interface PublishedRow {
   revisionHex: string;
   etag: string;
   sizeBytes: number;
+  remainingMs?: number;
 }
 
-/** Server-only. Resolve once per download; never serialize or cache the reference. */
-export function createPublishedReadAccess(db: { withSession(constraint: 'first-primary'): Database }, epoch: string, config: S3Config) {
+/** Server-only. Use fresh primary reads; never serialize or cache the reference. */
+export function createPublishedReadAccess(db: { withSession(constraint: 'first-primary'): Database }, epoch: string, config: S3Config,
+  ownerOnly = false) {
   const { settings: { endpoint, bucket }, storageConfigId } = uploadStorageEvidence(config, epoch);
   return {
     storageConfigId,
@@ -76,9 +85,11 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
         if (!hash) return null;
         // Authorize and resolve in the same fresh primary statement. Receipt
         // history alone does not establish that the file is still visible.
-        const row = await db.withSession('first-primary').prepare(`${access}
+        const scope = ownerOnly ? [id, hash] : [id, hash, id];
+        const started = performance.now();
+        const row = await db.withSession('first-primary').prepare(`${ownerOnly ? ownerAccess : access}
           SELECT hex(g.object_key) AS keyHex, hex(e.name) AS nameHex, g.etag,
-            g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex
+            g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex${ownerOnly ? ', a.remainingMs' : ''}
           FROM permitted a JOIN drive_entries e ON e.id = a.id
           JOIN drive_published_generations g ON g.entry_id = e.id AND g.owner_id = e.owner_id
             AND g.object_key = e.object_key AND g.size_bytes = e.size_bytes
@@ -89,8 +100,8 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
             AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones t WHERE t.intent_id = g.intent_id)
             AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = g.intent_id)
             AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_quarantine q WHERE q.operation_id = p.completion_operation_id)`)
-          .bind(id, hash, id, endpoint, bucket, epoch).first<PublishedRow>();
-        if (!row) return null;
+          .bind(...scope, endpoint, bucket, epoch).first<PublishedRow>();
+        if (!row || (ownerOnly && !(performance.now() - started < (row.remainingMs ?? 0)))) return null;
         const { etag, sizeBytes } = row;
         if (typeof etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag) ||
             !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return null;
