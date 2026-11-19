@@ -36,7 +36,7 @@ it('releases cancelled slots without deleting unrelated or active ceremonies', a
   const cancelledChallenge = await challenges.issue(cancelled.token);
   const activeChallenge = await challenges.issue(active.token);
   await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1022)
-    INSERT INTO drive_bound_ceremonies SELECT printf('other%d', x), 'registration', printf('other%d', x), 9999999999999 FROM n`).run();
+    INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at) SELECT printf('other%d', x), 'registration', printf('other%d', x), 9999999999999 FROM n`).run();
   const next = await recovery.issue(owner, 'member');
   await expect(challenges.issue(next.token)).rejects.toThrow('Recovery unavailable');
   await recovery.cancel(owner, cancelled.id);

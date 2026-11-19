@@ -19,23 +19,36 @@ export class BoundChallenges {
   constructor(private readonly db: Database) {}
 
   async issue(context: string, purpose: ChallengePurpose, expectedChallenge?: string): Promise<string> {
-    this.validate(context, purpose);
-    if (expectedChallenge !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(expectedChallenge)) throw new TypeError('Invalid challenge');
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const challenge = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+    return this.store(context, purpose, challenge, expectedChallenge);
+  }
+
+  async issueRegistration(context: string, challenge: string, principalId: string, userHandle: string): Promise<void> {
+    await this.store(context, 'registration', challenge, undefined, { principalId, userHandle });
+  }
+
+  private async store(context: string, purpose: ChallengePurpose, challenge: string, expectedChallenge?: string,
+    binding?: { principalId: string; userHandle: string }): Promise<string> {
+    this.validate(context, purpose);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(challenge) ||
+        (expectedChallenge !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(expectedChallenge))) throw new TypeError('Invalid challenge');
     await this.db.prepare(`DELETE FROM drive_bound_ceremonies
       WHERE expires_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)`).run();
     // A stale replacement returns the unchanged challenge; capacity refusal returns no row.
-    const row = await this.db.prepare(`INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at)
-      SELECT ?1, ?2, ?3, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?4
+    const row = await this.db.prepare(`INSERT INTO drive_bound_ceremonies
+      (context, purpose, challenge, expires_at, principal_id, webauthn_user_handle)
+      SELECT ?1, ?2, ?3, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?4, NULLIF(?8, ''), NULLIF(?9, '')
       WHERE ((SELECT count(*) FROM drive_bound_ceremonies) < ?5 AND
         (?2 = 'registration' OR (SELECT count(*) FROM drive_bound_ceremonies WHERE purpose = 'authentication') < ?6))
         OR EXISTS (SELECT 1 FROM drive_bound_ceremonies WHERE context = ?1 AND purpose = ?2)
       ON CONFLICT (context, purpose) DO UPDATE SET
         challenge = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.challenge ELSE drive_bound_ceremonies.challenge END,
-        expires_at = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.expires_at ELSE drive_bound_ceremonies.expires_at END
-      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, authenticationCapacity, expectedChallenge ?? '')
-      .first<{ challenge: string }>();
+        expires_at = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.expires_at ELSE drive_bound_ceremonies.expires_at END,
+        principal_id = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.principal_id ELSE drive_bound_ceremonies.principal_id END,
+        webauthn_user_handle = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.webauthn_user_handle ELSE drive_bound_ceremonies.webauthn_user_handle END
+      RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, authenticationCapacity,
+        expectedChallenge ?? '', binding?.principalId ?? '', binding?.userHandle ?? '').first<{ challenge: string }>();
     if (!row) throw new CeremonyCapacityReached('Ceremony capacity reached');
     if (row.challenge !== challenge) throw new ChallengeUnavailable('Challenge unavailable');
     return challenge;

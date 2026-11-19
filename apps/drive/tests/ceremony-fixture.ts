@@ -22,7 +22,7 @@ function der(raw: Uint8Array) {
   return join(bytes(0x30, body.length), body);
 }
 
-export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string; key?: CryptoKeyPair } = {}) {
+export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string; key?: CryptoKeyPair; counter?: number } = {}) {
   const key = options.key ?? await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', key.publicKey);
   const cose = join(bytes(0xa5, 1, 2, 3, 0x26, 0x20, 1, 0x21, 0x58, 0x20), decode(jwk.x!), bytes(0x22, 0x58, 0x20), decode(jwk.y!));
@@ -30,7 +30,7 @@ export async function fixture(kind: 'registration' | 'authentication', options: 
   const clientData = text(JSON.stringify({ type: kind === 'registration' ? 'webauthn.create' : 'webauthn.get', challenge: options.challenge ?? challenge, origin: options.origin ?? origin, crossOrigin: options.crossOrigin, topOrigin: options.topOrigin }));
   const rpHash = new Uint8Array(await crypto.subtle.digest('SHA-256', text(options.rpID ?? rpID)));
   const flags = (options.uv === false ? 0x01 : 0x05) | (kind === 'registration' ? 0x40 : 0);
-  const authData = join(rpHash, bytes(flags, 0, 0, 0, 1), ...(kind === 'registration' ? [new Uint8Array(16), bytes(0, id.length), id, cose] : []));
+  const authData = join(rpHash, bytes(flags, 0, 0, 0, options.counter ?? 1), ...(kind === 'registration' ? [new Uint8Array(16), bytes(0, id.length), id, cose] : []));
   const clientHash = new Uint8Array(await crypto.subtle.digest('SHA-256', clientData));
   const raw = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key.privateKey, join(authData, clientHash)));
   if (options.badSignature) raw[0] ^= 1;
