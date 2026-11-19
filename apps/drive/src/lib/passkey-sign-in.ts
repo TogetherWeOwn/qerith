@@ -41,7 +41,7 @@ export async function signInWithPasskey(browser: SignInBrowser, signal: AbortSig
     // Hold the origin-wide lock until Fetch has processed the final response headers,
     // including Set-Cookie. Cancel the queue or authenticator, not an in-flight POST.
     return await browser.exclusive(signal, async (): Promise<Outcome> => {
-      const session = await browser.fetch('/', { ...init, method: 'HEAD' });
+      const session = await browser.fetch('/', { ...init, method: 'HEAD', signal });
       if (session.status === 200) return 'signed-in';
       if (session.status !== 401) return 'cancelled';
       signal.throwIfAborted();
@@ -61,6 +61,7 @@ export async function signInWithPasskey(browser: SignInBrowser, signal: AbortSig
       if (assertion === null) return 'no-passkey';
 
       const proof = await post('verify', assertion);
+      signal.throwIfAborted();
       if (proof.status === 204) return 'signed-in';
       if (proof.status === 403 && await responseCode(proof) === 'revoked') return 'revoked';
       if (proof.status === 429 && await responseCode(proof) === 'rate-limited') return 'rate-limited';

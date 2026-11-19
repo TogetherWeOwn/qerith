@@ -51,9 +51,7 @@ try {
   const post = (step, headers, body) => worker.fetch(`${origin}${endpoint}${step}`, {
     method: 'POST', redirect: 'manual', headers: { origin, 'content-type': 'application/json', ...headers }, body,
   });
-  for (const step of ['challenge', 'restart', 'verify']) {
-    assert.equal((await post(step, { origin: 'https://other.example.test' })).status, 403);
-  }
+  for (const step of ['challenge', 'restart', 'verify']) assert.equal((await post(step, { origin: 'https://other.example.test' })).status, 403);
   const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
   const head = headers => worker.fetch(`${origin}/?return=1`, { method: 'HEAD', headers, redirect: 'manual' });
   const redirect = await head(navigation);
@@ -110,8 +108,12 @@ try {
   });
 
   const go = (page, path) => page.goto(`${origin}${path}`, { waitUntil: 'networkidle' });
-  await Promise.all([go(first, '/?tab=one'), go(second, '/sign-in?next=https%3A%2F%2Fother.example.test')]);
-  assert.equal(new URL(first.url()).searchParams.get('next'), '/?tab=one');
+  const signInFrom = async (page, path) => {
+    const response = await worker.fetch(`${origin}${path}`, { headers: navigation, redirect: 'manual' });
+    assert.equal(response.status, 303);
+    return go(page, response.headers.get('location'));
+  };
+  await Promise.all([signInFrom(first, '/?tab=one'), go(second, '/sign-in?next=https%3A%2F%2Fother.example.test')]);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
   loseNext = true;
@@ -143,11 +145,11 @@ try {
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
   assert.equal(await privateStatus(), 401);
-  await go(second, '/?revoked=1');
-  assert.equal(new URL(second.url()).searchParams.get('next'), '/?revoked=1');
+  await signInFrom(second, '/?revoked=1');
   await primary(second).click();
   await second.getByRole('heading', { name: 'Your access is turned off' }).waitFor();
   assert.deepEqual(traffic.at(-1), ['verify', 403]);
+  await DB.prepare('UPDATE drive_credentials SET counter = 0 WHERE id = ?').bind(credential.id).run();
   const challenge = await post('challenge');
   const forged = await fixture('authentication', { key, origin, rpID, challenge: (await challenge.json()).challenge, badSignature: true });
   const denial = await post('verify', { cookie: challenge.headers.get('set-cookie').split(';')[0] }, JSON.stringify(forged.authentication));

@@ -99,7 +99,7 @@ export default { fetch(request, env, ctx) {
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     assert.equal((await worker.fetch(`${origin}/sign-in`)).status, 404);
     assert.equal((await worker.fetch(`${origin}/api/sign-in/challenge`, { method: 'POST', headers: { origin } })).status, 404);
-    assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
+    assert.equal((await worker.fetch(`${origin}/%73ign-in`, { headers: { cookie }, redirect: 'manual' })).status, 404);
     const mutation = await access({ method: 'POST', headers: { cookie, 'content-type': 'application/json' } });
     assert.equal(mutation.status, 403, 'mutation needs the exact Origin');
     assert.equal(mutation.headers.get('cache-control'), 'private, no-store');

@@ -5,13 +5,13 @@ import { defineConfig } from 'vite';
 // @ts-ignore
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 // @ts-ignore
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 /** @param {import('@sveltejs/kit').Builder} builder */
 function signInAssets(builder) {
   /** @type {import('vite').Manifest} */
   const manifest = JSON.parse(readFileSync(`${builder.getClientDirectory()}/.vite/manifest.json`, 'utf8'));
-  const generated = `${builder.getBuildDirectory('generated')}/build/client-optimized`;
+  const generated = relative('.', `${builder.getBuildDirectory('generated')}/build/client-optimized`).replaceAll('\\', '/');
   const nodes = `${generated}/nodes`;
   const leaf = readdirSync(nodes).filter((/** @type {string} */ file) =>
     /^\d+\.js$/.test(file) && readFileSync(`${nodes}/${file}`, 'utf8').includes('/src/routes/sign-in/+page.svelte'));
@@ -34,8 +34,8 @@ function signInAssets(builder) {
     }
     entry.imports?.forEach(include);
   }
-  // Kit's app entry knows about every route. Do not follow its dynamic imports.
-  [start, runtime, `${generated}/app.js`, `${nodes}/0.js`, `${nodes}/${leaf[0]}`].forEach(include);
+  // Hydration needs both root nodes. Do not follow the app entry's dynamic imports.
+  [start, runtime, `${generated}/app.js`, ...['0.js', '1.js', leaf[0]].map(file => `${nodes}/${file}`)].forEach(include);
   return [...assets];
 }
 
