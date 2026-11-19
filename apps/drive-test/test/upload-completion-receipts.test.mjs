@@ -86,7 +86,7 @@ it('denies unqualified, foreign, mismatched, uncertain and revoked completions',
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it('does not dispatch completion when a later ListParts page has the wrong identity', async () => {
+it.each(['identity', 'cursor'])('does not dispatch completion when a later ListParts page has the wrong %s', async (mismatch) => {
   await applyD1Migrations(env.DB, migrations);
   const id = 'listing-identity', { token, key } = await seed(id);
   const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
@@ -95,10 +95,12 @@ it('does not dispatch completion when a later ListParts page has the wrong ident
     const marker = new URL(request.url).searchParams.get('part-number-marker');
     requests.push([request.method, marker]);
     if (request.method === 'POST') return response(key);
+    const terminal = mismatch === 'identity' ? '<UploadId>other</UploadId>' :
+      '<UploadId>upload/+id</UploadId><PartNumberMarker>0</PartNumberMarker>';
     return new Response(`<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key>` +
       (marker === null ? '<UploadId>upload/+id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>' +
         '<Part><PartNumber>2</PartNumber><Size>7</Size><ETag>"part-&amp;-ÿ"</ETag></Part>' :
-        '<UploadId>other</UploadId><IsTruncated>false</IsTruncated>') + '</ListPartsResult>');
+        `${terminal}<IsTruncated>false</IsTruncated>`) + '</ListPartsResult>');
   });
   const { DRIVE_UPLOAD_VERIFIER: verifier } = wireUploadStorage({
     DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,

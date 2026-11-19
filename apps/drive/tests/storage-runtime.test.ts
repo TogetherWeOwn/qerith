@@ -86,12 +86,12 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     assert.equal(url.searchParams.get('uploadId'), 'opaque+/=');
     markers.push(url.searchParams.get('part-number-marker'));
     const number = markers.length;
-    return listPage(listPart(number, `"tag-${number}"`), number === 1 ? 1 : undefined);
+    return listPage(listPart(number, number === 1 ? '"tag-1"' : '"tag-&amp;-ÿ"'), number === 1 ? 1 : undefined);
   }).DRIVE_UPLOAD_VERIFIER!;
   assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }), null);
   assert.deepEqual(markers, []);
   assert.deepEqual(await verifier.verifyParts(upload), [
-    { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-2"' }
+    { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
   assert.deepEqual(markers, [null, '1']);
   const invalid = wireUploadStorage(bindings(), async () => new Response('<ListPartsResult/>')).DRIVE_UPLOAD_VERIFIER!;

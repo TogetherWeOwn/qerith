@@ -53,7 +53,7 @@ test('lists parts and validates pagination and part metadata', async () => {
   const wrap = (content: string) => `<ListPartsResult><Bucket>test-bucket</Bucket><Key>key</Key><UploadId>upload+/=</UploadId>${content}</ListPartsResult>`;
   const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
     sent = input as Request;
-    return new Response(wrap('<IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><Size>42</Size><ETag>"tag"</ETag></Part>'));
+    return new Response(wrap('<IsTruncated>true</IsTruncated><PartNumberMarker>1</PartNumberMarker><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><Size>42</Size><ETag>"tag"</ETag></Part>'));
   } });
   assert.deepEqual(await listing.parts('key', 'upload+/=', { partNumberMarker: 1 }), {
     parts: [{ partNumber: 2, size: 42, etag: '"tag"' }], nextPartNumberMarker: 2
@@ -65,6 +65,9 @@ test('lists parts and validates pagination and part metadata', async () => {
   assert.deepEqual(await final.parts('key', 'upload+/='), { parts: [], nextPartNumberMarker: undefined });
   for (const content of [
     '<IsTruncated>true</IsTruncated>',
+    '<IsTruncated>false</IsTruncated><PartNumberMarker>0</PartNumberMarker>',
+    '<IsTruncated>false</IsTruncated><PartNumberMarker>1</PartNumberMarker><PartNumberMarker>1</PartNumberMarker>',
+    '<IsTruncated>false</IsTruncated><PartNumberMarker>1e0</PartNumberMarker>',
     '<IsTruncated>true</IsTruncated><NextPartNumberMarker>1</NextPartNumberMarker>',
     '<IsTruncated>false</IsTruncated><Part><PartNumber>2</PartNumber><Size>-1</Size><ETag>x</ETag></Part>',
     '<IsTruncated>false</IsTruncated><Part><PartNumber>2</PartNumber><Size>1</Size><ETag>x</ETag></Part><Part><PartNumber>2</PartNumber><Size>1</Size><ETag>x</ETag></Part>'

@@ -48,6 +48,8 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         // ListParts does not request URL encoding; compare the XML text without URL decoding.
         if (listingText(root, 'Bucket') !== bucket || listingText(root, 'Key') !== key ||
             listingText(root, 'UploadId') !== uploadId) throw new Error();
+        const echoedMarker = listingText(root, 'PartNumberMarker', false);
+        if (echoedMarker !== undefined && (!/^[0-9]+$/.test(echoedMarker) || Number(echoedMarker) !== (marker ?? 0))) throw new Error();
         const truncated = listingText(root, 'IsTruncated');
         if (truncated !== 'true' && truncated !== 'false') throw new Error();
         const rawNext = listingText(root, 'NextPartNumberMarker', false);

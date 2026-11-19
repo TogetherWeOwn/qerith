@@ -70,7 +70,9 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
             if (etag.length > maxPartEtagBytes || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) return null;
             retainedEtagBytes += 2 * etag.length;
             if (retainedEtagBytes > maxRetainedEtagBytes) return null;
-            parts.push(part);
+            // Rebuild from the validated Latin-1 bytes so a parser substring cannot retain the XML page.
+            const detachedEtag = String.fromCharCode(...Uint8Array.from(etag, (char) => char.charCodeAt(0)));
+            parts.push({ ...part, etag: detachedEtag });
           }
           marker = page.nextPartNumberMarker;
         } while (marker !== undefined);
