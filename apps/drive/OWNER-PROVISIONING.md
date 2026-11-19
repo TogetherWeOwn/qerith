@@ -29,7 +29,9 @@ use. This component does not create or manage secrets.
 The private transport is still unwired: this slice alone cannot provision an
 owner. Issuing new options supersedes the pending ceremony, which expires after
 five minutes. Older credentials stay unbound; this is not a re-enrollment
-mechanism. Before a real run, verify the target and its
+mechanism. Recovery does not bind a replacement credential to this handle;
+keep that recovery path unwired until a separate handle-aware flow is reviewed.
+Before a real run, verify the target and its
 migration ledger, use the approved deployment and release process, and retain the
 existing forward-only migration policy. Do not use direct SQL inserts or treat a
 failed ceremony as permission to bypass verification. A completed or revoked

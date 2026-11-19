@@ -65,7 +65,7 @@ async function exercisePrivateBoundary(main) {
     }
     const token = randomBytes(32).toString('base64url');
     const cookie = `__Host-drive-session=${token}`;
-    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'member', 'active')").run();
+    await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture', 'owner', 'active')").run();
     await DB.prepare("INSERT INTO drive_sessions (token_hash, principal_id, expires_at) VALUES (?, 'fixture', ?)")
       .bind(createHash('sha256').update(token).digest('hex'), Date.now() + 60_000).run();
 
@@ -83,6 +83,13 @@ async function exercisePrivateBoundary(main) {
     assert.equal(authorized.status, 200, 'live session reaches only the existing placeholder page');
     assert.equal(authorized.headers.get('cache-control'), 'private, no-store');
     assert.match(await authorized.text(), /Service unavailable\./);
+    for (const path of ['/owner/bootstrap', '/api/owner/provisioning']) {
+      const response = await worker.fetch(`${origin}${path}`, {
+        method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ operation: 'challenge' })
+      });
+      assert.equal(response.status, 404, `${path} must not expose provisioning to an owner session`);
+    }
     await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
     assert.equal((await access({ headers: { cookie } })).status, 401, 'revocation applies to the next request');
   } finally {

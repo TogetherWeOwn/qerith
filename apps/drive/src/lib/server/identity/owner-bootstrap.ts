@@ -8,7 +8,7 @@ interface Statement {
 }
 interface Database {
   prepare(sql: string): Statement;
-  batch(statements: Statement[]): Promise<{ meta: { changes: number } }[]>;
+  batch(statements: Statement[]): Promise<{ results?: { challenge: string }[] }[]>;
 }
 
 const lifetimeMs = 5 * 60 * 1000;
@@ -57,8 +57,10 @@ export class OwnerBootstrap {
         WHERE singleton = 1 AND challenge = ? AND changes() = 1`)
         .bind(credential.id, Array.from(credential.publicKey), credential.counter, JSON.stringify(credential.transports ?? []), challenge),
       this.db.prepare(`DELETE FROM drive_owner_registration
-        WHERE singleton = 1 AND challenge = ? AND changes() = 1`).bind(challenge),
+        WHERE singleton = 1 AND challenge = ? AND changes() = 1
+        RETURNING challenge`).bind(challenge),
     ]);
-    if (batch.some(({ meta }) => meta.changes !== 1)) throw new Error('Owner or challenge unavailable');
+    // D1's change metadata can include the principal's login-generation trigger.
+    if (batch[2].results?.[0]?.challenge !== challenge) throw new Error('Owner or challenge unavailable');
   }
 }
