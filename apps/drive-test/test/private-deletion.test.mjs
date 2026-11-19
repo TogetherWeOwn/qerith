@@ -98,7 +98,7 @@ const liveCount = (owner) => sql('SELECT COUNT(*) AS n FROM drive_entries WHERE 
 it('journals a three-level tree only for the active owner and exact generation scope', async () => {
   const owner = 'owner-authorized-tree';
   const { id, token } = await seedBoundPublication('authorized-tree');
-  const other = await member('other-deleter', 'owner');
+  const other = await member('other-deleter');
   await entry('authorized-root', owner);
   await entry('authorized-child', owner, 'authorized-root');
   await new PrivateMetadata(env.DB).move(owner, id, 'authorized-child', 'published');
@@ -135,19 +135,20 @@ it('journals a three-level tree only for the active owner and exact generation s
 });
 
 it.each([
-  ['count', MAX_DELETION_ENTRIES, () => 'node-0'],
-  ['depth', MAX_DELETION_DEPTH + 1, (i) => `node-${i - 1}`],
-])('rejects one over the %s limit without truncation and accepts the exact limit', async (_limit, count, parent) => {
-  const owner = 'boundary-owner';
+  ['count', MAX_DELETION_ENTRIES, false],
+  ['depth', MAX_DELETION_DEPTH + 1, true],
+])('rejects one over the %s limit without truncation and accepts the exact limit', async (limit, count, chain) => {
+  const owner = `boundary-${limit}`;
+  const node = (i) => `${limit}-node-${i}`;
   const token = await member(owner);
-  const remove = () => authorized().delete(token, 'node-0');
+  const remove = () => authorized().delete(token, node(0));
   await env.DB.batch(Array.from({ length: count + 1 }, (_, i) => sql(
     "INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES (?, ?, ?, ?, 'folder')",
-    `node-${i}`, owner, i === 0 ? null : parent(i), `node-${i}`)));
+    node(i), owner, i === 0 ? null : node(chain ? i - 1 : 0), node(i))));
   expect(await remove()).toBeNull();
   expect(await liveCount(owner)).toBe(count + 1);
   expect((await evidence(owner)).results).toEqual([]);
-  await sql('DELETE FROM drive_entries WHERE id = ?', `node-${count}`).run();
+  await sql('DELETE FROM drive_entries WHERE id = ?', node(count)).run();
   const receipt = await remove();
   expect(receipt).toEqual({ deletionId: expect.any(String) });
   expect(await liveCount(owner)).toBe(0);

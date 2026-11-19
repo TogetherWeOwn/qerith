@@ -23,12 +23,22 @@ const generationGuard = `AND NOT EXISTS (
   )
 )`;
 
-async function journalDeletion(db: Database, sessionToken: string, entryId: string, storage?: readonly string[]) {
+// SQLite may queue a parent's children before applying the recursive result
+// limit. Cap the indexed child lookup too and keep one overflow row.
+const boundedChildren = `CROSS JOIN drive_entries e
+  WHERE t.depth <= ${MAX_DELETION_DEPTH} AND e.id IN (
+    SELECT c.id FROM drive_entries c INDEXED BY drive_entries_owner_parent
+    WHERE c.owner_id = t.owner_id AND c.parent_id = t.id LIMIT ${MAX_DELETION_ENTRIES + 1}
+  ) LIMIT ${MAX_DELETION_ENTRIES + 1}`;
+const boundedTree = `WHERE (SELECT COUNT(*) FROM subtree) <= ${MAX_DELETION_ENTRIES}
+  AND NOT EXISTS (SELECT 1 FROM subtree WHERE depth > ${MAX_DELETION_DEPTH})`;
+
+type StorageScope = readonly [endpoint: string, bucket: string, epoch: string];
+
+async function journalDeletion(db: Database, sessionToken: string, entryId: string, storage?: StorageScope) {
   if (typeof sessionToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(sessionToken)) return null;
   const hash = await tokenHash(sessionToken);
   const deletionId = crypto.randomUUID();
-  // Cap both the recursive result and each indexed child lookup: SQLite may queue
-  // a parent's children before applying the result limit. Keep one overflow row.
   const [captured] = await db.batch([
     db.prepare(`INSERT INTO drive_deleted_entries (entry_id, deletion_id, owner_id, object_key)
       WITH RECURSIVE subtree(id, owner_id, kind, object_key, size_bytes, depth) AS (
@@ -38,15 +48,9 @@ async function journalDeletion(db: Database, sessionToken: string, entryId: stri
         WHERE e.id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
         UNION ALL
         SELECT e.id, e.owner_id, e.kind, e.object_key, e.size_bytes, t.depth + 1
-        FROM subtree t CROSS JOIN drive_entries e
-        WHERE t.depth <= ${MAX_DELETION_DEPTH} AND e.id IN (
-          SELECT c.id FROM drive_entries c INDEXED BY drive_entries_owner_parent
-          WHERE c.owner_id = t.owner_id AND c.parent_id = t.id LIMIT ${MAX_DELETION_ENTRIES + 1}
-        ) LIMIT ${MAX_DELETION_ENTRIES + 1}
+        FROM subtree t ${storage ? boundedChildren : 'JOIN drive_entries e ON e.owner_id = t.owner_id AND e.parent_id = t.id'}
       ) SELECT id, ?, owner_id, object_key FROM subtree
-      WHERE (SELECT COUNT(*) FROM subtree) <= ${MAX_DELETION_ENTRIES}
-        AND NOT EXISTS (SELECT 1 FROM subtree WHERE depth > ${MAX_DELETION_DEPTH})
-        ${storage ? generationGuard : ''}`).bind(entryId, hash, deletionId, ...(storage ?? [])),
+      ${storage ? `${boundedTree} ${generationGuard}` : ''}`).bind(entryId, hash, deletionId, ...(storage ?? [])),
     db.prepare(`DELETE FROM drive_entries WHERE id IN (
       SELECT entry_id FROM drive_deleted_entries WHERE deletion_id = ?)`).bind(deletionId),
   ]);
