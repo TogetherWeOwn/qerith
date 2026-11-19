@@ -73,7 +73,7 @@
 {/if}
 
 <style>
-  button { min-height: var(--drive-size-control-md); padding-inline: var(--drive-space-4); border: 0; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
+  button { min-height: var(--drive-size-control-md); padding-inline: var(--drive-space-4); border: var(--drive-size-line) solid transparent; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
   button:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
   button[aria-disabled='true'] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }

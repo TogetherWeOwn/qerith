@@ -1,11 +1,9 @@
 // Imported only by the disposable browser Worker wrapper. Never forwards outbound fetches.
 import { wireUploadStorage } from '../src/lib/server/storage-runtime.ts';
-
 const endpoint = 'https://storage.example.test', bucket = 'drive-fixture', epoch = 'browser-fixture';
 const region = 'test', accessKeyId = 'fixture-key', secretAccessKey = 'synthetic-secret';
 const partTag = '"fixture-part"', etag = '"fixture-object"';
 const uploads = new Map(), objects = new Map();
-
 const bindings = {
   DRIVE_S3_ENDPOINT: endpoint, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: region,
   DRIVE_S3_ACCESS_KEY_ID: accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,

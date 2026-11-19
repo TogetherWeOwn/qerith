@@ -24,5 +24,6 @@ export const load: PageServerLoad = async (event) => {
   const preview = admitsSignInFixture(env);
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
-  return { listing, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };
+  const uploadConfigured = preview && !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER);
+  return { listing, uploadConfigured, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };
 };

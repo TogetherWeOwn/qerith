@@ -6,7 +6,7 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page }: { result: RootListingResult; page: string | null } = $props();
+  let { result: initial, page, uploadConfigured }: { result: RootListingResult; page: string | null; uploadConfigured: boolean } = $props();
   let status = $state('');
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
@@ -34,7 +34,7 @@
 
 <header>
   <h1>My Drive</h1>
-  {#if result.status === 'ok'}
+  {#if uploadConfigured && result.status === 'ok'}
     <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
 </header>

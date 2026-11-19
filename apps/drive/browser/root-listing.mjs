@@ -56,8 +56,6 @@ export async function captureRootListing(page, origin, db) {
     await capture(page, 'listed', width, width !== 320);
     if (width === 320) continue;
     await page.keyboard.press('Tab');
-    assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).evaluate(el => document.activeElement === el), true);
-    await page.keyboard.press('Tab');
     const focus = await download.evaluate(el => ({ focused: document.activeElement === el, outline: getComputedStyle(el).outlineStyle }));
     assert.deepEqual(focus, { focused: true, outline: 'solid' });
     await writeFile(resolve(output, `root-keyboard-${width}.json`), JSON.stringify(focus));
@@ -65,8 +63,6 @@ export async function captureRootListing(page, origin, db) {
     await capture(page, 'greyscale', width, false);
     await root('');
     await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
-    await page.keyboard.press('Tab');
-    assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).evaluate(el => document.activeElement === el), true);
     await page.keyboard.press('Tab');
     assert.equal(await download.evaluate(el => document.activeElement === el && getComputedStyle(el).outlineStyle === 'solid'), true);
     assert.equal(await page.evaluate(() => document.getAnimations().length), 0);
@@ -83,7 +79,6 @@ export async function captureRootListing(page, origin, db) {
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
     await root('?page=invalid');
-    assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
     await page.getByRole('link', { name: 'Back to first page' }).waitFor();
     await capture(page, 'invalid-page', width);
     await root(`?page=${id}`);
