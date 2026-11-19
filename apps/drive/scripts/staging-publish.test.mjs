@@ -124,16 +124,25 @@ test('rejects a bundle symlink escaping the staging root', (t) => {
   assert.throws(() => publishStaging(root, () => assert.fail('runner invoked')), /invalid staging/);
 });
 
-test('command-line publisher refuses live publication even for the staging account', (t) => {
+test('command-line publisher refuses requests outside the protected dispatch job', (t) => {
   const { root } = fixture(t);
   const script = new URL('./staging-publish.mjs', import.meta.url).pathname;
-  const run = (args, account) => spawnSync(process.execPath, [script, ...args], {
-    cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: account }, encoding: 'utf8', timeout: 5000,
+  const env = { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: 'synthetic',
+    GITHUB_ACTIONS: 'true', GITHUB_JOB: 'publish', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith',
+    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: 'a'.repeat(40) };
+  const run = (args, overrides) => spawnSync(process.execPath, [script, ...args], {
+    cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 5000,
   });
-  assert.match(run([], accountId).stderr, /unrecognized staging publisher arguments/);
-  const result = run(['--publish'], accountId);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /live staging publication is disabled/);
+  assert.match(run([], {}).stderr, /unrecognized staging publisher arguments/);
+  for (const overrides of [
+    { GITHUB_ACTIONS: '' }, { GITHUB_JOB: 'preparation' }, { GITHUB_REPOSITORY: 'other/qerith' },
+    { GITHUB_EVENT_NAME: 'pull_request' }, { GITHUB_REF: 'refs/heads/other' },
+    { GITHUB_SHA: 'invalid' }, { CLOUDFLARE_API_TOKEN: '' },
+  ]) {
+    const result = run(['--publish'], overrides);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /publication requires the protected staging dispatch job/);
+  }
 });
 
 test('publisher terminates launcher descendants on overflow and timeout', async (t) => {
