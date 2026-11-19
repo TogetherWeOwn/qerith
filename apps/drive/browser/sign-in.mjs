@@ -6,6 +6,7 @@ import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 import { captureRootListing, captureSignedOut } from './root-listing.mjs';
+import { proveOwnerEnrollment } from './owner-enrollment.mjs';
 
 const origin = 'https://drive.example.test';
 const rpID = new URL(origin).hostname;
@@ -174,6 +175,7 @@ try {
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
   console.log('Generated Worker + Chromium + D1: cross-site navigation, restart, queued tabs, late cancel, return targets, expiry and revocation passed');
+  await proveOwnerEnrollment(browser);
 } finally {
   await browser?.close();
   await harness.close();
