@@ -124,20 +124,22 @@ test('rejects a bundle symlink escaping the staging root', (t) => {
   assert.throws(() => publishStaging(root, () => assert.fail('runner invoked')), /invalid staging/);
 });
 
-test('command-line publisher requires explicit action and rejects a wrong account', (t) => {
+test('command-line publisher refuses live publication even for the staging account', (t) => {
   const { root } = fixture(t);
   const script = new URL('./staging-publish.mjs', import.meta.url).pathname;
   const run = (args, account) => spawnSync(process.execPath, [script, ...args], {
     cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: account }, encoding: 'utf8', timeout: 5000,
   });
   assert.match(run([], accountId).stderr, /unrecognized staging publisher arguments/);
-  assert.match(run(['--publish'], '0'.repeat(32)).stderr, /invalid staging Cloudflare account/);
+  const result = run(['--publish'], accountId);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /live staging publication is disabled/);
 });
 
 test('publisher terminates launcher descendants on overflow and timeout', async (t) => {
   const { root } = fixture(t);
   const launcher = join(root, 'node_modules/.bin/wrangler');
-  writeFileSync(launcher, '#!/bin/sh\n(sleep 2; printf escaped > "$MARKER") &\nif [ "$MODE" = overflow ]; then /usr/bin/yes x | /usr/bin/head -c 100000; fi\nwait\n');
+  writeFileSync(launcher, '#!/bin/sh\ntouch "$MARKER.started"\n(sleep 2; printf escaped > "$MARKER") &\nif [ "$MODE" = overflow ]; then /usr/bin/yes x | /usr/bin/head -c 100000; fi\nwait\n');
   chmodSync(launcher, 0o700);
   const source = readFileSync(new URL('./staging-publish.mjs', import.meta.url), 'utf8');
   assert.ok(source.includes('setTimeout(stop, 110000)'));
@@ -145,12 +147,15 @@ test('publisher terminates launcher descendants on overflow and timeout', async 
   writeFileSync(script, source.replace('setTimeout(stop, 110000)', 'setTimeout(stop, 1000)'));
   for (const mode of ['overflow', 'timeout']) {
     const marker = join(root, mode);
-    const result = spawnSync(process.execPath, [script, '--publish'], {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+      'const { publishStaging } = await import(process.argv[2]); await publishStaging(process.cwd());', 'test-driver', script], {
       cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: accountId, MARKER: marker, MODE: mode },
       encoding: 'utf8', timeout: 5000,
     });
-    assert.notEqual(result.status, 0);
     assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.ok(existsSync(`${marker}.started`), `${mode} launcher never started`);
+    assert.match(result.stderr, /staging Worker publication failed/);
     assert.doesNotMatch(result.stderr, /x{20}/);
     await new Promise(resolve => setTimeout(resolve, 2300));
     assert.equal(existsSync(marker), false, `${mode} descendant survived`);

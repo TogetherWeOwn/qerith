@@ -51,9 +51,9 @@ jobs:
         run: node --test apps/drive/scripts/staging-manifest.test.mjs
 
   publish:
-    if: github.repository == 'TogetherWeOwn/qerith' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    # Keep provider operations out of this preparation-only workflow.
+    if: ${{ false }}
     needs: preparation
-    environment: staging
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -90,16 +90,12 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
-      - name: Validate fixed staging target
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
-        run: node scripts/staging-publish.mjs --check-target
       - name: Record staging migration and rollback evidence
+        # The synthetic regression exercises this block with fake Wrangler only.
+        if: ${{ false }}
         shell: bash
         env:
           NO_COLOR: '1'
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           # The native ledger is the staging authority. Keep the bookmark and
@@ -179,8 +175,3 @@ jobs:
             printf '%s\n' 'Migration apply or post-list failed; restore the bookmark or recreate the staging database before retry.' >&2
             exit 1
           fi
-      - name: Publish built staging Worker
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
-        run: timeout --kill-after=5s 120s node scripts/staging-publish.mjs --publish

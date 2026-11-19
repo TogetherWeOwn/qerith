@@ -51,9 +51,15 @@ R2 lifecycle rule applies only to `drive-qualification/` and expires objects
 after three days; the existing seven-day multipart-abort rule is retained. These
 are requirements and a reported provider receipt, not proof that cleanup ran.
 
-The staging publish job runs only on a trusted main dispatch in the `staging`
-environment, after source and target validation. Staging migrations use Wrangler's
-native `d1_migrations` ledger. Log the
+The preparation workflow does not attach the `staging` environment, read its
+secrets, run remote migrations, or publish. The staging config dry run and
+synthetic command tests do not establish live containment. A separately reviewed
+enabling change must gate publication and migration on trusted main dispatch,
+the `staging` environment, and source and target validation. It must also verify
+that cancelling the local runner stops the launcher and its descendants; an
+already accepted provider request can still have an uncertain outcome.
+
+Staging migrations use Wrangler's native `d1_migrations` ledger. Log the
 pre-apply Time Travel bookmark and pending lists before and after apply for the
 exact SHA; the final list must be empty. An uncertain apply requires restoring the
 bookmark or recreating the disposable database from migrations before retry.

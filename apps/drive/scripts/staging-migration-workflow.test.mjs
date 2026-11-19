@@ -5,23 +5,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
-test('publish job confines secrets to staging and gates publication on migration', () => {
+test('preparation has no staging credentials or live mutation step', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
-  const job = workflow.split('\n  publish:\n')[1];
-  assert.ok(job);
-  assert.match(job, /if: github\.repository == 'TogetherWeOwn\/qerith' && github\.ref == 'refs\/heads\/main' && github\.event_name == 'workflow_dispatch'/);
-  assert.doesNotMatch(workflow.split('\n  publish:\n')[0], /secrets\./);
-  assert.match(job, /\n    environment: staging/);
-  assert.match(job, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ secrets\.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID \}\}/);
-  assert.ok(job.indexOf('Validate fixed staging target') < job.indexOf('Record staging migration and rollback evidence'));
-  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
-  assert.match(job, /needs: preparation/);
+  assert.match(workflow, /\n  publish:\n(?:    #[^\n]*\n)*    if: \$\{\{ false \}\}/);
+  assert.match(workflow, /- name: Record staging migration and rollback evidence\n(?:        #[^\n]*\n)*        if: \$\{\{ false \}\}/);
+  assert.doesNotMatch(workflow, /\benvironment:|\bsecrets\b\s*(?:\.|\[)|CLOUDFLARE_API_TOKEN|staging-publish\.mjs|\bwrangler deploy\b/);
   assert.match(workflow, /\nconcurrency:\n  group: drive-staging-lifecycle\n  cancel-in-progress: false/);
-  assert.doesNotMatch(job, /DRIVE_STAGING_WRITE_GRANT/);
-  assert.ok(job.indexOf('Verify staging source') < job.indexOf('Install and build exact source'));
-  assert.ok(job.indexOf('Record staging migration and rollback evidence') < job.indexOf('Publish built staging Worker'));
-  assert.match(job, /node scripts\/staging-publish\.mjs --publish/);
-  assert.match(job, /CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.QERITH_STAGING_CLOUDFLARE_API_TOKEN \}\}/);
   assert.match(workflow, /on:\n  workflow_dispatch:\n/);
 });
 

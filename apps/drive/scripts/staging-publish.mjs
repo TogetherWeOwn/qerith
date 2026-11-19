@@ -47,25 +47,25 @@ export function validateStagingTarget(root, accountId) {
 export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
   validateStagingTarget(root, accountId);
   return new Promise((resolveRun, reject) => {
-      const child = run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
-        cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let failed = false;
-      const stop = () => {
-        failed = true;
-        if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
-      };
-      const timer = setTimeout(stop, 110000);
-      for (const stream of [child.stdout, child.stderr]) {
-        let bytes = 0;
-        stream.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) stop(); });
-        stream.on('error', stop);
-      }
-      child.on('error', stop);
-      child.on('close', code => {
-        clearTimeout(timer);
-        if (failed || code !== 0) reject(); else resolveRun();
-      });
+    const child = run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
+      cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let failed = false;
+    const stop = () => {
+      failed = true;
+      if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+    };
+    const timer = setTimeout(stop, 110000);
+    for (const stream of [child.stdout, child.stderr]) {
+      let bytes = 0;
+      stream.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) stop(); });
+      stream.on('error', stop);
+    }
+    child.on('error', stop);
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (failed || code !== 0) reject(); else resolveRun();
+    });
   }).catch(() => {
     // Provider diagnostics are untrusted and may include sensitive information.
     throw new Error('staging Worker publication failed');
@@ -76,7 +76,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
-    publishStaging(process.cwd());
+    throw new Error('live staging publication is disabled');
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }
