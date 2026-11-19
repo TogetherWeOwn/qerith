@@ -31,13 +31,40 @@
     return !!checkLayoutOnOpen && !trigger.getClientRects().length;
   }
 
-  function onScroll(event: Event) {
-    const target = event.target;
-    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target))) && !hiddenByParent()) {
-      const restore = menu.contains(document.activeElement);
-      close();
-      if (restore) trigger.focus({ preventScroll: true });
+  let scrollAtOpen: Map<Document | Element, readonly [number, number]> | undefined;
+
+  function scrollPosition(target: Document | Element): readonly [number, number] {
+    return target instanceof Element ? [target.scrollLeft, target.scrollTop] : [window.scrollX, window.scrollY];
+  }
+
+  function captureOpeningScroll() {
+    const positions = new Map<Document | Element, readonly [number, number]>();
+    positions.set(document, scrollPosition(document));
+    for (let ancestor = trigger.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      positions.set(ancestor, scrollPosition(ancestor));
     }
+    scrollAtOpen = positions;
+    // The browser delivers queued scroll events before this frame callback.
+    requestAnimationFrame(() => {
+      if (scrollAtOpen === positions) scrollAtOpen = undefined;
+    });
+  }
+
+  function onScroll(event: Event) {
+    const source = event.target;
+    const target = source === document ? document : source instanceof Element ? source : null;
+    if (!open || !menu || !target) return;
+    if (target instanceof Element && (!target.contains(trigger) || menu.contains(target))) return;
+    if (hiddenByParent()) return;
+    // A scroll can move the page before opening but deliver its event afterward.
+    const initial = scrollAtOpen?.get(target);
+    if (initial) {
+      const [left, top] = scrollPosition(target);
+      if (initial[0] === left && initial[1] === top) return;
+    }
+    const restore = menu.contains(document.activeElement);
+    close();
+    if (restore) trigger.focus({ preventScroll: true });
   }
 
   function onResize() {
@@ -55,6 +82,7 @@
     compact = window.matchMedia('(max-width: 820px)').matches;
     if (!open) {
       checkLayoutOnOpen?.('next-frame');
+      captureOpeningScroll();
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('pointerdown', outside);
       window.addEventListener('resize', onResize);
@@ -88,6 +116,7 @@
   function close(restore = false) {
     ++opening;
     if (open) {
+      scrollAtOpen = undefined;
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('pointerdown', outside);
       window.removeEventListener('resize', onResize);
