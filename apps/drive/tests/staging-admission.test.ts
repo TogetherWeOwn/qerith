@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { admitStagingRequest, stagingOrigin } from '../src/lib/server/staging-admission';
+import { admitStagingRequest, dispatchStagingRequest, stagingOrigin } from '../src/lib/server/staging-admission';
 
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
@@ -118,4 +118,57 @@ test('every protected request checks a live owner, including assets after revoca
   revoke();
   denied(await admitStagingRequest(request(root), env, true, assets), 401);
   assert.equal(reads(), 2);
+});
+
+test('denials and signed-out redirects do not enter any downstream handler', async () => {
+  const unexpected = async () => assert.fail('denied request reached downstream dispatch');
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
+  const { env, reads, revoke } = runtime();
+  for (const [req, status] of [
+    [request('/__data.json'), 404],
+    [request('/sign-in.html'), 404],
+    [request('/api/uploads/list', 'POST'), 404],
+    [request('/api/sign-in/verify', 'GET'), 404],
+    [request('/api/sign-in/verify', 'POST', { origin: 'https://other.example.test' }), 403],
+    [request('/api/uploads', 'POST', { origin: stagingOrigin }), 401],
+    [request(root, 'GET', {}), 401],
+    [request('/', 'GET', { 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }), 303]
+  ] as const) {
+    denied(await dispatchStagingRequest(req, env, true, assets, dispatch), status);
+  }
+  denied(await dispatchStagingRequest(request('/api/sign-in/challenge', 'POST'), env, false, assets, dispatch), 503);
+  assert.equal(reads(), 0);
+
+  revoke();
+  for (const [path, [method]] of protectedRoutes) {
+    denied(await dispatchStagingRequest(request(path, method), env, true, assets, dispatch), 401);
+  }
+  assert.equal(reads(), protectedRoutes.length);
+});
+
+test('admitted traffic reaches one handler; assets cannot carry CDN cache overrides', async () => {
+  const { env } = runtime();
+  const cacheHeaders = ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control'];
+  for (const [path, [method], target] of [...publicRoutes, ...protectedRoutes]) {
+    const req = request(path, method);
+    const calls: string[] = [];
+    const handle = (name: string) => async (received: Request) => {
+      assert.equal(received, req);
+      calls.push(name);
+      const headers = Object.fromEntries(cacheHeaders.map(name => [name, 'public, max-age=3600']));
+      return new Response(name, { headers });
+    };
+    const result = await dispatchStagingRequest(req, env, true, assets, {
+      adapter: handle('adapter'),
+      ceremony: (received, step) => handle(`ceremony:${step}`)(received),
+      asset: handle('asset')
+    });
+    const expected = target.kind === 'ceremony' ? `ceremony:${target.step}` : target.kind.endsWith('-asset') ? 'asset' : 'adapter';
+    assert.deepEqual(calls, [expected]);
+    assert.equal(await result.text(), expected);
+    if (expected === 'asset') {
+      assert.equal(result.headers.get('cache-control'), 'private, no-store');
+      for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
+    }
+  }
 });
