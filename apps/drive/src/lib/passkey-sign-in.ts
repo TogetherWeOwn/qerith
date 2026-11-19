@@ -61,8 +61,8 @@ export async function signInWithPasskey(browser: SignInBrowser, signal: AbortSig
       if (assertion === null) return 'no-passkey';
 
       const proof = await post('verify', assertion);
+      if (proof.status === 204) return 'signed-in'; // The session cookie has already been received.
       signal.throwIfAborted();
-      if (proof.status === 204) return 'signed-in';
       if (proof.status === 403 && await responseCode(proof) === 'revoked') return 'revoked';
       if (proof.status === 429 && await responseCode(proof) === 'rate-limited') return 'rate-limited';
       return 'cancelled';

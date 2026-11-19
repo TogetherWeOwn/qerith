@@ -62,11 +62,9 @@ try {
   assert.equal(blocked.status, 403);
   assert.equal(blocked.headers.get('cache-control'), 'private, no-store');
   assert.match(await blocked.text(), /<h1>Request blocked<\/h1>/);
-
   browser = await chromium.launch();
   const context = await browser.newContext();
-  const first = await context.newPage();
-  const second = await context.newPage();
+  const [first, second] = await Promise.all([context.newPage(), context.newPage()]);
   const authenticator = await context.newCDPSession(second);
   await authenticator.send('WebAuthn.enable');
   const { authenticatorId } = await authenticator.send('WebAuthn.addVirtualAuthenticator', { options: {
@@ -106,14 +104,12 @@ try {
     }
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   });
-
-  const go = (page, path) => page.goto(`${origin}${path}`, { waitUntil: 'networkidle' });
   const signInFrom = async (page, path) => {
     const response = await worker.fetch(`${origin}${path}`, { headers: navigation, redirect: 'manual' });
     assert.equal(response.status, 303);
-    return go(page, response.headers.get('location'));
+    return page.goto(`${origin}${response.headers.get('location')}`, { waitUntil: 'networkidle' });
   };
-  await Promise.all([signInFrom(first, '/?tab=one'), go(second, '/sign-in?next=https%3A%2F%2Fother.example.test')]);
+  await Promise.all([signInFrom(first, '/?tab=one'), signInFrom(second, '/shared?tab=two')]);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
   loseNext = true;
@@ -129,6 +125,7 @@ try {
   assert.deepEqual(traffic, [['challenge', 200], ['challenge', 200], ['challenge', 409], ['restart', 200], ['verify', 204]]);
   assert.deepEqual(await DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE context = ?')
     .bind(lostContext).first(), { challenge: lostChallenge });
+  await second.getByRole('button', { name: 'Cancel' }).click();
   deliver.resolve();
   await Promise.all([first.waitForURL(`${origin}/?tab=one`), second.waitForURL(`${origin}/`)]);
   assert.equal(traffic.filter(([step]) => step === 'verify').length, 1);
@@ -156,7 +153,7 @@ try {
   assert.equal(denial.status, 401);
   assert.deepEqual(await denial.json(), { code: 'denied' });
   assert.equal(denial.headers.has('set-cookie'), false);
-  console.log('Generated Worker + Chromium + D1: lost challenge/restart, queued tabs, cookie handoff, expiry and revocation passed');
+  console.log('Generated Worker + Chromium + D1: restart, queued tabs, late cancel, return targets, expiry and revocation passed');
 } finally {
   await browser?.close();
   await harness.close();
