@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { access, mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -51,8 +52,10 @@ async function exercisePrivateBoundary(main, preview = false) {
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
+${preview ? '' : deletionWorker}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
+  ${preview ? '' : 'admitDeletion(request, env.DB);'}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -72,7 +75,7 @@ export default { fetch(request, env, ctx) {
     await harness.listen();
     const worker = harness.getWorker();
     const { DB } = await worker.getEnv();
-    for (const name of ['0001_identity.sql', '0002_private_metadata.sql', '0009_sessions.sql', '0015_folder_listing_order.sql', '0033_owner_registration.sql']) {
+    for (const name of (await readdir('migrations')).filter((file) => file.endsWith('.sql')).sort()) {
       const sql = await readFile(`migrations/${name}`, 'utf8');
       await DB.batch(unstable_splitSqlQuery(sql).map((statement) => DB.prepare(statement)));
     }
@@ -144,6 +147,8 @@ export default { fetch(request, env, ctx) {
     if (preview) {
       assert.match(html, /Your drive is empty\./);
       await exerciseRootPages(DB, worker, origin, cookie, fileId);
+      const owner = await session('owner-fixture', 'owner');
+      await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       return;
     }
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
@@ -195,7 +200,9 @@ export default { fetch(request, env, ctx) {
     const revoked = await get({ cookie, range: 'bytes=1-' });
     assert.equal(revoked.status, 401);
     assert.equal(revoked.headers.get('location'), null);
-    await assertProvisioningUnavailable(await session('owner-fixture', 'owner'), 'owner');
+    const owner = await session('owner-fixture', 'owner');
+    await assertProvisioningUnavailable(owner, 'owner');
+    await exerciseDeletion({ worker, DB, origin, cookie: owner, revoked: cookie, other: await session('other-fixture', 'member') });
   } finally {
     await harness.close();
   }
