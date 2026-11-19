@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,20 +44,32 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
 }
 
-export function publishStaging(root, run = execFileSync, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID) {
   validateStagingTarget(root, accountId);
-  try {
-    run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
-      cwd: root,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 65536,
-      timeout: 120000,
-      killSignal: 'SIGKILL',
-    });
-  } catch {
+  return new Promise((resolveRun, reject) => {
+      const child = run(resolve(root, 'node_modules/.bin/wrangler'), ['deploy', entryPath, '--config', configPath], {
+        cwd: root, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let failed = false;
+      const stop = () => {
+        failed = true;
+        if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+      };
+      const timer = setTimeout(stop, 110000);
+      for (const stream of [child.stdout, child.stderr]) {
+        let bytes = 0;
+        stream.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) stop(); });
+        stream.on('error', stop);
+      }
+      child.on('error', stop);
+      child.on('close', code => {
+        clearTimeout(timer);
+        if (failed || code !== 0) reject(); else resolveRun();
+      });
+  }).catch(() => {
     // Provider diagnostics are untrusted and may include sensitive information.
     throw new Error('staging Worker publication failed');
-  }
+  });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

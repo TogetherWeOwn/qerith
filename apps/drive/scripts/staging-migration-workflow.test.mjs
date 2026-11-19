@@ -94,6 +94,8 @@ esac
   assert.equal(ok.status, 0, ok.stderr);
   const firstApply = run({ LARGE_APPLY: '1' });
   assert.equal(firstApply.status, 0, firstApply.stderr);
+  assert.ok(firstApply.stdout.length < 65536, 'apply progress must not appear in the log');
+  assert.doesNotMatch(firstApply.stdout, /\0/);
   for (const mode of ['timeout', 'overflow']) {
     const marker = join(root, `child-${mode}`);
     const result = spawnSync('/bin/bash', ['-c', script.replace(' 45s ', ' 1s ')], {

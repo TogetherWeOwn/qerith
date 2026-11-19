@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -41,18 +42,20 @@ test('target-check CLI validates the fixed account without invoking Wrangler', (
   assert.notEqual(check('0'.repeat(32)).status, 0);
 });
 
-test('publishes the validated staging bundle with the pinned runner', (t) => {
+test('publishes the validated staging bundle with the pinned runner', async (t) => {
   const { root } = fixture(t);
   let called = 0;
-  publishStaging(root, (binary, args, options) => {
+  await publishStaging(root, (binary, args, options) => {
     called++;
     assert.equal(binary, join(root, 'node_modules/.bin/wrangler'));
     assert.deepEqual(args, ['deploy', '.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.staging.json']);
     assert.equal(options.cwd, root);
     assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
-    assert.equal(options.maxBuffer, 65536);
-    assert.equal(options.timeout, 120000);
-    assert.equal(options.killSignal, 'SIGKILL');
+    assert.equal(options.detached, true);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    process.nextTick(() => child.emit('close', 0));
+    return child;
   });
   assert.equal(called, 1);
 });
@@ -131,8 +134,31 @@ test('command-line publisher requires explicit action and rejects a wrong accoun
   assert.match(run(['--publish'], '0'.repeat(32)).stderr, /invalid staging Cloudflare account/);
 });
 
-test('normalizes publish failure without exposing provider diagnostics', (t) => {
+test('publisher terminates launcher descendants on overflow and timeout', async (t) => {
   const { root } = fixture(t);
-  assert.throws(() => publishStaging(root, () => { throw new Error('sensitive provider output'); }),
+  const launcher = join(root, 'node_modules/.bin/wrangler');
+  writeFileSync(launcher, '#!/bin/sh\n(sleep 2; printf escaped > "$MARKER") &\nif [ "$MODE" = overflow ]; then /usr/bin/yes x | /usr/bin/head -c 100000; fi\nwait\n');
+  chmodSync(launcher, 0o700);
+  const source = readFileSync(new URL('./staging-publish.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('setTimeout(stop, 110000)'));
+  const script = join(root, 'publisher.mjs');
+  writeFileSync(script, source.replace('setTimeout(stop, 110000)', 'setTimeout(stop, 1000)'));
+  for (const mode of ['overflow', 'timeout']) {
+    const marker = join(root, mode);
+    const result = spawnSync(process.execPath, [script, '--publish'], {
+      cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: accountId, MARKER: marker, MODE: mode },
+      encoding: 'utf8', timeout: 5000,
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.error, undefined);
+    assert.doesNotMatch(result.stderr, /x{20}/);
+    await new Promise(resolve => setTimeout(resolve, 2300));
+    assert.equal(existsSync(marker), false, `${mode} descendant survived`);
+  }
+});
+
+test('normalizes publish failure without exposing provider diagnostics', async (t) => {
+  const { root } = fixture(t);
+  await assert.rejects(publishStaging(root, () => { throw new Error('sensitive provider output'); }),
     { message: 'staging Worker publication failed' });
 });
