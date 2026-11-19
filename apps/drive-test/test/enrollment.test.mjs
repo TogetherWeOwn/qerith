@@ -3,6 +3,7 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Invitations } from '../../drive/src/lib/server/identity/invitations.ts';
 import { InvitationEnrollment } from '../../drive/src/lib/server/identity/enrollment.ts';
+import { PasskeyLogin } from '../../drive/src/lib/server/identity/login.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { fixture, rpID, origin } from '../../drive/tests/ceremony-fixture.ts';
 
@@ -21,8 +22,15 @@ async function setup() {
 it('verifies and atomically persists exactly one competing redemption', async () => {
   const { owner, invitations, enrollment } = await setup();
   const invite = await invitations.issue(owner);
-  const challenge = await enrollment.issueChallenge(invite.token);
-  const signed = await fixture('registration', { challenge });
+  const options = await enrollment.issueOptions(invite.token);
+  const { challenge, user } = options;
+  expect(options.rp.id).toBe(rpID);
+  expect(options.authenticatorSelection).toMatchObject({ residentKey: 'required', userVerification: 'required' });
+  expect(user.id).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(user.id).not.toBe(invite.token);
+  expect((await enrollment.issueOptions((await invitations.issue(owner)).token)).user.id).not.toBe(user.id);
+  const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const signed = await fixture('registration', { challenge, key });
   const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => enrollment.enroll(invite.token, challenge, signed.registration)));
   expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
   const principal = attempts.find(({ status }) => status === 'fulfilled').value;
@@ -34,21 +42,33 @@ it('verifies and atomically persists exactly one competing redemption', async ()
   expect(credential.counter).toBe(1);
   expect(JSON.parse(credential.transports)).toEqual([]);
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(invite.id).first()).redeemed_at).toBeGreaterThan(0);
-  expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(0);
-  await expect(enrollment.issueChallenge(invite.token)).rejects.toThrow();
+  expect(await env.DB.prepare('SELECT 1 FROM drive_bound_ceremonies WHERE challenge = ?').bind(challenge).first()).toBeNull();
+  await expect(enrollment.issueOptions(invite.token)).rejects.toThrow();
   await expect(enrollment.enroll(invite.token, challenge, signed.registration)).rejects.toThrow();
+
+  const login = new PasskeyLogin(env.DB, rpID, origin);
+  const context = 'invitee-sign-in';
+  const loginChallenge = await login.issueChallenge(context);
+  const { authentication } = await fixture('authentication', { challenge: loginChallenge, key, counter: 2 });
+  authentication.response.userHandle = user.id;
+  const session = await login.authenticate(context, loginChallenge, authentication);
+  expect(await new Sessions(env.DB).lookup(session.token)).toEqual({ id: principal, role: 'member' });
 });
 
 it('rejects bad ceremonies and unavailable invitations and challenges without partial writes', async () => {
   const { owner, invitations, enrollment } = await setup();
   for (const state of ['invalid', 'cancelled', 'invite-expired', 'challenge-expired', 'replaced']) {
     const invite = await invitations.issue(owner);
-    const challenge = await enrollment.issueChallenge(invite.token);
+    const { challenge, user } = await enrollment.issueOptions(invite.token);
     const signed = await fixture('registration', { challenge, uv: state !== 'invalid' });
     if (state === 'cancelled') await invitations.cancel(owner, invite.id);
     if (state === 'invite-expired') await env.DB.prepare('UPDATE drive_invitations SET expires_at = 1 WHERE id = ?').bind(invite.id).run();
     if (state === 'challenge-expired') await env.DB.prepare('UPDATE drive_bound_ceremonies SET expires_at = 1 WHERE challenge = ?').bind(challenge).run();
-    if (state === 'replaced') await enrollment.issueChallenge(invite.token);
+    if (state === 'replaced') {
+      const retry = await enrollment.issueOptions(invite.token);
+      expect(retry.challenge).not.toBe(challenge);
+      expect(retry.user.id).toBe(user.id);
+    }
     await expect(enrollment.enroll(invite.token, challenge, signed.registration)).rejects.toThrow();
     expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(invite.id).first()).redeemed_at).toBeNull();
   }
@@ -59,11 +79,11 @@ it('rejects bad ceremonies and unavailable invitations and challenges without pa
 it('rolls back invitation, challenge and principal when a credential is not unique', async () => {
   const { owner, invitations, enrollment } = await setup();
   const first = await invitations.issue(owner);
-  const firstChallenge = await enrollment.issueChallenge(first.token);
+  const { challenge: firstChallenge } = await enrollment.issueOptions(first.token);
   const firstSigned = await fixture('registration', { challenge: firstChallenge });
   await enrollment.enroll(first.token, firstChallenge, firstSigned.registration);
   const second = await invitations.issue(owner);
-  const challenge = await enrollment.issueChallenge(second.token);
+  const { challenge } = await enrollment.issueOptions(second.token);
   const signed = await fixture('registration', { challenge });
   await expect(enrollment.enroll(second.token, challenge, signed.registration)).rejects.toThrow();
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(second.id).first()).redeemed_at).toBeNull();
