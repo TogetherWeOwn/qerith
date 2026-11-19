@@ -75,6 +75,23 @@ export async function captureRootListing(page, origin, db) {
     await root('?page=invalid');
     await page.getByRole('link', { name: 'Back to first page' }).waitFor();
     await capture(page, 'invalid-page', width);
+    await root(`?page=${id}`);
+    await page.getByText('No more items.', { exact: true }).waitFor();
+    await capture(page, 'exhausted', width);
+  }
+  const index = await db.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first();
+  await db.prepare('DROP INDEX drive_entries_listing_asc').run();
+  try {
+    for (const [width, height] of widths) {
+      await page.setViewportSize({ width, height });
+      await root(`?page=${id}`);
+      const retry = page.getByRole('link', { name: 'Try again' });
+      await retry.waitFor();
+      assert.equal(await retry.getAttribute('href'), `/?page=${id}`);
+      await capture(page, 'unavailable', width);
+    }
+  } finally {
+    await db.prepare(index.sql).run();
   }
   console.log('Generated My Drive route: signed-out, empty, listed, recovery, axe, keyboard and responsive evidence captured');
 }

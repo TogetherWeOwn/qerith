@@ -6,7 +6,7 @@
 </script>
 
 <svelte:head>
-  <title>My Drive</title>
+  <title>{data.listing ? 'My Drive' : 'Drive'}</title>
 </svelte:head>
 
 <main id="main">
@@ -18,7 +18,11 @@
       {/if}
     </div>
   {/if}
-  <RootListingView result={data.listing} page={data.page} />
+  {#if data.listing}
+    <RootListingView result={data.listing} page={data.page} />
+  {:else}
+    Service unavailable.
+  {/if}
 </main>
 
 <style>

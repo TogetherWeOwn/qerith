@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
+import { admitsSignInFixture } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import type { PageServerLoad } from './$types';
 
@@ -19,7 +20,8 @@ async function readDownloadNotice({ cookies, locals, request, url }: Parameters<
 }
 
 export const load: PageServerLoad = async (event) => {
-  const pages = event.url.searchParams.getAll('page');
-  const listing = await loadRootListing(event.request, env, pages);
+  const preview = admitsSignInFixture(env);
+  const pages = preview ? event.url.searchParams.getAll('page') : [];
+  const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   return { listing, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };
 };

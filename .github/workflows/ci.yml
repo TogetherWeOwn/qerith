@@ -533,6 +533,17 @@ jobs:
           test -f apps/drive/browser/sign-in.mjs
           npm run build --prefix apps/drive
           (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
+          for width in 390 1280; do
+            for state in signed-out empty listed invalid-page exhausted unavailable; do
+              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-$state-$width.png"
+              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/axe-root-$state-$width.json"
+            done
+            for sample in greyscale forced-colours-focus; do
+              test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-$sample-$width.png"
+            done
+            test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-keyboard-$width.json"
+          done
+          test -s "$DRIVE_BROWSER_EVIDENCE_DIR/root-listed-320.png"
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
