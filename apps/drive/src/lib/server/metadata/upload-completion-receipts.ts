@@ -85,9 +85,10 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
   transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier) {
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
+  const send = transport.fetch;
   const complete = createMultipartComplete(settings, { ...transport, async fetch(...args) {
     if (await verifier?.isQualified(storageConfigId) !== true) throw new Error('Storage no longer qualified');
-    return transport.fetch(...args);
+    return send(...args);
   } });
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {

@@ -112,7 +112,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
                 receipt ? Uint8Array.from(receipt.etag, (char) => char.charCodeAt(0)) : null) };
             } };
           }
-        });
+        }).then(({ status }) => reply(status));
       } catch { return reply(503); }
     },
 
