@@ -71,12 +71,12 @@ export class Invitations {
   }
 
   async present(token: string): Promise<Display> {
-    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('Invitation unavailable');
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new InvitationUnavailable();
     const row = await this.db.prepare(`SELECT display_name, note FROM drive_invitations WHERE token_hash = ?
       AND cancelled_at IS NULL AND redeemed_at IS NULL
       AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`)
       .bind(await tokenHash(token)).first<{ display_name: string | null; note: string | null }>();
-    if (!row) throw new Error('Invitation unavailable');
+    if (!row) throw new InvitationUnavailable();
     return { displayName: row.display_name, note: row.note };
   }
 
