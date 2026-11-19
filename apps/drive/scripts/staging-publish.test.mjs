@@ -129,6 +129,34 @@ test('command-line publisher refuses publication independently of the workflow',
   assert.match(run(['--publish'], '0'.repeat(32)).stderr, /staging publication remains disabled/);
 });
 
+/** @param {string} source */
+function* actionsExpressions(source) {
+  let offset = 0;
+  while ((offset = source.indexOf('${{', offset)) !== -1) {
+    const start = offset + 3;
+    let quoted = false;
+    for (offset = start; offset < source.length; offset++) {
+      if (source[offset] === "'") {
+        // Actions uses a doubled single quote to escape a quote inside a string.
+        if (quoted && source[offset + 1] === "'") offset++;
+        else quoted = !quoted;
+      } else if (!quoted && source.startsWith('}}', offset)) {
+        break;
+      }
+    }
+    assert.ok(offset < source.length, 'unterminated Actions expression');
+    yield source.slice(start, offset);
+    offset += 2;
+  }
+}
+
+test('scans quoted delimiters, escaped quotes and adjacent Actions expressions', () => {
+  const first = " format('it''s }}', github.sha) ";
+  const second = ' false ';
+  assert.deepEqual([...actionsExpressions('${{' + first + '}}${{' + second + '}}')], [first, second]);
+  assert.throws(() => [...actionsExpressions("${{ 'literal }}'")], /unterminated Actions expression/);
+});
+
 test('publish job remains disabled and bound to the preparation job and checkout SHA', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-preparation.yml', import.meta.url), 'utf8');
   const job = workflow.split('\n  publish:\n')[1]?.split(/^ {2}(?:[\w-]+|'[^']+'|"[^"]+")[ \t]*:/m, 1)[0];
@@ -137,9 +165,9 @@ test('publish job remains disabled and bound to the preparation job and checkout
   assert.match(job, /needs: preparation/);
   assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(job, /^ {4}(['"]?)environment\1[ \t]*:/m, 'publish job must not bind an environment');
-  // Ignore closing delimiters inside single-quoted Actions expression strings.
-  const expressions = job.match(/\$\{\{(?:'(?:[^']|'')*'|(?!\}\})[^'])*\}\}/g) ?? [];
-  assert.ok(expressions.every((expression) => !/\bsecrets\b/i.test(expression)), 'publish job must not reference secrets');
+  for (const expression of actionsExpressions(job)) {
+    assert.doesNotMatch(expression, /\bsecrets\b/i, 'publish job must not reference secrets');
+  }
 });
 
 test('normalizes publish failure without exposing provider diagnostics', (t) => {
