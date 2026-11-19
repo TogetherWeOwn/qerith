@@ -24,18 +24,20 @@ export class BoundChallenges {
     return this.store(context, purpose, challenge, expectedChallenge);
   }
 
-  async issueRegistration(context: string, challenge: string, principalId: string, userHandle: string): Promise<void> {
-    await this.store(context, 'registration', challenge, undefined, { principalId, userHandle });
+  async issueRegistration(context: string, challenge: string, principalId: string, userHandle: string,
+    minimumIntervalMs: number): Promise<void> {
+    await this.store(context, 'registration', challenge, undefined, { principalId, userHandle }, minimumIntervalMs);
   }
 
   private async store(context: string, purpose: ChallengePurpose, challenge: string, expectedChallenge?: string,
-    binding?: { principalId: string; userHandle: string }): Promise<string> {
+    binding?: { principalId: string; userHandle: string }, minimumIntervalMs = 0): Promise<string> {
     this.validate(context, purpose);
     if (!/^[A-Za-z0-9_-]{43}$/.test(challenge) ||
         (expectedChallenge !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(expectedChallenge))) throw new TypeError('Invalid challenge');
     await this.db.prepare(`DELETE FROM drive_bound_ceremonies
       WHERE expires_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)`).run();
-    // A stale replacement returns the unchanged challenge; capacity refusal returns no row.
+    // A stale replacement returns the unchanged challenge. Capacity and
+    // cooldown refusals return no row and leave the existing ceremony intact.
     const row = await this.db.prepare(`INSERT INTO drive_bound_ceremonies
       (context, purpose, challenge, expires_at, principal_id, webauthn_user_handle)
       SELECT ?1, ?2, ?3, CAST(unixepoch('subsec') * 1000 AS INTEGER) + ?4, NULLIF(?8, ''), NULLIF(?9, '')
@@ -47,8 +49,9 @@ export class BoundChallenges {
         expires_at = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.expires_at ELSE drive_bound_ceremonies.expires_at END,
         principal_id = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.principal_id ELSE drive_bound_ceremonies.principal_id END,
         webauthn_user_handle = CASE WHEN ?7 IN ('', drive_bound_ceremonies.challenge) THEN excluded.webauthn_user_handle ELSE drive_bound_ceremonies.webauthn_user_handle END
+      WHERE ?10 = 0 OR drive_bound_ceremonies.expires_at <= excluded.expires_at - ?10
       RETURNING challenge`).bind(context, purpose, challenge, lifetimeMs, capacity, authenticationCapacity,
-        expectedChallenge ?? '', binding?.principalId ?? '', binding?.userHandle ?? '').first<{ challenge: string }>();
+        expectedChallenge ?? '', binding?.principalId ?? '', binding?.userHandle ?? '', minimumIntervalMs).first<{ challenge: string }>();
     if (!row) throw new CeremonyCapacityReached('Ceremony capacity reached');
     if (row.challenge !== challenge) throw new ChallengeUnavailable('Challenge unavailable');
     return challenge;

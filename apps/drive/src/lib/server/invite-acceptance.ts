@@ -1,4 +1,6 @@
 import type { PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
+import { CeremonyCapacityReached } from './identity/challenges';
+import { InvitationEnrollment } from './identity/enrollment';
 import { Invitations, InvitationUnavailable } from './identity/invitations';
 import { Sessions } from './identity/sessions';
 import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie } from './request-auth';
@@ -65,8 +67,22 @@ function readRegistration(value: unknown): RegistrationResponseJSON | null {
   };
 }
 
-// Unwired: no Worker route, preview admission or session issuance. Callers
-// must dispatch to a credential-free URL and pass the token only in the body.
+// No Worker admission or session issuance. The caller must use a
+// credential-free URL; the invitation token travels only in the body.
+export function handleInviteAcceptance(request: Request, step: InviteStep,
+  env: InviteEnv & { DB?: ConstructorParameters<typeof InvitationEnrollment>[0] }): Promise<Response> {
+  const origin = authOrigin(env.DRIVE_ORIGIN);
+  if (!origin || !env.DB) return Promise.resolve(deny(503));
+  const enrollment = new InvitationEnrollment(env.DB, origin.hostname, origin.origin);
+  return inviteAcceptance(request, step, env, {
+    issueOptions: (token) => enrollment.issueOptions(token),
+    async enroll(token, challenge, response) {
+      await enrollment.enroll(token, challenge, response);
+      return true;
+    },
+  });
+}
+
 export async function inviteAcceptance(request: Request, step: InviteStep, env: InviteEnv, registration: InviteRegistration): Promise<Response> {
   const origin = authOrigin(env.DRIVE_ORIGIN);
   if (!origin || !env.DB) return deny(503);
@@ -97,6 +113,10 @@ export async function inviteAcceptance(request: Request, step: InviteStep, env: 
         await registration.enroll(token, challenge, assertion)) return new Response(null, { status: 204, headers });
     return deny(404);
   } catch (error) {
-    return deny(step === 'present' && error instanceof InvitationUnavailable ? 404 : 503);
+    if (error instanceof InvitationUnavailable) return deny(404);
+    if (error instanceof CeremonyCapacityReached) {
+      return new Response(null, { status: 429, headers: { ...headers, 'retry-after': '60' } });
+    }
+    return deny(503);
   }
 }
