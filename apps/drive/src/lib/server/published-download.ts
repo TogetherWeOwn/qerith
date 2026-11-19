@@ -28,20 +28,25 @@ export function downloadStorage(env: DownloadEnv) {
 
 // The immutable reader validates the byte count at EOF. Check that there are
 // deliverable bytes before committing headers, and hold the last byte until EOF.
-async function fixedLength(body: ReadableStream<Uint8Array>, length: number) {
+async function fixedLength(body: ReadableStream<Uint8Array>, length: number, signal: AbortSignal) {
   const reader = body.getReader();
   const cancel = () => reader.cancel().catch(() => {});
   try {
     const first = await reader.read();
+    signal.throwIfAborted();
     if (first.done) return new Uint8Array(0);
     if (length === 1) {
       if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
+      signal.throwIfAborted();
       return first.value.slice();
     }
-    // Only the native readable lets Workers set the response's wire length.
-    const stream = new FixedLengthStream(length);
-    const writer = stream.writable.getWriter();
-    void writer.closed.catch(cancel); // The separate request signal also aborts pending upstream reads.
+    // Keep the native wire length. At this compatibility date abort clears pending writes.
+    const { readable, writable } = new FixedLengthStream(length);
+    const writer = writable.getWriter();
+    const fail = (error: unknown) => { void cancel(); void writer.abort(error).catch(() => {}); };
+    const abort = () => fail(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void writer.closed.catch(cancel);
     void (async () => {
       let remaining = length;
       try {
@@ -51,18 +56,17 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number) {
           if (remaining === 0) {
             if (bytes.length > 1) await writer.write(bytes.subarray(0, -1));
             if (!(await reader.read()).done) throw new Error('Unexpected download bytes');
+            signal.throwIfAborted();
             await writer.write(bytes.subarray(-1));
             break;
           }
           await writer.write(bytes);
         }
         await writer.close();
-      } catch (error) {
-        void cancel();
-        void writer.abort(error).catch(() => {});
-      }
+      } catch (error) { fail(error); }
+      finally { signal.removeEventListener('abort', abort); }
     })();
-    return stream.readable;
+    return readable;
   } catch (error) {
     void cancel();
     throw error;
@@ -78,11 +82,13 @@ export async function publishedDownload(request: Request, id: string, token: str
   try {
     reader = createImmutableS3Reader(createS3Objects(config, { fetch: transport, timeoutMs, streamBudget }));
   } catch { return downloadFile(request, id); }
-  return downloadFile(request, id, {
+  // Start before authorization and keep the same cutoff through storage and native delivery.
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(streamBudget.totalMs)]);
+  return downloadFile(new Request(request, { signal }), id, {
     authorize: async () => token,
     resolveGeneration,
     readerFor: (id) => id === storageConfigId ? reader : null,
     onReadError,
-    fixedLength
+    fixedLength: (body, length) => fixedLength(body, length, signal)
   });
 }

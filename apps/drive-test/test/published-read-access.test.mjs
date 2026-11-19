@@ -156,28 +156,40 @@ it('composes with immutable full and range GETs without storage calls for denied
     expect(truncated.status).toBe(range ? 206 : 200);
     await expect(truncated.arrayBuffer()).rejects.toThrow();
   }
-  for (const stop of ['provider', 'client']) {
+  for (const stop of ['provider', 'client', 'backpressure', 'final-byte']) {
     const cancelled = vi.fn();
     const abort = new AbortController();
+    const cutoff = new AbortController();
     const eof = Promise.withResolvers();
     let source;
     const pendingEof = new ReadableStream({ start(output) {
       source = output;
       output.enqueue(new TextEncoder().encode('abcdefg'));
-    }, pull: eof.resolve, cancel: cancelled }, { highWaterMark: 0 });
+    }, pull(output) {
+      if (stop === 'final-byte') output.close();
+      eof.resolve();
+    }, cancel: cancelled }, { highWaterMark: 0 });
     fetch.mockResolvedValueOnce(new Response(pendingEof, { headers: { etag, 'content-length': '7' } }));
-    const client = (await get({}, token, storage, abort.signal)).body.getReader();
-    expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
-    const incomplete = expect(client.read()).rejects.toThrow();
-    await eof.promise;
-    if (stop === 'client') abort.abort(); // Workers reports a disconnect on the incoming request signal.
-    else source.error(new Error('EOF unavailable'));
-    await incomplete;
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(cutoff.signal);
+    const client = (await get({}, token, storage, abort.signal).finally(() => timeout.mockRestore())).body.getReader();
+    if (stop === 'backpressure') {
+      cutoff.abort();
+      expect(cancelled).toHaveBeenCalledOnce(); // Before any client read relieves backpressure.
+    } else {
+      expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
+      await eof.promise;
+      if (stop === 'final-byte') {
+        await scheduler.wait(0); // Let the verified final byte reach the native writer, not the client.
+        cutoff.abort();
+      } else if (stop === 'client') abort.abort();
+      else source.error(new Error('EOF unavailable'));
+    }
+    await expect(client.read(), stop).rejects.toThrow();
     if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
   }
   await sessions.revoke(token);
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });
   expect(revoked.status).toBe(404);
   expect(revoked.headers.get('content-range')).toBeNull();
-  expect(fetch).toHaveBeenCalledTimes(13);
+  expect(fetch).toHaveBeenCalledTimes(15);
 });
