@@ -7,7 +7,7 @@ beforeEach(async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec('DELETE FROM drive_invitations');
   await env.DB.exec('DELETE FROM drive_principals');
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
 });
 
 it('issues hashed tokens only for a live owner and persists cancellation', async () => {

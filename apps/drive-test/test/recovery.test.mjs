@@ -10,7 +10,7 @@ beforeEach(async () => {
 });
 
 it('issues bounded hashed tokens only for an active owner session and target', async () => {
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active'), ('revoked', 'member', 'revoked')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active'), ('revoked', 'member', 'revoked')");
   const sessions = new Sessions(env.DB);
   const owner = (await sessions.issue('owner')).token;
   const member = (await sessions.issue('member')).token;
@@ -43,7 +43,7 @@ it('issues bounded hashed tokens only for an active owner session and target', a
 });
 
 it('cancels tokens when an owner is deleted and permits target deletion', async () => {
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
   const owner = (await new Sessions(env.DB).issue('owner')).token;
   const recovery = new RecoveryTokens(env.DB);
   const token = await recovery.issue(owner, 'member');
@@ -55,7 +55,7 @@ it('cancels tokens when an owner is deleted and permits target deletion', async 
 
 it('rejects a revoked or expired owner session at mutation time', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
   const sessions = new Sessions(env.DB);
   const recovery = new RecoveryTokens(env.DB);
   const owner = (await sessions.issue('owner')).token;
@@ -74,7 +74,7 @@ it('rejects a revoked or expired owner session at mutation time', async () => {
 
 it('invalidates outstanding tokens across target and owner membership changes', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')");
   const sessions = new Sessions(env.DB);
   const owner = (await sessions.issue('owner')).token;
   const recovery = new RecoveryTokens(env.DB);
