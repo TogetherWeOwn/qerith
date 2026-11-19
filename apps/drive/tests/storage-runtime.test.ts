@@ -75,7 +75,9 @@ const listPage = (parts: string, marker?: number) => new Response(
 );
 
 test('verification uses signed ListParts on the exact key and upload ID across pages', async () => {
-  const markers: Array<string | null> = [];
+  const events: Array<string | null> = [];
+  let pages = 0;
+  const checkOwner = async () => { events.push('owner check'); return true; };
   const verifier = wireUploadStorage(bindings(), async input => {
     assert.ok(input instanceof Request);
     const url = new URL(input.url);
@@ -84,18 +86,30 @@ test('verification uses signed ListParts on the exact key and upload ID across p
     assert.ok(input.headers.has('authorization'));
     assert.equal(url.origin + url.pathname, 'https://storage.example.test/drive-staging/key%20one');
     assert.equal(url.searchParams.get('uploadId'), 'opaque+/=');
-    markers.push(url.searchParams.get('part-number-marker'));
-    const number = markers.length;
+    events.push(url.searchParams.get('part-number-marker'));
+    const number = ++pages;
     return listPage(listPart(number, number === 1 ? '"tag-1"' : '"tag-&amp;-ÿ"'), number === 1 ? 1 : undefined);
   }).DRIVE_UPLOAD_VERIFIER!;
-  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }), null);
-  assert.deepEqual(markers, []);
-  assert.deepEqual(await verifier.verifyParts(upload), [
+  assert.equal(await verifier.verifyParts({ ...upload, storageConfigId: 'wrong' }, checkOwner), null);
+  assert.deepEqual(events, []);
+  assert.deepEqual(await verifier.verifyParts(upload, checkOwner), [
     { partNumber: 1, size: 47, etag: '"tag-1"' }, { partNumber: 2, size: 94, etag: '"tag-&-ÿ"' }
   ]);
-  assert.deepEqual(markers, [null, '1']);
+  assert.deepEqual(events, ['owner check', null, 'owner check', '1']);
   const invalid = wireUploadStorage(bindings(), async () => new Response('<ListPartsResult/>')).DRIVE_UPLOAD_VERIFIER!;
   assert.equal(await invalid.verifyParts(upload), null);
+});
+
+test('verification fails closed when the owner check denies a page', async () => {
+  for (const deniedPage of [1, 2]) {
+    let checks = 0, sends = 0;
+    const verifier = wireUploadStorage(bindings(), async () => {
+      const number = ++sends;
+      return listPage(listPart(number, '"tag"'), number === 1 ? 1 : undefined);
+    }).DRIVE_UPLOAD_VERIFIER!;
+    assert.equal(await verifier.verifyParts(upload, async () => ++checks !== deniedPage), null);
+    assert.deepEqual({ checks, sends }, { checks: deniedPage, sends: deniedPage - 1 });
+  }
 });
 
 test('verification stops on oversized individual or cumulative ETag metadata', async () => {

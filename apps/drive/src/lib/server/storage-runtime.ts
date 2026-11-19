@@ -50,14 +50,15 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
   const { settings, storageConfigId } = identity;
   const budget = qualifiedBudget(proof, storageConfigId, settings.region);
   if (budget === null) return undefined;
-  const listing = createS3Listing(settings, { fetch: transport, timeoutMs: listTimeoutMs });
   return {
     async isQualified(id: string, signal?: AbortSignal) { return id === storageConfigId && !signal?.aborted; },
     completionTimeoutMs(id) { return id === storageConfigId ? budget : null; },
-    async verifyParts({ storageConfigId: id, objectKey, uploadId }) {
+    async verifyParts({ storageConfigId: id, objectKey, uploadId }, beforeSend) {
       if (id !== storageConfigId) return null;
       const signal = AbortSignal.timeout(listTimeoutMs);
       const deadline = performance.now() + listTimeoutMs;
+      const listing = createS3Listing(settings, { fetch: transport, timeoutMs: listTimeoutMs,
+        beforeSend: async () => (!beforeSend || await beforeSend() === true) && performance.now() < deadline });
       const parts: CompletedPart[] = [];
       let retainedEtagBytes = 0;
       let marker: number | undefined;
