@@ -79,7 +79,11 @@ try {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
-    if (request.isNavigationRequest()) headers['x-fixture-navigation'] = '1';
+    if (request.isNavigationRequest()) {
+      headers['x-fixture-navigation'] = '1';
+      // The relay may omit Fetch Metadata for the test's direct notice navigation.
+      if (url.pathname === '/' && url.searchParams.has('download')) headers['sec-fetch-site'] ??= 'none';
+    }
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
@@ -137,6 +141,8 @@ try {
     assert.ok((await context.cookies(origin)).some(cookie => cookie.name === name));
     const document = await page.goto(`${origin}/?download=${nonce}`);
     assert.equal(document?.status(), 200);
+    assert.ok((await document.headerValues('set-cookie')).some(value => value.startsWith(`${name}=;`) && /Max-Age=0/i.test(value)),
+      'the Worker expired the one-time notice cookie');
     assert.ok(!(await context.cookies(origin)).some(cookie => cookie.name === name), 'Chromium removed the one-time notice cookie');
   }
   await visitWithNotice();

@@ -15,7 +15,7 @@
 <main id="main">
   {#if downloadNotice}
     <div role="alert">
-      <p>{downloadNotice.name ?? 'The file'} didn’t download.{#if !data.staging} Try again.{/if}</p>
+      <p>{`${downloadNotice.name ?? 'The file'} didn’t download.${data.staging ? '' : ' Try again.'}`}</p>
       {#if downloadNotice.id}
         <a data-sveltekit-reload href={`/api/download/${downloadNotice.id}`}>{data.staging ? 'Retry download' : 'Try again'}</a>
       {/if}
