@@ -105,8 +105,8 @@ it('composes with immutable full and range GETs without storage calls for denied
     ? new Response('bc', { status: 206, headers: { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' } })
     : new Response('abcdefg', { headers: { etag, 'content-length': '7' } }));
   const onReadError = vi.fn();
-  const get = (headers = {}, auth = token, bindings = storage) => publishedDownload(
-    new Request('https://drive.example/file', { headers }), id, auth, bindings, onReadError, fetch);
+  const get = (headers = {}, auth = token, bindings = storage, signal) => publishedDownload(
+    new Request('https://drive.example/file', { headers, signal }), id, auth, bindings, onReadError, fetch);
   for (const response of [await get({}, 'a'.repeat(43)), await get({}, token,
     { ...storage, DRIVE_S3_STORAGE_EPOCH: 'different-epoch' })]) {
     expect(response.status).toBe(404);
@@ -158,22 +158,22 @@ it('composes with immutable full and range GETs without storage calls for denied
   }
   for (const stop of ['provider', 'client']) {
     const cancelled = vi.fn();
+    const abort = new AbortController();
+    const eof = Promise.withResolvers();
     let source;
     const pendingEof = new ReadableStream({ start(output) {
       source = output;
       output.enqueue(new TextEncoder().encode('abcdefg'));
-    }, cancel: cancelled }, { highWaterMark: 0 });
+    }, pull: eof.resolve, cancel: cancelled }, { highWaterMark: 0 });
     fetch.mockResolvedValueOnce(new Response(pendingEof, { headers: { etag, 'content-length': '7' } }));
-    const client = (await get()).body.getReader();
+    const client = (await get({}, token, storage, abort.signal)).body.getReader();
     expect(new TextDecoder().decode((await client.read()).value)).toBe('abcdef');
-    if (stop === 'client') {
-      const stop = client.cancel();
-      await vi.waitFor(() => expect(cancelled).toHaveBeenCalledOnce(), { timeout: 1000 });
-      await stop;
-    } else {
-      source.error(new Error('EOF unavailable'));
-      await expect(client.read()).rejects.toThrow();
-    }
+    const incomplete = expect(client.read()).rejects.toThrow();
+    await eof.promise;
+    if (stop === 'client') abort.abort(); // Workers reports a disconnect on the incoming request signal.
+    else source.error(new Error('EOF unavailable'));
+    await incomplete;
+    if (stop === 'client') expect(cancelled).toHaveBeenCalledOnce();
   }
   await sessions.revoke(token);
   const revoked = await get({ 'if-none-match': etag, range: 'bytes=20-' });

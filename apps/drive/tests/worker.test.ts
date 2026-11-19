@@ -12,6 +12,11 @@ for (const file of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   });
 }
 
+test('the generated Worker opts into incoming request cancellation', () => {
+  const config = JSON.parse(readFileSync(new URL('../wrangler.build.jsonc', import.meta.url), 'utf8'));
+  assert.ok(config.compatibility_flags.includes('enable_request_signal'));
+});
+
 test('the Worker denies requests before routing or serving assets', async () => {
   const response = worker.fetch();
   assert.equal(response.status, 503);

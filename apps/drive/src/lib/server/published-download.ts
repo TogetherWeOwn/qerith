@@ -41,7 +41,7 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number) {
     // Only the native readable lets Workers set the response's wire length.
     const stream = new FixedLengthStream(length);
     const writer = stream.writable.getWriter();
-    void writer.closed.catch(cancel); // client cancellation, including during a pending upstream read
+    void writer.closed.catch(cancel); // The separate request signal also aborts pending upstream reads.
     void (async () => {
       let remaining = length;
       try {

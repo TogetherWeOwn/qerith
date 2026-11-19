@@ -117,7 +117,7 @@ export default { fetch(request, env, ctx) {
     const location = unavailable.headers.get('location');
     assert.match(location, /^\/\?download=[a-f0-9-]{36}$/);
     const noticeCookie = unavailable.headers.get('set-cookie').split(';')[0];
-    assert.equal(noticeCookie, `__Host-drive-download-failed=${location.split('=')[1]}%3Aunavailable`);
+    assert.equal(decodeURIComponent(noticeCookie), `__Host-drive-download-failed=${location.split('=')[1]}:unavailable`);
     const noticeHeaders = { ...navigation, cookie: `${cookie}; ${noticeCookie}` };
     assert.doesNotMatch(await (await access({ headers: noticeHeaders })).text(), /didn’t download/);
     const notice = await get(noticeHeaders, `${origin}${location}`);
