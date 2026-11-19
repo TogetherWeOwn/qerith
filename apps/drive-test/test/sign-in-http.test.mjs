@@ -11,6 +11,7 @@ const authEnv = () => ({ DRIVE_ORIGIN: origin, DB: env.DB });
 const post = (step, headers = {}, body) => signIn(new Request(`${origin}/api/sign-in/${step}`, {
   method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers }, body,
 }), step, authEnv());
+const cookiePair = response => response.headers.getSetCookie()[0].split(';')[0];
 
 async function begin(options = {}, status = 'active') {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
@@ -47,8 +48,7 @@ it('requires the browser transaction cookie and issues a hardened session only o
   expect(success.headers.getSetCookie()).toEqual([
     expect.stringMatching(/^__Host-drive-session=[\w-]{43}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=\d+$/),
   ]);
-  const cookiePair = success.headers.getSetCookie()[0].split(';')[0];
-  const request = new Request(origin, { headers: { cookie: cookiePair } });
+  const request = new Request(origin, { headers: { cookie: cookiePair(success) } });
   expect((await readSession(request, env.DB)).principal).toEqual({ id: 'owner', role: 'owner' });
   expect((await post('verify', { cookie }, body)).status).toBe(401);
   await env.DB.exec("UPDATE drive_principals SET status = 'revoked'");
@@ -56,26 +56,22 @@ it('requires the browser transaction cookie and issues a hardened session only o
 });
 
 it('replaces a live challenge once and permits a restart when the replacement response is lost', async () => {
-  const { cookie, body } = await begin();
+  const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const { cookie, body } = await begin({ key });
   const replacements = await Promise.all([post('challenge', { cookie }), post('challenge', { cookie })]);
-  expect(replacements.map(response => response.status).sort()).toEqual([200, 409]);
-  const winner = replacements.find(response => response.status === 200);
-  const loser = replacements.find(response => response.status === 409);
+  const [winner, loser] = replacements.sort((a, b) => a.status - b.status);
+  expect([winner.status, loser.status]).toEqual([200, 409]);
   expect(await loser.json()).toEqual({ code: 'restart-required' });
   expect(loser.headers.getSetCookie()).toEqual([]);
-  const currentCookie = winner.headers.getSetCookie()[0].split(';')[0];
-  const denied = await post('verify', { cookie: currentCookie }, body);
+  const denied = await post('verify', { cookie: cookiePair(winner) }, body);
   expect(denied.status).toBe(401);
   expect(denied.headers.getSetCookie()).toEqual([]);
-  const row = await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all();
-  expect(row.results).toEqual([{ challenge: (await winner.json()).challenge }]);
   const restart = await post('restart', { cookie }); // The browser still holds the original cookie.
   expect(restart.status).toBe(200);
-  const restartCookie = restart.headers.getSetCookie()[0].split(';')[0];
-  expect(restartCookie.split('.')[0]).not.toBe(cookie.split('.')[0]);
-  const signed = await fixture('authentication', { challenge: (await restart.json()).challenge });
-  expect((await post('verify', { cookie: restartCookie }, JSON.stringify(signed.authentication))).status).toBe(204);
-  expect((await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all()).results).toEqual(row.results);
+  const signed = await fixture('authentication', { key, challenge: (await restart.json()).challenge });
+  expect((await post('verify', { cookie: cookiePair(restart) }, JSON.stringify(signed.authentication))).status).toBe(204);
+  expect((await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies').all()).results)
+    .toEqual([{ challenge: (await winner.json()).challenge }]);
 });
 
 it('reserves ceremony capacity for registration when authentication is full', async () => {

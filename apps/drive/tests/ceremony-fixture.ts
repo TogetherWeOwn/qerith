@@ -22,8 +22,8 @@ function der(raw: Uint8Array) {
   return join(bytes(0x30, body.length), body);
 }
 
-export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string } = {}) {
-  const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+export async function fixture(kind: 'registration' | 'authentication', options: { challenge?: string; origin?: string; rpID?: string; uv?: boolean; badSignature?: boolean; crossOrigin?: boolean; topOrigin?: string; key?: CryptoKeyPair } = {}) {
+  const key = options.key ?? await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', key.publicKey);
   const cose = join(bytes(0xa5, 1, 2, 3, 0x26, 0x20, 1, 0x21, 0x58, 0x20), decode(jwk.x!), bytes(0x22, 0x58, 0x20), decode(jwk.y!));
   const id = bytes(1, 2, 3, 4);
