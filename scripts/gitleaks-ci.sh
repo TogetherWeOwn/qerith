@@ -6,29 +6,41 @@ trap 'rm -rf -- "$scratch"' EXIT
 
 scan() {
   local repo=$1 fixture_report=${2:-} status=0
-  local report="$scratch/history.json" diagnostics="$scratch/history.log"
-  # Force text patches and compare merges to their first parent without
-  # restricting history traversal to the first-parent chain.
-  # Also emit content when a file is renamed out of an allowed path.
-  # Gitleaks 8.30.1 can log a Git read error and still exit 0. Keep error
-  # diagnostics private and fail the scan if it emitted any.
-  "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 --no-banner --log-level error \
+  local report="$scratch/history.json" diagnostics="$scratch/history.log" git_bin
+  local triage='Send Security only the run link and head/base SHAs for a private rerun with the same pinned scanner, wrapper and policy.'
+  # Gitleaks 8.30.1 can swallow a nonzero git log exit. Require success from
+  # the actual child that supplied patches, not from a second traversal.
+  git_bin=$(type -P git) || return 1
+  mkdir "$scratch/bin" || return 1
+  cat > "$scratch/bin/git" <<'SH' || return 1
+#!/usr/bin/env bash
+if [[ ${1:-} == -C && ${3:-} == log ]]; then
+  "$SCAN_GIT" "$@" && : > "$SCAN_GIT_DONE"
+else
+  exec "$SCAN_GIT" "$@"
+fi
+SH
+  chmod +x "$scratch/bin/git" || return 1
+  # Keep diagnostics private. Include text patches, merge resolutions and
+  # renamed content without restricting traversal to first-parent commits.
+  PATH="$scratch/bin:$PATH" SCAN_GIT="$git_bin" SCAN_GIT_DONE="$scratch/git-done" \
+    "${GITLEAKS_BIN:?}" git "$repo" --redact --exit-code 1 --no-banner --log-level error \
     --ignore-gitleaks-allow --log-opts='--text --diff-merges=first-parent --no-renames HEAD --' \
     --config "$scratch/.gitleaks.toml" --gitleaks-ignore-path "$scratch/.gitleaksignore" \
     --report-format json --report-path "$report" > "$diagnostics" 2>&1 || status=$?
-  if [[ ! -s "$diagnostics" ]]; then
+  if [[ -f "$scratch/git-done" && ! -s "$diagnostics" ]]; then
     if (( status == 0 )) && jq -e 'type == "array" and length == 0' "$report" >/dev/null 2>&1; then
       printf '%s\n' 'Gitleaks history scan passed; no findings reported'
       return 0
     elif (( status == 1 )) && jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
       if [[ -n "$fixture_report" ]]; then cp -- "$report" "$fixture_report"; fi
-      printf '%s\n' 'Gitleaks reported findings; review privately' >&2
+      printf '%s\n' 'Gitleaks reported findings' "$triage" >&2
       return 1
     fi
   fi
   printf '%s\n' 'Gitleaks history scan failed; diagnostics withheld' >&2
   if jq -e 'type == "array" and length > 0' "$report" >/dev/null 2>&1; then
-    printf '%s\n' 'Gitleaks reported findings during the failed scan; review privately' >&2
+    printf '%s\n' 'Gitleaks reported findings during the failed scan' "$triage" >&2
   fi
   return "$(( status == 0 ? 1 : status ))"
 }
@@ -119,6 +131,7 @@ assert_detected() {
   GITHUB_EVENT_NAME="$event" BASE_SHA="$base" SCAN_HEAD="$(git rev-parse --verify HEAD)" \
     bash "$script" scan "$report" > "$log" 2>&1 || status=$?
   if ! grep -Fq -- 'Gitleaks reported findings' "$log" ||
+    ! grep -Fq -- 'Send Security only the run link and head/base SHAs' "$log" ||
     grep -Fq -- 'synthetic-ignore-diagnostic-' "$log"; then
     printf 'Expected a safe finding summary in %s\n' "$label" >&2
     return 1
@@ -242,6 +255,23 @@ self_test() {
     git rm -q missing.txt
     git commit -qm 'Remove historical content'
     GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" bash "$script" scan
+    mkdir "$scratch/interrupted"
+    cat > "$scratch/interrupted/git" <<'SH'
+#!/usr/bin/env bash
+if [[ ${1:-} == -C && ${3:-} == log ]]; then
+  "$FIXTURE_GIT" "$1" "$2" log -1 "${@:4}" || exit "$?"
+  exit 7
+fi
+exec "$FIXTURE_GIT" "$@"
+SH
+    chmod +x "$scratch/interrupted/git"
+    if FIXTURE_GIT="$(type -P git)" GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" \
+      bash -c 'export PATH="$1:$PATH"; source "$2" scan' _ "$scratch/interrupted" "$script" > "$scratch/interrupted.log" 2>&1; then
+      printf '%s\n' 'Expected silent Git traversal failure to fail the scan' >&2
+      exit 1
+    fi
+    cmp "$scratch/interrupted.log" <(printf '%s\n' 'Gitleaks history scan failed; diagnostics withheld')
+    printf '%s\n' 'Rejected a silent Git failure after a partial patch stream'
     rm -- ".git/objects/${blob:0:2}/${blob:2}"
     if GITHUB_EVENT_NAME=push SCAN_HEAD="$(git rev-parse --verify HEAD)" \
       bash "$script" scan > "$scratch/incomplete.log" 2>&1; then
