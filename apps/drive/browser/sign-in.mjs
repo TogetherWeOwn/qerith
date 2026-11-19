@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
+import { captureRootListing, captureSignedOut } from './root-listing.mjs';
 
 const origin = 'https://drive.example.test';
 const rpID = new URL(origin).hostname;
@@ -124,6 +125,7 @@ try {
     return page.goto(`${origin}${response.headers.get('location')}`, { waitUntil: 'networkidle' });
   };
   await Promise.all([signInFrom(first, '/?tab=one'), signInFrom(second, '/shared?tab=two')]);
+  await captureSignedOut(first);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
   loseNext = true;
@@ -153,6 +155,7 @@ try {
   const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
   assert.equal(await privateStatus(), 200);
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
+  await captureRootListing(first, origin, DB);
   assert.equal((await post('verify', { cookie: proof.cookie }, proof.body)).status, 401);
   await DB.prepare('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?').bind(tokenHash).run();
   assert.equal(await privateStatus(), 401);

@@ -25,7 +25,7 @@ function admitDeletion(request, DB) {
   });
 }`;
 
-export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, other }) {
+export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, other, preview = false }) {
   const sql = (query, ...args) => DB.prepare(query).bind(...args);
   await DB.prepare('CREATE TABLE smoke_deletion_calls (key TEXT, method TEXT, etag TEXT)').run();
   const hash = await sql('SELECT token_hash FROM drive_sessions WHERE principal_id = ?', owner).first('token_hash');
@@ -60,6 +60,12 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   const job = (file) => sql('SELECT completed_at, completion_token, lease_token FROM drive_object_deletion_jobs WHERE entry_id = ?', file).first();
   const selected = await tree('selected');
   const before = await snapshot();
+  if (preview) {
+    await remove(selected.root, 404);
+    assert.deepEqual(await snapshot(), before);
+    console.log('Generated deletion: authenticated preview owner cannot admit deletion');
+    return;
+  }
   for (const [headers, status, body] of [
     [{ 'x-test-deletion': null }, 404], [{ cookie: null }, 401], [{ cookie: revoked }, 401], [{ cookie: other }, 404],
     [{ origin: null }, 403], [{ origin: 'https://other.example.test' }, 403],
