@@ -28,7 +28,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
     expect(url.pathname).toBe(`/${config.bucket}/${key}`);
     if (request.method === 'PUT') {
       parts.push({ partNumber: Number(url.searchParams.get('partNumber')), etag: tag, size: (await request.arrayBuffer()).byteLength });
-      return new Response(null, { headers: { etag: tag } });
+      return new Response(null, { headers: { etag: fail === 'receipt' ? `"${'a'.repeat(8191)}"` : tag } });
     }
     if (request.method === 'POST') return response(key);
     expect(request.headers.get('if-match')).toBe(etag);
@@ -87,20 +87,23 @@ it.each([
   expect(calls).toEqual([]);
 });
 
-it.each(['PUT', 'POST', 'qualification'])('preserves send fences and empty errors (%s)', async (fail) => {
+it.each(['PUT', 'POST', 'qualification', 'receipt'])('preserves send fences and empty errors (%s)', async (fail) => {
   const partFailed = fail !== 'POST';
   let checkPart = fail === 'qualification';
   const part = { bytes: partFailed ? minimum : 7 };
-  const { send, calls, generation } = await fixture({ fail, size: partFailed ? minimum + 7 : 7,
+  const { send, calls, generation, key } = await fixture({ fail, size: part.bytes + (partFailed ? 7 : 0),
     isQualified: async (id, intent) => await qualified(id) && (!checkPart ||
       !await sql('SELECT 1 FROM drive_upload_part_operations WHERE intent_id = ?', intent).first()) });
   const first = await send(1, part);
   expect([first.status, await first.text()]).toEqual([partFailed ? 409 : 204, '']);
   checkPart = false;
-  if (partFailed) expect([(await send(1, part)).status, (await send(2)).status]).toEqual([404, 404]);
-  expect([(await send()).status, (await send()).status]).toEqual([409, partFailed ? 409 : 404]);
-  expect(await generation()).toBeNull();
-  expect(calls).toEqual(fail === 'POST' ? ['PUT', 'POST'] : fail === 'PUT' ? ['PUT'] : []);
+  if (partFailed) {
+    expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
+      USING (operation_id) WHERE p.object_key = ? AND p.part_number = 1`, key).first()).toEqual({ kind: 'uncertain' });
+    expect([(await send(1, part)).status, (await send(2)).status]).toEqual([404, 404]);
+  }
+  expect([(await send()).status, (await send()).status, await generation()]).toEqual([409, partFailed ? 409 : 404, null]);
+  expect(calls).toEqual(fail === 'POST' ? ['PUT', 'POST'] : fail === 'qualification' ? [] : ['PUT']);
 });
 
 it.each(['provider error', 'qualification', 'session'])('requires current authority when publishing (%s)', async (veto) => {
