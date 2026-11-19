@@ -20,14 +20,15 @@ it('lists bounded pages of only the session owner’s root and projects client-s
   const insert = (id, owner, parent, name, key = null) => env.DB.prepare(`INSERT INTO drive_entries
     (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(id, owner, parent, name, key ? 'file' : 'folder', key, key ? 1 : null);
-  const boundaryId = 'boundary-'.repeat(16);
+  const boundaryId = crypto.randomUUID();
+  const nestedId = crypto.randomUUID();
   await env.DB.batch([
     ...Array.from({ length: 99 }, (_, n) => insert(`f${n}`, 'member', null, `folder-${String(n).padStart(2, '0')}`)),
     insert(boundaryId, 'member', null, 'á-👩🏽‍💻'),
     insert('last-folder', 'member', null, 'Ω folder'),
     insert('file', 'member', null, 'first.txt', 'test-storage-key'),
     insert('last', 'member', null, 'Ω.txt', 'test-last-key'),
-    insert('nested', 'member', 'f0', 'hidden'),
+    insert(nestedId, 'member', 'f0', 'hidden'),
     insert('other-file', 'other', null, '界.txt', 'test-other-key')
   ]);
   const sessions = new Sessions(env.DB);
@@ -43,18 +44,24 @@ it('lists bounded pages of only the session owner’s root and projects client-s
   expect(JSON.stringify(first)).not.toContain('hidden');
 
   const page = first.folder.nextPage;
+  expect(page).toBe(boundaryId); // The URL needs only the random ID, not the boundary name.
   expect(await loadRootListing(request(token), auth, [page])).toEqual({
     status: 'ok', folder: { entries: [
       { id: 'last-folder', name: 'Ω folder', kind: 'folder' },
       { id: 'file', name: 'first.txt', kind: 'file' }, { id: 'last', name: 'Ω.txt', kind: 'file' }
     ], nextPage: null }
   });
-  expect(await loadRootListing(request(otherToken), auth, [page])).toEqual({
-    status: 'ok', folder: { entries: [{ id: 'other-file', name: '界.txt', kind: 'file' }], nextPage: null }
-  });
-  for (const invalid of [[''], ['not+url-safe'], ['a'.repeat(4097)], [page, page]]) {
-    expect(await loadRootListing(request(token), auth, invalid)).toEqual({ status: 'unavailable' });
+  expect(await loadRootListing(request(otherToken), auth, [page])).toEqual({ status: 'invalid-page' });
+  expect(await loadRootListing(request(), auth, [page])).toEqual({ status: 'unavailable' });
+  await env.DB.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind('f0', boundaryId).run();
+  for (const invalid of [[''], ['not+url-safe'], ['a'.repeat(4097)], [page, page], [nestedId], [page], [crypto.randomUUID()]]) {
+    expect(await loadRootListing(request(token), auth, invalid)).toEqual({ status: 'invalid-page' });
   }
+  const failedDb = { prepare(sql) {
+    if (sql.includes('WITH authorized AS')) throw new Error('synthetic listing outage');
+    return env.DB.prepare(sql);
+  } };
+  expect(await loadRootListing(request(token), { ...auth, DB: failedDb }, [page])).toEqual({ status: 'unavailable' });
 });
 
 it('denies absent, wrong-origin, and revoked sessions rather than returning an empty drive', async () => {

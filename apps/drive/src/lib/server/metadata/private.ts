@@ -1,5 +1,3 @@
-import type { ListingBoundary } from './listing-cursor';
-
 // Identity integration must supply drive_active_members(id) from live membership.
 // This service accepts a server-authenticated principal, not a client owner ID.
 interface Statement {
@@ -21,7 +19,8 @@ export interface Cursor { name: string; id: string }
 export interface ListedEntry extends Entry { item_count: number | null }
 export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
 type RootEntry = Pick<Entry, 'id' | 'name' | 'kind'>;
-interface RootPage { entries: RootEntry[]; nextCursor: ListingBoundary | null }
+interface RootPage { entries: RootEntry[]; nextCursor: string | null }
+type RootRead = RootPage | 'invalid-page' | null;
 
 const columns = 'id, owner_id, parent_id, name, kind';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
@@ -52,14 +51,14 @@ export class PrivateMetadata {
       .bind(id, principalId, principalId).first<Entry>();
   }
 
-  list(principalId: string, parentId: null, cursor: ListingBoundary | null, sessionHash: string): Promise<RootPage | null>;
+  list(principalId: string, parentId: null, cursor: string | null, sessionHash: string): Promise<RootRead>;
   list(principalId: string, parentId: string | null, cursor?: Cursor | null): Promise<Page>;
-  async list(principalId: string, parentId: string | null, cursor: Cursor | ListingBoundary | null = null, sessionHash?: string): Promise<Page | RootPage | null> {
+  async list(principalId: string, parentId: string | null, cursor: Cursor | string | null = null, sessionHash?: string): Promise<Page | RootRead> {
     if (sessionHash !== undefined) {
-      if (parentId !== null || (cursor !== null && !('kind' in cursor))) throw new TypeError('Invalid root listing');
+      if (parentId !== null || (cursor !== null && typeof cursor !== 'string')) throw new TypeError('Invalid root listing');
       return this.listSessionRoot(principalId, cursor, sessionHash);
     }
-    if (cursor !== null && (!('id' in cursor) || typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
+    if (cursor !== null && (typeof cursor !== 'object' || typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
       throw new TypeError('Invalid cursor');
     }
     const boundary = cursor === null ? '' : 'AND (name, id) > (?, ?)';
@@ -77,33 +76,34 @@ export class PrivateMetadata {
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
-  private async listSessionRoot(principalId: string, cursor: ListingBoundary | null, sessionHash: string): Promise<RootPage | null> {
-    const ordered = 'ORDER BY kind DESC, name COLLATE BINARY ASC, id ASC';
-    const limit = `${ordered} LIMIT 101`;
-    const entries = `SELECT id, name, kind FROM drive_entries INDEXED BY drive_entries_listing_asc
-      WHERE owner_id = (SELECT principal_id FROM authorized) AND parent_id IS NULL`;
-    // Two index ranges let a folder cursor continue directly into the files.
-    const ranges = cursor ? `same_kind AS (
-      ${entries} AND kind = ? AND name COLLATE BINARY > ? ${limit}
+  private async listSessionRoot(principalId: string, cursor: string | null, sessionHash: string): Promise<RootRead> {
+    const limit = 'ORDER BY kind DESC, name COLLATE BINARY ASC, id ASC LIMIT 101';
+    const root = 'owner_id = (SELECT principal_id FROM authorized) AND parent_id IS NULL';
+    const entries = `SELECT id, name, kind FROM drive_entries INDEXED BY drive_entries_listing_asc WHERE ${root}`;
+    // Resolve the cursor within the same authorized read; keep the name out of the URL.
+    const ranges = cursor === null ? `children AS (${entries} ${limit})` : `boundary AS (
+      SELECT name, kind FROM drive_entries WHERE id = ? AND ${root}
+    ), same_kind AS (
+      ${entries} AND kind = (SELECT kind FROM boundary) AND name COLLATE BINARY > (SELECT name FROM boundary) ${limit}
     ), later_kind AS (
-      ${entries} AND kind < ? ${limit}
+      ${entries} AND kind < (SELECT kind FROM boundary) ${limit}
     ), children AS (
       SELECT * FROM (SELECT * FROM same_kind UNION ALL SELECT * FROM later_kind) ${limit}
-    )` : `children AS (${entries} ${limit})`;
-    // A sentinel from the same statement distinguishes an authorized empty root from a denied read.
+    )`;
+    // A sentinel distinguishes an authorized empty or stale page from a denied read.
+    const invalidPage = cursor === null ? '0' : 'NOT EXISTS (SELECT 1 FROM boundary)';
     const { results } = await this.db.prepare(`WITH authorized AS (
       SELECT s.principal_id FROM drive_sessions s JOIN drive_active_members m ON m.id = s.principal_id
       WHERE s.principal_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-    ), ${ranges} SELECT id, name, kind FROM children UNION ALL SELECT NULL, NULL, NULL FROM authorized
-      ORDER BY kind DESC, name, id`)
-      .bind(principalId, sessionHash, ...(cursor ? [cursor.kind, cursor.name, cursor.kind] : []))
-      .all<RootEntry | { id: null; name: null; kind: null }>();
-    if (!results.some(row => row.id === null)) return null;
+    ), ${ranges} SELECT id, name, kind, 0 AS invalid_page FROM children
+      UNION ALL SELECT NULL, NULL, NULL, ${invalidPage} FROM authorized ORDER BY kind DESC, name, id`)
+      .bind(principalId, sessionHash, ...(cursor === null ? [] : [cursor]))
+      .all<RootEntry | { id: null; name: null; kind: null; invalid_page: number }>();
+    const sentinel = results.find(row => row.id === null);
+    if (!sentinel) return null;
+    if (sentinel.invalid_page) return 'invalid-page';
     const items = results.filter((row): row is RootEntry => row.id !== null);
-    return {
-      entries: items.slice(0, 100),
-      nextCursor: items.length > 100 ? { kind: items[99].kind, name: items[99].name } : null
-    };
+    return { entries: items.slice(0, 100), nextCursor: items.length > 100 ? items[99].id : null };
   }
 
   // Decimal text preserves precision beyond JavaScript's safe integer range.
