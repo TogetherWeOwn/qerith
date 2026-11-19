@@ -10,8 +10,8 @@ import type { PageServerLoad } from './$types';
 // The generated Worker admits staging only with live DB, assets and qualified storage.
 export const csr = !building && (admitsSignInFixture(env) || env.DRIVE_ORIGIN === stagingOrigin);
 
-async function readDownloadNotice({ cookies, locals, request, url }: Parameters<PageServerLoad>[0]) {
-  if (!locals.driveSession || !isDownloadNavigation(request)) return;
+async function readDownloadNotice({ cookies, isDataRequest, locals, request, url }: Parameters<PageServerLoad>[0]) {
+  if (isDataRequest || !locals.driveSession || !isDownloadNavigation(request)) return;
   const nonce = url.searchParams.get('download');
   if (!nonce || !entryId.test(nonce)) return;
   const cookie = downloadNoticeCookie(nonce);

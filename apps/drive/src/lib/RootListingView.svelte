@@ -18,13 +18,18 @@
   let header: HTMLElement;
   let refreshVersion = 0, appliedVersion = 0;
 
+  $effect.pre(() => {
+    if (!staging || initial.status !== 'ok') return;
+    // The user may have moved focus while the data request was in flight.
+    const focused = document.activeElement;
+    void tick().then(() => restoreFocus(focused));
+  });
+
   async function refresh() {
     if (staging) {
-      const focused = document.activeElement;
       await invalidate('drive:root-listing');
       await tick();
       if (initial.status !== 'ok') throw new Error('Root listing unavailable');
-      restoreFocus(focused);
       return;
     }
     const version = ++refreshVersion;

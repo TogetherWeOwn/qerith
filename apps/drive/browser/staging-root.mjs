@@ -5,7 +5,6 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
-import { bindings } from './upload-storage.mjs';
 
 const origin = 'https://qerith-drive-staging.5150.workers.dev';
 const rpID = new URL(origin).hostname;
@@ -15,8 +14,9 @@ await using dir = await mkdtempDisposable('../.svelte-kit/staging-root-browser-'
 const config = JSON.parse(await readFile('../wrangler.build.jsonc', 'utf8'));
 const configPath = resolve(dir.path, 'wrangler.json');
 const main = resolve(dir.path, 'relay.mjs');
-await writeFile(main, `import worker from ${JSON.stringify(resolve('../.svelte-kit/cloudflare/_worker.js'))};
-import { storageFetch } from ${JSON.stringify(resolve('upload-storage.mjs'))};
+await writeFile(main, `import { withEnv } from 'cloudflare:workers';
+import worker from ${JSON.stringify(resolve('../.svelte-kit/cloudflare/_worker.js'))};
+import { bindings, storageFetch } from ${JSON.stringify(resolve('upload-storage.mjs'))};
 globalThis.fetch = storageFetch;
 export default { fetch(request, env, ctx) {
   const input = new Request(request);
@@ -26,13 +26,14 @@ export default { fetch(request, env, ctx) {
     input.headers.set('sec-fetch-dest', 'document');
     input.headers.delete('x-fixture-navigation');
   }
-  return worker.fetch(input, env, ctx);
+  const configured = { ...env, ...bindings };
+  return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
 await writeFile(configPath, JSON.stringify({ ...config, main,
   assets: { ...config.assets, directory: resolve('..', config.assets.directory) },
   d1_databases: [{ binding: 'DB', database_name: 'staging-root-test', database_id: '00000000-0000-4000-8000-000000000001' }],
 }));
-const harness = createTestHarness({ workers: [{ configPath, vars: { DRIVE_ORIGIN: origin, ...bindings } }] });
+const harness = createTestHarness({ workers: [{ configPath, vars: { DRIVE_ORIGIN: origin } }] });
 let browser;
 try {
   await harness.listen();
@@ -73,6 +74,7 @@ try {
   } });
 
   const assets = new Set();
+  let holdRefresh;
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
@@ -82,6 +84,7 @@ try {
     if (body) headers['content-length'] ??= String(body.length);
     const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
+    if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   });
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
@@ -120,6 +123,29 @@ try {
   }, await row.getAttribute('href'));
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
 
+  // Another upload pushes the last row to page two after the user tabs to it.
+  await DB.prepare(`WITH RECURSIVE pages(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM pages WHERE n < 99)
+    INSERT INTO drive_entries (id, owner_id, name, kind)
+    SELECT printf('00000000-0000-4000-8000-%012d', n), 'owner', printf('Folder %03d', n), 'folder' FROM pages`).run();
+  await page.goto(origin);
+  await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+  await upload.focus();
+  const [nextChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
+  const held = Promise.withResolvers();
+  holdRefresh = held.promise;
+  try {
+    await Promise.all([page.waitForRequest(request => new URL(request.url()).pathname === dataPath),
+      nextChooser.setFiles({ ...file, name: 'A.bin' })]);
+    await page.keyboard.press('Tab');
+    assert.equal(await row.evaluate(el => document.activeElement === el), true);
+  } finally {
+    held.resolve();
+    holdRefresh = undefined;
+  }
+  await row.waitFor({ state: 'detached' });
+  await page.getByRole('link', { name: 'A.bin', exact: true }).waitFor();
+  assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
   const data = new URL(refresh.url());
@@ -146,7 +172,7 @@ try {
   for (const path of protectedPaths) await deny(path, 401, { cookie });
 
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
-    mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations,
+    mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
     refresh: { method: 'GET', path: dataPath, status: 200 }, fullDownload: { bytes: file.buffer.length, byteIdentical: true },
     rangeDownload: { status: partial[0], contentRange: partial[1], byteIdentical: true }, denied: {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,
