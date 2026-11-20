@@ -11,6 +11,7 @@ import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from 
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, readGrantPath, readGrantWorker } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
+import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -111,8 +112,10 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
 import app from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
+${preview ? uploadResumeWorker : ''}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
+  ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
@@ -319,6 +322,8 @@ export default { fetch(request, env, ctx) {
           assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [404, 'private, no-store', '']);
         }
       }
+      const resume = await get(uploadResumePath('00000000-0000-4000-8000-000000000001'), memberHeaders);
+      assert.deepEqual([resume.status, resume.headers.get('cache-control'), await resume.text()], [404, 'private, no-store', '']);
       await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart');
       const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
       assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
@@ -416,6 +421,7 @@ export default { fetch(request, env, ctx) {
       await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       await exerciseReadGrants({ worker, DB, origin, session });
+      await exerciseUploadResume({ worker, DB, origin, session });
       await exerciseListingPages(DB, worker, origin, cookie);
       const root = await createFolder('Created at root', null);
       assert.deepEqual([root.status, root.headers.get('cache-control')], [201, 'private, no-store']);
