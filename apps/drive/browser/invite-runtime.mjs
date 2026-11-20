@@ -93,8 +93,14 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       }
     };
     let document;
+    const recipientNodes = new Set();
+    const recordNode = response => {
+      const { pathname } = new URL(response.url());
+      if (response.ok() && pathname.startsWith('/_app/immutable/nodes/')) recipientNodes.add(pathname);
+    };
     if (staging) {
       await page.goto(linkSource);
+      page.on('response', recordNode);
       [document] = await Promise.all([page.waitForResponse(`${origin}/invite`), page.getByRole('link', { name: 'Open invitation' }).click()]);
     } else document = await page.goto(`${origin}/invite#${first.token}`);
     if (staging) assert.ok(followedLink, 'followed the cross-site invitation link');
@@ -105,6 +111,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     const field = page.getByRole('textbox', { name: 'Your name' });
     await field.waitFor();
     assert.equal(await field.inputValue(), 'Rook');
+    page.off('response', recordNode);
     assert.equal(page.url(), `${origin}/invite`);
     await field.fill('Unsaved name');
     await page.evaluate(token => { location.hash = token; }, token);
@@ -250,6 +257,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       await captureState('member-revoked');
     }
     console.log(`${staging ? 'Staging-mode' : 'Generated'} Worker + Chromium + D1: invite enrollment, replay denial, member sign-in, private My Drive and revocation passed`);
+    return [...recipientNodes];
   } finally {
     await context.close();
   }

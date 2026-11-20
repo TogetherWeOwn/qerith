@@ -5,15 +5,20 @@
 </script>
 
 <a class="skip" href="#main">Skip to content</a>
-<nav aria-label="Drive" data-sveltekit-reload>
-  <a href="/" aria-current={current === 'home' ? 'page' : undefined}>My Drive</a>
-  <a href="/people" aria-current={current === 'people' ? 'page' : undefined}>Users and invites</a>
-</nav>
+<header>
+  <nav aria-label="Drive" data-sveltekit-reload>
+    <a href="/" aria-current={current === 'home' ? 'page' : undefined}>My Drive</a>
+    <a href="/people" aria-current={current === 'people' ? 'page' : undefined}>Users and invites</a>
+  </nav>
+</header>
 
 <style>
-  nav { display: flex; flex-wrap: wrap; gap: var(--drive-space-4); padding-inline: var(--drive-space-4); color: var(--drive-color-text-primary); background: var(--drive-color-bg-canvas); font-family: var(--drive-font-ui); }
-  nav a { display: inline-flex; align-items: center; min-height: var(--drive-size-control-md); color: inherit; }
-  nav a:not([aria-current]):not(:hover) { text-decoration: none; }
+  header { background: var(--drive-color-bg-canvas); }
+  nav { display: flex; flex-wrap: wrap; align-items: center; gap: var(--drive-space-2); box-sizing: border-box; max-width: var(--drive-layout-container); min-height: var(--drive-size-header-compact); margin-inline: auto; padding-inline: var(--drive-layout-gutter-wide); font-family: var(--drive-font-ui); }
+  nav a { display: inline-flex; align-items: center; min-height: var(--drive-size-control-sm); padding-inline: var(--drive-space-3); border-radius: var(--drive-radius-pill); font-size: var(--drive-font-size-ui); font-weight: var(--drive-font-weight-medium); color: var(--drive-color-text-secondary); text-decoration: none; }
+  nav a[aria-current] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
+  nav a[aria-current], nav a:hover { text-decoration: underline; }
+  @media (max-width: 820px) { nav { padding-inline: var(--drive-layout-gutter-compact); } }
   .skip { position: absolute; inset-block-start: var(--drive-space-3); inset-inline-start: var(--drive-space-3); display: inline-flex; align-items: center; min-height: var(--drive-size-control-sm); padding-inline: var(--drive-space-3); border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font-family: var(--drive-font-ui); }
   .skip:not(:focus) { clip-path: inset(50%); }
   a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }

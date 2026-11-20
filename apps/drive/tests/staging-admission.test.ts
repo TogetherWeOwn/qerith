@@ -52,6 +52,12 @@ test('people document and its exclusive assets require the invite flag and live 
     denied(await check(path, 'POST'), 404);
     denied(await check(path, 'GET', enabled(), { cookie, 'sec-fetch-site': 'same-site' }), 404);
   }
+  const nav = { cookie, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  const expired = { ...runtime('owner', 0).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  const redirect = await check('/people', 'GET', expired, nav);
+  denied(redirect, 303);
+  assert.equal(redirect.headers.get('location'), '/sign-in?next=%2Fpeople');
+  denied(await check(people, 'GET', expired, nav), 401);
   for (const path of ['/people/__data.json', '/%70eople', `${people}.map`]) denied(await check(path, 'GET'), 404);
 });
 

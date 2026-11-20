@@ -139,7 +139,7 @@
           {copyState === 'copied' ? 'Copied' : 'Copy link'}
         </button>
       </div>
-      {#if copyState === 'refused'}<p role="alert">Press Ctrl+C or ⌘C to copy.</p>{/if}
+      {#if copyState === 'refused'}<p role="alert">Press Ctrl+C or ⌘C to copy, or press and hold the link and choose Copy.</p>{/if}
       <p id={`${id}-expiry`}>Send it to {#if name.trim()}<bdi>{name.trim()}</bdi>{:else}them{/if} yourself. It works once and expires on {expires}. You won't see this link again.</p>
     {:else if phase !== 'uncertain'}
       <form id={`${id}-form`} autocomplete="off" onsubmit={issue}>

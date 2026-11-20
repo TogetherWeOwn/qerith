@@ -106,7 +106,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       // An otherwise valid member cookie must not prevent the owner from signing in.
       return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
     }
-    if (navigation && target.kind === 'root') return signInRedirect();
+    if (navigation && (target.kind === 'root' || (target.kind === 'people' && request.method === 'GET'))) return signInRedirect();
     if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
     return deny(401);
   } catch {
