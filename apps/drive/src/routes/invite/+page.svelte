@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { observeInviteLinks } from '../../lib/invite-link';
   import InviteAcceptance, { type InviteAcceptanceView, type InvitePasskeyPhase } from '../../lib/InviteAcceptance.svelte';
-  import SignInPage from '../../lib/SignInPage.svelte';
 
   let view = $state<InviteAcceptanceView>();
   let phase = $state<InvitePasskeyPhase>('valid');
@@ -103,12 +102,4 @@
   }
 </script>
 
-{#if view}
-  <InviteAcceptance {view} {phase} onSetup={setup} cancellable={!committing} onCancel={() => { if (!committing) attempt?.abort(); }} />
-{:else}
-  <SignInPage title="Accept invite">
-    <h1>Accept invite</h1>
-    <p role="status">Checking the invite…</p>
-    <noscript>Turn on JavaScript to set up a passkey.</noscript>
-  </SignInPage>
-{/if}
+<InviteAcceptance {view} {phase} onSetup={setup} cancellable={!committing} onCancel={() => { if (!committing) attempt?.abort(); }} />

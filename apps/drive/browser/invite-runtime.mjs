@@ -71,17 +71,37 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     const replay = await worker.fetch(`${origin}/api/invite/enroll`, { method: 'POST',
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
-    await open();
+    const releasePresent = Promise.withResolvers();
+    await page.route('**/api/invite/present', async route => { await releasePresent.promise; await relay(route); }, { times: 1 });
+    const presented = page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present');
+    const status = page.getByRole('status');
+    let loading;
+    try {
+      await open();
+      loading = await status.filter({ hasText: 'Checking the invite…' }).elementHandle();
+    } finally { releasePresent.resolve(); }
+    assert.equal((await presented).status(), 404);
     await dead.waitFor();
+    await status.filter({ hasText: "This link doesn't work any more" }).waitFor();
+    assert.equal(await loading.evaluate(el => el === document.querySelector('[role="status"]')), true);
+    assert.equal(await status.count(), 1);
+    assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
+    await loading.dispose();
     await page.route('**/api/invite/present', route => route.fulfill({ status: 503 }), { times: 1 });
     await page.evaluate(token => { location.hash = token; }, first.token);
     await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
+    await status.filter({ hasText: 'Drive unavailable' }).waitFor();
     const signIn = () => page.getByRole('button', { name: 'Sign in with a passkey' }).click();
     await page.getByRole('link', { name: 'Sign in', exact: true }).click();
     await signIn();
     await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
     await open();
-    await page.getByRole('heading', { name: "You're signed in" }).waitFor();
+    await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
+    await status.filter({ hasText: "You're signed in" }).waitFor();
+    for (const [width, height] of widths) {
+      await page.setViewportSize({ width, height });
+      await capture(page, 'signed-in', width, true, 'generated-invite');
+    }
     const id = await DB.prepare("SELECT id FROM drive_principals WHERE role = 'member'").first('id');
     const members = new Membership(DB);
     assert.equal(await members.setStatus(ownerToken, id, (await members.get(ownerToken, id)).generation, 'revoked'), true);
