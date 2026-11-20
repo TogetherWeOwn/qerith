@@ -48,6 +48,20 @@ writes. Record leftover rows as cleanup defects, not admission gates. Reported
 R2 expiry covers only `drive-qualification/` (three days); the seven-day
 multipart-abort rule remains. Neither proves that qualification cleanup ran.
 
+The manual staging storage proof does not deploy a Worker. Before dispatch,
+review provider evidence that the staging signer is scoped to the Drive
+namespace, no other writer can overwrite acknowledged parts or generations,
+and native lifecycle rules cover `drive-qualification/storage-proof/` if the
+runner is lost. Supply only the two SHA-256 digests from that review at
+manual dispatch: the reviewed scope evidence digest and the identity digest
+of `JSON.stringify([storageConfigId, region, accessKeyId])`, computed within
+trusted custody. `storageConfigId` is the JSON array string of normalized
+endpoint origin, bucket and storage epoch. Never pass the raw identity inputs
+as dispatch inputs. Missing digests or an identity mismatch stop the probe
+before any S3 request. The receipt correlates the run to the independent
+review; the probe cannot itself establish exclusive writer scope. Only a
+passing exact-run artifact with verified cleanup can qualify storage.
+
 The dry run and fake tests do not prove live readiness. Before the first
 main dispatch, require exact-head Actions, independent Security then QA review,
 and verify that `staging` is restricted to `main`. Place only the authorized
