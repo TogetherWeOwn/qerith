@@ -72,7 +72,7 @@ try {
   assert.equal(redirect.status, 303);
   assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F');
 
-  browser = await chromium.launch();
+  browser = await chromium.launch({ ignoreDefaultArgs: ['--disable-back-forward-cache'] });
   const context = await browser.newContext();
   const page = await context.newPage();
   // Keep interception armed across documents and chooser events, as in the sign-in fixture.
@@ -129,6 +129,7 @@ try {
 
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
   await page.keyboard.press('Tab');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);

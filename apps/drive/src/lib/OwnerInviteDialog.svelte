@@ -17,21 +17,24 @@
   let url = $state(''), expires = $state('');
   let copyState = $state<'idle' | 'copying' | 'copied' | 'refused'>('idle');
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let generation = 0, beganOnBackdrop = false;
+  let generation = 0, beganOnBackdrop = false, unconfirmed = false;
   const current = (attempt: number) => attempt === generation && dialog.open;
+  const unconfirmedMessage = "The invite may have been made, but no link was received. Close this dialog without making another link.";
 
   function reset() {
     ++generation;
     clearTimeout(timer);
     name = note = error = url = expires = '';
     invalid = null;
-    phase = 'editing';
+    phase = unconfirmed ? 'uncertain' : 'editing';
+    if (unconfirmed) error = unconfirmedMessage;
     copyState = 'idle';
     beganOnBackdrop = false;
   }
 
   function dismiss(force = false) {
     if (!dialog.open || (!force && phase === 'saving')) return;
+    if (phase === 'saving') unconfirmed = true;
     // Clear the live field as well as state before a page can enter the back/forward cache.
     if (linkField) linkField.value = '';
     dialog.close();
@@ -83,8 +86,9 @@
       phase = 'issued';
     } catch {
       if (!current(attempt)) return;
+      unconfirmed = true;
       phase = 'uncertain';
-      error = "The invite may have been made, but no link was received. Close this dialog without making another link.";
+      error = unconfirmedMessage;
     }
     await tick();
     if (current(attempt)) (phase === 'issued' ? copyButton : lastButton)?.focus();
@@ -110,8 +114,8 @@
   onDestroy(reset);
 </script>
 
-<svelte:window onpagehide={() => dismiss(true)} />
-<button class="primary" type="button" bind:this={opener} onclick={() => { dialog.showModal(); nameField?.focus(); }}>
+<svelte:window onpagehide={() => dismiss(true)} onpopstate={() => dismiss(true)} />
+<button class="primary" type="button" bind:this={opener} onclick={() => { dialog.showModal(); (unconfirmed ? lastButton : nameField)?.focus(); }}>
   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2m4-13v6m-3-3h6"/></svg>Invite someone
 </button>
 <dialog bind:this={dialog} aria-labelledby={`${id}-title`} onkeydown={handleKeydown} closedby={phase === 'saving' ? 'none' : 'closerequest'}

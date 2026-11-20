@@ -50,7 +50,11 @@ function generatedAssets(builder) {
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/invite/+page.svelte'));
-  return { signIn, root, invite: [...assets] };
+  const invite = [...assets];
+  assets.clear();
+  visited.clear();
+  include(leaf('/src/routes/people/+page.svelte'));
+  return { signIn, root, invite, people: [...assets] };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -85,7 +89,8 @@ const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...genera
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),
-  invite: new Set(generated.invite)
+  invite: new Set(generated.invite),
+  people: new Set(generated.people)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;

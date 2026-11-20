@@ -152,6 +152,12 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       await page.mouse.click(2, 2);
       await focus(open);
       assert.equal(await dialog.isVisible(), false);
+      await page.keyboard.press('Enter');
+      await focus(done);
+      assert.equal(await make.count(), 0);
+      assert.equal(await issueCount(), 3);
+      await page.keyboard.press('Escape');
+      await focus(open);
       assert.deepEqual(unexpected, []);
       await writeFile(resolve(output, `keyboard-owner-invite-${size}.json`), JSON.stringify({
         initialFocus: 'Name', wrapsBothWays: true, escapeRestoresFocus: true, repeatedEscapePreservesResult: true,

@@ -9,7 +9,8 @@ const signIn = '/_app/immutable/nodes/sign-in.js';
 const root = '/_app/immutable/nodes/root.js';
 const data = '/__data.json?x-sveltekit-invalidated=01';
 const invite = '/_app/immutable/nodes/invite.js';
-const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]), invite: new Set([shared, invite]) };
+const people = '/_app/immutable/nodes/people.js';
+const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]), invite: new Set([shared, invite]), people: new Set([shared, people]) };
 const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
   new Request(stagingOrigin + path, { method, headers: headers ?? { origin: stagingOrigin, cookie } });
@@ -33,6 +34,26 @@ function denied(result: unknown, status: number): asserts result is Response {
   assert.equal(result.headers.get('cache-control'), 'private, no-store');
   assert.equal(result.body, null);
 }
+
+test('people document and its exclusive assets require the invite flag and live owner session', async () => {
+  const enabled = (role?: 'owner' | 'member' | 'revoked') => ({ ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' });
+  const check = (path: string, method: string, env = enabled(), headers?: HeadersInit) =>
+    admitStagingRequest(request(path, method, headers), env, true, assets);
+  for (const [path, kind] of [['/people', 'people'], [people, 'people-asset']]) {
+    for (const method of ['GET', 'HEAD']) {
+      assert.equal((await check(path, method) as { kind: string }).kind, kind);
+      denied(await admitStagingRequest(request(path, method), runtime().env, true, assets), 404);
+      denied(await check(path, method, enabled(), {}), 401);
+      denied(await check(path, method, enabled('member')), 404);
+      denied(await check(path, method, enabled('revoked')), 401);
+    }
+    denied(await check(path + '?', 'GET'), 404);
+    denied(await check(path + '/', 'GET'), 404);
+    denied(await check(path, 'POST'), 404);
+    denied(await check(path, 'GET', enabled(), { cookie, 'sec-fetch-site': 'same-site' }), 404);
+  }
+  for (const path of ['/people/__data.json', '/%70eople', `${people}.map`]) denied(await check(path, 'GET'), 404);
+});
 
 const publicRoutes = [
   ['/sign-in?next=%2F', ['GET', 'HEAD'], { kind: 'sign-in' }],

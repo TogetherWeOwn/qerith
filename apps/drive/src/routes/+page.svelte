@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import DriveNav from '../lib/DriveNav.svelte';
   import RootListingView from '../lib/RootListingView.svelte';
   import type { PageData } from './$types';
 
@@ -12,7 +13,8 @@
   <title>{data.listing ? 'My Drive' : 'Drive'}</title>
 </svelte:head>
 
-<main id="main">
+{#if data.ownerInvites}<DriveNav current="home" />{/if}
+<main id="main" tabindex="-1">
   {#if downloadNotice}
     <div role="alert">
       <p>{`${downloadNotice.name ?? 'The file'} didn’t download.${data.staging ? '' : ' Try again.'}`}</p>
