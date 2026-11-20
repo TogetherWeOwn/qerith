@@ -1,4 +1,4 @@
-import { assertQualificationJob } from './staging-qualification.mjs';
+import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
 import {
   probeQualificationWorker, runQualificationPhase, uploadQualificationWorker, withQualificationRecovery, withQualificationWorker,
@@ -19,7 +19,7 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
   if ([assertFullV0, recordRecovery, inventory, exercise, cleanup].some(fn => typeof fn !== 'function')) {
     throw new Error('Qualification lifecycle requires full-v0 checks, recovery, inventory and cleanup.');
   }
-  const context = { ...identity, prefix: `drive-qualification/full-v0/${identity.runId}/${identity.attempt}/` };
+  const context = { ...identity, prefix: qualificationPrefix(identity) };
   const requireProof = async (task, input, parentSignal, timeout, message) => {
     if (await runQualificationPhase(task, input, parentSignal, timeout) !== true) throw new Error(message);
   };

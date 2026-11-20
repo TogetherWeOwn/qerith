@@ -13,9 +13,15 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
     if (response.status !== 200) throw new Error(`S3 request failed with status ${response.status}`);
     return response.body;
   }
+  function verifyListingScope(root: ReturnType<typeof parseListingXml>, bucketField: string, prefix?: string) {
+    if (!prefix || listingText(root, bucketField) !== bucket ||
+        decodeURIComponent(listingText(root, 'Prefix')!.replace(/\+/g, '%20')) !== prefix ||
+        listingText(root, 'Delimiter', false) || listingChildren(root, 'CommonPrefixes').length !== 0) throw new Error();
+  }
+
   return {
-    async objects(options: { prefix?: string; continuationToken?: string; signal?: AbortSignal } = {}) {
-      const { prefix, continuationToken, signal } = options;
+    async objects(options: { prefix?: string; continuationToken?: string; verifyScope?: boolean; signal?: AbortSignal } = {}) {
+      const { prefix, continuationToken, verifyScope, signal } = options;
       if (continuationToken === '') throw new Error('Invalid S3 listing cursor');
       const query: Record<string, string> = { 'list-type': '2', 'encoding-type': 'url' };
       if (prefix !== undefined) query.prefix = prefix;
@@ -30,6 +36,11 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         if (truncated === 'true' ? !next || next === continuationToken : next !== undefined) throw new Error();
         const keys = listingChildren(root, 'Contents').map((item) => decodeURIComponent(listingText(item, 'Key')!.replace(/\+/g, '%20')));
         if (keys.some((key) => !key)) throw new Error();
+        if (verifyScope) {
+          verifyListingScope(root, 'Name', prefix);
+          if (listingText(root, 'KeyCount') !== String(keys.length) || listingText(root, 'StartAfter', false) ||
+              (listingText(root, 'ContinuationToken', false) ?? '') !== (continuationToken ?? '')) throw new Error();
+        }
         return { keys, nextContinuationToken: next };
       } catch { throw new Error('Invalid S3 listing response'); }
     },
@@ -73,8 +84,8 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         return { parts, nextPartNumberMarker: truncated === 'true' ? next : undefined };
       } catch { throw new Error('Invalid S3 listing response'); }
     },
-    async uploads(options: { prefix?: string; keyMarker?: string; uploadIdMarker?: string; signal?: AbortSignal } = {}) {
-      const { prefix, keyMarker, uploadIdMarker, signal } = options;
+    async uploads(options: { prefix?: string; keyMarker?: string; uploadIdMarker?: string; verifyScope?: boolean; signal?: AbortSignal } = {}) {
+      const { prefix, keyMarker, uploadIdMarker, verifyScope, signal } = options;
       if ((uploadIdMarker !== undefined && keyMarker === undefined) || keyMarker === '' || uploadIdMarker === '') throw new Error('Invalid S3 listing cursor');
       const query: Record<string, string> = { uploads: '', 'encoding-type': 'url' };
       if (prefix !== undefined) query.prefix = prefix;
@@ -90,6 +101,12 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         const nextKeyMarker = rawKey === undefined ? undefined : decodeURIComponent(rawKey.replace(/\+/g, '%20'));
         const nextUploadIdMarker = listingText(root, 'NextUploadIdMarker', false);
         if (truncated === 'true' && (!nextKeyMarker || !nextUploadIdMarker || (nextKeyMarker === keyMarker && nextUploadIdMarker === uploadIdMarker))) throw new Error();
+        if (verifyScope) {
+          verifyListingScope(root, 'Bucket', prefix);
+          const echoedKey = decodeURIComponent((listingText(root, 'KeyMarker', false) ?? '').replace(/\+/g, '%20'));
+          if (echoedKey !== (keyMarker ?? '') || (listingText(root, 'UploadIdMarker', false) ?? '') !== (uploadIdMarker ?? '') ||
+              (truncated === 'false' && (nextKeyMarker || nextUploadIdMarker))) throw new Error();
+        }
         const uploads = listingChildren(root, 'Upload').map((item) => {
           const key = decodeURIComponent(listingText(item, 'Key')!.replace(/\+/g, '%20'));
           const uploadId = listingText(item, 'UploadId')!;
