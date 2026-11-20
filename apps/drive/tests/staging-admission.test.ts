@@ -47,8 +47,7 @@ test('people document and its exclusive assets require the invite flag and live 
       denied(await check(path, method, enabled('member')), 404);
       denied(await check(path, method, enabled('revoked')), 401);
     }
-    denied(await check(path + '?', 'GET'), 404);
-    denied(await check(path + '/', 'GET'), 404);
+    for (const invalid of [path + '?', path + '/']) denied(await check(invalid, 'GET'), 404);
     denied(await check(path, 'POST'), 404);
     denied(await check(path, 'GET', enabled(), { cookie, 'sec-fetch-site': 'same-site' }), 404);
   }

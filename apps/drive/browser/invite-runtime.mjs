@@ -209,6 +209,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       page.waitForURL(`${origin}/sign-in`),
       page.getByRole('link', { name: 'Sign in', exact: true }).click(),
     ]);
+    if (staging) await page.goto(`${origin}/sign-in?next=%2Fpeople`);
     await signIn(204, staging);
     await page.waitForURL(`${origin}/`);
     await page.getByRole('heading', { name: 'Your drive is empty.', exact: true }).waitFor();

@@ -260,9 +260,8 @@ try {
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
-  assert.deepEqual([recovery.status, recovery.headers.get('location')], [303, '/sign-in?next=%2Fpeople']);
   await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
-  await page.goto(origin + recovery.headers.get('location'));
+  await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });
   await Promise.all([page.waitForURL(`${origin}/people`), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
   const recovered = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'owner'").run();

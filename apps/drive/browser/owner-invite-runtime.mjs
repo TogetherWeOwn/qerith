@@ -88,11 +88,9 @@ export async function proveOwnerIssue(browser, { origin, relay, worker, defaultW
     assert.equal(created.status(), 201);
     assert.deepEqual(created.request().postDataJSON(), metadata);
     issued = await created.json();
-    const { id, token } = issued;
     const field = page.getByRole('textbox', { name: `Invite link for ${metadata.displayName}` });
-    await field.waitFor();
     const link = await field.inputValue();
-    assert.ok(link === `${origin}/invite#${token}`, 'field holds the exact fragment link');
+    assert.ok(link === `${origin}/invite#${issued.token}`, 'field holds the exact fragment link');
     // Redact before any evidence capture. Copy still reads the dialog's in-memory URL.
     await field.evaluate(el => { el.value = `${location.origin}/invite#REDACTED`; el.removeAttribute('value'); });
     const copy = dialog.getByRole('button', { name: 'Copy link' });
@@ -108,7 +106,7 @@ export async function proveOwnerIssue(browser, { origin, relay, worker, defaultW
     assert.ok(await page.evaluate(async expected => await navigator.clipboard.readText() === expected, link), 'clipboard matches the link');
     await page.evaluate(() => navigator.clipboard.writeText(''));
     assert.equal(await page.evaluate(needle => [location.href, JSON.stringify(history.state), document.cookie,
-      JSON.stringify(localStorage), JSON.stringify(sessionStorage)].some(value => value.includes(needle)), token), false);
+      JSON.stringify(localStorage), JSON.stringify(sessionStorage)].some(value => value.includes(needle)), issued.token), false);
     await tree('copied', dialog, /status: Link copied/);
     await captureState('copied');
     await field.evaluate((el, value) => { el.value = value; }, link);
@@ -116,21 +114,18 @@ export async function proveOwnerIssue(browser, { origin, relay, worker, defaultW
       const cleared = !el.value && !document.querySelector('dialog[open]');
       sessionStorage.setItem('owner-invite-cleaned-before-freeze', String(cleared));
     }, { once: true }));
-    await page.goBack();
-    assert.equal(page.url(), `${origin}/`);
-    await page.goForward();
-    await page.waitForURL(people);
+    await Promise.all([page.waitForURL(`${origin}/`), page.goBack()]);
+    await Promise.all([page.waitForURL(people), page.goForward()]);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('owner-invite-cleaned-before-freeze')), 'true');
     assert.equal(await page.locator('dialog[open], dialog input[readonly]').count(), 0);
-    assert.equal(await page.evaluate(needle => document.documentElement.outerHTML.includes(needle), token), false);
+    assert.equal(await page.evaluate(needle => document.documentElement.outerHTML.includes(needle), issued.token), false);
     assert.equal(posts, 1);
     const restored = await page.evaluate(() => window.restoredOwnerPage === true);
     await page.evaluate(() => history.pushState(history.state, '', '#back-check'));
     await open.click();
     await Promise.all([page.waitForRequest(endpoint), dialog.getByRole('button', { name: 'Make invite link' }).click()]);
     assert.equal(await dialog.getByRole('status').textContent(), 'Making invite link…');
-    await page.goBack();
-    assert.equal(page.url(), people);
+    await Promise.all([page.waitForURL(people), page.goBack()]);
     await dialog.waitFor({ state: 'hidden' });
     await Promise.all([page.waitForResponse(endpoint), lateResponse.resolve()]);
     await open.click();
@@ -140,7 +135,7 @@ export async function proveOwnerIssue(browser, { origin, relay, worker, defaultW
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-owner-invite-round-trip.json'), JSON.stringify({
       copyMatchesFragment: true, browserBackForwardClearsLink: true, restoredFromBFCache: restored, sameDocumentBackWhileSaving: true, workerPosts: 1,
     }, null, 2));
-    return { id, token, ownerNodes: exclusive };
+    return { id: issued.id, token: issued.token, ownerNodes: exclusive };
   } finally {
     lateResponse.resolve();
     await context.close();
