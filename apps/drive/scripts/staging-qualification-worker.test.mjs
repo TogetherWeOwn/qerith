@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
-import { probeQualificationWorker, uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
+import { inspectQualificationWorker, probeQualificationWorker, uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -114,6 +114,7 @@ function fixture(t, upload = false) {
   const git = (...args) => execFileSync('git', ['-c', 'user.name=Drive', '-c', 'user.email=drive@example.test',
     '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' }).trim();
   git('init', '-q', '--initial-branch=main', '--template=');
+  git('add', 'apps/drive/wrangler.staging.json');
   if (upload) {
     mkdirSync(join(app, 'scripts'));
     const receipt = { ...evidence, passed: true, failures: [], cleanup: 'verified', scope: { policySha256: 'b'.repeat(64),
@@ -189,6 +190,78 @@ function fixture(t, upload = false) {
   return { calls, state, options, controller, identity, cwd, app, env,
     run: (override, fetcher = request) => withQualificationWorker(options, { ...env, ...override }, cwd, controller.signal, fetcher) };
 }
+
+function inventoryFixture(t) {
+  const { app, controller, cwd, env } = fixture(t);
+  const config = JSON.parse(readFileSync(join(app, 'wrangler.staging.json'), 'utf8'));
+  writeFileSync(join(app, 'wrangler.staging.json'), 'not the tested configuration');
+  const bindings = [{ name: 'DB', type: 'd1', id: config.d1_databases[0].database_id },
+    { name: 'ASSETS', type: 'assets' }, { name: 'SECRET', type: 'secret_text' }];
+  const replies = {
+    deployments: { deployments: [deployment(prior, baseline)] },
+    [`versions/${baseline}`]: { id: baseline, resources: { bindings } },
+    schedules: { schedules: [] },
+  };
+  const calls = [];
+  const state = {};
+  const inspect = (override = {}) => inspectQualificationWorker({ ...env, ...override }, cwd, controller.signal,
+    async (url, { method, body, redirect, headers, signal }) => {
+      assert.equal(method, 'GET');
+      assert.equal(body, undefined);
+      assert.equal(redirect, 'error');
+      assert.equal(headers.authorization, 'Bearer fake-token');
+      assert.equal(signal.aborted, false);
+      const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${config.name}/`;
+      assert.ok(url.startsWith(prefix));
+      const path = url.slice(prefix.length);
+      calls.push(path);
+      assert.ok(Object.hasOwn(replies, path));
+      if (calls.length === 4 && state.changed) return json({ deployments: [deployment(active, baseline)] });
+      if (calls.length === 4 && state.cancelled) controller.abort();
+      return replies[path] instanceof Response ? replies[path] : json(replies[path]);
+    });
+  return { bindings, calls, inspect, replies, state };
+}
+
+test('Worker inventory reads the tested configuration and only the pinned Worker without mutation', async t => {
+  const { calls, inspect } = inventoryFixture(t);
+  for (const override of [{ TESTED_SHA: sha }, { GITHUB_JOB: 'preview' }, { CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32) }]) {
+    await assert.rejects(inspect(override), /Cannot verify staging Worker cron and resource bindings/);
+    assert.deepEqual(calls, []);
+  }
+  assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'] });
+  assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules', 'deployments']);
+});
+
+test('Worker inventory rejects cron, unknown bindings, candidates, deployment drift and cancellation', async t => {
+  const { bindings, calls, inspect, replies, state } = inventoryFixture(t);
+  const error = { message: 'Cannot verify staging Worker cron and resource bindings.' };
+  for (const schedules of [{}, { schedules: null }, { schedules: [{ cron: '* * * * *' }] },
+    new Response('private diagnostic fake-token', { status: 403 })]) {
+    replies.schedules = schedules;
+    calls.length = 0;
+    await assert.rejects(inspect(), error);
+    assert.equal(calls.at(-1), 'schedules');
+  }
+  replies.schedules = { schedules: [] };
+  const versionPath = `versions/${baseline}`;
+  for (const binding of [{ name: 'EXTRA', type: 'durable_object_namespace' }, { name: 'EXTRA', type: 'container' },
+    { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text' }, { name: 'DRIVE_QUALIFICATION_VERSION', type: 'plain_text' },
+    { name: 'DB', type: 'd1', id: foreign }]) {
+    replies[versionPath].resources.bindings = binding.name === 'DB' ? [binding, ...bindings.slice(1)] : [...bindings, binding];
+    calls.length = 0;
+    await assert.rejects(inspect(), error);
+    assert.deepEqual(calls, ['deployments', versionPath]);
+  }
+  replies[versionPath].resources.bindings = bindings;
+  for (const key of ['changed', 'cancelled']) {
+    state.changed = false;
+    state[key] = true;
+    calls.length = 0;
+    await assert.rejects(inspect(), error);
+    assert.equal(calls.length, 4);
+  }
+});
 
 function uploadFixture({ cwd, app, env }) {
   const state = { current: deployment(prior, baseline), tag: `${env.GITHUB_SHA}-18-2` };

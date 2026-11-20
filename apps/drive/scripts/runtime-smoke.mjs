@@ -7,6 +7,7 @@ import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
+import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from '../tests/entry-change-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, readGrantPath, readGrantWorker } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
@@ -110,12 +111,14 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
 import app from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
+${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
   ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
+  ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
   if (request.headers.has('x-test-qualification')) {
@@ -340,6 +343,7 @@ export default { fetch(request, env, ctx) {
       const range = await get(file, { cookie, range: 'bytes=1-2' });
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
+      await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
@@ -412,6 +416,7 @@ export default { fetch(request, env, ctx) {
       assert.equal(nested.status, 201);
       const body = await nested.json();
       assert.deepEqual(body, { id: body.id, parentId: id, name: 'Created inside', kind: 'folder' });
+      await exerciseEntryChange({ worker, DB, origin, session });
       return;
     }
     const closedFolder = await createFolder('Fixture disabled', null);

@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
-import { stagingStorage, validateStagingTarget } from './staging-publish.mjs';
+import { stagingStorage, validateStagingConfig, validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
 import { uploadVersion } from './staging-qualification-upload.mjs';
 
@@ -76,6 +76,10 @@ function workerApi(account, name, token, request) {
   const version = (id, signal) => call(`${script}/versions/${id}`, signal);
   return {
     version,
+    async assertNoSchedules(signal) {
+      const { schedules } = await call(`${script}/schedules`, signal);
+      if (!Array.isArray(schedules) || schedules.length !== 0) throw new Error('Cannot verify empty staging Worker schedules.');
+    },
     async recentUploads(signal) {
       // Same unfiltered, newest-first list used by Wrangler's secret list --latest-version.
       const { items } = await call(`${script}/versions`, signal);
@@ -135,6 +139,36 @@ function checkedBindings(version, config, vars) {
     throw invalid();
   }
   return bindings;
+}
+
+// Only Worker cron/binding evidence, not a whole-estate inventory or an atomic fence.
+export async function inspectQualificationWorker(env, cwd, signal, request = fetch) {
+  try {
+    const { sha } = assertQualificationJob(env, cwd);
+    const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
+    if (typeof token !== 'string' || !token.trim()) throw new Error();
+    const config = JSON.parse(execFileSync('git', ['show', `${sha}:apps/drive/wrangler.staging.json`],
+      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 65_536, timeout: 5_000 }));
+    validateStagingConfig(config, account);
+    const api = workerApi(account, config.name, token, request);
+    const timeout = 15_000;
+    const deadline = performance.now() + timeout;
+    const timer = AbortSignal.timeout(timeout);
+    const bounded = signal ? AbortSignal.any([signal, timer]) : timer;
+    const before = await api.current(bounded);
+    const deployed = await api.version(before.version, bounded);
+    const bindings = checkedBindings(deployed, config, {});
+    if (deployed.id !== before.version || bindings.has('DRIVE_QUALIFICATION_SHA') || bindings.has('DRIVE_QUALIFICATION_VERSION')) {
+      throw new Error();
+    }
+    await api.assertNoSchedules(bounded);
+    if (!sameDeployment(before, await api.current(bounded))) throw new Error();
+    bounded.throwIfAborted();
+    if (performance.now() >= deadline) throw new Error();
+    return { version: before.version, deployment: before.id, schedules: 0, resources: ['DB', 'ASSETS'] };
+  } catch {
+    throw new Error('Cannot verify staging Worker cron and resource bindings.');
+  }
 }
 
 // Unwired: the protected caller must hold the lifecycle lock and supply a fresh
