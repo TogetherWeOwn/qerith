@@ -130,13 +130,23 @@ remote rollback; use the recorded bookmark to recover before retrying an
 uncertain apply. The future caller must validate storage and recovery
 preconditions before invoking the adapter.
 
+The unwired Worker adapter requires a known, single-version staging baseline.
+It reads the uploaded version's SHA/attempt tag and records the prior deployment
+before changing traffic. A future live probe must independently read the SHA
+and version from the responding runtime, not from request inputs or the upload
+tag. The adapter restores the previous version after the checks, including on
+cooperative cancellation, and confirms the restored deployment by readback. It
+refuses to replace a deployment it does not own. Readback is not atomic fencing;
+the shared lock must cover all active writers. An ambiguous write without proof
+of rollback, hard cancellation, or runner loss still requires reconciliation.
+Worker rollback does not restore D1 or establish idle state.
+
 Remaining source slices, in dependency order:
 
-1. Wire the protected lifecycle: the exact deployed SHA and readiness, native
-   migration ledger and pre-apply Time Travel bookmark, rollback to the prior
-   Worker version or verified disablement, whole-estate zero-idle inventory,
-   and attempt-specific prefix-scoped cleanup with verified native expiry for
-   cancellation or runner loss. Keep artifact publication disabled.
+1. Implement the immutable Worker upload and runtime readiness probe. Wire the
+   protected lifecycle, including D1, Worker recovery, whole-estate zero-idle
+   inventory and attempt-specific prefix cleanup with verified native expiry
+   or stop for cancellation or runner loss. Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and

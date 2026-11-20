@@ -128,6 +128,6 @@ test('the staged workflow has no producer or provider path', () => {
   assert.match(workflow, /ref: \$\{\{ github.sha \}\}\n +fetch-depth: 0\n +persist-credentials: false/);
   assert.match(workflow, /TESTED_SHA: \$\{\{ inputs\.tested_sha \}\}\n +run: timeout .* node apps\/drive\/scripts\/staging-qualification\.mjs/);
   assert.equal(workflow.match(/timeout-minutes: 5/g)?.length, 2);
-  assert.doesNotMatch(workflow, /staging-qualification-migrations|upload-artifact|secrets\.|continue-on-error|always\(\)/);
+  assert.doesNotMatch(workflow, /staging-qualification-(migrations|worker)|upload-artifact|secrets\.|continue-on-error|always\(\)/);
   assert.match(workflow, /    needs: source\n[\s\S]*\n          exit 1\n$/);
 });
