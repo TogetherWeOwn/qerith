@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { uploadStorageEvidence } from '../src/lib/server/metadata/upload-storage-evidence';
 import type { S3Config } from '../src/lib/server/s3/config';
 import { createS3Listing } from '../src/lib/server/s3/listing';
@@ -161,8 +161,7 @@ export async function proveStorage(config: S3Config, epoch: string, run: Run, sc
 
 async function main() {
   const env = process.env;
-  const scopePath = new URL('../../../.github/drive-staging-s3-scope.json', import.meta.url);
-  const scope = await readFile(scopePath, 'utf8').then((value) => JSON.parse(value) as Scope, () => null);
+  const scope = { identitySha256: env.PROOF_IDENTITY_SHA256 ?? '', policySha256: env.PROOF_POLICY_SHA256 ?? '' };
   const stop = new AbortController();
   process.once('SIGTERM', () => stop.abort());
   process.once('SIGINT', () => stop.abort());

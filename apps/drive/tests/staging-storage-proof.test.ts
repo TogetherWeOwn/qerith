@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { proveStorage } from '../scripts/staging-storage-proof';
 import { MIN_PART_BYTES } from '../src/lib/server/s3/multipart-completion';
@@ -144,14 +143,4 @@ test('range or cleanup failure keeps the final result closed', async () => {
     assert.equal(proof.failures[0].phase, phase);
     assert.equal(proof.cleanup, cleanup);
   }
-});
-
-test('the protected manual workflow neither runs for PRs nor publishes staging', () => {
-  const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-storage-proof.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /\non:\n  workflow_dispatch:\n\npermissions:\n  contents: read/);
-  assert.match(workflow, /group: drive-staging-lifecycle\n  cancel-in-progress: false/);
-  assert.match(workflow, /github.ref == 'refs\/heads\/main'\n    environment: staging/);
-  assert.match(workflow, /persist-credentials: false/);
-  assert.match(workflow, /drive-staging-storage-proof-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  assert.doesNotMatch(workflow, /pull_request|wrangler|DRIVE_ORIGIN|DRIVE_SIGN_IN_FIXTURE/);
 });

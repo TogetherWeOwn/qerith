@@ -6,18 +6,22 @@ import { stagingOrigin } from '../src/lib/server/request-auth';
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
 const signIn = '/_app/immutable/nodes/sign-in.js';
-const root = '/_app/immutable/assets/root.css';
+const root = '/_app/immutable/nodes/root.js';
+const data = '/__data.json?x-sveltekit-invalidated=01';
 const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]) };
 const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
   new Request(stagingOrigin + path, { method, headers: headers ?? { origin: stagingOrigin, cookie } });
 
-function runtime(role: 'owner' | 'member' | 'revoked' | 'offline' = 'owner') {
+function runtime(role: 'owner' | 'member' | 'revoked' | 'offline' = 'owner', remaining_ms = 60_000, delayMs = 0) {
   let reads = 0;
   const DB = { prepare: () => {
     reads++;
     if (role === 'offline') throw new Error('fixture unavailable');
-    return { bind: () => ({ first: async () => role === 'revoked' ? null : { id, role } }) };
+    return { bind: () => ({ first: async () => {
+      if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs));
+      return role === 'revoked' ? null : { id, role, remaining_ms };
+    } }) };
   } };
   return { env: { DRIVE_ORIGIN: stagingOrigin, DB }, reads: () => reads, revoke: () => { role = 'revoked'; } };
 }
@@ -37,6 +41,7 @@ const publicRoutes = [
 ] as const;
 const protectedRoutes = [
   ['/?after=cursor', ['GET', 'HEAD'], { kind: 'root' }],
+  [data, ['GET'], { kind: 'root-data' }],
   [root, ['GET', 'HEAD'], { kind: 'private-asset' }],
   [`/api/download/${id}`, ['GET'], { kind: 'download' }],
   ['/api/uploads', ['POST'], { kind: 'upload' }],
@@ -50,7 +55,13 @@ test('preview admits only the declared methods and exact routes or assets', asyn
       const { env, reads } = runtime();
       const result = await admitStagingRequest(request(path, method), env, true, assets);
       if ((allowed as readonly string[]).includes(method)) {
-        assert.deepEqual(result, target, `${method} ${path}`);
+        if (target.kind === 'private-asset' || (target.kind === 'root' && method === 'HEAD')) {
+          assert.ok(!(result instanceof Response) && (result.kind === 'private-asset' || result.kind === 'root') &&
+            typeof result.deadline === 'number' && result.deadline > performance.now());
+          assert.equal(result.kind, target.kind);
+        } else {
+          assert.deepEqual(result, target, `${method} ${path}`);
+        }
         assert.equal(reads(), protectedRoutes.some(route => route[0] === path) ? 1 : 0);
       } else {
         denied(result, 404);
@@ -65,9 +76,11 @@ test('preview admits only the declared methods and exact routes or assets', asyn
 test('unlisted paths fail before authentication, including framework paths and noncanonical variants', async () => {
   const { env, reads } = runtime();
   for (const path of ['/shared', '/people', `/f/${id}`, '/invite', '/recover', '/sign-in/', '/sign-in.html',
-    '/__data.json', '/sign-in/__data.json', '/_app/env.js', '/_app/version.json', '/_app/immutable/chunks/other.js',
-    '/_app/immutable/assets/%72oot.css', '/_app/immutable/assets/root.css.map', '/api/uploads/', '/api/uploads/list',
+    '/__data.json/', '/%5f_data.json', '/index.html__data.json', '/sign-in/__data.json', '/shared/__data.json',
+    '/_app/env.js', '/_app/version.json', '/_app/immutable/chunks/other.js',
+    '/_app/immutable/nodes/%72oot.js', `${root}.map`, '/api/uploads/', '/api/uploads/list',
     '/api/sign-in/enroll', '/api/sign-in/%76erify', `/api/download/${id}/`, `/api/download/${id}%2F`,
+    '/api/owner/invitations', `/api/owner/invitations/${id}/cancel`, `/api/owner/members/${id}/revoke`,
     `/api/uploads/${id}/complete/`, `/api/uploads/${id}/abort`, `/api/uploads/${id}/parts/1/`,
     ...['0', '01', '10001', '1e1', '%31'].map(part => `/api/uploads/${id}/parts/${part}`)]) {
     for (const method of ['GET', 'HEAD', 'POST', 'PUT']) {
@@ -115,7 +128,8 @@ test('every protected request checks a live owner, including assets after revoca
   assert.equal(result.headers.get('location'), '/sign-in?next=%2F%3Fafter%3Dcursor');
 
   const { env, reads, revoke } = runtime();
-  assert.deepEqual(await admitStagingRequest(request(root), env, true, assets), { kind: 'private-asset' });
+  const admitted = await admitStagingRequest(request(root), env, true, assets);
+  assert.ok(!(admitted instanceof Response) && admitted.kind === 'private-asset');
   revoke();
   denied(await admitStagingRequest(request(root), env, true, assets), 401);
   assert.equal(reads(), 2);
@@ -126,7 +140,8 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
   const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
   const { env, reads, revoke } = runtime();
   for (const [req, status] of [
-    [request('/__data.json'), 404],
+    [request(data, 'HEAD'), 404],
+    [request(data, 'GET', {}), 401],
     [request('/sign-in.html'), 404],
     [request('/api/uploads/list', 'POST'), 404],
     [request('/api/sign-in/verify', 'GET'), 404],
@@ -138,6 +153,10 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
     denied(await dispatchStagingRequest(req, env, true, assets, dispatch), status);
   }
   denied(await dispatchStagingRequest(request('/api/sign-in/challenge', 'POST'), env, false, assets, dispatch), 503);
+  denied(await dispatchStagingRequest(request('/', 'GET', {
+    cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document'
+  }), env, true, assets, dispatch), 303);
+  denied(await dispatchStagingRequest(request('/', 'HEAD'), runtime('member').env, true, assets, dispatch), 401);
   assert.equal(reads(), 0);
 
   revoke();
@@ -147,7 +166,25 @@ test('denials and signed-out redirects do not enter any downstream handler', asy
   assert.equal(reads(), protectedRoutes.length);
 });
 
-test('admitted traffic reaches one handler; assets cannot carry CDN cache overrides', async () => {
+test('private assets are not dispatched when the session lifetime runs out during lookup', async () => {
+  const { env, reads } = runtime('owner', 1, 10);
+  const unexpected = async () => assert.fail('expired owner session reached downstream dispatch');
+  denied(await dispatchStagingRequest(request(root), env, true, assets, {
+    adapter: unexpected, asset: unexpected, ceremony: unexpected,
+  }), 401);
+  assert.equal(reads(), 1);
+});
+
+test('the staged sign-in probe reports a live owner without dispatching the root page', async () => {
+  const unexpected = async () => assert.fail('sign-in probe reached downstream dispatch');
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
+  for (const [fixture, status] of [[runtime(), 200], [runtime('member'), 401], [runtime('owner', 1, 10), 401]] as const) {
+    denied(await dispatchStagingRequest(request('/', 'HEAD'), fixture.env, true, assets, dispatch), status);
+    assert.equal(fixture.reads(), 1);
+  }
+});
+
+test('admitted traffic reaches one handler; assets and root data cannot carry CDN cache overrides', async () => {
   const { env } = runtime();
   const cacheHeaders = ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control'];
   for (const [path, [method], target] of [...publicRoutes, ...protectedRoutes]) {
@@ -159,7 +196,7 @@ test('admitted traffic reaches one handler; assets cannot carry CDN cache overri
     });
     const expected = target.kind === 'ceremony' ? `ceremony:${target.step}` : target.kind.endsWith('-asset') ? 'asset' : 'adapter';
     assert.deepEqual(calls, [expected]);
-    if (expected !== 'asset') continue;
+    if (expected !== 'asset' && target.kind !== 'root-data') continue;
     assert.equal(result.headers.get('cache-control'), 'private, no-store');
     for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
   }

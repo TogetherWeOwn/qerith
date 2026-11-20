@@ -45,6 +45,12 @@ export class Sessions {
       .bind(hash).first<{ id: string; role: 'owner' | 'member'; remaining_ms: number }>();
   }
 
+  async isLiveOwner(token: string, id: string): Promise<boolean> {
+    const started = performance.now();
+    const session = await this.lookupWithRemainingLifetime(token);
+    return session?.id === id && session.role === 'owner' && performance.now() - started < session.remaining_ms;
+  }
+
   // Trusted server maintenance only: one atomic, indexed batch per invocation.
   // Repeat while 100 rows are returned; no scheduler or endpoint is implied.
   async cleanupExpired(): Promise<number> {

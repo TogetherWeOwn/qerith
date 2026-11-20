@@ -1,5 +1,6 @@
 import { mount } from 'svelte';
 import Fixture from './Fixture.svelte';
+import InviteFixture from './InviteFixture.svelte';
 import sansUrl from '../../src/lib/fonts/QerithSans-latin.woff2?url';
 import monoUrl from '../../src/lib/fonts/FragmentMono-Regular-latin.woff2?url';
 
@@ -16,4 +17,4 @@ if (new URLSearchParams(window.location.search).has('listing')) {
   })).then(() => faces);
 }
 
-mount(Fixture, { target: document.getElementById('app') });
+mount(new URLSearchParams(window.location.search).has('invite') ? InviteFixture : Fixture, { target: document.getElementById('app') });

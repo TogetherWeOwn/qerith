@@ -2,6 +2,15 @@ name: Drive staging storage proof
 
 on:
   workflow_dispatch:
+    inputs:
+      identity_sha256:
+        type: string
+        required: true
+        description: SHA-256 of the independently reviewed staging signer identity
+      policy_sha256:
+        type: string
+        required: true
+        description: SHA-256 of the independently reviewed scope evidence
 
 permissions:
   contents: read
@@ -42,6 +51,8 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
       - name: Probe staging storage without publishing a Worker
         env:
+          PROOF_IDENTITY_SHA256: ${{ inputs.identity_sha256 }}
+          PROOF_POLICY_SHA256: ${{ inputs.policy_sha256 }}
           QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
           QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
           QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}

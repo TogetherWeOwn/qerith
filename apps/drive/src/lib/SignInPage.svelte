@@ -4,13 +4,14 @@
   import type { SignInState } from './sign-in-state';
   import qerithSans from './fonts/QerithSans-latin.woff2?url';
 
+  export let title = 'Sign in';
   export let state: SignInState = 'sign-in';
-  export let onSignIn: () => void;
-  export let onCancel: () => void;
+  export let onSignIn: (() => void) | undefined = undefined;
+  export let onCancel: (() => void) | undefined = undefined;
 </script>
 
 <svelte:head>
-  <title>Sign in · Drive</title>
+  <title>{title} · Drive</title>
   <link rel="preload" href={qerithSans} as="font" type="font/woff2" crossorigin="anonymous" />
 </svelte:head>
 
@@ -20,7 +21,9 @@
       <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M3 7a2 2 0 0 1 2-2h4.59a2 2 0 0 1 1.42.59L12.91 7.5H19a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm4 6.25v1.5h10v-1.5z"/></svg>
       <span>Drive</span>
     </header>
-    <SignInCard {state} {onSignIn} {onCancel} />
+    <slot>
+      {#if onSignIn && onCancel}<SignInCard {state} {onSignIn} {onCancel} />{/if}
+    </slot>
   </div>
 </main>
 

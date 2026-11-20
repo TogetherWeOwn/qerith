@@ -1,10 +1,12 @@
 import { downloadFile } from './download';
 import { createPublishedReadAccess } from './metadata/read-access';
+import { stagingOrigin } from './request-auth';
 import { createImmutableS3Reader, createS3Objects } from './s3/objects';
 import { storageIdentity, type StorageBindings } from './storage-runtime';
 
 export interface DownloadEnv extends StorageBindings {
   DB?: Parameters<typeof createPublishedReadAccess>[0];
+  DRIVE_ORIGIN?: string;
 }
 
 const timeoutMs = 15_000;
@@ -14,7 +16,7 @@ export function downloadStorage(env: DownloadEnv) {
   const identity = storageIdentity(env);
   if (!env.DB || !identity) return null;
   const { settings: config, epoch } = identity;
-  return { ...createPublishedReadAccess(env.DB, epoch, config), config };
+  return { ...createPublishedReadAccess(env.DB, epoch, config, env.DRIVE_ORIGIN === stagingOrigin), config };
 }
 
 // The immutable reader validates the byte count at EOF. Check that there are
@@ -66,17 +68,44 @@ export async function publishedDownload(request: Request, id: string, token: str
   const storage = downloadStorage(env);
   if (!storage) return downloadFile(request, id);
   const { config, storageConfigId, resolveGeneration } = storage;
-  let reader;
-  try {
-    reader = createImmutableS3Reader(createS3Objects(config, { fetch: transport, timeoutMs, streamBudget }));
-  } catch { return downloadFile(request, id); }
+  const ownerOnly = env.DRIVE_ORIGIN === stagingOrigin;
+  let generation: Awaited<ReturnType<typeof resolveGeneration>> = null;
   // Start before authorization and keep the same cutoff through storage and native delivery.
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(streamBudget.totalMs)]);
-  return downloadFile(new Request(request, { signal }), id, {
+  const resolveCurrent = async () => {
+    if (!ownerOnly) return resolveGeneration(token, id);
+    if (signal.aborted) return null;
+    const lookup = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    const stopped = Promise.withResolvers<null>();
+    const abort = () => stopped.resolve(null);
+    lookup.addEventListener('abort', abort, { once: true });
+    try {
+      const current = await Promise.race([resolveGeneration(token, id), stopped.promise]);
+      return lookup.aborted ? null : current;
+    } finally { lookup.removeEventListener('abort', abort); }
+  };
+  const stillAuthorized = async () => {
+    const current = await resolveCurrent();
+    return !signal.aborted && !!current && !!generation && current.evidenceRevision === generation.evidenceRevision &&
+      current.key === generation.key && current.etag === generation.etag && current.sizeBytes === generation.sizeBytes &&
+      current.name === generation.name;
+  };
+  let reader;
+  try {
+    reader = createImmutableS3Reader(createS3Objects(config, {
+      fetch: transport, timeoutMs, streamBudget, beforeSend: ownerOnly ? stillAuthorized : undefined
+    }));
+  } catch { return downloadFile(request, id); }
+  const response = await downloadFile(new Request(request, { signal }), id, {
     authorize: async () => token,
-    resolveGeneration,
+    resolveGeneration: async () => generation = await resolveCurrent(),
     readerFor: (id) => id === storageConfigId ? reader : null,
     onReadError,
     fixedLength: (body, length) => fixedLength(body, length, signal)
   });
+  if (ownerOnly && generation && response.status !== 404 && !await stillAuthorized()) {
+    void response.body?.cancel().catch(() => {});
+    return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } });
+  }
+  return response;
 }
