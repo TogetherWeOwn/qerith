@@ -22,11 +22,15 @@
     const current = attempt = new AbortController();
     state = 'waiting';
     const outcome = await signInWithPasskey(browser, current.signal);
+    const next = outcome === 'signed-in' && data.next === '/people'
+      ? await browser.fetch('/people', { method: 'HEAD', cache: 'no-store', redirect: 'error', signal: current.signal })
+        .then(response => response.status === 200 ? '/people' : '/', () => '/')
+      : data.next;
     if (attempt !== current) return;
     attempt = undefined;
     if (outcome === 'signed-in') {
       // Keep per-tab state, including any interrupted uploads. Do not clear storage.
-      window.location.replace(data.next);
+      window.location.replace(next);
       return;
     }
     state = outcome;

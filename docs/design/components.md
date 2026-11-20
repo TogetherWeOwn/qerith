@@ -383,7 +383,7 @@ Shown inline in a K15 item (and as a single K7 when one file is dropped and the 
 
 **Job:** hand over an invite or sign-in link once.
 
-**Anatomy:** a read-only A11 field in mono holding the full URL (selectable, `aria-label="Invite link for Sam"`) · ghost `sm` "Copy link" beside it (under it at 390). After copying: the button reads "Copied" with a check for 2 s (text swap), and the status region says "Link copied". If the clipboard is refused, the field text is selected and a line says "Press Ctrl+C or ⌘C to copy." Below, a 14 px `text.secondary` line: "Send it to Sam yourself. It works once and expires on 21 Nov. You won't see this link again." The link is shown only in the dialog that made it (K7 "Invite someone" or "Make a sign-in link"); lists never show it again.
+**Anatomy:** a read-only A11 field in mono holding the full URL (selectable, `aria-label="Invite link for Sam"`) · ghost `sm` "Copy link" beside it (under it at 390). After copying: the button reads "Copied" with a check for 2 s (text swap), and the status region says "Link copied". If the clipboard is refused, the field text is selected and a line says "Press Ctrl+C or ⌘C to copy, or press and hold the link and choose Copy." Below, a 14 px `text.secondary` line: "Send it to Sam yourself. It works once and expires on 21 Nov. You won't see this link again." The link is shown only in the dialog that made it (K7 "Invite someone" or "Make a sign-in link"); lists never show it again.
 
 ### K19. People table (owner)
 

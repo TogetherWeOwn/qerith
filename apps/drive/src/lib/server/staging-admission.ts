@@ -9,13 +9,14 @@ interface PreviewAssets {
   signIn: ReadonlySet<string>;
   root: ReadonlySet<string>;
   invite: ReadonlySet<string>;
+  people: ReadonlySet<string>;
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
-  { kind: 'private-asset' | 'root'; deadline?: number };
+  { kind: 'private-asset' | 'people-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -28,6 +29,7 @@ function route(method: string, path: string, assets: PreviewAssets, invite: bool
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/sign-in') return { kind: 'sign-in' };
     if (invite && path === '/invite') return { kind: 'invite' };
+    if (invite && path === '/people') return { kind: 'people' };
     if (path === '/') return { kind: 'root' };
     if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
     // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
@@ -35,6 +37,7 @@ function route(method: string, path: string, assets: PreviewAssets, invite: bool
       if (assets.signIn.has(path)) return { kind: 'public-asset' };
       if (invite && assets.invite.has(path)) return { kind: 'invite-asset' };
       if (assets.root.has(path)) return { kind: 'private-asset' };
+      if (invite && assets.people.has(path)) return { kind: 'people-asset' };
     }
   }
   const [, api, resource, id, action, part, extra] = path.split('/', 7);
@@ -74,13 +77,15 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     if (request.url !== stagingOrigin + pathname) return deny(404);
     return allowsStagingInviteSite(request, target.kind === 'invite') ? target : deny(403);
   }
+  const ownerPage = target.kind === 'people' || target.kind === 'people-asset';
+  if (ownerPage && request.url !== stagingOrigin + pathname) return deny(404);
   const site = request.headers.get('sec-fetch-site');
   const navigation = isTopLevelDocumentNavigation(request);
   const signInRedirect = () => downloadRedirect(`/sign-in?${new URLSearchParams({ next: pathname + search })}`);
   if (site !== null && site !== 'same-origin' && site !== 'none') {
     // A cross-site document visit may reach sign-in, but never reads private state.
     if (navigation && target.kind === 'root') return signInRedirect();
-    if (!(navigation && target.kind === 'sign-in')) return deny(403);
+    if (!(navigation && target.kind === 'sign-in')) return deny(ownerPage ? 404 : 403);
   }
   if (target.kind === 'sign-in' || target.kind === 'ceremony' || target.kind === 'public-asset') return target;
 
@@ -94,13 +99,14 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       const memberRoute = invite && (target.kind === 'root' || target.kind === 'root-data' ||
         target.kind === 'private-asset' || target.kind === 'download');
       if (session.role === 'owner' || memberRoute) {
-        return target.kind === 'private-asset' || (target.kind === 'root' && request.method === 'HEAD')
+        return target.kind === 'private-asset' || target.kind === 'people-asset' || (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
       }
+      if (ownerPage) return deny(404);
       // An otherwise valid member cookie must not prevent the owner from signing in.
       return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
     }
-    if (navigation && target.kind === 'root') return signInRedirect();
+    if (navigation && (target.kind === 'root' || (target.kind === 'people' && request.method === 'GET'))) return signInRedirect();
     if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
     return deny(401);
   } catch {
@@ -113,7 +119,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
   const rootProbe = target.kind === 'root' && request.method === 'HEAD';
-  if (target.kind === 'private-asset' || rootProbe) {
+  if (target.kind === 'private-asset' || target.kind === 'people-asset' || rootProbe) {
     if (!(performance.now() < (target.deadline ?? 0))) return deny(401);
     // The sign-in probe reports authorization, not whether the listing rendered.
     if (rootProbe) return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
@@ -126,6 +132,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'invite-asset':
     case 'public-asset':
     case 'private-asset':
+    case 'people-asset':
     case 'root-data': {
       const result = await (target.kind === 'root-data' ? dispatch.adapter(request) : dispatch.asset(request));
       const response = new Response(result.body, result);
@@ -141,6 +148,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'download':
     case 'upload':
     case 'owner-lifecycle':
+    case 'people':
       return dispatch.adapter(request);
   }
 }

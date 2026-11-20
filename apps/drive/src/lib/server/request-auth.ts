@@ -107,6 +107,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const fixture = admitsSignInFixture(env);
     const staging = origin.origin === stagingOrigin;
     const routeId = event.route?.id;
+    const peoplePage = routeId === '/people';
+    if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${stagingOrigin}/people` ||
+        (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {
       if (fixture || !admitsStagingInvite(env) || ownerLifecycleRoute(request, url) !== routeId) return deny(404);
       if (!allowsStagingInviteSite(request)) return deny(403);
@@ -130,6 +133,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       return new Response(null, { status: session ? 204 : 200,
         headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
     }
+    if (peoplePage && session?.principal.role !== 'owner') return deny(session ? 404 : 401);
     if (staging && session && session.principal.role !== 'owner') {
       const memberRoot = routeId === '/' &&
         ((pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) ||

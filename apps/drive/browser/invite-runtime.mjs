@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { tsImport } from 'tsx/esm/api';
 import { proveMemberDownload } from './member-download.mjs';
+import { proveOwnerIssue } from './owner-invite-runtime.mjs';
 import { capture, widths } from './root-listing.mjs';
 
 // The trusted browser lane starts with plain Node; transform only the fixture's service imports.
@@ -26,7 +27,10 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     : new Invitations(DB).issue(ownerToken, metadata);
   const list = async (suffix = '') => (await (await owner(invitations + suffix, 200)).json()).invitations;
   const first = await issue({ displayName: 'Rook' });
-  const { id: invitationId, token } = await issue({ displayName: 'Pell', note: 'Welcome to Drive!' });
+  const metadata = { displayName: 'Pell', note: 'Welcome to Drive!' };
+  const created = staging ? await proveOwnerIssue(browser, { origin, relay, worker, ownerToken,
+    defaultWorker: stagingRoot.defaultWorker }, metadata) : await issue(metadata);
+  const { id: invitationId, token, ownerNodes = [] } = created;
   if (staging) {
     const ids = [first.id, invitationId].sort();
     const entries = await list();
@@ -89,8 +93,14 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       }
     };
     let document;
+    const recipientNodes = new Set();
+    const recordNode = response => {
+      const { pathname } = new URL(response.url());
+      if (response.ok() && pathname.startsWith('/_app/immutable/nodes/')) recipientNodes.add(pathname);
+    };
     if (staging) {
       await page.goto(linkSource);
+      page.on('response', recordNode);
       [document] = await Promise.all([page.waitForResponse(`${origin}/invite`), page.getByRole('link', { name: 'Open invitation' }).click()]);
     } else document = await page.goto(`${origin}/invite#${first.token}`);
     if (staging) assert.ok(followedLink, 'followed the cross-site invitation link');
@@ -101,6 +111,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     const field = page.getByRole('textbox', { name: 'Your name' });
     await field.waitFor();
     assert.equal(await field.inputValue(), 'Rook');
+    page.off('response', recordNode);
     assert.equal(page.url(), `${origin}/invite`);
     await field.fill('Unsaved name');
     await page.evaluate(token => { location.hash = token; }, token);
@@ -149,6 +160,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(result.status(), 204);
     assert.equal((await result.allHeaders())['set-cookie'], undefined);
     await page.waitForURL(`${origin}/sign-in`);
+    assert.equal((await context.cookies(origin)).some(cookie => cookie.name === '__Host-drive-session'), false);
     const replay = await worker.fetch(`${origin}/api/invite/enroll`, { method: 'POST',
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
@@ -197,6 +209,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       page.waitForURL(`${origin}/sign-in`),
       page.getByRole('link', { name: 'Sign in', exact: true }).click(),
     ]);
+    if (staging) await page.goto(`${origin}/sign-in?next=%2Fpeople`);
     await signIn(204, staging);
     await page.waitForURL(`${origin}/`);
     await page.getByRole('heading', { name: 'Your drive is empty.', exact: true }).waitFor();
@@ -205,6 +218,8 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     if (staging) {
       await captureState('member-root-empty');
       memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, checkOwner: owner, ...stagingRoot }, captureState);
+      assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
+      for (const path of ownerNodes) await memberRoot.check(path, 'GET', 404);
     }
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
@@ -224,7 +239,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(await field.inputValue(), 'Rook');
     if (staging) {
       for (const [path, method] of [['/', 'GET'], ['/', 'HEAD'], [memberRoot.dataPath, 'GET'],
-        [stagingRoot.asset, 'GET'], [invitations, 'GET']]) {
+        [stagingRoot.asset, 'GET'], [invitations, 'GET'], ['/people', 'GET'], ...ownerNodes.map(path => [path, 'GET'])]) {
         await memberRoot.check(path, method, 401);
       }
       await memberRoot.checkRevoked();
@@ -243,6 +258,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       await captureState('member-revoked');
     }
     console.log(`${staging ? 'Staging-mode' : 'Generated'} Worker + Chromium + D1: invite enrollment, replay denial, member sign-in, private My Drive and revocation passed`);
+    return [...recipientNodes];
   } finally {
     await context.close();
   }
