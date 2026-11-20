@@ -33,7 +33,7 @@ function fixture(options: {
     if (req.method === 'GET') {
       if (req.cache !== 'no-store' && pin === etag && cachedPinnedRead) return object();
       if (pin === etag && present) cachedPinnedRead = true;
-      return present ? object() : error(404, 'NoSuchKey');
+      return present ? object() : error(404, 'NoSuchKey', `<Key>${key}</Key>`);
     }
     if (!/^"[0-9a-f]{32}"$/.test(pin ?? '')) return error(412, 'PreconditionFailed');
     if (pin !== etag && !options.ignoreDigestComparison) {
@@ -71,12 +71,13 @@ function verifyTrace(calls: Request[], length: number) {
 }
 
 test('accepts only a signed matching delete followed by explicit key absence', async () => {
-  for (const status of [200, 204]) {
-    const { target, calls } = fixture({
-      success: status,
-      successHeaders: status === 200 ? { 'content-length': '0' } : undefined,
-      override: (step) => status === 200 && step === 5 ? error(404, 'NoSuchKey', `<Key>${key}</Key>`) : undefined,
-    });
+  for (const [status, headers] of [
+    [204, {}],
+    [200, {}],
+    [200, { 'content-length': '0' }],
+    [200, { 'transfer-encoding': 'Chunked' }],
+  ] as const) {
+    const { target, calls } = fixture({ success: status, successHeaders: headers });
     assert.deepEqual(await proveConditionalDelete(target), { passed: true });
     verifyTrace(calls, 5);
   }
@@ -125,9 +126,22 @@ test('rejects uncertain or versioned responses without advancing or retrying', a
   }
 });
 
+for (const [name, status, headers] of [
+  ['length on 204', 204, { 'content-length': '0' }],
+  ['transfer coding on 204', 204, { 'transfer-encoding': 'chunked' }],
+  ['conflicting framing on 200', 200, { 'transfer-encoding': 'chunked', 'content-length': '0' }],
+  ['repeated chunked coding on 200', 200, { 'transfer-encoding': 'chunked, chunked' }],
+] as const) {
+  test(`rejects ${name} before checking absence`, async () => {
+    const { target, calls } = fixture({ success: status, successHeaders: headers });
+    assert.deepEqual(await proveConditionalDelete(target), { passed: false, phase: 'matching-delete' });
+    verifyTrace(calls, 4);
+  });
+}
+
 test('rejects contradictory or malformed length metadata on a bodyless acknowledgment', async () => {
   for (const length of ['1', '0, 0', 'invalid']) {
-    const { target, calls } = fixture({ successHeaders: { 'content-length': length } });
+    const { target, calls } = fixture({ success: 200, successHeaders: { 'content-length': length } });
     assert.deepEqual(await proveConditionalDelete(target), { passed: false, phase: 'matching-delete' });
     verifyTrace(calls, 4);
   }

@@ -74,8 +74,12 @@ export async function proveConditionalDelete(target: ConditionalDeleteTarget, st
     phase = 'matching-delete';
     const deleted = await deleteIfMatch(etag);
     const length = deleted.headers.get('content-length');
-    if ((deleted.status !== 200 && deleted.status !== 204) || deleted.body.length !== 0 ||
-        (length !== null && length !== '0')) return { passed: false, phase };
+    const transfer = deleted.headers.get('transfer-encoding');
+    // 204 forbids both headers. For 200, accept only unambiguous empty framing.
+    const validFraming = deleted.status === 204 ? length === null && transfer === null
+      : deleted.status === 200 && (transfer === null ? length === null || length === '0'
+        : length === null && transfer.toLowerCase() === 'chunked');
+    if (!validFraming || deleted.body.length !== 0) return { passed: false, phase };
     phase = 'absence';
     // Unconditioned read: a generation mismatch is not evidence of absence.
     const missing = await send({ method: 'GET', cache: 'no-store', maxResponseBytes: errorLimit });

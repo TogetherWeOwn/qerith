@@ -31,8 +31,11 @@ For a separately approved run, the qualification owner supplies the capability:
   check the request policy, not the provider's consistency guarantee.
 - Pass the dispatch cancellation signal. The probe makes at most five calls in
   25 seconds: pinned read, wrong-ETag `412 PreconditionFailed`, independent pinned
-  read of the same bytes and ETag, matching-ETag empty `200`/`204` with no
-  `Content-Length` or exactly `0`, and unconditional GET with `404 NoSuchKey`.
+  read of the same bytes and ETag, matching-ETag DELETE with an empty
+  acknowledgment, and unconditional GET with `404 NoSuchKey`. For `204`, neither
+  `Content-Length` nor `Transfer-Encoding` may be present. For `200`, accept no
+  framing headers, `Content-Length: 0` alone, or `Transfer-Encoding: chunked`
+  alone. Invalid framing stops the probe before the absence read.
   If the error XML names a key it must unambiguously match the bound key. Both
   deletes sign `If-Match`; neither selects a version. Any version/marker header
   fails the probe, even if its value is `null` or `false`.
