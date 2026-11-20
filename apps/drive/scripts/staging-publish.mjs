@@ -16,14 +16,10 @@ function requireContained(root, relative, type) {
   }
 }
 
-export function validateStagingTarget(root, accountId) {
+export function validateStagingConfig(config, accountId) {
   if (accountId !== '209cf7dd678adfb683947dd7874d05af') {
     throw new Error('invalid staging Cloudflare account');
   }
-  requireContained(root, configPath, 'isFile');
-  requireContained(root, entryPath, 'isFile');
-  requireContained(root, assetsPath, 'isDirectory');
-  const config = JSON.parse(readFileSync(resolve(root, configPath), 'utf8'));
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
       Object.keys(config).sort().join(',') !== 'assets,compatibility_date,compatibility_flags,d1_databases,main,name,vars' ||
       !config.vars || Object.keys(config.vars).join(',') !== 'DRIVE_ORIGIN' ||
@@ -45,6 +41,14 @@ export function validateStagingTarget(root, accountId) {
       config.assets.run_worker_first !== true) {
     throw new Error('invalid staging Worker configuration');
   }
+}
+
+export function validateStagingTarget(root, accountId) {
+  requireContained(root, configPath, 'isFile');
+  requireContained(root, entryPath, 'isFile');
+  requireContained(root, assetsPath, 'isDirectory');
+  const config = JSON.parse(readFileSync(resolve(root, configPath), 'utf8'));
+  validateStagingConfig(config, accountId);
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
   return config;
 }

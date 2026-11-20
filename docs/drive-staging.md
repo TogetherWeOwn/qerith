@@ -121,22 +121,37 @@ dispatch this increment. Required CI uses local Git history, synthetic evidence
 and a fake Wrangler; none is live qualification.
 
 The qualification-only D1 adapter is not called by either staging workflow.
-It checks migration files against the tested commit, records a Time Travel
-bookmark before any ledger initialization or apply, then reads the native
+It snapshots verified SQL and D1 config from the tested commit outside the checkout.
+It awaits the recovery writer for the Time Travel bookmark before any ledger
+initialization or apply, then reads the native
 `d1_migrations` rows before and after apply. It requires the full committed set
 without changes to existing ledger entries. The native ledger records names,
 not the historical applied bytes. A failed or cancelled apply does not prove
 remote rollback; use the recorded bookmark to recover before retrying an
 uncertain apply. The future caller must validate storage and recovery
-preconditions before invoking the adapter.
+preconditions before invoking the adapter and route runner termination into
+its abort signal.
+
+The unwired Worker adapter requires a known, single-version staging baseline.
+It reads the uploaded version's SHA/attempt tag and records the prior deployment
+before changing traffic. A future live probe must independently read the SHA
+and version from the responding runtime, not from request inputs or the upload
+tag. The adapter restores the previous version after the checks, including on
+cooperative cancellation, and confirms the restored deployment by readback.
+The probe and cases have separate deadlines; the callbacks must stop and settle
+all work before rollback. A hard stop is not verified cleanup. It
+refuses to replace a deployment it does not own. Readback is not atomic fencing;
+the shared lock must cover all active writers. An ambiguous write without proof
+of rollback, hard cancellation, or runner loss still requires reconciliation.
+Worker rollback does not restore D1 or establish idle state.
 
 Remaining source slices, in dependency order:
 
-1. Wire the protected lifecycle: the exact deployed SHA and readiness, native
-   migration ledger and pre-apply Time Travel bookmark, rollback to the prior
-   Worker version or verified disablement, whole-estate zero-idle inventory,
-   and attempt-specific prefix-scoped cleanup with verified native expiry for
-   cancellation or runner loss. Keep artifact publication disabled.
+1. Implement immutable Worker upload without invalidating the baseline version
+   (no forced restore), and implement the runtime readiness probe. Wire the
+   protected lifecycle, including D1, Worker recovery, whole-estate zero-idle
+   inventory and attempt-specific prefix cleanup with verified native expiry
+   or stop for cancellation or runner loss. Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and

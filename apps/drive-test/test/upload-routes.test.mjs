@@ -47,13 +47,13 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   } });
   const handle = privateRequests(bindings);
   function send(number, { auth = token, source = requestOrigin, host = requestOrigin, name = 'file', parentId = null,
-    intentId = intent, bytes = 7, runtime = false } = {}) {
+    intentId = intent, bytes = 7, runtime = false, stream, signal } = {}) {
     const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
     if (auth) headers.cookie = `__Host-drive-session=${auth}`;
     if (source) headers.origin = source;
     const request = new Request(`${host}/api/uploads/${intentId}/${number ? `parts/${number}` : 'complete'}`,
-      { method: number ? 'PUT' : 'POST', body, headers });
+      { method: number ? 'PUT' : 'POST', body: stream ?? body, headers, signal });
     const execute = (session) => number ? routes.part(request, session, intentId, String(number))
       : routes.complete(request, session, intentId);
     // Test the closed execution path separately from the unchanged public hook.
@@ -93,6 +93,87 @@ it('publishes a verified sparse upload without duplicate part or completion send
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
   expect(headPins).toEqual([etag]);
+});
+
+it.each([
+  ['two parts', [minimum, 7], true],
+  ['one empty part', [0], true],
+  ['a mismatched generation', [minimum, 7], false],
+])('runs invite-mode allocation through the storage adapter with %s', async (_label, sizes, matchesHead) => {
+  await applyD1Migrations(env.DB, migrations);
+  const owner = crypto.randomUUID(), size = sizes.reduce((sum, bytes) => sum + bytes, 0);
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'owner', 'active')", owner).run();
+  try {
+    const { token } = await sessions.issue(owner);
+    const calls = [], parts = [];
+    const fetch = async (request) => {
+      const url = new URL(request.url), key = url.pathname.split('/').at(-1);
+      if (request.method === 'POST' && url.searchParams.has('uploads')) {
+        calls.push('create');
+        return new Response(`<InitiateMultipartUploadResult><Key>${key}</Key>` +
+          `<UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
+      }
+      calls.push(request.method);
+      if (request.method === 'PUT') {
+        const number = Number(url.searchParams.get('partNumber')), partTag = `"part-${number}"`;
+        parts.push({ number, bytes: (await request.arrayBuffer()).byteLength, partTag });
+        return new Response(null, { headers: { etag: partTag } });
+      }
+      if (request.method === 'GET') {
+        return new Response(`<ListPartsResult><Bucket>${config.bucket}</Bucket><Key>${key}</Key>` +
+          `<UploadId>${uploadId}</UploadId><IsTruncated>false</IsTruncated>` + parts.map(({ number, bytes, partTag }) =>
+            `<Part><PartNumber>${number}</PartNumber><Size>${bytes}</Size><ETag>${partTag}</ETag></Part>`).join('') +
+          '</ListPartsResult>');
+      }
+      if (request.method === 'POST') {
+        expect(request.headers.get('if-none-match')).toBe('*');
+        expect(await request.text()).toBe('<CompleteMultipartUpload>' + parts.map(({ number, partTag }) =>
+          `<Part><PartNumber>${number}</PartNumber><ETag>${partTag}</ETag></Part>`).join('') + '</CompleteMultipartUpload>');
+        return response(key);
+      }
+      expect(request.method).toBe('HEAD');
+      expect(request.headers.get('if-match')).toBe(etag);
+      return new Response(null, { headers: { etag, 'content-length': String(matchesHead ? size : size + 1) } });
+    };
+    const runtime = wireUploadStorage({ DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+      DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+      DRIVE_S3_STORAGE_EPOCH: epoch, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey,
+      DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId: JSON.stringify([config.endpoint, config.bucket, epoch]),
+        region: config.region, sourceSha: 'a'.repeat(40), runId: '123', runAttempt: 1, completionTimeoutMs: 5000 })
+    }, fetch);
+    const transport = { fetch, timeoutMs: 5000 }, routes = uploadRoutes(runtime, transport);
+    const request = (path, method, body) => new Request(`${stagingOrigin}/api/uploads${path}`, { method, body,
+      headers: { origin: stagingOrigin, cookie: `__Host-drive-session=${token}`, 'content-length': String(body.length),
+        'content-type': method === 'PUT' ? 'application/octet-stream' : 'application/json' } });
+    const allocation = await postUploadIntent(request('', 'POST', JSON.stringify({ size })), runtime, transport);
+    expect(allocation.status).toBe(201);
+    const { id } = await allocation.json();
+    const put = (number, bytes) => request(`/${id}/parts/${number}`, 'PUT', new Uint8Array(bytes));
+    const complete = () => request(`/${id}/complete`, 'POST', JSON.stringify({ parentId: null, name: 'file' }));
+    // Exercise backend handlers only; the public Worker and hook own admission separately.
+    const session = await readSession(complete(), env.DB);
+    const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', id).first();
+    expect((await routes.part(put(1, sizes[0]), session, id, '1')).status).toBe(204);
+    if (sizes.length === 2) {
+      expect((await routes.complete(complete(), session, id)).status).toBe(409);
+      expect(await generation()).toBeNull();
+      expect((await routes.part(put(2, sizes[1] + 1), session, id, '2')).status).toBe(404);
+      expect(calls).toEqual(['create', 'PUT']);
+      expect((await routes.part(put(2, sizes[1]), session, id, '2')).status).toBe(204);
+    }
+    const result = await routes.complete(complete(), session, id);
+    expect(calls).toEqual(['create', ...sizes.map(() => 'PUT'), 'GET', 'POST', 'HEAD']);
+    expect(parts.map(({ number, bytes }) => [number, bytes])).toEqual(sizes.map((bytes, i) => [i + 1, bytes]));
+    if (matchesHead) {
+      expect(result.status).toBe(201);
+      expect(await generation()).toEqual({ entry_id: (await result.json()).id, size_bytes: size, etag });
+    } else {
+      expect(result.status).toBe(409);
+      expect(await generation()).toBeNull();
+    }
+  } finally {
+    await sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", owner).run();
+  }
 });
 
 it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation (%s)', async (change) => {
@@ -307,6 +388,24 @@ it('applies exact origin, session, owner and next-request revocation to both mut
   await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", principal).run();
   for (const number of [1, undefined]) expect((await send(number)).status).toBe(401);
   expect(calls).toEqual([]);
+});
+
+it('cancels a pending owner completion body before claiming or sending', async () => {
+  const { send, calls, principal } = await fixture({ staging: true });
+  expect((await send(1)).status).toBe(204);
+  const abort = new AbortController(), reading = Promise.withResolvers();
+  let cancels = 0;
+  const stream = new ReadableStream({
+    pull() { reading.resolve(); },
+    cancel() { cancels++; }
+  }, { highWaterMark: 0 });
+  const result = send(undefined, { stream, signal: abort.signal });
+  await reading.promise;
+  abort.abort();
+  expect((await result).status).toBe(400);
+  expect(cancels).toBe(1);
+  expect(await sql('SELECT operation_id FROM drive_upload_completion_operations WHERE owner_id = ?', principal).first()).toBeNull();
+  expect(calls).toEqual(['PUT']);
 });
 
 it.each([

@@ -7,6 +7,8 @@ import { createMultipartCreate } from './s3/multipart-create';
 
 // The first-upload preview fits in one existing bounded part.
 export const maxUploadIntentBytes = 16 * 1024 * 1024;
+// Match the v0 multipart client ceiling; individual parts remain bounded separately.
+const maxInviteUploadIntentBytes = 5 * 1024 ** 3;
 export interface UploadIntentEnv extends DriveAuthEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
@@ -82,12 +84,14 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (request.method !== 'POST') return reply(405);
   if (!allowsOrigin(request, origin.origin)) return reply(403);
   // Allocation only; staging request admission and part/publication policy are separate.
-  const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
+  const inviteMode = admitsStagingInvite(env);
+  const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
+  const limit = inviteMode ? maxInviteUploadIntentBytes : maxUploadIntentBytes;
   let sent = false;
   try {
     const session = await readSession(request, db);
     if (!session || (ownerOnly && session.principal.role !== 'owner')) return reply(401);
-    if (!Number.isSafeInteger(size) || size < 0 || size > maxUploadIntentBytes) return reply(400);
+    if (!Number.isSafeInteger(size) || size < 0 || size > limit) return reply(400);
     if (!config || !epoch || !verifier) return reply(503);
     const { token, principal: { id: owner } } = session;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);

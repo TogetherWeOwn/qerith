@@ -59,6 +59,17 @@ export function assertDispatch(env, cwd = process.cwd()) {
   return testedSha;
 }
 
+export function assertQualificationJob(env, cwd) {
+  const testedSha = assertDispatch(env, cwd);
+  const { GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt, GITHUB_WORKFLOW_REF: workflow } = env;
+  if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' ||
+      workflow !== `${repo}/.github/workflows/drive-staging-qualification.yml@${main}` ||
+      !requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
+    throw new Error('Requires the protected staging qualification job.');
+  }
+  return { sha: testedSha, runId, attempt };
+}
+
 // This is a policy predicate, not a live-evidence source or an artifact writer.
 export function qualificationReceiptName(env, evidence, status, cwd) {
   const testedSha = assertDispatch(env, cwd);

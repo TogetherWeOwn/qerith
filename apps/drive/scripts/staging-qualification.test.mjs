@@ -112,22 +112,50 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
 test('the staged workflow has no producer or provider path', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-qualification.yml', import.meta.url), 'utf8');
   const gate = "github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'";
-  assert.equal(workflow.split('\n\n')[1], `on:
+  const [name, trigger, permissions, ...jobs] = workflow.trimEnd().split('\n\n');
+  assert.equal(trigger, `on:
   workflow_dispatch:
     inputs:
       tested_sha:
         description: Lowercase 40-hex SHA of the dispatch head on main
         required: true
         type: string`);
-  assert.match(workflow, /^permissions:\n  contents: read$/m);
-  assert.doesNotMatch(workflow, /^concurrency:/m);
-  const [source, qualification] = workflow.split('\n  qualification:\n');
-  assert.ok(source.includes(`  source:\n    if: ${gate}\n`));
-  assert.doesNotMatch(source, /concurrency:/);
-  assert.ok(qualification.startsWith(`    needs: source\n    if: success() && !cancelled() && needs.source.result == 'success' && ${gate}\n    concurrency:\n      group: drive-staging-lifecycle\n      cancel-in-progress: false\n    environment: staging\n`));
-  assert.match(workflow, /ref: \$\{\{ github.sha \}\}\n +fetch-depth: 0\n +persist-credentials: false/);
-  assert.match(workflow, /TESTED_SHA: \$\{\{ inputs\.tested_sha \}\}\n +run: timeout .* node apps\/drive\/scripts\/staging-qualification\.mjs/);
-  assert.equal(workflow.match(/timeout-minutes: 5/g)?.length, 2);
-  assert.doesNotMatch(workflow, /staging-qualification-migrations|upload-artifact|secrets\.|continue-on-error|always\(\)/);
-  assert.match(workflow, /    needs: source\n[\s\S]*\n          exit 1\n$/);
+  assert.equal(permissions, 'permissions:\n  contents: read');
+  assert.equal(name, 'name: Drive staging qualification');
+  const jobBlocks = jobs.join('\n\n').split('\n\n  qualification:\n');
+  assert.equal(jobBlocks.length, 2);
+  const splitSteps = job => {
+    const sections = job.split('\n    steps:\n');
+    assert.equal(sections.length, 2);
+    return sections;
+  };
+  const [sourceHeader, sourceSteps] = splitSteps(jobBlocks[0]);
+  assert.equal(sourceHeader, `jobs:
+  # Validate before entering the shared queue: even non-preempting jobs can replace pending jobs.
+  source:
+    if: ${gate}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5`);
+  const [qualificationHeader, qualificationSteps] = splitSteps(jobBlocks[1]);
+  assert.equal(qualificationHeader, `    needs: source
+    if: success() && !cancelled() && needs.source.result == 'success' && ${gate}
+    concurrency:
+      group: drive-staging-lifecycle
+      cancel-in-progress: false
+    environment: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 5`);
+  assert.equal(sourceSteps, `      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: \${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact dispatch source before staging approval
+        env:
+          TESTED_SHA: \${{ inputs.tested_sha }}
+        run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification.mjs`);
+  assert.equal(qualificationSteps, `      - name: Fail closed until the live runner and cleanup are reviewed
+        run: |
+          printf '%s\\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
+          exit 1`);
 });
