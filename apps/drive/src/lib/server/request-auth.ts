@@ -4,11 +4,13 @@ import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavi
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { stagingOrigin } from './qualification-readiness';
+import { readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
 import { uploadAdmissionRoute } from './upload-admission';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
   DRIVE_STAGING_INVITE_ACCEPTANCE?: string;
+  DRIVE_STAGING_READ_GRANTS?: string;
   DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
@@ -22,6 +24,10 @@ export function admitsSignInFixture(env: DriveAuthEnv): boolean {
 // Default-off staging mode for invitation lifecycle, acceptance and member My Drive access.
 export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
+}
+
+export function admitsStagingReadGrants(env: DriveAuthEnv): boolean {
+  return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_READ_GRANTS === '1';
 }
 
 export type DriveUploadMode = 'disabled' | 'preview' | 'multipart';
@@ -104,21 +110,27 @@ function pageDenial(request: Request, status: 403 | 503): Response {
 
 export function privateRequests(env: DriveAuthEnv): Handle {
   return async ({ event, resolve }) => {
-    const { request } = event;
+    const request = readGrantOriginalRequest(event.request);
     const url = new URL(request.url);
     const { pathname, search } = url;
     const navigation = isDrivePageNavigation(request);
     const refuse = (status: 403 | 503) => navigation ? pageDenial(request, status) : deny(status);
+    const routeId = event.route?.id;
+    const readGrant = routeId === readGrantCollectionRoute || routeId === readGrantRecipientRoute;
     const origin = authOrigin(env.DRIVE_ORIGIN);
     if (!origin || !env.DB) {
+      if (readGrant) return deny(503);
       if (navigation) return pageDenial(request, 503);
       return new Response('Service unavailable', { status: 503, headers: { 'cache-control': 'no-store' } });
     }
     if (!allowsOrigin(request, origin.origin)) return refuse(403);
+    if (readGrant) {
+      if (!admitsStagingReadGrants(env) || readGrantAdmissionRoute(request, url) !== routeId) return deny(404);
+      if (!allowsStagingInviteSite(request)) return deny(403);
+    }
 
     const fixture = admitsSignInFixture(env);
     const staging = origin.origin === stagingOrigin;
-    const routeId = event.route?.id;
     const peoplePage = routeId === '/people';
     const folderPage = routeId === folderDocumentRoute;
     if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
@@ -158,7 +170,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const uploadRoute = uploadAdmissionRoute(request, url);
       const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request) &&
         driveUploadMode(env, session.principal.role) === 'multipart';
-      if (!(memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage)))) {
+      if (!(readGrant || memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage)))) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }

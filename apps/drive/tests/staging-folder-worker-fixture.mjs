@@ -53,13 +53,21 @@ export async function exerciseStagingFolder({ worker, DB, origin, owner, member 
   await unavailable(`${folder}?page=invalid`, owner);
   await unavailable(folder, member);
   assert.match(await body('/f/folder-own', member, 200), /Member own folder/);
-  await DB.prepare("INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES ('folder-proof', 'member')").run();
+  const changeGrant = async method => {
+    const response = await worker.fetch(`${origin}/api/entries/folder-proof/read-grants/member`, {
+      method, redirect: 'manual', headers: {
+        cookie: owner, origin, 'x-test-grant-boundary': 'worker', 'x-test-read-grants': '1',
+      },
+    });
+    assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [204, 'private, no-store', '']);
+  };
+  await changeGrant('PUT');
   assert.match(await body(folder, member, 200), /Folder proof title/);
   await unavailable(folder + page, member);
   const memberPage = (await body(folder, member, 200)).match(/href="(\?page=[A-Za-z0-9_-]{378})"/)?.[1];
   assert.ok(memberPage);
   await unavailable('/f/folder-own' + memberPage, member);
-  await DB.prepare("DELETE FROM drive_read_grants WHERE entry_id = 'folder-proof'").run();
+  await changeGrant('DELETE');
   await unavailable(folder, member);
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'member'").run();
   for (const path of [folder, ...folderOnly]) assert.equal(await body(path, member, 401), '');

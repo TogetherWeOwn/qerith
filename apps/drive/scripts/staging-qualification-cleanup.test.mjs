@@ -195,6 +195,7 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
   const key = `${prefix}provider-multipart-fixture`;
   const split = 5 * 1024 * 1024;
   const whole = Buffer.concat([Buffer.alloc(split, 0x35), Buffer.alloc(257, 0x9a)]);
+  whole.set([0x12, 0x34, 0x56, 0x78], split - 2);
   const tag = '"stored"';
   const trace = [];
   const send = async request => {
@@ -211,31 +212,33 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
       assert.ok(query.has('uploads'));
       return new Response(`<InitiateMultipartUploadResult><UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
     }
-    if (op < 9) assert.equal(query.get('uploadId'), uploadId);
-    if (op <= 5) {
-      assert.equal(query.get('partNumber'), op === 5 ? '2' : '1');
+    if (op <= 9) assert.equal(query.get('uploadId'), uploadId);
+    if (op === 2 || (op >= 4 && op <= 6)) {
+      const last = op === 6;
+      assert.equal(query.get('partNumber'), last ? '2' : '1');
       const bytes = Buffer.from(await request.arrayBuffer());
-      assert.deepEqual(bytes, op === 2 ? Buffer.alloc(split, 0x71) : op < 5 ? whole.subarray(0, split) : whole.subarray(split));
-      return new Response(null, { headers: { etag: `"p${op === 4 ? 3 : op}"` } });
+      assert.deepEqual(bytes, op === 2 ? Buffer.alloc(split, 0x71) : last ? whole.subarray(split) : whole.subarray(0, split));
+      return new Response(null, { headers: { etag: op === 2 ? '"seed"' : last ? '"last"' : '"replacement"' } });
     }
-    if (op <= 7) {
-      const first = op === 6;
-      assert.equal(query.get('part-number-marker'), first ? null : '1');
+    if (op === 3 || op === 7 || op === 8) {
+      const last = op === 8, truncated = op === 7;
+      assert.equal(query.get('part-number-marker'), last ? '1' : null);
       assert.equal(query.get('max-parts'), '1');
       return new Response(`<ListPartsResult><Bucket>${bucket}</Bucket><Key>${key}</Key><UploadId>${uploadId}</UploadId>` +
-        `<IsTruncated>${first}</IsTruncated>${first ? '<NextPartNumberMarker>1</NextPartNumberMarker>' : '<PartNumberMarker>1</PartNumberMarker>'}` +
-        `<Part><PartNumber>${first ? 1 : 2}</PartNumber><ETag>"p${first ? 3 : 5}"</ETag><Size>${first ? split : 257}</Size></Part></ListPartsResult>`);
+        `<IsTruncated>${truncated}</IsTruncated>${truncated ? '<NextPartNumberMarker>1</NextPartNumberMarker>' : last ? '<PartNumberMarker>1</PartNumberMarker>' : ''}` +
+        `<Part><PartNumber>${last ? 2 : 1}</PartNumber><ETag>"${op === 3 ? 'seed' : last ? 'last' : 'replacement'}"</ETag>` +
+        `<Size>${last ? 257 : split}</Size></Part></ListPartsResult>`);
     }
-    if (op === 8) {
+    if (op === 9) {
       assert.equal(request.headers.get('if-none-match'), '*');
       const manifest = await request.text();
-      assert.match(manifest, /p3.*p5/);
-      assert.doesNotMatch(manifest, /p2/);
+      assert.match(manifest, /replacement.*last/);
+      assert.doesNotMatch(manifest, /seed/);
       return new Response(`<CompleteMultipartUploadResult><ETag>${tag}</ETag></CompleteMultipartUploadResult>`);
     }
     assert.equal(request.headers.get('if-match'), tag);
-    if (op === 9) return new Response(null, { headers: { etag: tag, 'content-length': String(whole.length) } });
-    const ranged = op === 11;
+    if (op === 10) return new Response(null, { headers: { etag: tag, 'content-length': String(whole.length) } });
+    const ranged = op === 12;
     assert.equal(request.headers.get('range'), ranged ? `bytes=${split - 2}-${split + 1}` : null);
     const bytes = ranged ? whole.subarray(split - 2, split + 2) : whole;
     return new Response(bytes, { status: ranged ? 206 : 200, headers: { etag: tag, 'content-length': String(bytes.length),
@@ -245,7 +248,7 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
   assert.throws(() => exercise({ ...context, runId: '183' }), /cases are unverified/);
   assert.deepEqual(trace, []);
   assert.deepEqual(await exercise(context), { 's3-multipart': 'pass', 's3-range': 'pass', 's3-retry': 'pass', 's3-persistence': 'pass' });
-  assert.deepEqual(trace, ['HEAD', 'POST', 'PUT', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET']);
+  assert.deepEqual(trace, ['HEAD', 'POST', 'PUT', 'GET', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET']);
 });
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {

@@ -1,9 +1,9 @@
 import { isMetadataId, readMetadataJson } from './metadata-request';
 import { moveSessionEntry, type EntryChange } from './metadata/move-entry';
 import { validateName } from './metadata/private';
-import { admitsSignInFixture, allowsOrigin, allowsStagingInviteSite, readSessionToken, type DriveAuthEnv } from './request-auth';
+import { admitsSignInFixture, admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, type DriveAuthEnv } from './request-auth';
 
-type EntryChangeEnv = DriveAuthEnv & { DB?: Parameters<typeof moveSessionEntry>[0] };
+export type MetadataWriteEnv = DriveAuthEnv & { DB?: Parameters<typeof moveSessionEntry>[0] };
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers: status === 405 ? { ...headers, allow: 'PATCH' } : headers });
 const path = /^\/api\/entries\/([^/]+)$/;
@@ -36,19 +36,22 @@ function parseChange(body: Record<string, unknown> | null): EntryChange | null {
   return null;
 }
 
-// Only the disposable generated Worker wrapper dispatches this candidate.
-export function entryChangeRequest(request: Request, env: EntryChangeEnv): Promise<Response> | undefined {
-  const url = new URL(request.url);
-  const matched = path.exec(url.pathname);
-  if (matched) return patchEntry(request, env, url, matched[1]);
+export function entryChangeSource(request: Request, url: URL): string | null {
+  const wireId = path.exec(url.pathname)?.[1];
+  return wireId && request.url === url.origin + url.pathname ? entryId(wireId) : null;
 }
 
-async function patchEntry(request: Request, env: EntryChangeEnv, url: URL, wireId: string): Promise<Response> {
-  if (!admitsSignInFixture(env)) return reply(404);
+export function entryChangeRequest(request: Request, env: MetadataWriteEnv): Promise<Response> | undefined {
+  const url = new URL(request.url);
+  if (path.test(url.pathname)) return patchEntry(request, env, url);
+}
+
+async function patchEntry(request: Request, env: MetadataWriteEnv, url: URL): Promise<Response> {
+  if (!admitsSignInFixture(env) && !admitsStagingInvite(env)) return reply(404);
   if (request.method !== 'PATCH') return reply(405);
   if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || !allowsStagingInviteSite(request)) return reply(403);
-  const sourceId = entryId(wireId);
-  if (sourceId === null || request.url !== url.origin + url.pathname) return reply(404);
+  const sourceId = entryChangeSource(request, url);
+  if (sourceId === null) return reply(404);
   const token = readSessionToken(request);
   if (!token) return reply(401);
   const db = env.DB;

@@ -24,23 +24,46 @@ it('resolves the current listed name and exact generation for a live owner or gr
   const reader = (await sessions.issue('reader')).token;
   const grants = new ReadGrants(env.DB);
   const primary = vi.fn((mode) => env.DB.withSession(mode));
-  const { resolveGeneration, storageConfigId } = createPublishedReadAccess({ withSession: primary }, epoch, config);
+  const { resolveGeneration, storageConfigId } = createPublishedReadAccess({ withSession: primary }, epoch, config, 'grant-aware');
   expect(storageConfigId).toBe(expectedConfigId);
   const reference = { name, key, etag, storageConfigId: expectedConfigId, evidenceRevision, sizeBytes: 7 };
   expect(await resolveGeneration(token, id)).toEqual(reference);
   expect(await resolveGeneration(reader, id)).toBeNull();
   expect(await grants.create(token, folder, 'reader')).toBe(true);
   expect(await resolveGeneration(reader, id)).toEqual(reference);
+  expect(await metadata.move(owner, id, null, name)).not.toBeNull();
+  expect(await resolveGeneration(reader, id)).toBeNull();
+  expect(await metadata.move(owner, id, folder, name)).not.toBeNull();
+  expect(await resolveGeneration(reader, id)).toEqual(reference);
   expect(await grants.revoke(token, folder, 'reader')).toBe(true);
   expect(await resolveGeneration(reader, id)).toBeNull();
   expect(await grants.create(token, id, 'reader')).toBe(true);
   expect(await resolveGeneration(reader, id)).toEqual(reference);
-  await sessions.revoke(reader);
+  expect(await createPublishedReadAccess(env.DB, epoch, config).resolveGeneration(reader, id)).toEqual(reference);
+  expect(await createPublishedReadAccess(env.DB, 'wrong-epoch', config, 'grant-aware').resolveGeneration(reader, id)).toBeNull();
+  await sql('UPDATE drive_entries SET size_bytes = 8 WHERE id = ?', id).run();
+  expect(await resolveGeneration(reader, id)).toBeNull();
+  await sql('UPDATE drive_entries SET size_bytes = 7 WHERE id = ?', id).run();
+  expect(await resolveGeneration(reader, id)).toEqual(reference);
+
+  await sql('UPDATE drive_sessions SET expires_at = 1 WHERE token_hash = ?', await tokenHash(reader)).run();
   expect(await resolveGeneration(reader, id)).toBeNull();
   const renewed = (await sessions.issue('reader')).token;
-  await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner).run();
+  expect(await resolveGeneration(renewed, id)).toEqual(reference);
+  await sessions.revoke(renewed);
   expect(await resolveGeneration(renewed, id)).toBeNull();
-  expect(primary.mock.calls).toEqual(Array.from({ length: 7 }, () => ['first-primary']));
+  const live = (await sessions.issue('reader')).token;
+  expect(await resolveGeneration(live, id)).toEqual(reference);
+  await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = 'reader'").run();
+  expect(await resolveGeneration(live, id)).toBeNull();
+
+  await sql("UPDATE drive_principals SET status = 'active' WHERE id = 'reader'").run();
+  const restored = (await sessions.issue('reader')).token;
+  expect(await grants.create(token, id, 'reader')).toBe(true);
+  expect(await resolveGeneration(restored, id)).toEqual(reference);
+  await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner).run();
+  expect(await resolveGeneration(restored, id)).toBeNull();
+  expect(primary.mock.calls).toEqual(Array.from({ length: 16 }, () => ['first-primary']));
 });
 
 it('resolves only own bound generations in own-file mode, even when a grant exists', async () => {
@@ -88,19 +111,40 @@ it('rechecks the live own-file session and principal on each resolution', async 
   expect(await resolveGeneration(live, id)).toBeNull();
 });
 
-it('denies an own-file reference when the primary result uses up the remaining session lifetime', async () => {
-  const { id, token } = await seedBoundPublication('read-own-lifetime');
-  let elapsed = 0;
+it.each(['own-file', 'grant-aware', false])('read mode %s denies a primary result that uses up the session lifetime', async (mode) => {
+  const { id, token } = await seedBoundPublication(`read-lifetime-${mode}`);
+  let reader = token;
+  if (mode !== 'own-file') {
+    const principal = `lifetime-reader-${mode}`;
+    await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", principal).run();
+    reader = (await sessions.issue(principal)).token;
+    expect(await new ReadGrants(env.DB).create(token, id, principal)).toBe(true);
+  }
+  const hash = await tokenHash(reader);
+  let elapsed = 0, unusedMs = 1, row;
   const now = vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-  const db = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
-    const row = await env.DB.withSession(mode).prepare(query).bind(...args).first();
-    elapsed = row?.remainingMs ?? 0;
+  const db = { withSession: (constraint) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
+    // SQLite's clock is stable within a statement. Derive elapsed time from
+    // the stored expiry and that clock, not from the resolver's projection.
+    row = await env.DB.withSession(constraint).prepare(`SELECT result.*,
+      (SELECT expires_at FROM drive_sessions WHERE token_hash = ?) AS expiresAt,
+      CAST(unixepoch('subsec') * 1000 AS INTEGER) AS statementMs FROM (${query}) result`)
+      .bind(hash, ...args).first();
+    if (row) elapsed = row.expiresAt - row.statementMs - unusedMs;
     return row;
   } }) }) }) };
   try {
-    const { resolveGeneration } = createPublishedReadAccess(db, epoch, config, 'own-file');
-    expect(await resolveGeneration(token, id)).toBeNull();
+    const { resolveGeneration } = createPublishedReadAccess(db, epoch, config, mode);
+    expect(await resolveGeneration(reader, id)).not.toBeNull();
     expect(elapsed).toBeGreaterThan(0);
+    expect(row?.remainingMs).toBe(elapsed + 1);
+
+    // A second, shorter lifetime prevents a constant budget matching both reads.
+    await sql("UPDATE drive_sessions SET expires_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) + 60000 WHERE token_hash = ?", hash).run();
+    elapsed = unusedMs = 0;
+    expect(await resolveGeneration(reader, id)).toBeNull();
+    expect(elapsed).toBeGreaterThan(0);
+    expect(row?.remainingMs).toBe(elapsed);
   } finally { now.mockRestore(); }
 });
 
@@ -148,12 +192,12 @@ it.each([
 it('preserves opaque evidence and fails closed on malformed evidence or a primary read failure', async () => {
   const evidenceRevision = 'opaque-revision'.padEnd(36, '0');
   const revisionHex = new TextEncoder().encode(evidenceRevision).toHex();
-  const row = { keyHex: '6b', nameHex: '6e', etag, sizeBytes: 7, revisionHex };
+  const row = { keyHex: '6b', nameHex: '6e', etag, sizeBytes: 7, revisionHex, remainingMs: 60_000 };
   const primary = (first) => ({ withSession: () => ({ prepare: () => ({ bind: () => ({ first }) }) }) });
   const valid = createPublishedReadAccess(primary(async () => row), epoch, config);
   expect(await valid.resolveGeneration('a'.repeat(43), 'id')).toMatchObject({ evidenceRevision });
   for (const bad of [{ keyHex: 'ff' }, { nameHex: 'ff' }, { etag: 'W/"weak"' }, { revisionHex: 'ff' },
-    { revisionHex: '61' }, { revisionHex: `${revisionHex}00` }, { sizeBytes: -1 }]) {
+    { revisionHex: '61' }, { revisionHex: `${revisionHex}00` }, { sizeBytes: -1 }, { remainingMs: undefined }]) {
     const { resolveGeneration } = createPublishedReadAccess(primary(async () => ({ ...row, ...bad })), epoch, config);
     expect(await resolveGeneration('a'.repeat(43), 'id')).toBeNull();
   }

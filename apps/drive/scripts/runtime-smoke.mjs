@@ -9,8 +9,9 @@ import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from '../tests/entry-change-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
-import { exerciseReadGrants, readGrantPath, readGrantWorker } from '../tests/read-grant-worker-fixture.mjs';
+import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
+import { exerciseStagingFolderCreate } from '../tests/staging-folder-create-worker-fixture.mjs';
 import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
@@ -110,11 +111,21 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
 import app from ${JSON.stringify(resolve(main))};
-${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
+${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js'))};
+globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
+  ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
+  if (boundary !== null) {
+    const bindings = { ...env,
+      DRIVE_STAGING_READ_GRANTS: request.headers.get('x-test-read-grants') ?? undefined,
+      DRIVE_SIGN_IN_FIXTURE: request.headers.get('x-test-sign-in-fixture') ?? undefined,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') ?? undefined };
+    const target = boundary === 'adapter' ? adapter : app;
+    return withEnv(bindings, () => target.fetch(request, bindings, ctx));
+  }` : ''}
   ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
@@ -129,7 +140,7 @@ export default { fetch(request, env, ctx) {
     if (missing) delete env[missing];
   }
   if (request.headers.has('x-test-invite')) {
-    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
@@ -181,6 +192,7 @@ export default { fetch(request, env, ctx) {
     };
     let cookie = await session('fixture', staging ? 'owner' : 'member');
     if (rawOutsideStaging) {
+      await refusePreviewReadGrants({ worker, origin, cookie });
       const refused = await worker.fetch(`${origin}/api/uploads`, {
         method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: '{"size":4}',
       });
@@ -358,6 +370,9 @@ export default { fetch(request, env, ctx) {
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
       await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
+      await exerciseEntryChange({ worker, DB, origin, session, staging });
+      await exerciseStagingFolderCreate({ worker, DB, origin, session });
+      await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
