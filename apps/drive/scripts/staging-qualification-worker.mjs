@@ -76,6 +76,12 @@ function workerApi(account, name, token, request) {
   const version = (id, signal) => call(`${script}/versions/${id}`, signal);
   return {
     version,
+    async recentUploads(signal) {
+      // Same unfiltered, newest-first list used by Wrangler's secret list --latest-version.
+      const { items } = await call(`${script}/versions`, signal);
+      if (!Array.isArray(items)) throw new Error('Cannot verify staging Worker upload history.');
+      return items.slice(0, 2).map(item => item?.id);
+    },
     async assertUploadTarget(signal) {
       const { previews_enabled: preview } = await call(`${script}/subdomain`, signal);
       const { default_environment: environment } = await call(`services/${name}`, signal);
@@ -157,9 +163,17 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
     DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const tag = `${sha}-${runId}-${attempt}`;
+  // Wrangler inherits from the latest upload, not the deployment serving traffic.
+  if ((await api.recentUploads(signal))[0] !== previous.version) {
+    throw new Error('Staging baseline is not the latest uploaded version; refusing to inherit secrets.');
+  }
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
   const candidate = checkedBindings(await api.assertUploaded(version, tag, signal), config, vars);
+  const [latest, predecessor] = await api.recentUploads(signal);
+  if (latest !== version || predecessor !== previous.version) {
+    throw new Error('The candidate did not immediately follow the staging baseline in upload history.');
+  }
   if (candidate.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata' ||
       candidate.size !== Object.keys(vars).length + secrets.length + 3 ||
       secretNames(candidate).join('\n') !== secrets.join('\n') || !sameDeployment(await api.current(signal), previous)) {

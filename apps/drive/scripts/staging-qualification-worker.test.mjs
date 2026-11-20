@@ -197,7 +197,7 @@ function uploadFixture({ cwd, app, env }) {
   const shared = [{ name: 'DB', type: 'd1', id: db.database_id }, { name: 'ASSETS', type: 'assets' },
     ...secretBindings.map(name => ({ name, type: 'secret_text' }))];
   const setup = { previews_enabled: false, tags: ['staging'], baselineBindings: [...shared, ...varsToBindings(storageVars)],
-    uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings };
+    uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
   const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
     DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
@@ -212,6 +212,7 @@ function uploadFixture({ cwd, app, env }) {
     if (path === `scripts/${name}/subdomain`) return json({ previews_enabled: setup.previews_enabled });
     if (path === `services/${name}`) return json({ default_environment: { script: { tags: setup.tags } } });
     if (path === `scripts/${name}/deployments`) return json({ deployments: [state.current] });
+    if (path === `scripts/${name}/versions`) return json({ items: setup.history.map(id => ({ id })) });
     if (path === `scripts/${name}/versions/${baseline}`) return json({ id: baseline, resources: { bindings: setup.baselineBindings } });
     assert.equal(path, `scripts/${name}/versions/${candidate}`);
     return json({ id: candidate, annotations: { 'workers/tag': setup.readbackTag }, resources: { bindings: setup.adjust(uploaded) } });
@@ -237,6 +238,8 @@ function uploadFixture({ cwd, app, env }) {
     const child = new EventEmitter();
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
     process.nextTick(() => {
+      if (setup.interleavedUpload) setup.history.unshift(foreign);
+      setup.history.unshift(setup.uploadId);
       if (setup.superseded) state.current = deployment(foreign, baseline);
       if (setup.abort) controller.abort();
       child.stderr.emit('data', setup.overflow ? Buffer.alloc(65_537) : Buffer.from('untrusted diagnostic with fake-token'));
@@ -252,8 +255,22 @@ test('uploads only the exact-attempt version with inherited secrets and an uncha
   const { run, calls, scratch } = uploadFixture(fixture(t, true));
   assert.deepEqual(await run(), { version: candidate, previousVersion: baseline, previousDeployment: prior });
   assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['subdomain', 'qerith-drive-staging', 'deployments',
-    baseline, 'upload', candidate, 'deployments']);
+    baseline, 'versions', 'upload', candidate, 'versions', 'deployments']);
   assert.ok(!existsSync(scratch()));
+});
+
+test('rejects a newer undeployed version before inheriting staging secrets', async t => {
+  const { setup, calls, run } = uploadFixture(fixture(t, true));
+  setup.history = [foreign, baseline];
+  await assert.rejects(run(), /baseline is not the latest uploaded version/);
+  assert.ok(!calls.includes('upload'));
+});
+
+test('rejects an intervening upload even when the candidate binding names and deployment match', async t => {
+  const { setup, calls, run } = uploadFixture(fixture(t, true));
+  setup.interleavedUpload = true;
+  await assert.rejects(run(), /candidate did not immediately follow the staging baseline/);
+  assert.ok(calls.includes('upload'));
 });
 
 test('rejects unreviewed storage, unsafe targets and incompatible baselines before upload', async t => {

@@ -135,13 +135,17 @@ its abort signal.
 The unwired Worker adapter requires a known, single-version staging baseline
 with the reviewed storage configuration, the staging D1 binding, and assets.
 It uses pinned Wrangler `versions upload`, with version previews disabled on the
-existing target. It inherits the baseline's secret binding names without writing
-or rotating secrets, reads back the candidate's tag and bindings, and requires
-unchanged deployment identity before activation. Secret-binding readback does
-not attest secret values; live storage checks must use the qualified signer.
-The caller must build from the tested SHA under the shared lock. The adapter
-records the prior deployment before changing traffic and never forces a
-restore. The readiness helper uses a fresh, credential-free
+existing target. Wrangler inherits secrets from the latest upload, which may
+not be serving traffic. The adapter requires the baseline to be the newest
+upload before it runs Wrangler, then requires the candidate and baseline to
+be the two newest versions in order. It does not write or rotate secrets. It
+reads back the candidate's tag and bindings and requires unchanged deployment
+identity before activation. This check does not attest secret values; live
+storage checks must use the qualified signer. An older baseline restored after
+a prior attempt is not eligible for another upload while a newer version
+remains. The caller must build from the tested SHA under the shared lock.
+The adapter records the prior deployment before changing traffic and never
+forces a restore. The readiness helper uses a fresh, credential-free
 HEAD challenge on the fixed staging origin. The responding Worker proves its
 version-scoped `DRIVE_QUALIFICATION_SHA` and native `DRIVE_QUALIFICATION_VERSION`
 metadata ID when its D1, assets and reviewed storage bindings are ready. It
