@@ -321,12 +321,18 @@ it('rechecks an invitee’s live session before storage dispatch and before retu
   expect(transport).not.toHaveBeenCalled();
 
   const fresh = (await sessions.issue(`owner-${label}`)).token;
-  transport.mockImplementationOnce(async request => {
-    expect(request.headers.get('if-match')).toBe(etag);
-    await sessions.revoke(fresh);
+  let revokeDuringRead = false;
+  transport.mockImplementation(async () => {
+    if (revokeDuringRead) await sessions.revoke(fresh);
     return new Response('abcdefg', { headers: { etag, 'content-length': '7' } });
   });
+  const allowed = await get(storage, fresh);
+  expect([allowed.status, await allowed.text()]).toEqual([200, 'abcdefg']);
+
+  revokeDuringRead = true;
   const denied = await get(storage, fresh);
   expect([denied.status, denied.headers.get('content-disposition'), await denied.text()]).toEqual([404, null, '']);
-  expect(transport).toHaveBeenCalledOnce();
+  expect(await sessions.lookup(fresh)).toBeNull();
+  expect(transport).toHaveBeenCalledTimes(2);
+  expect(transport.mock.calls.map(([request]) => request.headers.get('if-match'))).toEqual([etag, etag]);
 });

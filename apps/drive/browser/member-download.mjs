@@ -5,12 +5,13 @@ import { tsImport } from 'tsx/esm/api';
 
 const { uploadToRoot } = await tsImport('../src/lib/root-upload.ts', import.meta.url);
 const fixtureOrigin = 'https://drive.example.test';
-const bytes = Buffer.from([0, 255, 12, 44, 128, 4]);
+const bytes = Buffer.from([11, 129, 0, 255, 33, 91]);
 const name = 'Member-only résumé.txt';
 const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' };
 
 export async function proveMemberDownload(page, { origin, defaultWorker, DB, id, cookie, check,
   ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState }) {
+  assert.notDeepEqual(bytes.subarray(1, 4), ownerFile.buffer.subarray(1, 4), 'the tested range distinguishes member and owner bytes');
   // Only fixture setup uses a member upload. The staged member may not upload.
   const setupStatuses = [];
   const published = await uploadToRoot(new File([bytes], name), () => {}, async (path, init) => {
