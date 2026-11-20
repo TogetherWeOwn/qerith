@@ -61,7 +61,7 @@ function expiryFixture(t) {
       assert.equal(init.headers.authorization, 'Bearer fixture-api-token');
       assert.equal(init.headers['cf-r2-jurisdiction'], 'default');
       assert.equal(init.signal.aborted, false);
-      return respond();
+      return respond(init.signal);
     });
   return { verify, urls, cwd };
 }
@@ -108,6 +108,32 @@ test('native R2 expiry rejects provider errors, excessive bodies and cancellatio
   assert.equal(controller.signal.aborted, true);
 });
 
+test('native R2 expiry rejects cancellation while reading a stalled response body', { timeout: 5000 }, async t => {
+  const { verify } = expiryFixture(t);
+  const controller = new AbortController();
+  const stalled = Promise.withResolvers();
+  let sentChunk = false;
+  const respond = active => new Response(new ReadableStream({
+    start(body) {
+      // Like fetch, the transport errors a pending body read on request abort.
+      active.addEventListener('abort', () => body.error(active.reason), { once: true });
+    },
+    pull(body) {
+      if (sentChunk) {
+        stalled.resolve();
+      } else {
+        sentChunk = true;
+        body.enqueue(new TextEncoder().encode('{"success":true,'));
+      }
+    },
+  }, { highWaterMark: 0 }));
+  const rejected = assert.rejects(verify({ respond, signal: controller.signal }),
+    { message: 'Qualification R2 native expiry is unverified.' });
+  await stalled.promise;
+  controller.abort(new Error('private diagnostic'));
+  await rejected;
+});
+
 function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket, postPendingPrefix = prefix,
   initialUploadsXml = '', finalUploadsXml = '', finalObjectsXml = '', listedKey = key, namespaced = false } = {}) {
   const namespace = namespaced ? ' xmlns="http://s3.amazonaws.com/doc/2006-03-01/"' : '';
@@ -143,13 +169,19 @@ function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket,
   return { send, trace };
 }
 
+test('the protected R2 adapter rejects unverified bindings before sending requests', async t => {
+  const { cwd, env } = job(t);
+  const { send, trace } = signedFixture();
+  await assert.rejects(createQualificationR2Cleanup({ ...env, QERITH_S3_BUCKET: 'other-bucket' }, cwd, { send }), /cleanup is unverified/);
+  await assert.rejects(createQualificationR2Cleanup({ ...env, GITHUB_JOB: 'preview' }, cwd, { send }), /protected staging/);
+  const nonNativeProvider = job(t, 'https://storage.example.test');
+  await assert.rejects(createQualificationR2Cleanup(nonNativeProvider.env, nonNativeProvider.cwd, { send }), /cleanup is unverified/);
+  assert.deepEqual(trace, []);
+});
+
 test('the protected R2 adapter signs and scopes every request with a reviewed binding', async t => {
   const { cwd, env, context } = job(t);
   const { send, trace } = signedFixture();
-  await assert.rejects(createQualificationR2Cleanup({ ...env, QERITH_S3_BUCKET: 'other-bucket' }, cwd, { send }), /does not match/);
-  await assert.rejects(createQualificationR2Cleanup({ ...env, GITHUB_JOB: 'preview' }, cwd, { send }), /protected staging/);
-  const unreviewedProvider = job(t, 'https://storage.example.test');
-  await assert.rejects(createQualificationR2Cleanup(unreviewedProvider.env, unreviewedProvider.cwd, { send }), /cleanup is unverified/);
   const cleanup = await createQualificationR2Cleanup(env, cwd, { send });
   assert.throws(() => cleanup({ ...context, sha: 'f'.repeat(40) }), /cleanup is unverified/);
   assert.deepEqual(trace, []);
