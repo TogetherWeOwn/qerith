@@ -117,8 +117,18 @@ ancestor of fetched `origin/main`. A dispatch of today's head with yesterday's
 SHA as input cannot qualify yesterday's head. Only after source validation does
 the protected `staging` job enter the shared `drive-staging-lifecycle` queue.
 That job intentionally fails: it has no live runner, secrets or upload step. Do not
-dispatch this increment. Required CI tests the policy with local Git history
-and in-memory evidence only; neither is live qualification.
+dispatch this increment. Required CI uses local Git history, synthetic evidence
+and a fake Wrangler; none is live qualification.
+
+The qualification-only D1 adapter is not called by either staging workflow.
+It checks migration files against the tested commit, records a Time Travel
+bookmark before any ledger initialization or apply, then reads the native
+`d1_migrations` rows before and after apply. It requires the full committed set
+without changes to existing ledger entries. The native ledger records names,
+not the historical applied bytes. A failed or cancelled apply does not prove
+remote rollback; use the recorded bookmark to recover before retrying an
+uncertain apply. The future caller must validate storage and recovery
+preconditions before invoking the adapter.
 
 Remaining source slices, in dependency order:
 
