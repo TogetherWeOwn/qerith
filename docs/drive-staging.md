@@ -204,6 +204,9 @@ The generated Worker rejects new requests at or after the deadline before app,
 asset or readiness routing. This bounds candidate request admission without a
 runner, but does not stop in-flight work, revoke issued storage URLs, restore the
 previous deployment, or clean up D1. Neither existing staging workflow uses it.
+Before wiring the protected caller, reconcile its pre-activation budget with
+this window: D1 command timeouts alone can consume the five-minute margin,
+before accounting for upload, readback and recovery recording.
 
 Remaining source slices, in dependency order:
 
