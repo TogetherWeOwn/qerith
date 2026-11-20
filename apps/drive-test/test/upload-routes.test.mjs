@@ -17,7 +17,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
-  const other = `other-${intent}`, calls = [], parts = [];
+  const other = `other-${intent}`, calls = [], parts = [], headPins = [];
   await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active'), (?, 'member', 'active')",
     principal, role, other).run();
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
@@ -41,7 +41,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
       expect(request.headers.get('if-none-match')).toBe('*');
       return response(key);
     }
-    expect(request.headers.get('if-match')).toBe(etag);
+    headPins.push(request.headers.get('if-match'));
     await beforeHead?.(token);
     return new Response(null, { headers: { etag, 'content-length': String(size) } });
   } });
@@ -61,7 +61,7 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
       : handle({ event: { request, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
-  return { send, generation, calls, foreign, key, principal, other };
+  return { send, generation, calls, foreign, key, principal, other, headPins };
 }
 
 async function occupy(owner, name, parentId = null) {
@@ -79,7 +79,7 @@ async function expectNameTaken(result) {
 }
 
 it('publishes a verified sparse upload without duplicate part or completion sends', async () => {
-  const { send, generation, calls, foreign } = await fixture({ size: minimum + 7 });
+  const { send, generation, calls, foreign, headPins } = await fixture({ size: minimum + 7 });
   expect((await send()).status).toBe(409); // An empty seal must roll back.
   const part = { bytes: minimum };
   expect((await Promise.all([send(1, part), send(1, part)])).map(({ status }) => status).sort()).toEqual([204, 404]);
@@ -92,6 +92,7 @@ it('publishes a verified sparse upload without duplicate part or completion send
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   for (const options of [{ auth: foreign }, { name: 'different' }]) expect((await send(undefined, options)).status).toBe(404);
   expect(calls).toEqual(['PUT', 'PUT', 'POST', 'HEAD']);
+  expect(headPins).toEqual([etag]);
 });
 
 it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation (%s)', async (change) => {
@@ -130,7 +131,8 @@ it.each(['owner', 'claim', 'send'])('checks the staging owner during allocation 
   } finally { await demote(); }
 });
 
-it.each(['part claim', 'parts verification', 'completion claim', 'publication send', 'generation HEAD'])('keeps staging upload owner-only after %s', async (change) => {
+it.each(['part claim', 'parts verification', 'completion claim', 'publication send', 'generation HEAD']
+  .flatMap((change) => [undefined, '1'].map((inviteFlag) => [change, inviteFlag])))('keeps staging upload owner-only after %s (flag %s)', async (change, inviteFlag) => {
   let principal;
   const demote = () => sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
   const claim = {
@@ -138,7 +140,7 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
     'completion claim': 'drive_upload_completion_operations JOIN drive_upload_completion_dispatches USING (operation_id)',
     'publication send': 'drive_upload_completion_operations JOIN drive_upload_completion_receipts USING (operation_id)'
   }[change];
-  const upload = await fixture({ staging: true, async isQualified(id, intent) {
+  const upload = await fixture({ staging: true, inviteFlag, async isQualified(id, intent) {
     if (claim && await sql(`SELECT 1 FROM ${claim} WHERE intent_id = ?`, intent).first()) await demote();
     return qualified(id);
   }, async verify(_upload, parts) {
@@ -160,6 +162,7 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
     const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
       'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
     expect(upload.calls).toEqual(expected[change]);
+    expect(upload.headPins).toEqual(change === 'generation HEAD' ? [etag] : []);
     if (partDenied) expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
       USING (operation_id) WHERE p.owner_id = ?`, principal).first()).toEqual({ kind: 'uncertain' });
     if (change === 'parts verification') expect(await sql(`SELECT 1 FROM drive_upload_completion_operations o
@@ -183,7 +186,7 @@ it.each([undefined, '1'])('keeps owner publication unchanged in staging (%s)', a
 });
 
 it.each([undefined, 'true', '1'])('prepares only the live member’s own intent with the exact invite flag (%s)', async (inviteFlag) => {
-  const { send, calls, foreign, generation, principal } = await fixture({ staging: true, inviteFlag, role: 'member' });
+  const { send, calls, foreign, generation, principal, headPins } = await fixture({ staging: true, inviteFlag, role: 'member' });
   const runtime = { runtime: true };
   for (const number of [1, undefined]) expect((await send(number)).status).toBe(403);
   for (const number of [1, undefined]) expect((await send(number, { ...runtime, auth: foreign })).status).toBe(404);
@@ -194,11 +197,13 @@ it.each([undefined, 'true', '1'])('prepares only the live member’s own intent 
   } else {
     expect((await send(1, runtime)).status).toBe(204);
     expect((await send(undefined, runtime)).status).toBe(409); // Verified receipt, but no member publication.
-    expect(await sql(`SELECT r.etag FROM drive_upload_completion_receipts r
-      JOIN drive_upload_completion_operations o USING (operation_id) WHERE o.owner_id = ?`, principal).first()).toEqual({ etag });
+    const receipt = await sql(`SELECT r.etag FROM drive_upload_completion_receipts r
+      JOIN drive_upload_completion_operations o USING (operation_id) WHERE o.owner_id = ?`, principal).first();
+    expect(receipt).toEqual({ etag });
     expect((await send(undefined, { ...runtime, auth: foreign })).status).toBe(404);
     expect(await generation()).toBeNull();
     expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+    expect(headPins).toEqual([receipt.etag]);
   }
 });
 

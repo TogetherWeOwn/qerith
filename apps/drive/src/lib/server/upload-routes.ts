@@ -1,4 +1,4 @@
-import { livePrincipalCheck, tokenHash } from './identity/sessions';
+import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
   occupiedUploadName } from './metadata/upload-completion-receipts';
@@ -56,10 +56,6 @@ async function destination(request: Request): Promise<{ name: string; parentId: 
 }
 
 export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThis.fetch, timeoutMs: 5000 }) {
-  const mode = admitsStagingInvite(env) ? 'active' : env.DRIVE_ORIGIN === stagingOrigin ? 'owner' : undefined;
-  const ownerOnly = mode === 'owner';
-  const bound = `${storageBound} ${requireActiveOwner(ownerOnly, 'i.owner_id')}`;
-  const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
   async function authorize(request: Request, session: Session | undefined, intentId: string) {
     const origin = authOrigin(env.DRIVE_ORIGIN);
     const { DB: db, DRIVE_UPLOAD_EPOCH: epoch, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_VERIFIER: verifier } = env;
@@ -68,21 +64,26 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     if (!session) return reply(401);
     if (!config || !epoch || !verifier) return reply(503);
     if (!uploadIdPattern.test(intentId)) return reply(400);
+    const { token, principal: { id: ownerId, role } } = session;
+    // Keep owner-admitted requests owner-only even when the internal member path is prepared.
+    const mode: LivePrincipalMode | undefined = role === 'member' && admitsStagingInvite(env) ? 'active'
+      : env.DRIVE_ORIGIN === stagingOrigin ? 'owner' : undefined;
+    const bound = `${storageBound} ${requireActiveOwner(mode === 'owner', 'i.owner_id')}`;
+    const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const isQualified = (id: string) => verifier.isQualified(id);
     if (await isQualified(storageConfigId) !== true) return reply(503);
     const timeoutMs = uploadCompletionBudget(verifier, storageConfigId);
     if (timeoutMs === null) return reply(503);
-    const { token, principal: { id: ownerId } } = session;
     const bindings = [intentId, ownerId, await tokenHash(token), settings.endpoint, settings.bucket, epoch];
-    return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs };
+    return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs, mode, bound, allocated };
   }
   return {
     async part(request: Request, session: Session | undefined, intentId: string, number: string): Promise<Response> {
       try {
         const access = await authorize(request, session, intentId);
         if (access instanceof Response) return access;
-        const { db, bindings, settings, epoch, ownerId, token, isQualified, storageConfigId } = access;
+        const { db, bindings, settings, epoch, ownerId, token, isQualified, storageConfigId, mode, allocated } = access;
         const ledger = new UploadPartOperationEvidence(db);
         const checkPrincipal = livePrincipalCheck(db, mode, token, ownerId);
         return await uploadPart(request, intentId, number, {
@@ -129,7 +130,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       if (access instanceof Response) return access;
       const target = await destination(request).catch(() => null);
       if (!target) return reply(400);
-      const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs } = access;
+      const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs, mode, bound, allocated } = access;
       const { parentId, name } = target, operationId = crypto.randomUUID();
       const destinationBindings = [parentId, parentId, parentId, name];
       let fallback = 409, checkName = false;
@@ -147,7 +148,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         const row = await db.withSession('first-primary').prepare(`${candidates}
           SELECT operation_id, claim_version, recorded FROM c
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
-            ${requireActiveOwner(ownerOnly, 'c.owner_id')} AND ${availableUploadDestination('c.owner_id')}`)
+            ${requireActiveOwner(mode === 'owner', 'c.owner_id')} AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
         if (!row) {
           fallback = 404;
