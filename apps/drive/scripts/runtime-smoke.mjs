@@ -82,6 +82,16 @@ function fixtureStorage() {
   };
 }
 
+const rootDataPath = '/__data.json?x-sveltekit-invalidated=01';
+
+async function assertRootUploadData(response, mode, configured) {
+  assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
+  const { nodes } = JSON.parse((await response.text()).split('\n', 1)[0]);
+  // SvelteKit serializes the page as a flattened devalue table; slot zero is the root object.
+  const { data } = nodes.at(-1);
+  assert.deepEqual([data[data[0].uploadMode], data[data[0].uploadConfigured]], [mode, configured]);
+}
+
 async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false } = {}) {
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
@@ -92,13 +102,19 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   const configPath = resolve(join(fixture.path, 'wrangler.json'));
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
-  await writeFile(entry, `import app from ${JSON.stringify(resolve(main))};
+  await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
+import app from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? '' : deletionWorker}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
-  if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };` : ''}
+  if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
+  if (request.headers.has('x-test-invite')) {
+    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+    if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
+    return withEnv(bindings, () => app.fetch(request, bindings, ctx));
+  }` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -254,6 +270,12 @@ export default { fetch(request, env, ctx) {
       const refresh = await get(`/__data.json?download=${notice}&x-sveltekit-trailing-slash=1&x-sveltekit-invalidated=01`, document);
       assert.deepEqual([refresh.status, refresh.headers.get('cache-control'), refresh.headers.get('set-cookie')],
         [200, 'private, no-store', null], 'root data cannot consume a download notice');
+      await assertRootUploadData(refresh, 'preview', true);
+      const memberHeaders = { cookie: member, 'x-test-invite': '1' };
+      await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart', false);
+      const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
+      assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
+        [503, 'private, no-store', ''], 'staging rejects mismatched storage qualification before serializing page data');
       const noticePage = await get(`/?download=${notice}`, document);
       assert.match(noticePage.headers.get('set-cookie'), /Max-Age=0/);
       assert.match(await noticePage.text(), /didn’t download/);
@@ -340,6 +362,8 @@ export default { fetch(request, env, ctx) {
       assert.match(html, /Your drive is empty\./);
       await exerciseRootPages(DB, worker, origin, cookie, fileId);
       const owner = await session('owner-fixture', 'owner');
+      const data = await worker.fetch(`${origin}${rootDataPath}`, { headers: { cookie: owner }, redirect: 'manual' });
+      await assertRootUploadData(data, 'disabled', false);
       await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       await exerciseListingPages(DB, worker, origin, cookie);
