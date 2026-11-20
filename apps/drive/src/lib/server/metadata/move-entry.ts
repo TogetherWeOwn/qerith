@@ -39,9 +39,13 @@ const candidate = `WITH RECURSIVE live AS (
 // triggers remain authoritative; unexpected database failures are not conflicts.
 export async function moveSessionEntry(db: Database, token: string, id: string, change: EntryChange)
   : Promise<UpdatedEntry | 401 | 404 | 409> {
-  if (change.kind === 'rename') validateName(change.name);
-  else if (change.name !== undefined) validateName(change.name);
-  const args = [await tokenHash(token), id, change.kind, change.kind === 'move' ? change.parentId : null, change.name ?? null] as const;
+  const { kind, name } = change;
+  if (kind !== 'rename' && kind !== 'move') throw new TypeError('Invalid entry change');
+  const parentId = kind === 'move' ? change.parentId : null;
+  if (parentId !== null && typeof parentId !== 'string') throw new TypeError('Invalid parent ID');
+  if (kind === 'rename') validateName(name);
+  else if (name !== undefined) validateName(name);
+  const args = [await tokenHash(token), id, kind, parentId, name ?? null] as const;
   const primary = db.withSession('first-primary');
   // Derive the target in the write itself. Classify a refused write afterward,
   // inside the same D1 transaction, without relying on a prior session lookup.

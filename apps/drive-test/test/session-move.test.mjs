@@ -69,6 +69,10 @@ it('resolves rename parent and move name at the write rather than from an earlie
   expect(await moveSessionEntry(moved, token, 'file', rename('New.txt'))).toMatchObject({ parentId: 'nested', name: 'New.txt' });
   const renamed = beforeWrite(() => change(token, 'file', rename('Latest.txt')));
   expect(await moveSessionEntry(renamed, token, 'file', move(null))).toMatchObject({ parentId: null, name: 'Latest.txt' });
+  const input = move('nested', 'Move.txt');
+  const pending = change(token, 'file', input);
+  Object.assign(input, move(null, 'Other.txt'));
+  expect(await pending).toMatchObject({ parentId: 'nested', name: 'Move.txt' });
 });
 
 it('returns 409 only for actionable sibling conflicts and leaves denied changes untouched', async () => {
@@ -84,6 +88,8 @@ it('returns 409 only for actionable sibling conflicts and leaves denied changes 
   for (const name of ['', ' . ', 'a/b', 'a\0b', '\ud800', 'é'.repeat(128)]) {
     await expect(change(token, 'file', rename(name))).rejects.toThrow(TypeError);
   }
+  await expect(change(token, 'file', { kind: 'renmae', name: 'Valid' })).rejects.toThrow(TypeError);
+  await expect(change(token, 'file', { kind: 'move' })).rejects.toThrow(TypeError);
   expect(await snapshot()).toEqual(before);
 });
 
@@ -124,6 +130,6 @@ it('rolls back a move when a schema guard aborts after decrementing the source c
   const { token } = await sessions.issue('alice');
   await env.DB.prepare("DELETE FROM drive_folder_counts WHERE folder_id = 'nested'").run();
   const before = await snapshot();
-  await expect(change(token, 'file', move('nested'))).rejects.toThrow();
+  await expect(change(token, 'file', move('nested'))).rejects.toThrow('missing folder count');
   expect(await snapshot()).toEqual(before);
 });
