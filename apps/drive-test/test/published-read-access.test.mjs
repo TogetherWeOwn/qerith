@@ -39,6 +39,7 @@ it('resolves the current listed name and exact generation for a live owner or gr
   expect(await resolveGeneration(reader, id)).toBeNull();
   expect(await grants.create(token, id, 'reader')).toBe(true);
   expect(await resolveGeneration(reader, id)).toEqual(reference);
+  expect(await createPublishedReadAccess(env.DB, epoch, config).resolveGeneration(reader, id)).toEqual(reference);
   expect(await createPublishedReadAccess(env.DB, 'wrong-epoch', config, 'grant-aware').resolveGeneration(reader, id)).toBeNull();
   await sql('UPDATE drive_entries SET size_bytes = 8 WHERE id = ?', id).run();
   expect(await resolveGeneration(reader, id)).toBeNull();
@@ -119,20 +120,31 @@ it.each(['own-file', 'grant-aware', false])('read mode %s denies a primary resul
     reader = (await sessions.issue(principal)).token;
     expect(await new ReadGrants(env.DB).create(token, id, principal)).toBe(true);
   }
-  let elapsed = 0, unusedMs = 1;
+  const hash = await tokenHash(reader);
+  let elapsed = 0, unusedMs = 1, row;
   const now = vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
   const db = { withSession: (constraint) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
-    const row = await env.DB.withSession(constraint).prepare(query).bind(...args).first();
-    elapsed = Math.max(0, (row?.remainingMs ?? 0) - unusedMs);
+    // SQLite's clock is stable within a statement. Derive elapsed time from
+    // the stored expiry and that clock, not from the resolver's projection.
+    row = await env.DB.withSession(constraint).prepare(`SELECT result.*,
+      (SELECT expires_at FROM drive_sessions WHERE token_hash = ?) AS expiresAt,
+      CAST(unixepoch('subsec') * 1000 AS INTEGER) AS statementMs FROM (${query}) result`)
+      .bind(hash, ...args).first();
+    if (row) elapsed = row.expiresAt - row.statementMs - unusedMs;
     return row;
   } }) }) }) };
   try {
     const { resolveGeneration } = createPublishedReadAccess(db, epoch, config, mode);
     expect(await resolveGeneration(reader, id)).not.toBeNull();
     expect(elapsed).toBeGreaterThan(0);
+    expect(row?.remainingMs).toBe(elapsed + 1);
+
+    // A second, shorter lifetime prevents a constant budget matching both reads.
+    await sql("UPDATE drive_sessions SET expires_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) + 60000 WHERE token_hash = ?", hash).run();
     elapsed = unusedMs = 0;
     expect(await resolveGeneration(reader, id)).toBeNull();
     expect(elapsed).toBeGreaterThan(0);
+    expect(row?.remainingMs).toBe(elapsed);
   } finally { now.mockRestore(); }
 });
 
