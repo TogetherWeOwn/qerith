@@ -47,13 +47,13 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   } });
   const handle = privateRequests(bindings);
   function send(number, { auth = token, source = requestOrigin, host = requestOrigin, name = 'file', parentId = null,
-    intentId = intent, bytes = 7, runtime = false } = {}) {
+    intentId = intent, bytes = 7, runtime = false, stream, signal } = {}) {
     const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
     if (auth) headers.cookie = `__Host-drive-session=${auth}`;
     if (source) headers.origin = source;
     const request = new Request(`${host}/api/uploads/${intentId}/${number ? `parts/${number}` : 'complete'}`,
-      { method: number ? 'PUT' : 'POST', body, headers });
+      { method: number ? 'PUT' : 'POST', body: stream ?? body, headers, signal });
     const execute = (session) => number ? routes.part(request, session, intentId, String(number))
       : routes.complete(request, session, intentId);
     // Test the closed execution path separately from the unchanged public hook.
@@ -307,6 +307,24 @@ it('applies exact origin, session, owner and next-request revocation to both mut
   await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", principal).run();
   for (const number of [1, undefined]) expect((await send(number)).status).toBe(401);
   expect(calls).toEqual([]);
+});
+
+it('cancels a pending owner completion body before claiming or sending', async () => {
+  const { send, calls, principal } = await fixture({ staging: true });
+  expect((await send(1)).status).toBe(204);
+  const abort = new AbortController(), reading = Promise.withResolvers();
+  let cancels = 0;
+  const stream = new ReadableStream({
+    pull() { reading.resolve(); },
+    cancel() { cancels++; }
+  }, { highWaterMark: 0 });
+  const result = send(undefined, { stream, signal: abort.signal });
+  await reading.promise;
+  abort.abort();
+  expect((await result).status).toBe(400);
+  expect(cancels).toBe(1);
+  expect(await sql('SELECT operation_id FROM drive_upload_completion_operations WHERE owner_id = ?', principal).first()).toBeNull();
+  expect(calls).toEqual(['PUT']);
 });
 
 it.each([
