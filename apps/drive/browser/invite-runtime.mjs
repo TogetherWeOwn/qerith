@@ -91,9 +91,20 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     await page.evaluate(token => { location.hash = token; }, first.token);
     await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
     await status.filter({ hasText: 'Drive unavailable' }).waitFor();
-    const signIn = () => page.getByRole('button', { name: 'Sign in with a passkey' }).click();
-    await page.getByRole('link', { name: 'Sign in', exact: true }).click();
-    await signIn();
+    const signIn = async expectedStatus => {
+      // The server renders the button before its client-side handler is installed.
+      await page.waitForLoadState('networkidle');
+      const [verification] = await Promise.all([
+        page.waitForResponse(response => new URL(response.url()).pathname === '/api/sign-in/verify'),
+        page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+      ]);
+      assert.equal(verification.status(), expectedStatus);
+    };
+    await Promise.all([
+      page.waitForURL(`${origin}/sign-in`),
+      page.getByRole('link', { name: 'Sign in', exact: true }).click(),
+    ]);
+    await signIn(204);
     await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
@@ -110,7 +121,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(await field.inputValue(), 'Rook');
     assert.equal(await page.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
     await page.goto(`${origin}/sign-in`);
-    await signIn();
+    await signIn(403);
     await page.getByRole('heading', { name: 'Your access is turned off' }).waitFor();
     console.log('Generated Worker + Chromium + D1: invite redemption, replay denial, member sign-in, empty My Drive and revocation passed');
   } finally {
