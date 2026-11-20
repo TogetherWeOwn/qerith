@@ -34,13 +34,14 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS drive_webauthn_challenges;
     DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_owner_registration;
     DROP TABLE IF EXISTS drive_credentials;
     DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
     DROP VIEW IF EXISTS drive_active_members;
     DROP TABLE IF EXISTS drive_principals;`);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
-  await env.DB.exec("INSERT INTO drive_principals VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
+  await env.DB.exec("INSERT INTO drive_principals (id, role, status) VALUES ('alice', 'member', 'active'), ('bob', 'owner', 'active'), ('revoked', 'member', 'revoked')");
 });
 
 it('upgrades seeded entries exactly and enforces live owner membership', async () => {

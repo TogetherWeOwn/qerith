@@ -1,6 +1,7 @@
 <script lang="ts">
   import './tokens.css';
 
+  // Owned folders only; shared folders have a different empty state and no upload action.
   export let root: boolean;
   export let onUpload: (() => void) | undefined = undefined;
 </script>

@@ -10,7 +10,7 @@ beforeEach(async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec(`DELETE FROM drive_bound_ceremonies; DELETE FROM drive_recovery_tokens;
     DELETE FROM drive_sessions; DELETE FROM drive_principals;
-    INSERT INTO drive_principals VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')`);
+    INSERT INTO drive_principals (id, role, status) VALUES ('owner', 'owner', 'active'), ('member', 'member', 'active')`);
   owner = (await new Sessions(env.DB).issue('owner')).token;
   recovery = new RecoveryTokens(env.DB);
   challenges = new RecoveryChallenges(env.DB);
@@ -36,7 +36,7 @@ it('releases cancelled slots without deleting unrelated or active ceremonies', a
   const cancelledChallenge = await challenges.issue(cancelled.token);
   const activeChallenge = await challenges.issue(active.token);
   await env.DB.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1022)
-    INSERT INTO drive_bound_ceremonies SELECT printf('other%d', x), 'registration', printf('other%d', x), 9999999999999 FROM n`).run();
+    INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at) SELECT printf('other%d', x), 'registration', printf('other%d', x), 9999999999999 FROM n`).run();
   const next = await recovery.issue(owner, 'member');
   await expect(challenges.issue(next.token)).rejects.toThrow('Recovery unavailable');
   await recovery.cancel(owner, cancelled.id);
@@ -51,7 +51,7 @@ it('rolls back challenge removal when token cancellation fails in a batch', asyn
   const challenge = await challenges.issue(issued.token);
   await expect(env.DB.batch([
     env.DB.prepare('UPDATE drive_recovery_tokens SET cancelled_at = 1 WHERE id = ?').bind(issued.id),
-    env.DB.prepare("INSERT INTO drive_principals VALUES ('member', 'member', 'active')"),
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('member', 'member', 'active')"),
   ])).rejects.toThrow();
   expect((await env.DB.prepare('SELECT cancelled_at FROM drive_recovery_tokens WHERE id = ?').bind(issued.id).first()).cancelled_at).toBeNull();
   expect(await env.DB.prepare('SELECT challenge FROM drive_bound_ceremonies WHERE challenge = ?').bind(challenge).first()).not.toBeNull();

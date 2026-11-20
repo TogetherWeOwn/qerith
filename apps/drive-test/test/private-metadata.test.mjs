@@ -26,6 +26,7 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS drive_owner_usage;
     DROP TABLE IF EXISTS drive_webauthn_challenges;
     DROP TABLE IF EXISTS drive_bound_ceremonies;
+    DROP TABLE IF EXISTS drive_owner_registration;
     DROP TABLE IF EXISTS drive_credentials;
     DROP TABLE IF EXISTS drive_invitations;
     DROP TABLE IF EXISTS d1_migrations;
@@ -50,14 +51,14 @@ it('initializes and reapplies the available actual migration directory', async (
 
 it('upgrades seeded actual identity and uses live membership for private metadata', async () => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS.filter(({ name }) => name === '0001_identity.sql'));
-  await env.DB.prepare('INSERT INTO drive_principals VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
+  await env.DB.prepare('INSERT INTO drive_principals (id, role, status) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)')
     .bind('alice', 'member', 'active', 'bob', 'owner', 'active', 'revoked', 'member', 'revoked').run();
-  const principals = (await env.DB.prepare('SELECT * FROM drive_principals ORDER BY id').all()).results;
+  const principals = (await env.DB.prepare('SELECT id, role, status FROM drive_principals ORDER BY id').all()).results;
   const beforeLedger = (await env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all()).results;
   expect(beforeLedger).toEqual([{ name: '0001_identity.sql' }]);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  expect((await env.DB.prepare('SELECT * FROM drive_principals ORDER BY id').all()).results).toEqual(principals);
+  expect((await env.DB.prepare('SELECT id, role, status FROM drive_principals ORDER BY id').all()).results).toEqual(principals);
   expect((await env.DB.prepare('SELECT name FROM d1_migrations ORDER BY id').all()).results.map(({ name }) => name))
     .toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
   expect(await findActivePrincipal(env.DB, 'alice')).toEqual({ id: 'alice', role: 'member' });

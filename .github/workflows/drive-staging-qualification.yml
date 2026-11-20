@@ -1,0 +1,44 @@
+name: Drive staging qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      tested_sha:
+        description: Lowercase 40-hex SHA of the dispatch head on main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Validate before entering the shared queue: even non-preempting jobs can replace pending jobs.
+  source:
+    if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact dispatch source before staging approval
+        env:
+          TESTED_SHA: ${{ inputs.tested_sha }}
+        run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification.mjs
+
+  qualification:
+    needs: source
+    if: success() && !cancelled() && needs.source.result == 'success' && github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: drive-staging-lifecycle
+      cancel-in-progress: false
+    environment: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed until the live runner and cleanup are reviewed
+        run: |
+          printf '%s\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
+          exit 1

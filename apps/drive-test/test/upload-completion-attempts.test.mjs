@@ -1,8 +1,8 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeAll, expect, it, vi } from 'vitest';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
-import { evidence, intentRow, migrations, parts, producer, seed, sql } from './fixtures/upload-completion.mjs';
+import { evidence, intentRow, migrations, parts, preGenerationMigrations, producer, seed, sql } from './fixtures/upload-completion.mjs';
 
 const intents = new UploadIntents(env.DB);
 const sized = (id) => seed(id, { declaredSize: 7, intent: `intent-${id}` });
@@ -17,10 +17,17 @@ async function dispatch(id) {
     id, row.endpoint, row.bucket, row.intent_version + 1, 'a'.repeat(64), row.session_hash).run();
 }
 
-beforeEach(() => applyD1Migrations(env.DB, migrations));
+let resetIntent;
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, preGenerationMigrations);
+  ({ intent: resetIntent } = await sized('dispatch-first'));
+  await dispatch('dispatch-first');
+  await sql("UPDATE drive_upload_intents SET state = 'allocated', version = 4 WHERE id = ?", resetIntent).run();
+  await applyD1Migrations(env.DB, migrations);
+});
 
 it('keeps cleanup and legacy completion fenced after an attempt and journal reset', async () => {
-  const { intent, token } = await sized('attempt-first'), owner = 'owner-attempt-first';
+  const { intent, token, identity } = await sized('attempt-first'), owner = 'owner-attempt-first';
   const row = await intentRow(intent);
   expect(row).toMatchObject({ state: 'allocated', version: 2, declared_size: 7 });
   await expect(attempt(row, 1)).rejects.toThrow('upload completion claim is stale');
@@ -45,7 +52,7 @@ it('keeps cleanup and legacy completion fenced after an attempt and journal rese
   await sql('UPDATE drive_upload_intents SET version = 2 WHERE id = ?', intent).run();
   await expect(dispatch('attempt-first')).rejects.toThrow('upload completion already attempted');
   const fetch = vi.fn(), verify = vi.fn(async () => parts);
-  await expect(producer(fetch, verify).complete(token, 'attempt-first')).resolves.toBe('not-admitted');
+  await expect(producer(fetch, verify).complete(token, identity)).resolves.toBe('not-admitted');
   expect(verify).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
   expect(await evidence('dispatches', 'attempt-first')).toBeNull();
@@ -76,9 +83,7 @@ it('rolls back the attempt when cleanup claimed first', async () => {
 });
 
 it('rejects an attempt when a legacy dispatch won before the journal reset', async () => {
-  const { intent } = await sized('dispatch-first');
-  await dispatch('dispatch-first');
-  expect(await intents.recordNotDispatched('owner-dispatch-first', intent, 3, 'completion')).toBe(true);
+  const intent = resetIntent;
   const row = await intentRow(intent);
   expect(row).toMatchObject({ state: 'allocated', version: 4 });
   await expect(attempt(row)).rejects.toThrow('upload completion already attempted');

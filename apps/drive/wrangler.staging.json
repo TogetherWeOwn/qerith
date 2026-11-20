@@ -1,0 +1,22 @@
+{
+  "name": "qerith-drive-staging",
+  "main": ".svelte-kit/cloudflare/_worker.js",
+  "compatibility_date": "2026-07-30",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "assets": {
+    "directory": ".svelte-kit/cloudflare",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "vars": {
+    "DRIVE_ORIGIN": "https://qerith-drive-staging.5150.workers.dev"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "qerith-drive-staging",
+      "database_id": "87ac8041-ad2d-4650-b0d7-05bb78846f60",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

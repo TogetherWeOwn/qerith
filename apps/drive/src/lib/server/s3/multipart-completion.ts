@@ -1,6 +1,6 @@
-const MIN_PART_BYTES = 5 * 1024 * 1024;
-const MAX_PART_BYTES = 16 * 1024 * 1024;
-const MAX_PARTS = 10_000;
+export const MIN_PART_BYTES = 5 * 1024 * 1024;
+export const MAX_PART_BYTES = 16 * 1024 * 1024;
+export const MAX_PARTS = 10_000;
 
 export type CompletedPart = { partNumber: number; etag: string; size: number };
 

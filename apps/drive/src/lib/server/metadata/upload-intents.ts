@@ -1,3 +1,5 @@
+import { requireActiveOwner } from './private';
+
 // Server-only reconciliation records. Authenticate the principal before calling;
 // neither an intent nor a provider acknowledgement publishes a file.
 interface Statement {
@@ -6,6 +8,9 @@ interface Statement {
   all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
+export interface UploadAllocationDatabase extends Database {
+  batch<T>(statements: Statement[]): Promise<{ results: T[] }[]>;
+}
 
 type State = 'created' | 'initiating' | 'allocated' | 'completing' | 'uncertain' | 'acknowledged';
 export interface UploadIntent {
@@ -21,6 +26,9 @@ export interface UploadIntent {
 
 const columns = 'id, owner_id, object_key, upload_id, completion_acknowledged, state, version, declared_size';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
+// Trusted dispatch recovery uses the receipt/quarantine ledger, not legacy journal transitions.
+const noTrustedDispatch = `NOT EXISTS (SELECT 1 FROM drive_upload_completion_operations o
+  JOIN drive_upload_completion_dispatches d USING (operation_id) WHERE o.intent_id = drive_upload_intents.id)`;
 
 function validateVersion(version: number): void {
   // Reserve a version for recording an uncertain outcome and one for late evidence.
@@ -29,8 +37,29 @@ function validateVersion(version: number): void {
   }
 }
 
-export class UploadIntents {
-  constructor(private readonly db: Database) {}
+export class UploadIntents<DB extends Database = Database> {
+  constructor(private readonly db: DB) {}
+
+  // Bind the namespace before claiming on the same transaction that checks live authority.
+  async claimNewAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
+    size: number, endpoint: string, bucket: string, epoch: string, ownerOnly = false): Promise<UploadIntent | null> {
+    if (!Number.isSafeInteger(size) || size < 0) throw new TypeError('Invalid declared upload size');
+    const id = crypto.randomUUID(), key = crypto.randomUUID();
+    const [, , claim] = await this.db.batch<UploadIntent>([
+      this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
+        SELECT ?, ?, ?, 'created', ? WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions s
+          WHERE token_hash = ? AND principal_id = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+            ${requireActiveOwner(ownerOnly, 's.principal_id')})`)
+        .bind(id, principalId, key, size, principalId, sessionHash, principalId),
+      this.db.prepare(`INSERT INTO drive_upload_storage_bindings (intent_id, endpoint, bucket, storage_epoch)
+        SELECT id, ?, ?, ? FROM drive_upload_intents WHERE id = ? AND object_key = ?`)
+        .bind(endpoint, bucket, epoch, id, key),
+      // Only the brand-new row can match; its ID and key cannot be reused.
+      this.db.prepare(`UPDATE drive_upload_intents SET state = 'initiating', version = 1
+        WHERE id = ? AND object_key = ? AND state = 'created' AND version = 0 RETURNING ${columns}`).bind(id, key)
+    ]);
+    return claim.results[0] ?? null;
+  }
 
   async create(principalId: string): Promise<UploadIntent | null> {
     return this.insert(principalId, null);
@@ -65,6 +94,8 @@ export class UploadIntents {
       WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${active}
         AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = drive_upload_intents.id)
         AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = drive_upload_intents.id)
+        AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = drive_upload_intents.id)
+        AND ${noTrustedDispatch}
       RETURNING ${columns}`)
       .bind(operation === 'allocation' ? 'initiating' : 'completing', id, principalId,
         operation === 'allocation' ? 'created' : 'allocated', version, principalId).first<UploadIntent>();
@@ -78,7 +109,7 @@ export class UploadIntents {
   async listInFlight(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
-      WHERE state IN ('initiating', 'completing') AND id > ? ORDER BY id LIMIT ?`)
+      WHERE state IN ('initiating', 'completing') AND id > ? AND ${noTrustedDispatch} ORDER BY id LIMIT ?`)
       .bind(afterId, limit).all<UploadIntent>();
     return page.results;
   }
@@ -89,7 +120,7 @@ export class UploadIntents {
   async listUncertain(afterId: string, limit: number): Promise<UploadIntent[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Invalid recovery limit');
     const page = await this.db.prepare(`SELECT ${columns} FROM drive_upload_intents
-      WHERE state = 'uncertain' AND id > ? ORDER BY id LIMIT ?`)
+      WHERE state = 'uncertain' AND id > ? AND ${noTrustedDispatch} ORDER BY id LIMIT ?`)
       .bind(afterId, limit).all<UploadIntent>();
     return page.results;
   }
@@ -102,7 +133,7 @@ export class UploadIntents {
     validateVersion(version);
     if (operation !== 'allocation' && operation !== 'completion') throw new TypeError('Invalid upload operation');
     const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = 'uncertain', version = version + 1
-      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? RETURNING id`)
+      WHERE id = ? AND owner_id = ? AND state = ? AND version = ? AND ${noTrustedDispatch} RETURNING id`)
       .bind(id, ownerId, operation === 'allocation' ? 'initiating' : 'completing', version).first<{ id: string }>();
     return row !== null;
   }
@@ -132,6 +163,7 @@ export class UploadIntents {
     const row = await this.db.prepare(`UPDATE drive_upload_intents SET state = ?, version = version + 1
       WHERE id = ? AND owner_id = ?
         AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${noTrustedDispatch}
         AND ${operation === 'allocation' ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
       RETURNING id`)
       .bind(operation === 'allocation' ? 'created' : 'allocated', id, ownerId,
@@ -155,6 +187,7 @@ export class UploadIntents {
         version = version + 1
       WHERE id = ? AND owner_id = ? AND version < 9007199254740991
         AND ((state = ? AND version = ?) OR (state = 'uncertain' AND version = ?))
+        AND ${noTrustedDispatch}
         AND ${allocation ? 'upload_id IS NULL' : 'upload_id IS NOT NULL AND completion_acknowledged = 0'}
       RETURNING id`)
       .bind(allocation ? 'allocated' : 'acknowledged', allocation ? result.uploadId : null,

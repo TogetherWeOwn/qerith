@@ -4,11 +4,18 @@ interface Statement {
   all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
+export type LivePrincipalMode = 'owner' | 'active';
+
+// Open a fresh primary session at each provider send, not when the operation is claimed.
+export function livePrincipalCheck(db: { withSession(constraint: 'first-primary'): Database },
+  mode: LivePrincipalMode | undefined, token: string, id: string): (() => Promise<boolean>) | undefined {
+  return mode && (() => new Sessions(db.withSession('first-primary')).isLivePrincipal(token, id, mode));
+}
 
 const lifetimeMs = 12 * 60 * 60 * 1000;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
 
-async function tokenHash(token: string): Promise<string> {
+export async function tokenHash(token: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -32,12 +39,24 @@ export class Sessions {
   }
 
   async lookup(token: string): Promise<{ id: string; role: 'owner' | 'member' } | null> {
+    const session = await this.lookupWithRemainingLifetime(token);
+    return session ? { id: session.id, role: session.role } : null;
+  }
+
+  async lookupWithRemainingLifetime(token: string): Promise<{ id: string; role: 'owner' | 'member'; remaining_ms: number } | null> {
     if (typeof token !== 'string' || !tokenPattern.test(token)) return null;
     const hash = await tokenHash(token);
-    return this.db.prepare(`SELECT p.id, p.role FROM drive_sessions s
-      JOIN drive_principals p ON p.id = s.principal_id
-      WHERE s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-        AND p.status = 'active'`).bind(hash).first<{ id: string; role: 'owner' | 'member' }>();
+    return this.db.prepare(`SELECT p.id, p.role, s.expires_at - CAST(unixepoch('subsec') * 1000 AS INTEGER) AS remaining_ms
+      FROM drive_sessions s JOIN drive_principals p ON p.id = s.principal_id
+      WHERE s.token_hash = ? AND remaining_ms > 0 AND p.status = 'active'`)
+      .bind(hash).first<{ id: string; role: 'owner' | 'member'; remaining_ms: number }>();
+  }
+
+  async isLivePrincipal(token: string, id: string, mode: LivePrincipalMode): Promise<boolean> {
+    const started = performance.now();
+    const session = await this.lookupWithRemainingLifetime(token);
+    return session?.id === id && (mode === 'active' || session.role === 'owner') &&
+      performance.now() - started < session.remaining_ms;
   }
 
   // Trusted server maintenance only: one atomic, indexed batch per invocation.

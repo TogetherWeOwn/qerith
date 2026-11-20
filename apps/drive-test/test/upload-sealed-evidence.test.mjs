@@ -21,7 +21,7 @@ const utf8 = new TextEncoder();
 async function seed(id, { missing = false, uncertain = false, otherEpoch = false, short = false, operationId = `complete-${id}` } = {}) {
   const operation = { operationId, intentId: `intent-${id}`, ownerId: `owner-${id}`,
     objectKey: `key-${id}`, storageEpoch: 'epoch-1', uploadId: `upload-${id}`, intentVersion: 2 };
-  await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", operation.ownerId);
+  await run("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", operation.ownerId);
   await run(`INSERT INTO ${journal} (id, owner_id, object_key, upload_id, state, version)
     VALUES (?, ?, ?, ?, 'allocated', 2)`, operation.intentId, operation.ownerId, operation.objectKey, operation.uploadId);
   await completion.recordOperation(operation);
@@ -137,7 +137,7 @@ it('binds all 10000 slots and matches inherited identities by exact bytes', asyn
   await migrate();
   const operation = { operationId: 'complete/large', intentId: 'intent-large', ownerId: 'owner-large',
     objectKey: 'key-large', storageEpoch: 'epoch-1', uploadId: new Uint8Array([0xaa, 0xff, 0xbb]).subarray(1, 2), intentVersion: 2 };
-  await run("INSERT INTO drive_principals VALUES ('owner-large', 'member', 'active')");
+  await run("INSERT INTO drive_principals (id, role, status) VALUES ('owner-large', 'member', 'active')");
   await run(`INSERT INTO ${journal} (id, owner_id, object_key, upload_id, state, version)
     VALUES ('intent-large', 'owner-large', 'key-large', CAST(x'ff' AS TEXT), 'allocated', 2)`);
   await run(`INSERT INTO drive_upload_completion_operations VALUES

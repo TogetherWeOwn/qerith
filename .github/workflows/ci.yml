@@ -332,6 +332,30 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/tests/lock-age.test.mjs
+      - name: Test staging preparation metadata
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-manifest.test.mjs
+      - name: Test staging publish orchestration
+        if: hashFiles('apps/drive/scripts/staging-publish.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-publish.test.mjs
+      - name: Test staging migration workflow
+        if: hashFiles('apps/drive/scripts/staging-migration-workflow.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migration-workflow.test.mjs
+      - name: Test migration source ledger
+        if: hashFiles('apps/drive/scripts/staging-migrations.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-migrations.test.mjs
+      # An exact PR head can predate the guard even when the merge ref has this CI step.
+      - name: Test staging source guard
+        if: hashFiles('.github/workflows/drive-staging-preparation.yml', 'apps/drive/scripts/staging-source.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-source.test.mjs
+      - name: Test staging qualification policy without dispatch
+        if: hashFiles('.github/workflows/drive-staging-qualification.yml', 'apps/drive/scripts/staging-qualification.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification.test.mjs
+      - name: Test staging qualification migrations without provider access
+        if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-migrations.test.mjs
+      - name: Test staging qualification Worker lifecycle without provider access
+        if: hashFiles('apps/drive/scripts/staging-qualification-worker.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-worker.test.mjs
       - name: Test offline bundle validation
         run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
 
@@ -398,6 +422,10 @@ jobs:
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
+      - name: Resolve private qualification migrations with pinned Wrangler locally
+        # Older PR checkouts may have the unit tests but predate this integration check.
+        if: hashFiles('apps/drive/scripts/test-qualification-wrangler.sh') != ''
+        run: bash scripts/test-qualification-wrangler.sh
       - name: Check Drive project types and configuration coverage
         run: |
           npm run check
@@ -430,6 +458,7 @@ jobs:
           test ! -e .svelte-kit/adapter-wrangler.json
           test -s .svelte-kit/cloudflare/_worker.js
           npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
+          npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run --outdir "$RUNNER_TEMP/drive-staging"
           npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
       - name: Exercise Workers runtime
         run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
@@ -513,10 +542,21 @@ jobs:
           npm test --prefix apps/drive/browser
           git diff --exit-code
           git diff --cached --exit-code
+      - name: Exercise generated sign-in in Chromium with local D1
+        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD
+        env:
+          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+        run: |
+          test -f apps/drive/browser/sign-in.mjs
+          npm run build --prefix apps/drive
+          (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+          ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
+          UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
+          STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

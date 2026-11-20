@@ -69,7 +69,7 @@ it('enforces exact identity and immutable, non-replaceable evidence', async () =
 it('reconciles a late committed receipt after D1 acknowledgement loss without changing authority', async () => {
   const op = operation('late');
   await migrate();
-  await run("INSERT INTO drive_principals VALUES ('alice', 'member', 'active')");
+  await run("INSERT INTO drive_principals (id, role, status) VALUES ('alice', 'member', 'active')");
   await insertIntent(op, 'completing');
   const ledger = new UploadOperationEvidence(env.DB);
   await ledger.recordOperation(op);

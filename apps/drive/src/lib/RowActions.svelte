@@ -9,6 +9,9 @@
   export let name: string;
   export let file = true;
   export let owned = true;
+  export let detailsOnly = false;
+  // A responsive listing checks layout on open and owns dismissal of hidden triggers.
+  export let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined = undefined;
   export let onAction: (action: RowAction) => void;
   // Called after the menu closes. Return false to use native tab order from the trigger.
   export let onTab: (direction: 'next' | 'previous') => boolean | void;
@@ -25,20 +28,53 @@
     return () => close();
   });
 
-  function onScroll(event: Event) {
-    const target = event.target;
-    if (open && menu && (target === document || (target instanceof Element && target.contains(trigger) && !menu.contains(target)))) {
-      const restore = menu.contains(document.activeElement);
-      close();
-      if (restore) trigger.focus({ preventScroll: true });
-    }
+  function hiddenByParent() {
+    return !!checkLayoutOnOpen && !trigger.getClientRects().length;
   }
 
-  function onResize() { if (open) close(true); }
+  let scrollAtOpen: Map<Document | Element, readonly [number, number]> | undefined;
+
+  function scrollPosition(target: Document | Element): readonly [number, number] {
+    return target instanceof Element ? [target.scrollLeft, target.scrollTop] : [window.scrollX, window.scrollY];
+  }
+
+  function captureOpeningScroll() {
+    const positions = new Map<Document | Element, readonly [number, number]>();
+    positions.set(document, scrollPosition(document));
+    for (let ancestor = trigger.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      positions.set(ancestor, scrollPosition(ancestor));
+    }
+    scrollAtOpen = positions;
+    // The browser delivers queued scroll events before this frame callback.
+    requestAnimationFrame(() => {
+      if (scrollAtOpen === positions) scrollAtOpen = undefined;
+    });
+  }
+
+  function onScroll(event: Event) {
+    const source = event.target;
+    const target = source === document ? document : source instanceof Element ? source : null;
+    if (!open || !menu || !target) return;
+    if (target instanceof Element && (!target.contains(trigger) || menu.contains(target))) return;
+    if (hiddenByParent()) return;
+    // A scroll can move the page before opening but deliver its event afterward.
+    const initial = scrollAtOpen?.get(target);
+    if (initial) {
+      const [left, top] = scrollPosition(target);
+      if (initial[0] === left && initial[1] === top) return;
+    }
+    const restore = menu.contains(document.activeElement);
+    close();
+    if (restore) trigger.focus({ preventScroll: true });
+  }
+
+  function onResize() {
+    if (open && !hiddenByParent()) close(true);
+  }
   let menuLeft = 0;
   let menuTop = 0;
   $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
-  $: actions = (owned
+  $: actions = (detailsOnly ? ['Details'] : owned
     ? [...(file ? ['Download'] : []), 'Share', 'Rename', 'Move', 'Details', 'Delete']
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
 
@@ -46,15 +82,24 @@
     const request = ++opening;
     compact = window.matchMedia('(max-width: 820px)').matches;
     if (!open) {
+      checkLayoutOnOpen?.('next-frame');
+      captureOpeningScroll();
       window.addEventListener('scroll', onScroll, true);
       window.addEventListener('pointerdown', outside);
       window.addEventListener('resize', onResize);
     }
     open = true;
     await tick();
-    if (!open || !menu || request !== opening) return;
+    if (!open || request !== opening) return;
+    // No layer was shown yet. Clear state even if the trigger reappears before handoff.
+    if (!menu || hiddenByParent()) { close(); return; }
     if (compact) layer.showModal();
     else layer.showPopover();
+    if (!open || request !== opening) return;
+    // A beforetoggle listener can cancel the native opening.
+    if (!(compact ? layer.open : layer.matches(':popover-open'))) { close(); return; }
+    // Showing a layer can run focus handlers that hide its trigger synchronously.
+    if (hiddenByParent()) { checkLayoutOnOpen?.('now'); return; }
     const rect = menu.getBoundingClientRect();
     const anchor = trigger.getBoundingClientRect();
     menuLeft = Math.max(0, Math.min(anchor.left, window.innerWidth - rect.width));
@@ -63,6 +108,8 @@
     menuTop = Math.max(0, Math.min(below >= rect.height || below >= above ? anchor.bottom : anchor.top - rect.height, window.innerHeight - rect.height));
     await tick();
     if (!open || request !== opening) return;
+    // Hand off before the source layout can reappear with an open, unfocused layer.
+    if (hiddenByParent()) { checkLayoutOnOpen?.('now'); return; }
     const items = menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
     items[last ? items.length - 1 : 0]?.focus();
   }
@@ -70,6 +117,7 @@
   function close(restore = false) {
     ++opening;
     if (open) {
+      scrollAtOpen = undefined;
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('pointerdown', outside);
       window.removeEventListener('resize', onResize);
@@ -115,10 +163,13 @@
     if (event.target === layer) close(true);
   }
 
+  // A layout switch closes the old layer without restoring its hidden trigger.
+  export function dismiss() { close(); }
+
   // A parent row can call this for its pointer-only context menu.
   export function openFromContextMenu(event: MouseEvent) {
     event.preventDefault();
-    void show();
+    if (!open) void show();
   }
 </script>
 

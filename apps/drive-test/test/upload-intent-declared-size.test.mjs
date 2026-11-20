@@ -9,7 +9,7 @@ const count = async (table) => (await env.DB.prepare(`SELECT count(*) AS count F
 
 async function setup(owner) {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
-  await run("INSERT INTO drive_principals VALUES (?, 'member', 'active')", owner);
+  await run("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", owner);
   return new UploadIntents(env.DB);
 }
 
@@ -38,7 +38,7 @@ it('creates sized intents only for live members and returns size through owner r
   const owner = 'sized-owner';
   const intents = await setup(owner);
   const before = await count('drive_upload_intents');
-  await run("INSERT INTO drive_principals VALUES ('other-member', 'member', 'active')");
+  await run("INSERT INTO drive_principals (id, role, status) VALUES ('other-member', 'member', 'active')");
   for (const size of [0, 16, Number.MAX_SAFE_INTEGER]) {
     const intent = await intents.createSized(owner, size);
     expect(intent).toMatchObject({ owner_id: owner, declared_size: size, state: 'created', version: 0 });

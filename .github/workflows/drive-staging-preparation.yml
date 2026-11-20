@@ -1,0 +1,229 @@
+name: Drive staging source preparation
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_main_sha:
+        description: Exact lowercase 40-character main commit SHA
+        required: true
+        type: string
+      activate_preview:
+        description: Activate the owner-only preview (false publishes closed)
+        type: boolean
+        default: false
+
+env:
+  EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+
+permissions:
+  contents: read
+
+# All staging deploy and qualification workflows must use this group.
+concurrency:
+  group: drive-staging-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  preparation:
+    if: github.repository == 'TogetherWeOwn/qerith' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify dispatch source
+        shell: bash
+        run: |
+          # Actions expression comparisons ignore case; this check does not.
+          if [[ "$GITHUB_REPOSITORY" != TogetherWeOwn/qerith ||
+                "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            printf '%s\n' 'unexpected dispatch source' >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' 'invalid source SHA' >&2
+            exit 1
+          fi
+          if [[ "$EXPECTED_MAIN_SHA" != "$GITHUB_SHA" ]]; then
+            printf '%s\n' 'expected main SHA does not match dispatch SHA' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify checked-out commit
+        shell: bash
+        run: |
+          if ! checkout_sha="$(git rev-parse --verify HEAD)"; then
+            printf '%s\n' 'could not resolve checkout HEAD' >&2
+            exit 1
+          fi
+          if [[ "$checkout_sha" != "$GITHUB_SHA" ]]; then
+            printf '%s\n' 'checkout SHA mismatch' >&2
+            exit 1
+          fi
+      - name: Record migration source inputs
+        run: node apps/drive/scripts/staging-migrations.mjs >> "$GITHUB_STEP_SUMMARY"
+      - name: Test closed-admission metadata
+        run: node --test apps/drive/scripts/staging-manifest.test.mjs
+
+  publish:
+    if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: preparation
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify staging source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != TogetherWeOwn/qerith ||
+                "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || "$EXPECTED_MAIN_SHA" != "$GITHUB_SHA" ||
+                "$(git rev-parse --verify HEAD)" != "$GITHUB_SHA" ]]; then
+            printf '%s\n' 'Invalid staging source or checkout.' >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify source and lock
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+      - name: Install and build exact source
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Dry-run the staging Worker package before migration
+        run: |
+          timeout --signal=TERM --kill-after=10s 90s node_modules/.bin/wrangler deploy \
+            .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run \
+            --outdir "$RUNNER_TEMP/drive-staging"
+      - name: Verify staging storage qualification before migration
+        env:
+          QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: ${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+        run: node scripts/staging-publish.mjs --check-storage
+      - name: Migrate staging D1
+        shell: bash
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
+          NO_COLOR: '1'
+          WRANGLER_HIDE_BANNER: 'true'
+        run: |
+          set -euo pipefail
+          unset DRIVE_OWNER_ENROLLMENT
+          : "${CLOUDFLARE_API_TOKEN:?missing staging deploy token}"
+          node scripts/staging-publish.mjs --check-target
+          # The native ledger is the staging authority. Keep the bookmark and
+          # before/after lists in the Actions log for this exact dispatch SHA.
+          wrangler=node_modules/.bin/wrangler
+          config=wrangler.staging.json
+          printf 'Migration source: %s; run: %s; attempt: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          capture_dir="$(mktemp -d "$RUNNER_TEMP/drive-migrations.XXXXXXXX")"
+          trap 'rm -rf -- "$capture_dir"' EXIT
+          bookmark_file="$capture_dir/bookmark"
+          after_file="$capture_dir/after"
+          # Bound captured streams; discard apply progress and never disclose stderr.
+          # Timeout or overflow kills the launcher process group, not remote requests.
+          capture() {
+            node -e '
+              const { spawn } = require("node:child_process");
+              const { writeFileSync } = require("node:fs");
+              const [output, duration, mode, command, ...args] = process.argv.slice(1);
+              const child = spawn(command, args, { detached: true, stdio: ["ignore", mode === "discard" ? "ignore" : "pipe", "pipe"] });
+              let failed = false, stdout = [], stdoutBytes = 0, stderrBytes = 0;
+              function stop() {
+                failed = true;
+                if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+              }
+              const timer = setTimeout(stop, Number.parseInt(duration, 10) * 1000);
+              child.stdout?.on("data", chunk => {
+                stdoutBytes += chunk.length;
+                if (stdoutBytes > 65536) stop(); else stdout.push(chunk);
+              });
+              child.stderr.on("data", chunk => { stderrBytes += chunk.length; if (stderrBytes > 65536) stop(); });
+              child.on("error", stop);
+              child.on("close", code => {
+                clearTimeout(timer);
+                try {
+                  if (failed || code !== 0) throw new Error();
+                  writeFileSync(output, Buffer.concat(stdout), { flag: "wx" });
+                } catch {
+                  console.error("Wrangler command or bounded capture failed.");
+                  process.exitCode = 1;
+                }
+              });
+            ' "$@"
+          }
+          # Provider output is data, not a GitHub Actions workflow command.
+          log_capture() {
+            local token
+            token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+            printf '::stop-commands::%s\n' "$token"
+            cat "$1"
+            printf '\n::%s::\n' "$token"
+          }
+          printf '%s\n' 'Pending migrations before apply:'
+          capture "$capture_dir/before" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config"
+          log_capture "$capture_dir/before"
+          capture "$bookmark_file" 45s keep "$wrangler" d1 time-travel info qerith-drive-staging --json --config "$config"
+          node -e '
+            const fs = require("node:fs");
+            try {
+              const { bookmark } = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              if (typeof bookmark !== "string" || !/^[A-Za-z0-9_-]{1,1024}$/.test(bookmark)) throw new Error();
+              console.log("Pre-apply Time Travel bookmark: " + bookmark);
+            } catch {
+              console.error("Invalid Time Travel bookmark response.");
+              process.exitCode = 1;
+            }
+          ' "$bookmark_file"
+          apply_status=0
+          capture "$capture_dir/apply" 120s discard "$wrangler" d1 migrations apply qerith-drive-staging --remote --config "$config" || apply_status=$?
+          if (( apply_status == 0 )); then log_capture "$capture_dir/apply"; fi
+          printf '%s\n' 'Pending migrations after apply:'
+          list_status=0
+          capture "$after_file" 45s keep "$wrangler" d1 migrations list qerith-drive-staging --remote --config "$config" || list_status=$?
+          if (( list_status == 0 )); then log_capture "$after_file"; fi
+          # With the banner off, pinned Wrangler prints the location and result.
+          if (( apply_status != 0 || list_status != 0 )) || ! node -e '
+            const lines = require("node:fs").readFileSync(process.argv[1], "utf8")
+              .split(/\r?\n/).map(line => line.trimEnd()).filter(Boolean);
+            if (lines.length !== 2 || lines[0] !== "Resource location: remote" ||
+                lines[1] !== "✅ No migrations to apply!") process.exitCode = 1;
+          ' "$after_file"; then
+            printf '%s\n' 'Migration apply or post-list failed; restore the bookmark or recreate the staging database before retry.' >&2
+            exit 1
+          fi
+      - name: Publish staging Worker
+        env:
+          ACTIVATE_PREVIEW: ${{ inputs.activate_preview }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
+          QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: ${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+          NO_COLOR: '1'
+          WRANGLER_HIDE_BANNER: 'true'
+        run: node scripts/staging-publish.mjs --publish

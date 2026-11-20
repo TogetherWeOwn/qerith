@@ -1,0 +1,75 @@
+name: Drive staging storage proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      identity_sha256:
+        type: string
+        required: true
+        description: SHA-256 of the independently reviewed staging signer identity
+      policy_sha256:
+        type: string
+        required: true
+        description: SHA-256 of the independently reviewed scope evidence
+
+permissions:
+  contents: read
+
+concurrency:
+  group: drive-staging-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/drive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify source and install from lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == TogetherWeOwn/qerith && "$GITHUB_EVENT_NAME" == workflow_dispatch &&
+             "$GITHUB_REF" == refs/heads/main && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
+             "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Probe staging storage without publishing a Worker
+        env:
+          PROOF_IDENTITY_SHA256: ${{ inputs.identity_sha256 }}
+          PROOF_POLICY_SHA256: ${{ inputs.policy_sha256 }}
+          QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: ${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in QERITH_S3_{ENDPOINT,BUCKET,REGION,STORAGE_EPOCH,ACCESS_KEY_ID,SECRET_ACCESS_KEY}; do
+            if [[ -z "${!name}" ]]; then printf 'Missing staging secret: %s\n' "$name" >&2; exit 1; fi
+          done
+          timeout --signal=TERM --kill-after=50s 180s node --import tsx scripts/staging-storage-proof.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: drive-staging-storage-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/drive-staging-storage-proof.json
+          if-no-files-found: error
+          retention-days: 14

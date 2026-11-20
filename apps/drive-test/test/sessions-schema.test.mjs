@@ -15,8 +15,13 @@ it('upgrades seeded data and replays the full migration ledger safely', async ()
   const after = await ledger();
   expect(after.slice(0, before.length)).toEqual(before);
   expect(after.map(({ name }) => name)).toEqual(env.DRIVE_MIGRATIONS.map(({ name }) => name));
-  expect(await env.DB.prepare("SELECT principal_id, counter FROM drive_credentials WHERE id = 'credential'").first())
-    .toEqual({ principal_id: 'member', counter: 0 });
+  expect(await env.DB.prepare("SELECT principal_id, counter, webauthn_user_handle FROM drive_credentials WHERE id = 'credential'").first())
+    .toEqual({ principal_id: 'member', counter: 0, webauthn_user_handle: null });
+  expect((await env.DB.prepare('SELECT webauthn_user_handle FROM drive_principals ORDER BY id').all()).results)
+    .toEqual([{ webauthn_user_handle: null }, { webauthn_user_handle: null }]);
+  const bindHandle = env.DB.prepare('UPDATE drive_principals SET webauthn_user_handle = ? WHERE id = ?');
+  await bindHandle.bind('A'.repeat(43), 'member').run();
+  await expect(bindHandle.bind('A'.repeat(43), 'owner').run()).rejects.toThrow();
   await expect(env.DB.prepare('INSERT INTO drive_sessions VALUES (?, ?, ?)')
     .bind('a'.repeat(64), 'missing', 9999999999999).run()).rejects.toThrow();
 });
