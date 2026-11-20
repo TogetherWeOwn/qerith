@@ -23,6 +23,16 @@ export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DR
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
 
+export type DriveUploadMode = 'disabled' | 'preview' | 'multipart';
+
+// Pass only a role from a validated session. This policy does not authorize a
+// write: storage readiness and the checks on each mutation are separate.
+export function driveUploadMode(env: DriveAuthEnv, role?: 'owner' | 'member'): DriveUploadMode {
+  if (role === 'member' && admitsStagingInvite(env)) return 'multipart';
+  if (role === 'owner' && (env.DRIVE_ORIGIN === stagingOrigin || admitsSignInFixture(env))) return 'preview';
+  return 'disabled';
+}
+
 export function allowsStagingInviteSite(request: Request, document = false): boolean {
   const site = request.headers.get('sec-fetch-site');
   if (site === null || site === 'same-origin') return true;
@@ -143,8 +153,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const memberDownload = routeId === downloadRoute && isExactDownloadGet(request.method, pathname) &&
         (site === null || site === 'same-origin' || site === 'none');
       const uploadRoute = uploadAdmissionRoute(request, url);
-      const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request);
-      if (!admitsStagingInvite(env) || !(memberRoot || memberDownload || memberUpload)) {
+      const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request) &&
+        driveUploadMode(env, session.principal.role) === 'multipart';
+      if (!(memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload)))) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }

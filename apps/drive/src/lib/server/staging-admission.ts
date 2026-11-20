@@ -2,7 +2,7 @@ import { isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadAdmissionRoute } from './upload-admission';
 
 interface PreviewAssets {
@@ -93,9 +93,10 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
-      const memberRoute = invite && (target.kind === 'root' || target.kind === 'root-data' ||
-        target.kind === 'private-asset' || target.kind === 'download' ||
-        (target.kind === 'upload' && allowsStagingInviteSite(request)));
+      const memberRoute = target.kind === 'upload'
+        ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
+        : invite && (target.kind === 'root' || target.kind === 'root-data' ||
+          target.kind === 'private-asset' || target.kind === 'download');
       if (session.role === 'owner' || memberRoute) {
         return target.kind === 'private-asset' || target.kind === 'people-asset' || (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
