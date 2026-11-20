@@ -54,7 +54,11 @@ function generatedAssets(builder) {
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/people/+page.svelte'));
-  return { signIn, root, invite, people: [...assets] };
+  const people = [...assets];
+  assets.clear();
+  visited.clear();
+  include(leaf('/src/routes/f/[folderId]/+page.svelte'));
+  return { signIn, root, invite, people, folder: [...assets].filter(path => /\.(?:css|woff2)$/.test(path)) };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -88,7 +92,7 @@ import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
-const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite]);
+const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folder]);
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),

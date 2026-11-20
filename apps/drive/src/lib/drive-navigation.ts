@@ -1,10 +1,12 @@
-const drivePage = /^(?:\/|\/shared|\/people|\/(?:shared\/)?f\/[A-Za-z0-9_-]+)$/;
+const otherDrivePage = /^(?:\/|\/shared|\/people|\/shared\/f\/[A-Za-z0-9_-]+)$/;
+export const isLinkableFolderId = (id: string) => /^[A-Za-z0-9_-]{1,128}$/.test(id);
+const drivePage = (path: string) => path.startsWith('/f/') ? isLinkableFolderId(path.slice(3)) : otherDrivePage.test(path);
 const conditionalHeaders = ['range', 'if-range', 'if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since'];
 
 export function driveNext(value: string | null): string {
   if (!value || /[\u0000- \u007f#]|%(?![0-9a-f]{2})/i.test(value)) return '/';
   // Match the raw path before any URL parser can normalize it. Only the query may be encoded.
-  if (!drivePage.test(value.split('?', 1)[0])) return '/';
+  if (!drivePage(value.split('?', 1)[0])) return '/';
   const url = new URL(value, 'https://drive.invalid');
   return url.href.slice(url.origin.length);
 }
@@ -18,5 +20,5 @@ export function isTopLevelDocumentNavigation(request: Request): boolean {
 }
 
 export function isDrivePageNavigation(request: Request): boolean {
-  return isTopLevelDocumentNavigation(request) && drivePage.test(new URL(request.url).pathname);
+  return isTopLevelDocumentNavigation(request) && drivePage(new URL(request.url).pathname);
 }

@@ -9,6 +9,7 @@ import { captureRootListing, captureSignedOut } from './root-listing.mjs';
 import { proveOwnerEnrollment } from './owner-enrollment.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { captureRootUpload } from './root-upload.mjs';
+import { captureFolderView } from './folder-view.mjs';
 
 const origin = 'https://drive.example.test';
 const rpID = new URL(origin).hostname;
@@ -151,7 +152,9 @@ try {
     assert.equal(response.status, 303);
     return page.goto(`${origin}${response.headers.get('location')}`, { waitUntil: 'networkidle' });
   };
-  await Promise.all([signInFrom(first, '/?tab=one'), signInFrom(second, '/shared?tab=two')]);
+  assert.equal((await worker.fetch(`${origin}/f/legacy%3Areceipts`, { headers: navigation, redirect: 'manual' })).status, 401);
+  await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'fixture-owner', 'Receipts', 'folder')").run();
+  await Promise.all([signInFrom(first, '/f/fixture-parent?page=old-session'), signInFrom(second, '/shared?tab=two')]);
   await captureSignedOut(first);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
@@ -170,7 +173,7 @@ try {
     .bind(lostContext).first(), { challenge: lostChallenge });
   await second.getByRole('button', { name: 'Cancel' }).click();
   deliver.resolve();
-  await Promise.all([first.waitForURL(`${origin}/?tab=one`), second.waitForURL(`${origin}/`)]);
+  await Promise.all([first.waitForURL(`${origin}/f/fixture-parent`), second.waitForURL(`${origin}/`)]);
   assert.equal(traffic.filter(([step]) => step === 'verify').length, 1);
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure && session.sameSite === 'Lax');
@@ -182,6 +185,7 @@ try {
   const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
   assert.equal(await privateStatus(), 200);
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
+  await captureFolderView(first, origin, DB);
   await captureRootListing(first, origin, DB);
   configuredStorage = true;
   await captureRootUpload(first, origin, holdResponse, () => { failListing = true; }, DB);
