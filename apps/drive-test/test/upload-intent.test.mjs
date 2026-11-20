@@ -9,10 +9,10 @@ import { createUploadIntent, maxUploadIntentBytes, postUploadIntent } from '../.
 
 const origin = 'https://drive.example';
 const config = { endpoint: 'https://storage.example', bucket: 'drive-test', region: 'us-east-1', accessKeyId: 'fixture-key', secretAccessKey: 'fixture-secret' };
-async function fixture(requestOrigin = origin) {
+async function fixture(requestOrigin = origin, role = 'member') {
   const db = env.DB, owner = crypto.randomUUID();
   await applyD1Migrations(db, env.DRIVE_MIGRATIONS);
-  await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
+  await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(owner, role).run();
   const sessions = new Sessions(db), { token } = await sessions.issue(owner);
   const bindings = { DB: db, DRIVE_ORIGIN: requestOrigin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
     DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true), completionTimeoutMs: () => 5000 } };
@@ -40,6 +40,34 @@ it('allocates from a browser JSON body and returns only the intent ID', async ()
   expect(response.status).toBe(201);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.json()).toEqual({ id: intent.id });
+});
+
+it.each([
+  ['default staging', stagingOrigin, undefined, 'owner', 16 * 1024 ** 2],
+  ['off in staging', stagingOrigin, '0', 'owner', 16 * 1024 ** 2],
+  ['invalid staging flag', stagingOrigin, 'true', 'owner', 16 * 1024 ** 2],
+  ['flag outside staging', origin, '1', 'member', 16 * 1024 ** 2],
+  ['opt-in staging', stagingOrigin, '1', 'member', 5 * 1024 ** 3],
+])('enforces the declaration ceiling for %s before claiming or dispatching', async (_mode, target, flag, role, limit) => {
+  const { post, row, fetch, bindings, db, owner } = await fixture(target, role);
+  const overrides = { DRIVE_STAGING_INVITE_ACCEPTANCE: flag };
+  try {
+    for (const size of [limit + 1, Number.MAX_SAFE_INTEGER + 1]) {
+      expect((await post(JSON.stringify({ size }), { overrides })).status).toBe(400);
+    }
+    expect(await row()).toBeNull();
+    expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+
+    fetch.mockImplementation(async () => new Response(
+      `<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`));
+    const accepted = await post(JSON.stringify({ size: limit }), { overrides }), intent = await row();
+    expect([accepted.status, await accepted.json()]).toEqual([201, { id: intent.id }]);
+    expect(intent).toMatchObject({ declared_size: limit, state: 'allocated' });
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    if (role === 'owner') await db.prepare("UPDATE drive_principals SET role = 'member' WHERE id = ?").bind(owner).run();
+  }
 });
 
 it('allocates only for the live staging member behind the exact flag, without admitting upload routes', async () => {
