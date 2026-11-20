@@ -2,6 +2,20 @@ export const readGrantCollectionRoute = '/api/entries/[entryId]/read-grants';
 export const readGrantRecipientRoute = `${readGrantCollectionRoute}/[recipientId]`;
 export const readGrantPath = /^\/api\/entries\/([^/]{1,1536})\/read-grants(?:\/([^/]{1,1536}))?$/;
 const encoder = new TextEncoder();
+const originalGrantRequest = Symbol.for('qerith.drive.originalGrantRequest');
+
+// SvelteKit strips these suffixes before its hook. Escape them only after Worker
+// admission, and carry the canonical request in memory, never in a wire header.
+export function readGrantAdapterRequest(request: Request, url: URL): Request {
+  const pathname = url.pathname.replace(/(\/|\.html)_(_(?:data\.json|route\.js))$/, '$1%5F$2');
+  if (pathname === url.pathname) return request;
+  url.pathname = pathname;
+  return Object.assign(new Request(url, request), { [originalGrantRequest]: request });
+}
+
+export function readGrantOriginalRequest(request: Request): Request {
+  return (request as Request & { [originalGrantRequest]?: Request })[originalGrantRequest] ?? request;
+}
 export const validReadGrantId = (id: string) => id.length > 0 && !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(id) && encoder.encode(id).length <= 512;
 
 // An ID is data, not a pathname or a UUID. Accept one canonical wire spelling.

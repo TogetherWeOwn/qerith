@@ -1,5 +1,5 @@
 import { ReadGrants } from './metadata/read-grants';
-import { decodeReadGrantId, readGrantCursor, readGrantPath, validReadGrantId } from './read-grant-admission';
+import { decodeReadGrantId, readGrantCursor, readGrantOriginalRequest, readGrantPath, validReadGrantId } from './read-grant-admission';
 import { admitsSignInFixture, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, readSession, type DriveAuthEnv } from './request-auth';
 
 type GrantEnv = DriveAuthEnv & { DB?: ConstructorParameters<typeof ReadGrants>[0] };
@@ -13,8 +13,9 @@ export function readGrantRequest(request: Request, env: GrantEnv): Promise<Respo
   if (matched) return admitsSignInFixture(env) ? handle(request, env, url, matched) : Promise.resolve(reply(404));
 }
 
-export function stagingReadGrantRequest(request: Request, env: GrantEnv, token: string | null): Response | Promise<Response> {
+export function stagingReadGrantRequest(input: Request, env: GrantEnv, token: string | null): Response | Promise<Response> {
   if (!admitsStagingReadGrants(env)) return reply(404);
+  const request = readGrantOriginalRequest(input);
   const url = new URL(request.url);
   const matched = readGrantPath.exec(url.pathname);
   return matched ? handle(request, env, url, matched, token) : reply(404);

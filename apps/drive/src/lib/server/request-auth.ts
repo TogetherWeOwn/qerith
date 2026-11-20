@@ -4,7 +4,7 @@ import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavi
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { stagingOrigin } from './qualification-readiness';
-import { readGrantAdmissionRoute, readGrantCollectionRoute, readGrantRecipientRoute } from './read-grant-admission';
+import { readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
 import { uploadAdmissionRoute } from './upload-admission';
 
 export interface DriveAuthEnv {
@@ -110,7 +110,7 @@ function pageDenial(request: Request, status: 403 | 503): Response {
 
 export function privateRequests(env: DriveAuthEnv): Handle {
   return async ({ event, resolve }) => {
-    const { request } = event;
+    const request = readGrantOriginalRequest(event.request);
     const url = new URL(request.url);
     const { pathname, search } = url;
     const navigation = isDrivePageNavigation(request);

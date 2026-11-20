@@ -91,6 +91,27 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
     await reject(send('DELETE', item), 204, 'member owner revokes read');
     assert.deepEqual(await list(`${path}?cursor=reader`), empty);
   }
+  const workerGrant = stagingFetch(worker, origin, 'worker');
+  const adapterGrant = stagingFetch(worker, origin, 'adapter');
+  for (const recipientId of ['__data.json', '__route.js', 'file.html__data.json', 'file.html__route.js']) {
+    await session(recipientId, 'member');
+    const canonical = `${path}/${recipientId}`;
+    const alias = `${path}/${recipientId.replace('_', '%5F')}`;
+    for (const ask of [workerGrant, adapterGrant]) {
+      await expectPrivateEmpty(ask('PUT', alias, owner, active), 404, 'escaped path is not a public alias');
+    }
+    await expectPrivateEmpty(workerGrant('PUT', canonical, owner), 404, 'reserved IDs still require opt-in');
+    await expectPrivateEmpty(workerGrant('PUT', canonical, owner, active, '{}'), 400, 'reserved IDs still reject a body');
+    await expectPrivateEmpty(workerGrant('PUT', canonical, owner, active), 204, `grant ${recipientId}`);
+    const read = async () => {
+      const response = await workerGrant('GET', path, owner, active);
+      assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
+      return response.json();
+    };
+    assert.deepEqual(await read(), { recipients: [{ recipientId }], nextCursor: null });
+    await expectPrivateEmpty(workerGrant('DELETE', canonical, owner, active), 204, `revoke ${recipientId}`);
+    assert.deepEqual(await read(), empty);
+  }
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'grant-owner'").run();
   for (const boundary of boundaries) for (const [method, suffix] of operations) {
     await expectPrivateEmpty(stagingFetch(worker, origin, boundary)(method, path + suffix, owner, active), 401, 'revoked session');

@@ -55,6 +55,21 @@ test('invalid read-grant queries never reach the staging adapter', async () => {
   assert.equal(response.status, 200);
 });
 
+test('reserved grant recipient IDs reach the adapter without admitting encoded aliases', async () => {
+  const path = `/api/entries/${id}/read-grants`;
+  const env = { ...runtime('member').env, DRIVE_STAGING_READ_GRANTS: '1' };
+  const unexpected = async () => { throw new Error('Unexpected dispatch'); };
+  for (const suffix of ['__data.json', '__route.js', 'file.html__data.json', 'file.html__route.js']) {
+    const alias = `${path}/${suffix.replace('_', '%5F')}`;
+    const dispatch = { adapter: unexpected, ceremony: unexpected, invite: unexpected, asset: unexpected };
+    denied(await dispatchStagingRequest(request(alias, 'PUT'), env, true, assets, dispatch), 404);
+    const response = await dispatchStagingRequest(request(`${path}/${suffix}`, 'PUT'), env, true, assets, {
+      ...dispatch, adapter: async input => { assert.equal(new URL(input.url).pathname, alias); return new Response(null); },
+    });
+    assert.equal(response.status, 200);
+  }
+});
+
 test('people document and its exclusive assets require the invite flag and live owner session', async () => {
   const enabled = (role?: 'owner' | 'member' | 'revoked') => ({ ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' });
   const check = (path: string, method: string, env = enabled(), headers?: HeadersInit) =>
