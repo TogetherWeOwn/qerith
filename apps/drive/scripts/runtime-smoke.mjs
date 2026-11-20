@@ -120,7 +120,8 @@ export default { fetch(request, env, ctx) {
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
   if (request.headers.has('x-test-qualification')) {
     env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
-      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };
+      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} },
+      DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + (request.headers.has('x-test-expired') ? -1 : 60_000)) };
     const missing = request.headers.get('x-test-missing-binding');
     if (missing) delete env[missing];
   }
@@ -204,7 +205,14 @@ export default { fetch(request, env, ctx) {
         const unready = await readiness({ 'x-test-qualification': '1', 'x-test-missing-binding': binding });
         assert.deepEqual([unready.status, ...identity(unready)], [503, null, null, null], `candidate without ${binding}`);
       }
-      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage');
+      const expired = { 'x-test-qualification': '1', 'x-test-expired': '1' };
+      const expiredProbe = await readiness(expired);
+      assert.deepEqual([expiredProbe.status, ...identity(expiredProbe)], [503, null, null, null]);
+      for (const path of ['/', '/_app/version.json', '/api/deployer/owner-enrollment']) {
+        const stopped = await worker.fetch(origin + path, { headers: expired, redirect: 'manual' });
+        assert.deepEqual([stopped.status, stopped.headers.get('cache-control')], [503, 'no-store'], path);
+      }
+      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage; expired candidates refuse requests');
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
       const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },

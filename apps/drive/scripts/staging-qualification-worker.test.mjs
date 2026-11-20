@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
+import { allowsQualificationTraffic, qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 import { inspectQualificationWorker, probeQualificationWorker, uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
@@ -18,6 +18,24 @@ const json = result => Response.json({ success: true, errors: [], result });
 const sha = 'a'.repeat(40);
 const readinessEnv = { DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: sha, DRIVE_QUALIFICATION_VERSION: { id: candidate } };
 const probeUrl = stagingOrigin + readinessPath;
+const now = 1_800_000_000_000;
+const expiresAt = String(now + 25 * 60_000);
+const expiryBinding = 'DRIVE_QUALIFICATION_EXPIRES_AT';
+
+test('candidate traffic fails closed at its absolute deadline and with partial identity', () => {
+  const env = { ...readinessEnv, [expiryBinding]: expiresAt };
+  assert.equal(allowsQualificationTraffic({ DRIVE_ORIGIN: stagingOrigin }, Number(expiresAt)), true);
+  assert.equal(allowsQualificationTraffic(env, Number(expiresAt) - 1), true);
+  for (const time of [now - 1, Number(expiresAt), Number(expiresAt) + 1]) {
+    assert.equal(allowsQualificationTraffic(env, time), false);
+  }
+  for (const override of [{ [expiryBinding]: undefined }, { [expiryBinding]: ` ${expiresAt}` },
+    { [expiryBinding]: `${expiresAt}\n` }, { [expiryBinding]: Number(expiresAt) },
+    { DRIVE_QUALIFICATION_VERSION: undefined }, { DRIVE_QUALIFICATION_SHA: undefined },
+    { DRIVE_ORIGIN: 'https://drive.example.test' }, { DRIVE_SIGN_IN_FIXTURE: '1' }]) {
+    assert.equal(allowsQualificationTraffic({ ...env, ...override }, now), false);
+  }
+});
 
 test('readiness stays off without candidate bindings and never admits app requests', () => {
   const headers = { [readinessHeaders.nonce]: 'b'.repeat(32), [readinessHeaders.sha]: 'f'.repeat(40) };
@@ -104,6 +122,7 @@ const secretBindings = ['DRIVE_OWNER_ENROLLMENT', 'DRIVE_S3_ACCESS_KEY_ID', 'DRI
 const varsToBindings = vars => Object.entries(vars).map(([name, text]) => ({ name, type: 'plain_text', text }));
 
 function fixture(t, upload = false) {
+  t.mock.method(Date, 'now', () => now);
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-worker-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const app = join(cwd, 'apps/drive');
@@ -135,13 +154,18 @@ function fixture(t, upload = false) {
     CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: 'fake-token' };
   const tag = `${sha}-18-2`;
   const calls = [];
-  const state = { current: deployment(prior, baseline), tag };
+  const { d1_databases: [db] } = JSON.parse(readFileSync(join(app, 'wrangler.staging.json'), 'utf8'));
+  const state = { current: deployment(prior, baseline), tag, candidateBindings: [
+    { name: 'DB', type: 'd1', id: db.database_id }, { name: 'ASSETS', type: 'assets' },
+    ...varsToBindings({ DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt }),
+    { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' },
+  ] };
   const controller = new AbortController();
   const identity = { sha, runId: '18', attempt: '2', version: candidate };
   const options = {
-    upload: { version: candidate, previousVersion: baseline, previousDeployment: prior },
+    upload: { version: candidate, expiresAt, previousVersion: baseline, previousDeployment: prior },
     recordRecovery(point) {
-      assert.deepEqual(point, { ...identity, previousVersion: baseline, previousDeployment: prior });
+      assert.deepEqual(point, { ...identity, expiresAt, previousVersion: baseline, previousDeployment: prior });
       calls.push('record');
     },
     probe(target, signal) {
@@ -167,7 +191,8 @@ function fixture(t, upload = false) {
     const path = url.slice(prefix.length);
     if (method === 'GET' && path === `versions/${candidate}`) {
       calls.push('version');
-      return state.versionResponse ?? json({ id: candidate, annotations: { 'workers/tag': state.tag } });
+      return state.versionResponse ?? json({ id: candidate, annotations: { 'workers/tag': state.tag },
+        resources: { bindings: state.candidateBindings } });
     }
     assert.equal(path, 'deployments');
     if (method === 'GET') {
@@ -247,7 +272,7 @@ test('Worker inventory rejects cron, unknown bindings, candidates, deployment dr
   const versionPath = `versions/${baseline}`;
   for (const binding of [{ name: 'EXTRA', type: 'durable_object_namespace' }, { name: 'EXTRA', type: 'container' },
     { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text' }, { name: 'DRIVE_QUALIFICATION_VERSION', type: 'plain_text' },
-    { name: 'DB', type: 'd1', id: foreign }]) {
+    { name: expiryBinding, type: 'plain_text', text: expiresAt }, { name: 'DB', type: 'd1', id: foreign }]) {
     replies[versionPath].resources.bindings = binding.name === 'DB' ? [binding, ...bindings.slice(1)] : [...bindings, binding];
     calls.length = 0;
     await assert.rejects(inspect(), error);
@@ -273,7 +298,8 @@ function uploadFixture({ cwd, app, env }) {
   const setup = { previews_enabled: false, tags: ['staging'], baselineBindings: [...shared, ...varsToBindings(storageVars)],
     uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
   const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
-    DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
+    [expiryBinding]: expiresAt, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
+    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
   async function request(url, { method, body, headers }) {
     const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/`;
@@ -327,7 +353,7 @@ function uploadFixture({ cwd, app, env }) {
 
 test('uploads only the exact-attempt version with inherited secrets and an unchanged baseline', async t => {
   const { run, calls, scratch } = uploadFixture(fixture(t, true));
-  assert.deepEqual(await run(), { version: candidate, previousVersion: baseline, previousDeployment: prior });
+  assert.deepEqual(await run(), { version: candidate, expiresAt, previousVersion: baseline, previousDeployment: prior });
   assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['subdomain', 'qerith-drive-staging', 'deployments',
     baseline, 'versions', 'upload', candidate, 'versions', 'deployments']);
   assert.ok(!existsSync(scratch()));
@@ -371,6 +397,7 @@ test('does not return candidates on cancellation, ambiguous output, binding drif
     [{ output: '{fake-token' }, /upload could not be verified/],
     [{ uploadId: baseline }, /new version ID/],
     [{ readbackTag: 'another-attempt' }, /SHA and attempt/],
+    [{ adjust: bindings => bindings.filter(binding => binding.name !== expiryBinding) }, /incompatible resource/],
     [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_QUALIFICATION_VERSION') }, /unchanged staging baseline/],
     [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_OWNER_ENROLLMENT') }, /unchanged staging baseline/],
     [{ superseded: true }, /unchanged staging baseline/],
@@ -387,6 +414,24 @@ test('records the rollback point, proves exact-SHA readiness, and reads back the
   const { run, calls, identity } = fixture(t);
   assert.deepEqual(await run(), { ...identity, previousVersion: baseline, restoredDeployment: restored, cases: 'synthetic cases' });
   assert.deepEqual(calls, ['current', 'version', 'record', 'current', 'activate', 'current', 'probe', 'cases', 'current', 'restore', 'current']);
+});
+
+test('refuses activation when the deadline differs or recovery recording consumes the activation window', async t => {
+  const { run, calls, state, options } = fixture(t);
+  const remote = state.candidateBindings.find(binding => binding.name === expiryBinding);
+  remote.text = String(Number(expiresAt) - 1);
+  await assert.rejects(run(), /incompatible resource/);
+  assert.deepEqual(calls.splice(0), ['current', 'version']);
+  remote.text = expiresAt;
+  let time = now;
+  t.mock.method(Date, 'now', () => time);
+  const record = options.recordRecovery;
+  options.recordRecovery = point => {
+    record(point);
+    time += 5 * 60_000;
+  };
+  await assert.rejects(run(), /insufficient time left to activate/);
+  assert.deepEqual(calls, ['current', 'version', 'record', 'current']);
 });
 
 test('refuses wrong source or target, missing or split prior traffic, and stale candidates before activation', async t => {
