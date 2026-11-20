@@ -7,7 +7,7 @@ name: ci
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened]
   # Merge queue validation: every required check must report on the queue's
   # temporary merge commit. merge_group runs are never cancelled.
   merge_group:
@@ -560,6 +560,7 @@ jobs:
           ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
           UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
           STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
+          STAGING_FOLDER_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/tests/staging-folder-worker-fixture.mjs') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

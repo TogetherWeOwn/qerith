@@ -25,7 +25,7 @@ async function denied(response: Response, status: number) {
 test('folder creation stays closed outside the fixture and in staging invite mode', async () => {
   const staging = { ...fixture, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
   const request = post({ headers: { ...headers, origin: stagingOrigin } }, stagingOrigin + path);
-  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>() };
+  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>(), folder: new Set<string>() };
   const result = await admitStagingRequest(request, staging, true, assets);
   assert.ok(result instanceof Response);
   await denied(result, 404);

@@ -1,5 +1,5 @@
 import type { Handle } from '@sveltejs/kit/hooks';
-import { driveNext, isDrivePageNavigation, isTopLevelDocumentNavigation } from '../drive-navigation';
+import { driveNext, folderDocumentRoute, isDrivePageNavigation, isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
@@ -120,6 +120,8 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const staging = origin.origin === stagingOrigin;
     const routeId = event.route?.id;
     const peoplePage = routeId === '/people';
+    const folderPage = routeId === folderDocumentRoute;
+    if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
     if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${stagingOrigin}/people` ||
         (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {
@@ -156,7 +158,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const uploadRoute = uploadAdmissionRoute(request, url);
       const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request) &&
         driveUploadMode(env, session.principal.role) === 'multipart';
-      if (!(memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload)))) {
+      if (!(memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage)))) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }

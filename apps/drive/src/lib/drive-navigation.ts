@@ -1,6 +1,7 @@
 const otherDrivePage = /^(?:\/|\/shared|\/people|\/shared\/f\/[A-Za-z0-9_-]+)$/;
 export const isLinkableFolderId = (id: string) => /^[A-Za-z0-9_-]{1,128}$/.test(id);
-const drivePage = (path: string) => path.startsWith('/f/') ? isLinkableFolderId(path.slice(3)) : otherDrivePage.test(path);
+const folderPath = (path: string) => path.startsWith('/f/') && isLinkableFolderId(path.slice(3));
+const drivePage = (path: string) => folderPath(path) || otherDrivePage.test(path);
 const conditionalHeaders = ['range', 'if-range', 'if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since'];
 
 export function driveNext(value: string | null): string {
@@ -17,6 +18,18 @@ export function isTopLevelDocumentNavigation(request: Request): boolean {
   return (request.method === 'GET' || request.method === 'HEAD') &&
     headers.get('sec-fetch-mode') === 'navigate' && headers.get('sec-fetch-dest') === 'document' &&
     !conditionalHeaders.some((name) => headers.has(name));
+}
+
+export const folderDocumentRoute = '/f/[folderId]';
+
+export function isExactFolderDocument(request: Request, url: URL): boolean {
+  const site = request.headers.get('sec-fetch-site');
+  // Leave the page query to the cursor reader; only the path must be canonical here.
+  return (request.method === 'GET' || request.method === 'HEAD') &&
+    (site === null || site === 'same-origin' || site === 'none') &&
+    (!request.headers.has('sec-fetch-dest') || isTopLevelDocumentNavigation(request)) &&
+    folderPath(url.pathname) && !request.url.includes('#') &&
+    request.url.split('?', 1)[0] === url.origin + url.pathname;
 }
 
 export function isDrivePageNavigation(request: Request): boolean {
