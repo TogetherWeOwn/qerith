@@ -76,6 +76,7 @@ const buildAdapter = {
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
 import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
+import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
@@ -116,6 +117,9 @@ export default {
         asset: request => env.ASSETS.fetch(request)
       });
     }
+    // Keep listing denials out of the adapter's query validation.
+    const listing = listingRequest(request, env);
+    if (listing) return listing;
     if (url.pathname === '/api/deployer/owner-enrollment') return ownerEnrollment(request, env);
     let pathname;
     try {
