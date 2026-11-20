@@ -8,7 +8,7 @@ import { readinessHeaders, readinessPath } from '../src/lib/server/qualification
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
-import { exerciseReadGrants, readGrantPath, readGrantWorker } from '../tests/read-grant-worker-fixture.mjs';
+import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
@@ -108,9 +108,19 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
 import app from ${JSON.stringify(resolve(main))};
-${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
+${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js'))};
+globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
+  ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
+  if (boundary !== null) {
+    const bindings = { ...env,
+      DRIVE_STAGING_READ_GRANTS: request.headers.get('x-test-read-grants') ?? undefined,
+      DRIVE_SIGN_IN_FIXTURE: request.headers.get('x-test-sign-in-fixture') ?? undefined,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') ?? undefined };
+    const target = boundary === 'adapter' ? adapter : app;
+    return withEnv(bindings, () => target.fetch(request, bindings, ctx));
+  }` : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
@@ -174,6 +184,7 @@ export default { fetch(request, env, ctx) {
     };
     let cookie = await session('fixture', staging ? 'owner' : 'member');
     if (rawOutsideStaging) {
+      await refusePreviewReadGrants({ worker, origin, cookie });
       const refused = await worker.fetch(`${origin}/api/uploads`, {
         method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: '{"size":4}',
       });
@@ -296,12 +307,7 @@ export default { fetch(request, env, ctx) {
         [200, 'private, no-store', null], 'root data cannot consume a download notice');
       await assertRootUploadData(refresh, 'preview');
       const memberHeaders = { cookie: member, 'x-test-invite': '1' };
-      for (const headers of [{ cookie }, { cookie, 'x-test-invite': '1' }, memberHeaders]) {
-        for (const [method, path] of [['GET', readGrantPath], ['PUT', `${readGrantPath}/other`], ['DELETE', `${readGrantPath}/other`]]) {
-          const response = await worker.fetch(origin + path, { method, headers: { origin, ...headers }, redirect: 'manual' });
-          assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [404, 'private, no-store', '']);
-        }
-      }
+      assert.equal((await get(readGrantPath, { cookie })).status, 404);
       await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart');
       const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
       assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
@@ -335,6 +341,7 @@ export default { fetch(request, env, ctx) {
       const range = await get(file, { cookie, range: 'bytes=1-2' });
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
+      await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);

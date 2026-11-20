@@ -1,7 +1,10 @@
 # Drive read-grant HTTP contract
 
-Only the generated disposable Worker fixture mounts these endpoints. Neither
-staging admission layer is changed. There is no deployment flag for this slice.
+The generated Worker and the SvelteKit auth hook admit these endpoints only at
+Drive's configured staging origin with `DRIVE_STAGING_READ_GRANTS=1`. The flag
+is unset in normal publishes (off). Invite and sign-in fixture flags do not
+enable the deployable endpoints, including in preview. The isolated test
+fixture can still exercise the handlers without staging.
 
 | Method | Exact path | Success |
 | --- | --- | --- |
@@ -24,11 +27,14 @@ statement that reads or changes the grant. Owning the entry, not having the
 Drive-wide owner role, is what permits management. A folder grant gives read
 access to descendants but does not create descendant grant rows or permit a
 recipient to write or re-share. Removing a grant does not affect independent
-grants that still permit access.
+grants that still permit access. This flag does not admit Shared with me
+navigation or file delivery to grantees, and adds no sharing UI. The existing
+folder document and its authorization remain unchanged.
 
 Responses are `private, no-store`. Errors have empty bodies: `401` for missing
-or stale sessions observed at lookup, `403` for a wrong site, `404` for a
-missing or inaccessible entry or an unchanged grant (including an ineligible
-recipient or a duplicate insert), `400` for invalid query or body, `405` for a
-wrong method on a matched path, and `503` for an unavailable service. There are
-no invitation details, display names, or public links in the response.
+or stale sessions observed at lookup, `403` for a wrong origin or site, `404`
+for an unadmitted method/path, a missing or inaccessible entry, or an unchanged
+grant (including an ineligible recipient or a duplicate insert), `400` for
+invalid query or body, and `503` for an unavailable service. The fixture-only
+entry point returns `405` for a wrong method on a matched path. There are no
+invitation details, display names, or public links in the response.

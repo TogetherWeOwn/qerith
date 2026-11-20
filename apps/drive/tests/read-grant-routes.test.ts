@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readGrantCollectionRoute, readGrantRecipientRoute } from '../src/lib/server/read-grant-admission';
 import { readGrantRequest } from '../src/lib/server/read-grant-routes';
+import { privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
+import { admitStagingRequest } from '../src/lib/server/staging-admission';
 
 const origin = 'https://drive.example.test';
 const path = '/api/entries/source/read-grants';
@@ -56,4 +59,31 @@ test('rejects mutations with a missing Origin, wrong site, body or query before 
     assert.equal((await ask(target + '?cursor=x', { method, headers: { origin } }))?.status, 400);
     assert.equal((await ask(target, { method, headers: { origin } }))?.status, 401);
   }
+});
+
+test('both staging gates require the exact read-grant opt-in and method/path before resolving', async () => {
+  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>(), folder: new Set<string>() };
+  const verify = async (request: Request, route: string, flag: string | undefined, expected: number) => {
+    const bindings = { ...env, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_READ_GRANTS: flag };
+    const handle = privateRequests(bindings);
+    const hook = await handle({
+      event: { request, route: { id: route }, locals: {} },
+      resolve: () => { throw new Error('Denials must not resolve the route'); },
+    } as unknown as Parameters<typeof handle>[0]);
+    for (const result of [hook, await admitStagingRequest(request, bindings, true, assets)]) {
+      assert.ok(result instanceof Response);
+      assert.deepEqual([result.status, result.headers.get('cache-control')], [expected, 'private, no-store']);
+    }
+  };
+  const list = new Request(stagingOrigin + path);
+  const put = new Request(stagingOrigin + target, { method: 'PUT', headers: { origin: stagingOrigin } });
+  for (const flag of [undefined, '0', 'true']) {
+    await verify(list, readGrantCollectionRoute, flag, 404);
+    await verify(put, readGrantRecipientRoute, flag, 404);
+  }
+  await verify(list, readGrantCollectionRoute, '1', 401);
+  await verify(put, readGrantRecipientRoute, '1', 401);
+  await verify(new Request(list, { method: 'HEAD' }), readGrantCollectionRoute, '1', 404);
+  await verify(new Request(stagingOrigin + target + '/', put), readGrantRecipientRoute, '1', 404);
+  await verify(new Request(put, { headers: { origin: stagingOrigin, 'sec-fetch-site': 'cross-site' } }), readGrantRecipientRoute, '1', 403);
 });
