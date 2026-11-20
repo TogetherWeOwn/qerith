@@ -114,8 +114,9 @@ Worker version or its absence; Worker rollback is separate from D1 recovery.
 `drive-staging-qualification.yml` verifies that `tested_sha` is one lowercase
 40-hex SHA, equal to the manual dispatch head and checked-out commit, and an
 ancestor of fetched `origin/main`. A dispatch of today's head with yesterday's
-SHA as input cannot qualify yesterday's head. The protected `staging` job
-intentionally fails: it has no live runner, secrets or upload step. Do not
+SHA as input cannot qualify yesterday's head. Only after source validation does
+the protected `staging` job enter the shared `drive-staging-lifecycle` queue.
+That job intentionally fails: it has no live runner, secrets or upload step. Do not
 dispatch this increment. Required CI tests the policy with local Git history
 and in-memory evidence only; neither is live qualification.
 

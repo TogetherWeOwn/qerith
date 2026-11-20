@@ -11,11 +11,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: drive-staging-lifecycle
-  cancel-in-progress: false
-
 jobs:
+  # Validate before entering the shared queue: even non-preempting jobs can replace pending jobs.
   source:
     if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -34,6 +31,9 @@ jobs:
   qualification:
     needs: source
     if: success() && !cancelled() && needs.source.result == 'success' && github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: drive-staging-lifecycle
+      cancel-in-progress: false
     environment: staging
     runs-on: ubuntu-latest
     timeout-minutes: 5

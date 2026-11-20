@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { assertDispatch, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
+import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
 
 function history(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-'));
@@ -58,7 +58,34 @@ test('dispatch, checkout and fetched main history must independently agree', t =
 
 test('only a complete successful full-v0 run has the pinned consumer name', t => {
   const { cwd, env, ancestor } = history(t);
-  const results = Object.fromEntries(requiredCases.map(name => [name, 'pass']));
+  // Keep this fixture independent so removing a case from the policy cannot weaken the test.
+  const results = {
+    'sha-bound-readiness': 'pass',
+    'passkey-positive': 'pass',
+    'passkey-negative': 'pass',
+    'invite-acceptance': 'pass',
+    'member-revocation': 'pass',
+    'cross-user-denial': 'pass',
+    'authenticated-file-access': 'pass',
+    'unauthenticated-file-denial': 'pass',
+    's3-multipart': 'pass',
+    's3-range': 'pass',
+    's3-retry': 'pass',
+    's3-persistence': 'pass',
+    'large-transfer-hash': 'pass',
+    'interrupted-transfer-resume': 'pass',
+    'folder-operations': 'pass',
+    'share-and-revoke': 'pass',
+    'delete-envelope': 'pass',
+    'delete-boundary-and-safe-fallback': 'pass',
+    'delete-rollback-and-retry': 'pass',
+    'delete-provider-proof': 'pass',
+    'migration-ledger': 'pass',
+    'time-travel-bookmark': 'pass',
+    'rollback-or-disablement': 'pass',
+    'zero-idle-inventory': 'pass',
+    'prefix-cleanup-verified': 'pass',
+  };
   const evidence = { mode: 'full-v0', sha: env.GITHUB_SHA, runId: '182', attempt: '3', results };
   const name = (proof = evidence, status = 'success', context = env) => qualificationReceiptName(context, proof, status, cwd);
   assert.equal(name(), `drive-staging-qualification-${env.GITHUB_SHA}-attempt-3`);
@@ -71,7 +98,7 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   for (const attempt of ['0', '03', '3\n', 3]) {
     assert.throws(() => name({ ...evidence, attempt }, 'success', { ...env, GITHUB_RUN_ATTEMPT: attempt }), /attempt/);
   }
-  for (const caseName of requiredCases) {
+  for (const caseName of Object.keys(results)) {
     const { [caseName]: _, ...incomplete } = results;
     assert.throws(() => name({ ...evidence, results: incomplete }), /must pass/, `missing ${caseName}`);
   }
@@ -92,9 +119,12 @@ test('the staged workflow has no producer or provider path', () => {
         description: Lowercase 40-hex SHA of the dispatch head on main
         required: true
         type: string`);
-  assert.match(workflow, /^permissions:\n  contents: read\n\nconcurrency:\n  group: drive-staging-lifecycle\n  cancel-in-progress: false$/m);
-  assert.ok(workflow.includes(`  source:\n    if: ${gate}\n`));
-  assert.ok(workflow.includes(`    if: success() && !cancelled() && needs.source.result == 'success' && ${gate}\n    environment: staging\n`));
+  assert.match(workflow, /^permissions:\n  contents: read$/m);
+  assert.doesNotMatch(workflow, /^concurrency:/m);
+  const [source, qualification] = workflow.split('\n  qualification:\n');
+  assert.ok(source.includes(`  source:\n    if: ${gate}\n`));
+  assert.doesNotMatch(source, /concurrency:/);
+  assert.ok(qualification.startsWith(`    needs: source\n    if: success() && !cancelled() && needs.source.result == 'success' && ${gate}\n    concurrency:\n      group: drive-staging-lifecycle\n      cancel-in-progress: false\n    environment: staging\n`));
   assert.match(workflow, /ref: \$\{\{ github.sha \}\}\n +fetch-depth: 0\n +persist-credentials: false/);
   assert.match(workflow, /TESTED_SHA: \$\{\{ inputs\.tested_sha \}\}\n +run: timeout .* node apps\/drive\/scripts\/staging-qualification\.mjs/);
   assert.equal(workflow.match(/timeout-minutes: 5/g)?.length, 2);
