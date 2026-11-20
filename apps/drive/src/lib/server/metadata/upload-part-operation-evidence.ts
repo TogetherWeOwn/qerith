@@ -50,6 +50,8 @@ function identity(op: UploadPartOperation): (string | number | ArrayBuffer)[] {
 const exactOperation = `o.operation_id = ? AND o.intent_id = CAST(? AS TEXT) AND o.owner_id = CAST(? AS TEXT)
   AND o.object_key = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.upload_id = CAST(? AS TEXT)
   AND o.intent_version = ? AND o.part_number = ? AND o.size_bytes = ?`;
+export { identity as bindUploadPartOperation, exactOperation, isText, typedArrayTag, copyBytes };
+
 function observation(reportedEtag: Uint8Array | null): ['uncertain' | 'reported', ArrayBuffer | null] {
   if (reportedEtag === null) return ['uncertain', null];
   if (typedArrayTag.call(reportedEtag) !== 'Uint8Array') throw new TypeError('Invalid reported part ETag');
