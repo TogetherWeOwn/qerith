@@ -174,6 +174,23 @@ test('probe and case deadlines abort and settle work before rollback', async t =
   }
 });
 
+test('rejects probe and case overruns even when the timer has not fired', async t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 20 * 60_000]]) {
+    const { run, options, calls } = fixture(t);
+    options[phase] = (identity, signal) => {
+      assert.ok(!signal.aborted);
+      now += timeout;
+      assert.ok(!signal.aborted);
+      return { ...identity, ready: true };
+    };
+    await assert.rejects(run(), { name: 'TimeoutError' });
+    assert.deepEqual(calls.slice(-3), ['current', 'restore', 'current']);
+    if (phase === 'probe') assert.ok(!calls.includes('cases'));
+  }
+});
+
 test('recovers an attempt-owned ambiguous activation but never certifies it', async t => {
   const { run, state, calls } = fixture(t);
   state.activateLost = true;

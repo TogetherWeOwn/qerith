@@ -69,11 +69,15 @@ async function runPhase(task, identity, parentSignal, timeout) {
   const controller = new AbortController();
   const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
   signal.throwIfAborted();
-  const timer = setTimeout(() => controller.abort(new DOMException('Qualification phase timed out.', 'TimeoutError')), timeout);
+  const deadline = performance.now() + timeout;
+  const expire = () => controller.abort(new DOMException('Qualification phase timed out.', 'TimeoutError'));
+  const timer = setTimeout(expire, timeout);
   try {
     // The callback must stop and drain its work on abort. Racing the promise
     // would allow a still-running case to mutate staging during rollback.
     const result = await task({ ...identity }, signal);
+    // A blocked event loop can settle the callback before the timer gets a turn.
+    if (performance.now() >= deadline) expire();
     signal.throwIfAborted();
     return result;
   } finally {

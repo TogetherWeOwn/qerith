@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
 
 const first = { id: 1, name: '0001_first.sql', applied_at: '2026-11-20 10:00:00' };
 const second = { id: 2, name: '0002_second.sql', applied_at: '2026-11-20 10:02:00' };
 const rows = (...results) => JSON.stringify([{ success: true, results }]);
 
-function fixture(t) {
+function fixture(t, { localWrangler = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'drive-qualification-d1-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const app = join(root, 'apps/drive');
@@ -28,6 +29,10 @@ function fixture(t) {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'fixture');
   const sha = git('rev-parse', 'HEAD');
   git('update-ref', 'refs/remotes/origin/main', sha);
+  if (localWrangler) {
+    const binary = fileURLToPath(new URL('../node_modules/.bin/wrangler', import.meta.url));
+    writeFileSync(join(root, 'local-wrangler'), `${binary}\n`);
+  }
   writeFileSync(join(app, 'node_modules/.bin/wrangler'), `#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/calls"
 if env | grep -Eq '^(QERITH_S3_|GITHUB_TOKEN=|NODE_OPTIONS=)'; then exit 70; fi
@@ -36,7 +41,12 @@ case "$*" in
   'd1 time-travel info '*) /bin/cat "$HOME/bookmark" ;;
   'd1 execute '*)
     if grep -q 'migrations apply' "$HOME/calls"; then /bin/cat "$HOME/after"; else /bin/cat "$HOME/before"; fi ;;
-  'd1 migrations list '*) : ;;
+  'd1 migrations list '*)
+    if [ -f "$HOME/local-wrangler" ]; then
+      IFS= read -r wrangler < "$HOME/local-wrangler" || exit 76
+      env -i "PATH=$PATH" "HOME=$HOME" CI=true NO_COLOR=1 WRANGLER_SEND_METRICS=false WRANGLER_WRITE_LOGS=false \\
+        "$wrangler" d1 migrations list qerith-drive-staging --local --config wrangler.staging.json > "$HOME/local-list"
+    fi ;;
   'd1 migrations apply '*)
     [ "$PWD" != "$HOME/apps/drive" ] || exit 73
     grep -qx 'SELECT 1;' migrations/${second.name} || exit 74
@@ -45,7 +55,8 @@ case "$*" in
   *) exit 71 ;;
 esac
 `, { mode: 0o700 });
-  const env = { PATH: '/usr/bin:/bin', HOME: root, CLOUDFLARE_API_TOKEN: 'synthetic',
+  const env = { PATH: localWrangler ? `${dirname(process.execPath)}:/usr/bin:/bin` : '/usr/bin:/bin',
+    HOME: root, CLOUDFLARE_API_TOKEN: 'synthetic',
     CLOUDFLARE_ACCOUNT_ID: '209cf7dd678adfb683947dd7874d05af', GITHUB_ACTIONS: 'true',
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_REF: 'refs/heads/main',
@@ -58,7 +69,8 @@ esac
     for (const [name, text] of Object.entries({ calls: '', bookmark, before, after })) writeFileSync(join(root, name), text);
     return applyQualificationMigrations({ recordRecovery }, { ...env, ...overrides }, relative(process.cwd(), root), signal);
   };
-  return { app, sha, file, calls, run, failApply: () => writeFileSync(join(root, 'fail-apply'), '') };
+  return { app, sha, file, calls, run, failApply: () => writeFileSync(join(root, 'fail-apply'), ''),
+    localList: () => readFileSync(join(root, 'local-list'), 'utf8') };
 }
 
 const target = 'qerith-drive-staging';
@@ -104,6 +116,15 @@ test('uses the private SQL and config even if the checkout changes after validat
   assert.deepEqual(calls(), [bookmarkCommand, list, ledger, apply, ledger]);
   await assert.rejects(run(), /migration config differs/);
   assert.deepEqual(calls(), []);
+});
+
+test('pinned Wrangler resolves both private migrations in local mode', {
+  skip: process.env.DRIVE_QUALIFICATION_WRANGLER_LOCAL !== '1',
+}, async t => {
+  const { file, localList, run } = fixture(t, { localWrangler: true });
+  await run({ recordRecovery() { file('wrangler.staging.json', '{}'); } });
+  const output = localList();
+  for (const { name } of [first, second]) assert.ok(output.includes(name), `Missing ${name} in the local Wrangler list`);
 });
 
 test('rejects wrong dispatch, target, untracked migrations and changed migration bytes before Wrangler', async t => {

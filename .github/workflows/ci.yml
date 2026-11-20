@@ -422,6 +422,11 @@ jobs:
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
+      - name: Resolve private qualification migrations with pinned Wrangler locally
+        if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
+        env:
+          DRIVE_QUALIFICATION_WRANGLER_LOCAL: '1'
+        run: timeout --signal=TERM --kill-after=10s 60s node --test --test-name-pattern '^pinned Wrangler' scripts/staging-qualification-migrations.test.mjs
       - name: Check Drive project types and configuration coverage
         run: |
           npm run check
