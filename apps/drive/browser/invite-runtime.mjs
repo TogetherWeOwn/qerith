@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { tsImport } from 'tsx/esm/api';
+import { proveMemberDownload } from './member-download.mjs';
 import { capture, widths } from './root-listing.mjs';
 
 // The trusted browser lane starts with plain Node; transform only the fixture's service imports.
@@ -203,7 +204,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     let memberRoot;
     if (staging) {
       await captureState('member-root-empty');
-      memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, ...stagingRoot }, captureState);
+      memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, checkOwner: owner, ...stagingRoot }, captureState);
     }
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
@@ -226,6 +227,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
         [stagingRoot.asset, 'GET'], [invitations, 'GET']]) {
         await memberRoot.check(path, method, 401);
       }
+      await memberRoot.checkRevoked();
       assert.deepEqual((await list()).map(entry => entry.id), [first.id]);
       await owner(`${invitations}/${first.id}/cancel`, 204, { method: 'POST' });
       assert.deepEqual(await list(), []);
@@ -246,7 +248,8 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
   }
 }
 
-async function proveMemberRoot(page, context, { origin, worker, DB, id, asset, ownerDownload, ownerName }, captureState) {
+async function proveMemberRoot(page, context, { worker, asset, ...options }, captureState) {
+  const { origin, ownerFile } = options;
   const session = (await context.cookies(origin)).find(cookie => cookie.name === '__Host-drive-session');
   assert.ok(session?.httpOnly && session.secure);
   const cookie = `${session.name}=${session.value}`;
@@ -259,31 +262,13 @@ async function proveMemberRoot(page, context, { origin, worker, DB, id, asset, o
   };
   assert.equal(await (await check('/', 'HEAD', 200)).text(), '');
   await check(asset, 'GET', 200);
-  const fileId = crypto.randomUUID(), name = 'Member-only résumé.txt';
-  await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes)
-    VALUES (?, ?, ?, 'file', 'internal-member-fixture-key', 1)`).bind(fileId, id, name).run();
-  const rootDocument = await page.reload();
-  assert.equal(rootDocument.status(), 200);
-  assert.equal((await rootDocument.allHeaders())['cache-control'], 'private, no-store');
-  await page.getByRole('heading', { name: 'My Drive', exact: true }).waitFor();
-  await page.getByText(name, { exact: true }).first().waitFor();
-  assert.equal(await page.getByText(ownerName, { exact: true }).count(), 0);
-  assert.equal(await page.locator('a[href^="/api/download/"], input[type="file"]').count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
-  await captureState('member-root-listed');
+  const { name, checkRevoked } = await proveMemberDownload(page, { ...options, cookie, check, captureState });
   const data = await (await check(dataPath, 'GET', 200)).text();
-  assert.ok(data.includes(name) && !data.includes(ownerName) && !data.includes('internal-member-fixture-key'));
+  assert.ok(data.includes(name) && !data.includes(ownerFile.name) && !data.includes('internal-member-fixture-key'));
   await check(dataPath, 'GET', 403, { 'sec-fetch-site': 'cross-site' });
-  const nonce = crypto.randomUUID(), notice = `__Host-drive-download-failed-${nonce}`;
-  const document = await check(`/?download=${nonce}`, 'GET', 200, {
-    cookie: `${cookie}; ${notice}=${ownerDownload.split('/').at(-1)}`,
-    'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin',
-  });
-  assert.ok(!document.headers.getSetCookie().some(value => value.startsWith(`${notice}=`)));
-  assert.doesNotMatch(await document.text(), /didn’t download|Retry download/);
-  for (const [path, method, status] of [[ownerDownload, 'GET', 403], [`/api/download/${fileId}`, 'GET', 403],
+  for (const [path, method, status] of [
     ['/api/uploads', 'POST', 403], ['/api/owner/invitations', 'GET', 403], ['/people', 'GET', 404]]) {
     await check(path, method, status);
   }
-  return { check, dataPath };
+  return { check, dataPath, checkRevoked };
 }

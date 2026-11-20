@@ -17,7 +17,7 @@ const configPath = resolve(dir.path, 'wrangler.json');
 const main = resolve(dir.path, 'relay.mjs');
 await writeFile(main, `import { withEnv } from 'cloudflare:workers';
 import worker from ${JSON.stringify(resolve('../.svelte-kit/cloudflare/_worker.js'))};
-import { bindings, storageFetch } from ${JSON.stringify(resolve('upload-storage.mjs'))};
+import { bindings, storage, storageCalls, storageFetch, truncateNextDownload } from ${JSON.stringify(resolve('upload-storage.mjs'))};
 globalThis.fetch = storageFetch;
 export default { fetch(request, env, ctx) {
   const input = new Request(request);
@@ -27,7 +27,16 @@ export default { fetch(request, env, ctx) {
     input.headers.set('sec-fetch-dest', 'document');
     input.headers.delete('x-fixture-navigation');
   }
+  if (input.headers.has('x-fixture-storage-count')) return Response.json(storageCalls());
+  if (input.headers.has('x-fixture-short-download')) {
+    truncateNextDownload();
+    input.headers.delete('x-fixture-short-download');
+  }
   const configured = { ...env, ...bindings };
+  // Seed with the fixture upload route only. All download assertions use staging dispatch.
+  if (new URL(input.url).origin === 'https://drive.example.test' && /^\\/api\\/uploads(?:\\/|$)/.test(new URL(input.url).pathname)) {
+    Object.assign(configured, storage, { DRIVE_ORIGIN: 'https://drive.example.test', DRIVE_SIGN_IN_FIXTURE: '1' });
+  }
   if (input.headers.get('x-fixture-invite') === '1') {
     configured.DRIVE_STAGING_INVITE_ACCEPTANCE = '1';
     input.headers.delete('x-fixture-invite');
@@ -155,12 +164,15 @@ try {
   const notice = page.getByRole('alert');
   const noticeRetry = notice.getByRole('link', { name: 'Retry download', exact: true });
   const listingRetry = page.getByRole('link', { name: 'Try again', exact: true });
-  async function visitWithNotice(value = failedDownload.split('/').at(-1)) {
-    const nonce = crypto.randomUUID(), name = `__Host-drive-download-failed-${nonce}`;
+  async function renderNotice(target, nonce, name, value) {
     const seeded = pendingNotice = { nonce, name, value, expired: false };
-    const document = await page.goto(`${origin}/?download=${nonce}`);
+    const document = await target.goto(`${origin}/?download=${nonce}`);
     assert.equal(document?.status(), 200);
-    assert.ok(seeded.expired, 'the Worker sent an expiration header for the synthetic notice cookie');
+    assert.ok(seeded.expired, 'the Worker sent an expiration header for the notice cookie');
+  }
+  function visitWithNotice(value = failedDownload.split('/').at(-1)) {
+    const nonce = crypto.randomUUID();
+    return renderNotice(page, nonce, `__Host-drive-download-failed-${nonce}`, value);
   }
   await visitWithNotice();
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload);
@@ -235,7 +247,8 @@ try {
   const priorAssets = new Set(assets);
   await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
     worker: inviteWorker, DB, ownerToken: session.value,
-    stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerName: file.name } });
+    stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
+      storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
   const inviteNodes = [...assets].filter(path => path.startsWith('/_app/immutable/nodes/') && !priorAssets.has(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});

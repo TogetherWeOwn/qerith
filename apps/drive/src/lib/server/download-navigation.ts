@@ -1,6 +1,12 @@
+import { entryId } from '../download-id';
 import { isTopLevelDocumentNavigation } from '../drive-navigation';
 
-export { entryId } from '../download-id';
+export { entryId };
+
+export function isExactDownloadGet(method: string, pathname: string) {
+  const prefix = '/api/download/';
+  return method === 'GET' && pathname.startsWith(prefix) && entryId.test(pathname.slice(prefix.length));
+}
 
 export const downloadRoute = '/api/download/[fileId]';
 export const downloadNoticeCookie = (nonce: string) => `__Host-drive-download-failed-${nonce}`;

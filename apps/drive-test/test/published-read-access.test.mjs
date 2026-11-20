@@ -302,3 +302,31 @@ it('composes with immutable full and range GETs without storage calls for denied
   expect(revoked.headers.get('content-range')).toBeNull();
   expect(fetch).toHaveBeenCalledTimes(18);
 });
+
+it('rechecks an invitee’s live session before storage dispatch and before returning bytes', async () => {
+  const label = 'read-invite-recheck';
+  const { id, token } = await seedBoundPublication(label);
+  const storage = { DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+    DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+    DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey, DRIVE_S3_STORAGE_EPOCH: epoch };
+  const transport = vi.fn();
+  const get = (bindings, auth) => publishedDownload(new Request(`${stagingOrigin}/api/download/${id}`),
+    id, auth, bindings, () => {}, transport);
+  const DB = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
+    const reference = await env.DB.withSession(mode).prepare(query).bind(...args).first();
+    if (reference) await sessions.revoke(token);
+    return reference;
+  } }) }) }) };
+  expect((await get({ ...storage, DB }, token)).status).toBe(404);
+  expect(transport).not.toHaveBeenCalled();
+
+  const fresh = (await sessions.issue(`owner-${label}`)).token;
+  transport.mockImplementationOnce(async request => {
+    expect(request.headers.get('if-match')).toBe(etag);
+    await sessions.revoke(fresh);
+    return new Response('abcdefg', { headers: { etag, 'content-length': '7' } });
+  });
+  const denied = await get(storage, fresh);
+  expect([denied.status, denied.headers.get('content-disposition'), await denied.text()]).toEqual([404, null, '']);
+  expect(transport).toHaveBeenCalledOnce();
+});

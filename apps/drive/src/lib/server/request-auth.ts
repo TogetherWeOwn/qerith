@@ -1,6 +1,6 @@
 import type { Handle } from '@sveltejs/kit/hooks';
 import { driveNext, isDrivePageNavigation, isTopLevelDocumentNavigation } from '../drive-navigation';
-import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation } from './download-navigation';
+import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 
@@ -18,7 +18,7 @@ export function admitsSignInFixture(env: DriveAuthEnv): boolean {
 }
 
 // Default-off staging mode for invitation lifecycle, acceptance and member My Drive.
-export function admitsStagingInvite(env: DriveAuthEnv): boolean {
+export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
 
@@ -131,10 +131,15 @@ export function privateRequests(env: DriveAuthEnv): Handle {
         headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
     }
     if (staging && session && session.principal.role !== 'owner') {
-      const memberRoot = admitsStagingInvite(env) && routeId === '/' &&
+      const memberRoot = routeId === '/' &&
         ((pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) ||
          (pathname === '/__data.json' && request.method === 'GET'));
-      if (!memberRoot) return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
+      const site = request.headers.get('sec-fetch-site');
+      const memberDownload = routeId === downloadRoute && isExactDownloadGet(request.method, pathname) &&
+        (site === null || site === 'same-origin' || site === 'none');
+      if (!admitsStagingInvite(env) || !(memberRoot || memberDownload)) {
+        return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
+      }
     }
     if (!session && !signInPage && !invitePage) {
       if (event.route?.id === downloadRoute) {
