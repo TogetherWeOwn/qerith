@@ -31,6 +31,7 @@ function runStep(name, overrides = {}) {
       GITHUB_EVENT_NAME: 'workflow_dispatch',
       GITHUB_REF: 'refs/heads/main',
       GITHUB_SHA: sourceSha,
+      EXPECTED_MAIN_SHA: sourceSha,
       TEST_CHECKOUT_SHA: sourceSha,
       TEST_GIT_STATUS: '0',
       ...overrides,
@@ -78,6 +79,12 @@ test('rejects the wrong repository, event or ref before checkout', () => {
 test('rejects malformed source SHAs independently of checkout identity', () => {
   for (const sha of ['', 'HEAD', sourceSha.slice(1), `${sourceSha}0`, `g${sourceSha.slice(1)}`, sourceSha.toUpperCase()]) {
     assertRejected(runStep(sourceStep, { GITHUB_SHA: sha }), /invalid source SHA/);
+  }
+});
+
+test('rejects a missing, malformed or mismatched dispatch pin before checkout', () => {
+  for (const sha of ['', 'main', sourceSha.toUpperCase(), 'f'.repeat(40)]) {
+    assertRejected(runStep(sourceStep, { EXPECTED_MAIN_SHA: sha }), /expected main SHA does not match dispatch SHA/);
   }
 });
 

@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import { publishStaging as publish, validateStagingTarget } from './staging-publish.mjs';
 
 const accountId = '209cf7dd678adfb683947dd7874d05af';
-const publishStaging = (root, run) => publish(root, run, accountId);
+const storage = { vars: {}, secrets: {} };
+const publishStaging = (root, run) => publish(root, run, accountId, storage);
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'drive-publish-'));
@@ -48,8 +49,11 @@ test('publishes the validated staging bundle with the pinned runner', async (t) 
   await publishStaging(root, (binary, args, options) => {
     called++;
     assert.equal(binary, join(root, 'node_modules/.bin/wrangler'));
-    assert.deepEqual(args, ['deploy', '.svelte-kit/cloudflare/_worker.js', '--config', 'wrangler.staging.json',
-      '--var', 'DRIVE_OWNER_ENROLLMENT_RELEASE:disabled']);
+    assert.deepEqual(args.slice(0, 3), ['deploy', join(root, '.svelte-kit/cloudflare/_worker.js'), '--config']);
+    assert.equal(args[4], '--secrets-file');
+    assert.deepEqual(JSON.parse(readFileSync(args[3], 'utf8')).vars, {
+      DRIVE_ORIGIN: 'disabled', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled',
+    });
     assert.equal(options.cwd, root);
     assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal(options.detached, true);
@@ -59,26 +63,6 @@ test('publishes the validated staging bundle with the pinned runner', async (t) 
     return child;
   });
   assert.equal(called, 1);
-});
-
-test('passes the ephemeral authorization as a Worker secret file, not via argv or child env', async (t) => {
-  const { root } = fixture(t);
-  const sha = 'a'.repeat(40);
-  const value = `${sha}:${Date.now() + 60_000}:${'a'.repeat(43)}`;
-  assert.throws(() => publish(root, () => assert.fail('runner invoked'), accountId, value, 'b'.repeat(40)), /mismatched/);
-  let file;
-  await publish(root, (_binary, args, options) => {
-    assert.equal(args.at(-2), '--secrets-file');
-    assert.ok(args.includes(`DRIVE_OWNER_ENROLLMENT_RELEASE:${sha}`));
-    file = args.at(-1);
-    assert.ok(!args.includes(value) && !Object.hasOwn(options.env, 'DRIVE_OWNER_ENROLLMENT'));
-    assert.ok(JSON.parse(readFileSync(file, 'utf8')).DRIVE_OWNER_ENROLLMENT === value);
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
-    process.nextTick(() => child.emit('close', 0));
-    return child;
-  }, accountId, value, sha);
-  assert.equal(existsSync(file), false);
 });
 
 test('rejects missing and wrong inputs before invoking Wrangler', (t) => {
@@ -101,6 +85,12 @@ test('rejects each mismatched staging configuration field', (t) => {
   for (const [object, key, value] of [
     [config, 'main', 'other.js'],
     [config, 'env', {}],
+    [config, 'vars', null],
+    [config, 'vars', {}],
+    [config.vars, 'DRIVE_ORIGIN', 'https://wrong.example.test'],
+    [config.vars, 'DRIVE_SIGN_IN_FIXTURE', '1'],
+    [config.vars, 'DRIVE_STAGING_INVITE_ACCEPTANCE', '1'],
+    [config.vars, 'DRIVE_OWNER_ENROLLMENT_RELEASE', 'a'.repeat(40)],
     [config, 'compatibility_date', '2025-01-01'],
     [config, 'compatibility_flags', ['nodejs_compat']],
     [config, 'compatibility_flags', ['enable_request_signal']],
@@ -150,7 +140,8 @@ test('command-line publisher refuses requests outside the protected dispatch job
   const script = new URL('./staging-publish.mjs', import.meta.url).pathname;
   const env = { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: 'synthetic',
     GITHUB_ACTIONS: 'true', GITHUB_JOB: 'publish', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith',
-    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: 'a'.repeat(40) };
+    GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', GITHUB_SHA: 'a'.repeat(40),
+    EXPECTED_MAIN_SHA: 'a'.repeat(40) };
   const run = (args, overrides) => spawnSync(process.execPath, [script, ...args], {
     cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 5000,
   });
@@ -158,7 +149,7 @@ test('command-line publisher refuses requests outside the protected dispatch job
   for (const overrides of [
     { GITHUB_ACTIONS: '' }, { GITHUB_JOB: 'preparation' }, { GITHUB_REPOSITORY: 'other/qerith' },
     { GITHUB_EVENT_NAME: 'pull_request' }, { GITHUB_REF: 'refs/heads/other' },
-    { GITHUB_SHA: 'invalid' }, { CLOUDFLARE_API_TOKEN: '' },
+    { GITHUB_SHA: 'invalid' }, { EXPECTED_MAIN_SHA: '' }, { EXPECTED_MAIN_SHA: 'b'.repeat(40) }, { CLOUDFLARE_API_TOKEN: '' },
   ]) {
     const result = run(['--publish'], overrides);
     assert.equal(result.status, 1);
@@ -179,7 +170,7 @@ test('publisher terminates launcher descendants on overflow and timeout', async 
     writeFileSync(script, mode === 'timeout' ? source.replace('setTimeout(stop, 110000)', 'setTimeout(stop, 1000)') : source);
     const marker = join(root, mode);
     const result = spawnSync(process.execPath, ['--input-type=module', '-e',
-      'const { publishStaging } = await import(process.argv[2]); await publishStaging(process.cwd());', 'test-driver', script], {
+      'const { publishStaging } = await import(process.argv[2]); await publishStaging(process.cwd(), undefined, undefined, { vars: {}, secrets: {} });', 'test-driver', script], {
       cwd: root, env: { PATH: process.env.PATH, CLOUDFLARE_ACCOUNT_ID: accountId, MARKER: marker, MODE: mode },
       encoding: 'utf8', timeout: 5000,
     });

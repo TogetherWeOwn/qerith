@@ -97,7 +97,8 @@ ${rawStorage ? `globalThis.fetch = (${fixtureStorage})();` : preview ? '' : dele
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
-  ${staging ? "if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };" : ''}
+  ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
+  if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -166,8 +167,15 @@ export default { fetch(request, env, ctx) {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
         body: '{"operation":"challenge"}',
       });
-      assert.equal((await bootstrap()).status, 404, 'qualified preview has no enrollment route');
+      const inactive = await bootstrap();
+      assert.deepEqual([inactive.status, await inactive.text()], [404, ''], 'qualified preview has no enrollment route');
       const grant = { 'x-test-bootstrap': '1' };
+      const closed = { ...grant, cookie, 'x-test-closed': '1' };
+      for (const path of ['/', '/sign-in', '/_app/version.json', '/invite']) {
+        assert.equal((await get(path, closed)).status, 503, path);
+      }
+      assert.equal((await bootstrap({ ...closed, authorization: `Bearer ${enrollmentToken}` })).status, 503,
+        'closed publish refuses even a matching inherited enrollment grant');
       assert.equal((await bootstrap(grant)).status, 403, 'release-bound enrollment still needs the bearer');
       assert.equal((await bootstrap({ ...grant, authorization: `Bearer ${enrollmentToken}` })).status, 409,
         'release-bound enrollment remains available with qualified storage and refuses a second owner');
