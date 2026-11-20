@@ -3,7 +3,7 @@ import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
-import { uploadIdPattern } from './upload-part';
+import { uploadAdmissionRoute } from './upload-admission';
 
 interface PreviewAssets {
   signIn: ReadonlySet<string>;
@@ -25,7 +25,9 @@ interface PreviewDispatch {
   asset(request: Request): Promise<Response>;
 }
 
-function route(method: string, path: string, assets: PreviewAssets, invite: boolean): Target | null {
+function route(request: Request, url: URL, assets: PreviewAssets, invite: boolean): Target | null {
+  const { method } = request;
+  const { pathname: path } = url;
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/sign-in') return { kind: 'sign-in' };
     if (invite && path === '/invite') return { kind: 'invite' };
@@ -40,19 +42,14 @@ function route(method: string, path: string, assets: PreviewAssets, invite: bool
       if (invite && assets.people.has(path)) return { kind: 'people-asset' };
     }
   }
-  const [, api, resource, id, action, part, extra] = path.split('/', 7);
-  if (api !== 'api' || extra !== undefined) return null;
+  const [, api, resource, id, action] = path.split('/', 5);
+  if (api !== 'api') return null;
   if (method === 'POST' && resource === 'sign-in' && action === undefined &&
       (id === 'challenge' || id === 'restart' || id === 'verify')) return { kind: 'ceremony', step: id };
   if (invite && method === 'POST' && resource === 'invite' && action === undefined &&
       (id === 'present' || id === 'challenge' || id === 'enroll')) return { kind: 'invite-ceremony', step: id };
   if (isExactDownloadGet(method, path)) return { kind: 'download' };
-  if (resource !== 'uploads') return null;
-  if (method === 'POST' && (id === undefined ||
-      (uploadIdPattern.test(id) && action === 'complete' && part === undefined))) return { kind: 'upload' };
-  if (method === 'PUT' && id && uploadIdPattern.test(id) && action === 'parts' && part &&
-      /^(?:[1-9][0-9]{0,3}|10000)$/.test(part)) return { kind: 'upload' };
-  return null;
+  return uploadAdmissionRoute(request, url) ? { kind: 'upload' } : null;
 }
 
 function deny(status: number): Response {
@@ -69,7 +66,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const { pathname, search } = url;
   const invite = admitsStagingInvite(env);
   const target: Target | null = invite && ownerLifecycleRoute(request, url)
-    ? { kind: 'owner-lifecycle' } : route(request.method, pathname, assets, invite);
+    ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite);
   if (!target) return deny(404);
   if (target.kind === 'owner-lifecycle' && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
@@ -97,7 +94,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
       const memberRoute = invite && (target.kind === 'root' || target.kind === 'root-data' ||
-        target.kind === 'private-asset' || target.kind === 'download');
+        target.kind === 'private-asset' || target.kind === 'download' ||
+        (target.kind === 'upload' && allowsStagingInviteSite(request)));
       if (session.role === 'owner' || memberRoute) {
         return target.kind === 'private-asset' || target.kind === 'people-asset' || (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;

@@ -1,3 +1,5 @@
+import { captureUploadPartAcknowledgement, type UploadPartByteEvidence,
+  type UploadPartByteScope } from './metadata/upload-part-byte-evidence';
 import type { createMultipartUpload } from './s3/multipart-upload';
 
 const maxPartBytes = 16 * 1024 * 1024;
@@ -8,6 +10,10 @@ type PartReceipt = Awaited<ReturnType<SendPart>>;
 interface PartAttempt {
   objectKey: string;
   uploadId: string;
+  byteEvidence?: {
+    scope: UploadPartByteScope & { objectKey: string; uploadId: string };
+    store: Pick<UploadPartByteEvidence, 'recordAcknowledged'>;
+  };
   // Null preserves uncertainty; neither result grants permission to send again.
   record(receipt: PartReceipt | null): Promise<void>;
 }
@@ -85,9 +91,20 @@ export async function uploadPart(request: Request, intentId: string, part: strin
   try {
     const attempt = await access.claim(partNumber, size);
     if (!attempt) return reply(404);
-    let receipt: PartReceipt | null = null;
-    try { receipt = await deps.send(attempt.objectKey, attempt.uploadId, partNumber, bytes, request.signal); }
-    catch { /* No provider response is trusted after a send failure. */ }
+    const send = async (key: string, uploadId: string, part: number, body: Uint8Array<ArrayBuffer>) =>
+      deps.send(key, uploadId, part, body, request.signal);
+    let sent: Promise<PartReceipt> | undefined;
+    if (attempt.byteEvidence) {
+      const { scope, store } = attempt.byteEvidence;
+      try {
+        const proof = await captureUploadPartAcknowledgement(scope, bytes, (target, body) =>
+          sent ??= send(target.objectKey, target.uploadId, target.partNumber, body));
+        await store.recordAcknowledged(proof);
+        return reply(204);
+      } catch { /* Fall back to the existing receipt path, never to a second send. */ }
+    }
+    // Capture can fail before dispatch. Once started, even rejection is final.
+    const receipt = await (sent ?? send(attempt.objectKey, attempt.uploadId, partNumber, bytes)).catch(() => null);
     await attempt.record(receipt);
     if (receipt !== null) return reply(204);
   } catch {

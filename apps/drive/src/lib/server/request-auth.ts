@@ -4,6 +4,7 @@ import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavi
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { stagingOrigin } from './qualification-readiness';
+import { uploadAdmissionRoute } from './upload-admission';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
@@ -18,7 +19,7 @@ export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
 
-// Default-off staging mode for invitation lifecycle, acceptance and member My Drive.
+// Default-off staging mode for invitation lifecycle, acceptance and member My Drive access.
 export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
@@ -142,7 +143,9 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const site = request.headers.get('sec-fetch-site');
       const memberDownload = routeId === downloadRoute && isExactDownloadGet(request.method, pathname) &&
         (site === null || site === 'same-origin' || site === 'none');
-      if (!admitsStagingInvite(env) || !(memberRoot || memberDownload)) {
+      const uploadRoute = uploadAdmissionRoute(request, url);
+      const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request);
+      if (!admitsStagingInvite(env) || !(memberRoot || memberDownload || memberUpload)) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }
