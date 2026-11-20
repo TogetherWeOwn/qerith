@@ -16,7 +16,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
   function verifyListingScope(root: ReturnType<typeof parseListingXml>, bucketField: string, prefix?: string) {
     if (!prefix || listingText(root, bucketField) !== bucket ||
         decodeURIComponent(listingText(root, 'Prefix')!.replace(/\+/g, '%20')) !== prefix ||
-        listingChildren(root, 'CommonPrefixes').length !== 0) throw new Error();
+        listingText(root, 'Delimiter', false) || listingChildren(root, 'CommonPrefixes').length !== 0) throw new Error();
   }
 
   return {
@@ -38,7 +38,8 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
         if (keys.some((key) => !key)) throw new Error();
         if (verifyScope) {
           verifyListingScope(root, 'Name', prefix);
-          if (listingText(root, 'KeyCount') !== String(keys.length)) throw new Error();
+          if (listingText(root, 'KeyCount') !== String(keys.length) || listingText(root, 'StartAfter', false) ||
+              (listingText(root, 'ContinuationToken', false) ?? '') !== (continuationToken ?? '')) throw new Error();
         }
         return { keys, nextContinuationToken: next };
       } catch { throw new Error('Invalid S3 listing response'); }
@@ -94,13 +95,18 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
       try {
         const root = parseListingXml(body, 'ListMultipartUploadsResult');
         if (listingText(root, 'EncodingType') !== 'url') throw new Error();
-        if (verifyScope) verifyListingScope(root, 'Bucket', prefix);
         const truncated = listingText(root, 'IsTruncated');
         if (truncated !== 'true' && truncated !== 'false') throw new Error();
         const rawKey = listingText(root, 'NextKeyMarker', false);
         const nextKeyMarker = rawKey === undefined ? undefined : decodeURIComponent(rawKey.replace(/\+/g, '%20'));
         const nextUploadIdMarker = listingText(root, 'NextUploadIdMarker', false);
         if (truncated === 'true' && (!nextKeyMarker || !nextUploadIdMarker || (nextKeyMarker === keyMarker && nextUploadIdMarker === uploadIdMarker))) throw new Error();
+        if (verifyScope) {
+          verifyListingScope(root, 'Bucket', prefix);
+          const echoedKey = decodeURIComponent((listingText(root, 'KeyMarker', false) ?? '').replace(/\+/g, '%20'));
+          if (echoedKey !== (keyMarker ?? '') || (listingText(root, 'UploadIdMarker', false) ?? '') !== (uploadIdMarker ?? '') ||
+              (truncated === 'false' && (nextKeyMarker || nextUploadIdMarker))) throw new Error();
+        }
         const uploads = listingChildren(root, 'Upload').map((item) => {
           const key = decodeURIComponent(listingText(item, 'Key')!.replace(/\+/g, '%20'));
           const uploadId = listingText(item, 'UploadId')!;

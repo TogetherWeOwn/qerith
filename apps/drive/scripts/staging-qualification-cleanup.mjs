@@ -11,7 +11,7 @@ const unverified = () => new Error('Qualification R2 prefix cleanup is unverifie
 export async function cleanQualificationR2(context, signal, { listing, request }) {
   const prefix = qualificationPrefix(context);
   if (context.prefix !== prefix) throw unverified();
-  const inScope = key => typeof key === 'string' && key.startsWith(prefix) && key.length > prefix.length &&
+  const inScope = key => typeof key === 'string' && key.startsWith(prefix) &&
     key.isWellFormed() && Buffer.byteLength(key) <= 1024 && !key.split('/').some(part => part === '.' || part === '..');
 
   try {
