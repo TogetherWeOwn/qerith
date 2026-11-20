@@ -15,29 +15,30 @@ export async function exerciseQualificationStorage(context, signal, { create, up
       if ((await head(key, { signal: active })).status !== 404) throw unverified();
       const bytes = Buffer.alloc(partBytes + 257, 0x35);
       bytes.fill(0x9a, partBytes);
+      const start = partBytes - 2, end = partBytes + 1;
+      // Uniform fills alone would let a same-length read from the wrong offsets pass.
+      bytes.set([0x12, 0x34, 0x56, 0x78], start);
       const { uploadId } = await create(key, active);
+      const verifyPart = async (expected, partNumber, size, marker, nextMarker) => {
+        const { parts, nextPartNumberMarker } = await listParts(key, uploadId, { partNumberMarker: marker, maxParts: 1, signal: active });
+        const part = parts[0];
+        if (parts.length !== 1 || part.partNumber !== partNumber || expected.partNumber !== partNumber ||
+            part.etag !== expected.etag || part.size !== size || nextPartNumberMarker !== nextMarker) throw unverified();
+      };
       const initial = await upload(key, uploadId, 1, Buffer.alloc(partBytes, 0x71), active);
-      // Replace the seed and repeat the same part write with identical bytes.
-      // The final object must contain the replacement, not the seed.
+      await verifyPart(initial, 1, partBytes);
+      // Replace the verified seed and repeat the same part write with identical bytes.
       const firstBytes = bytes.subarray(0, partBytes);
       const first = await upload(key, uploadId, 1, firstBytes, active);
       const retry = await upload(key, uploadId, 1, firstBytes, active);
       if (initial.etag === first.etag || retry.etag !== first.etag) throw unverified();
       const last = await upload(key, uploadId, 2, bytes.subarray(partBytes), active);
       const manifest = [retry, last];
-      let marker;
-      for (let i = 0; i < manifest.length; i++) {
-        const { parts, nextPartNumberMarker } = await listParts(key, uploadId, { partNumberMarker: marker, maxParts: 1, signal: active });
-        const part = parts[0], expected = manifest[i];
-        if (parts.length !== 1 || part.partNumber !== i + 1 || expected.partNumber !== i + 1 ||
-            part.etag !== expected.etag || part.size !== (i === 0 ? partBytes : 257) ||
-            nextPartNumberMarker !== (i === 0 ? 1 : undefined)) throw unverified();
-        marker = nextPartNumberMarker;
-      }
+      await verifyPart(retry, 1, partBytes, undefined, 1);
+      await verifyPart(last, 2, 257, 1);
       const { etag } = await complete(key, uploadId, manifest, active);
       const stored = await head(key, { ifMatch: etag, signal: active });
       if (stored.status !== 200 || stored.etag !== etag || stored.contentLength !== String(bytes.length)) throw unverified();
-      const start = partBytes - 2, end = partBytes + 1;
       for (const range of [false, true]) {
         const expected = range ? bytes.subarray(start, end + 1) : bytes;
         const get = await request({ method: 'GET', key, signal: active, maxResponseBytes: expected.length,
