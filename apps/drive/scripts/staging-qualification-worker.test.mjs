@@ -4,7 +4,8 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { withQualificationWorker } from './staging-qualification-worker.mjs';
+import { qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
+import { probeQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -12,6 +13,65 @@ const deployment = (id, version_id, message) => ({
   id, versions: [{ version_id, percentage: 100 }], annotations: { 'workers/message': message },
 });
 const json = result => Response.json({ success: true, errors: [], result });
+const sha = 'a'.repeat(40);
+const readinessEnv = { DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: sha, DRIVE_QUALIFICATION_VERSION: { id: candidate } };
+const probeUrl = stagingOrigin + readinessPath;
+
+test('readiness stays off without candidate bindings and never admits app requests', () => {
+  const headers = { [readinessHeaders.nonce]: 'b'.repeat(32), [readinessHeaders.sha]: 'f'.repeat(40) };
+  const head = new Request(probeUrl, { method: 'HEAD', headers });
+  const check = (env, request = head, ready = true, status = 404) => {
+    const result = qualificationReadiness(request, env, ready);
+    assert.equal(result.status, status);
+    assert.equal(result.headers.get('cache-control'), 'private, no-store');
+    assert.equal(result.body, null);
+    for (const name of Object.values(readinessHeaders)) assert.equal(result.headers.get(name), null);
+  };
+  for (const env of [{ DRIVE_ORIGIN: stagingOrigin }, { ...readinessEnv, DRIVE_SIGN_IN_FIXTURE: '1' },
+    { ...readinessEnv, DRIVE_ORIGIN: 'https://drive.example.test' }, { ...readinessEnv, DRIVE_ORIGIN: 'disabled' },
+    { ...readinessEnv, DRIVE_QUALIFICATION_SHA: 'HEAD' }, { ...readinessEnv, DRIVE_QUALIFICATION_VERSION: { id: 'latest' } }]) check(env);
+  for (const input of [new Request(probeUrl, { headers }), new Request(probeUrl, { method: 'HEAD' }),
+    new Request(stagingOrigin, { method: 'HEAD', headers }), new Request(probeUrl + '?', { method: 'HEAD', headers }),
+    new Request('https://other.example.test' + readinessPath, { method: 'HEAD', headers }),
+    new Request(probeUrl, { method: 'HEAD', headers: { ...headers, origin: 'https://other.example.test' } })]) check(readinessEnv, input);
+  check(readinessEnv, head, false, 503);
+  assert.equal(qualificationReadiness(head, readinessEnv, true).headers.get(readinessHeaders.sha), sha);
+});
+
+test('the readiness probe requires fresh exact-SHA evidence from the responding Worker', async () => {
+  const identity = { sha, version: candidate };
+  const controller = new AbortController();
+  let previous;
+  const request = async (url, init) => {
+    assert.equal(url, probeUrl);
+    assert.deepEqual([init.method, init.redirect, init.cache, init.credentials], ['HEAD', 'error', 'no-store', 'omit']);
+    assert.deepEqual(Object.keys(init.headers), [readinessHeaders.nonce]);
+    assert.ok(init.signal instanceof AbortSignal && !init.signal.aborted);
+    return qualificationReadiness(new Request(url, init), readinessEnv, true);
+  };
+  assert.deepEqual(await probeQualificationWorker(identity, controller.signal, async (...args) => {
+    previous = await request(...args);
+    return previous;
+  }), { ...identity, ready: true });
+  await assert.rejects(probeQualificationWorker(identity, controller.signal, async () => previous), /fresh exact-SHA/);
+  for (const bad of [{ sha: 'f'.repeat(40) }, { version: foreign }]) {
+    await assert.rejects(probeQualificationWorker({ ...identity, ...bad }, controller.signal, request), /fresh exact-SHA/);
+  }
+  for (const status of [200, 302, 404, 503]) {
+    await assert.rejects(probeQualificationWorker(identity, controller.signal, async (...args) =>
+      new Response(null, { status, headers: (await request(...args)).headers })), /fresh exact-SHA/);
+  }
+  await assert.rejects(probeQualificationWorker(identity, controller.signal, async (...args) => {
+    const response = await request(...args);
+    response.headers.set('cache-control', 'public');
+    return response;
+  }), /fresh exact-SHA/);
+  await assert.rejects(probeQualificationWorker(identity, controller.signal, async (...args) => {
+    const response = await request(...args);
+    controller.abort();
+    return response;
+  }), /fresh exact-SHA/);
+});
 
 function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-worker-'));
