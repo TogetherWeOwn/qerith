@@ -22,8 +22,8 @@ async function denied(response: Response, status: number) {
   assert.equal(await response.text(), '');
 }
 
-test('folder creation stays closed outside the fixture and in staging invite mode', async () => {
-  const staging = { ...fixture, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+test('folder creation stays closed outside the fixture and with staging invite mode off', async () => {
+  const staging = { ...fixture, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '0' };
   const request = post({ headers: { ...headers, origin: stagingOrigin } }, stagingOrigin + path);
   const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>(), folder: new Set<string>() };
   const result = await admitStagingRequest(request, staging, true, assets);
@@ -53,6 +53,7 @@ test('rejects method, CSRF, query and missing or ambiguous session cookie before
 
 test('rejects unexpected fields, invalid names and IDs, bad UTF-8 and bounded-body violations', async () => {
   for (const body of ['null', '{', '{"name":"Folder"}', '{"name":"Folder","parentId":null,"ownerId":"other"}',
+    '{"name":"First","name":"Second","parentId":null}', '{"name":"Folder","parentId":null,"parentId":"other"}',
     ...['', ' ... ', 'bad/name', 'bad\0name', 'é'.repeat(128), '\ud800'].map(name => JSON.stringify({ name, parentId: null })),
     ...['', 42, 'bad\0id', '💾'.repeat(129), '\ud800'].map(parentId => JSON.stringify({ name: 'Folder', parentId })),
     new Uint8Array([0xff]), validBody.padEnd(5121)]) {
