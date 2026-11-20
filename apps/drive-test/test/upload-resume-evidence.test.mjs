@@ -7,6 +7,8 @@ import { config, epoch, migrations, sessions, sql } from './fixtures/upload-comp
 
 const storage = { endpoint: config.endpoint, bucket: config.bucket, storageEpoch: epoch };
 const partBytes = 16 * 1024 * 1024;
+// Pin both sides of the same ceiling as root-upload and upload-intent tests.
+const multipartLimit = 5 * 1024 ** 3;
 const abc = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
 const empty = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const full = '080acf35a507ac9849cfcba47dc2ad83e01b75663a516279c8b9d243b719643e'; // 16 MiB of zeros
@@ -35,11 +37,11 @@ async function part(intent, number, size, digest) {
 }
 
 it('uses one primary statement and returns an empty prefix only for an unused allocation', async () => {
-  const intent = await setup(partBytes + 3);
+  const intent = await setup(multipartLimit);
   const prepare = vi.fn((query) => env.DB.withSession('first-primary').prepare(query));
   const withSession = vi.fn(() => ({ prepare }));
   expect(await readUploadResumeEvidence({ withSession }, intent.id, intent.scope, storage)).toEqual({
-    declaredSize: partBytes + 3, parts: [],
+    declaredSize: multipartLimit, parts: [],
   });
   expect(withSession).toHaveBeenCalledExactlyOnceWith('first-primary');
   expect(prepare).toHaveBeenCalledTimes(1);
@@ -109,7 +111,7 @@ it.each([
 });
 
 it.each([
-  ['legacy declaration', null, true], ['oversized declaration', 5 * 1024 ** 3 + 1, true], ['missing storage binding', 3, false],
+  ['legacy declaration', null, true], ['oversized declaration', multipartLimit + 1, true], ['missing storage binding', 3, false],
 ])('rejects an allocation with %s even before any parts', async (_, size, bound) => {
   expect(await read(await setup(size, bound))).toBeNull();
 });
