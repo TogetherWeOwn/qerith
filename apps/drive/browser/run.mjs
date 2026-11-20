@@ -11,6 +11,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 import { exerciseInviteAcceptance } from './invite-acceptance.mjs';
+import { exerciseOwnerInvite } from './owner-invite.mjs';
 
 const filenameCases = [
   ['unicode', 'áááááááááááá👩‍👩‍👧‍👦.txt'],
@@ -262,6 +263,7 @@ try {
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
   await exerciseInviteAcceptance(browser, origin, axe, output);
+  await exerciseOwnerInvite(browser, origin, axe, output);
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
