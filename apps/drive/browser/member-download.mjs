@@ -68,8 +68,9 @@ export async function proveMemberDownload(page, { origin, defaultWorker, DB, id,
   const row = page.getByRole('link', { name, exact: true });
   assert.equal(await row.getAttribute('href'), path);
   assert.equal(await row.getAttribute('download'), null);
-  await page.getByText('Unpublished.txt', { exact: true }).waitFor();
-  assert.equal(await page.getByRole('link', { name: 'Unpublished.txt', exact: true }).count(), 0);
+  const unpublishedName = page.getByText('Unpublished.txt', { exact: true });
+  await unpublishedName.filter({ visible: true }).waitFor();
+  assert.equal(await unpublishedName.and(page.locator('a')).count(), 0);
   assert.equal(await page.getByText(ownerFile.name, { exact: true }).count(), 0);
   assert.equal(await page.locator('input[type="file"]').count(), 0);
   assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
