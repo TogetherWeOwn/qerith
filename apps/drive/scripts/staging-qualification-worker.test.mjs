@@ -30,6 +30,7 @@ function fixture(t) {
   const account = '209cf7dd678adfb683947dd7874d05af';
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/main', GITHUB_SHA: sha, TESTED_SHA: sha, GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_RUN_ID: '18', GITHUB_RUN_ATTEMPT: '2',
     CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: 'fake-token' };
   const tag = `${sha}-18-2`;
@@ -45,13 +46,13 @@ function fixture(t) {
     },
     probe(target, signal) {
       assert.deepEqual(target, identity);
-      assert.equal(signal, controller.signal);
+      assert.ok(signal instanceof AbortSignal && !signal.aborted);
       calls.push('probe');
       return { ready: true, sha, version: candidate };
     },
     exercise(target, signal) {
       assert.deepEqual(target, identity);
-      assert.equal(signal, controller.signal);
+      assert.ok(signal instanceof AbortSignal && !signal.aborted);
       calls.push('cases');
       return 'synthetic cases';
     },
@@ -99,7 +100,7 @@ test('refuses wrong source or target, missing or split prior traffic, and stale 
   const { run, calls, state, options } = fixture(t);
   const expectedTag = state.tag;
   for (const override of [{ TESTED_SHA: 'a'.repeat(40) }, { GITHUB_JOB: 'publish' }, { GITHUB_RUN_ATTEMPT: '02' },
-    { GITHUB_RUN_ID: 18 }, { CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) }]) await assert.rejects(run(override));
+    { GITHUB_RUN_ID: 18 }, { GITHUB_WORKFLOW_REF: 'other' }, { CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) }]) await assert.rejects(run(override));
   assert.deepEqual(calls, []);
   for (const current of [undefined, { ...deployment(prior, baseline), versions: [
     { version_id: baseline, percentage: 50 }, { version_id: foreign, percentage: 50 },
@@ -141,6 +142,35 @@ test('rejects wrong runtime SHA or version, and restores after case failure or c
     await assert.rejects(run(), failure === 'case' ? /case failed/ : failure === 'abort' ? /aborted/ : /runtime readiness/);
     assert.equal(calls.includes('cases'), failure === 'case' || failure === 'abort');
     assert.deepEqual(calls.slice(-3), ['current', 'restore', 'current']);
+  }
+});
+
+test('probe and case deadlines abort and settle work before rollback', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 20 * 60_000]]) {
+    const { run, options, calls } = fixture(t);
+    const started = Promise.withResolvers();
+    let aborted = false;
+    const drained = Promise.withResolvers();
+    options[phase] = async (identity, signal) => {
+      signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+      started.resolve();
+      await drained.promise;
+      calls.push('settled');
+      return { ...identity, ready: true };
+    };
+    const outcome = assert.rejects(run(), { name: 'TimeoutError' });
+    await Promise.race([started.promise, outcome]);
+    t.mock.timers.tick(timeout);
+    try {
+      assert.ok(aborted);
+      assert.ok(!calls.includes('restore'));
+    } finally {
+      drained.resolve();
+      await outcome;
+    }
+    assert.deepEqual(calls.slice(-4), ['settled', 'current', 'restore', 'current']);
+    if (phase === 'probe') assert.ok(!calls.includes('cases'));
   }
 });
 

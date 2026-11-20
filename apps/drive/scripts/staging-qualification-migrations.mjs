@@ -1,20 +1,28 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { assertDispatch } from './staging-qualification.mjs';
-import { validateStagingTarget } from './staging-publish.mjs';
+import { lstatSync, mkdirSync, mkdtempDisposableSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
+import { assertQualificationJob } from './staging-qualification.mjs';
+import { validateStagingConfig } from './staging-publish.mjs';
 
 const directory = 'apps/drive/migrations';
 const target = 'qerith-drive-staging';
 const sql = 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id';
 const ledgerTime = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 const migrationName = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/;
-const runNumber = /^[1-9][0-9]{0,19}$/;
+const configPath = 'apps/drive/wrangler.staging.json';
 
-function migrationNames(cwd, sha) {
+function verifiedInputs(cwd, sha, accountId) {
   const git = (...args) => execFileSync('git', args, { cwd, timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
   const entries = git('ls-tree', '-rz', '--full-tree', sha, '--', `${directory}/`).toString('utf8');
-  const names = new Set();
+  const committedConfig = git('show', `${sha}:${configPath}`);
+  const configFile = join(cwd, configPath);
+  if (!lstatSync(configFile).isFile() || !readFileSync(configFile).equals(committedConfig)) {
+    throw new Error('Staging migration config differs from the tested SHA.');
+  }
+  const config = JSON.parse(committedConfig);
+  validateStagingConfig(config, accountId);
+  const inputs = new Map();
   const path = join(cwd, directory);
   if (!entries.endsWith('\0') || !lstatSync(path).isDirectory()) throw new Error('Missing tracked staging migrations.');
   for (const entry of entries.slice(0, -1).split('\0')) {
@@ -22,19 +30,20 @@ function migrationNames(cwd, sha) {
     const name = match?.[2];
     if (!match || !migrationName.test(name)) throw new Error('Invalid tracked staging migration.');
     const file = join(path, name);
-    if (!lstatSync(file).isFile() || !readFileSync(file).equals(git('cat-file', 'blob', match[1]))) {
+    const bytes = git('cat-file', 'blob', match[1]);
+    if (!lstatSync(file).isFile() || !readFileSync(file).equals(bytes)) {
       throw new Error('Staging migration bytes differ from the tested SHA.');
     }
-    names.add(name);
+    inputs.set(name, bytes);
   }
-  if (readdirSync(path).some(name => !names.has(name))) throw new Error('Unexpected staging migration input.');
-  return names;
+  if (readdirSync(path).some(name => !inputs.has(name))) throw new Error('Unexpected staging migration input.');
+  return { inputs, config: { name: config.name, d1_databases: config.d1_databases } };
 }
 
-function wrangler(cwd, env, args, { timeout = 45_000, discard = false, signal } = {}) {
+function wrangler(binary, cwd, env, args, { timeout = 45_000, discard = false, signal } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(join(cwd, 'node_modules/.bin/wrangler'), [...args, '--config', 'wrangler.staging.json'], {
+    const child = spawn(binary, [...args, '--config', 'wrangler.staging.json'], {
       cwd, env, detached: true, stdio: ['ignore', discard ? 'ignore' : 'pipe', 'pipe'],
     });
     const output = [];
@@ -45,6 +54,7 @@ function wrangler(cwd, env, args, { timeout = 45_000, discard = false, signal } 
     };
     const timer = setTimeout(stop, timeout);
     signal?.addEventListener('abort', stop, { once: true });
+    if (signal?.aborted) stop();
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) {
       let bytes = 0;
       stream.on('error', stop);
@@ -87,18 +97,26 @@ function readLedger(text, expected) {
   return rows.map(({ id, name, applied_at }) => ({ id, name, applied_at }));
 }
 
-// No CLI entry point. The protected orchestrator must verify storage and recovery preconditions before calling.
-export async function applyQualificationMigrations(env, cwd = process.cwd(), signal) {
-  const sha = assertDispatch(env, cwd);
-  const { GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } = env;
-  if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' || !CLOUDFLARE_API_TOKEN ||
-      !runNumber.test(runId ?? '') || !runNumber.test(attempt ?? '')) {
-    throw new Error('Staging migrations require the protected qualification job.');
+// The protected caller must verify storage and await durable recovery recording before mutation.
+export async function applyQualificationMigrations({ recordRecovery }, env, cwd = process.cwd(), signal) {
+  cwd = resolve(cwd);
+  const identity = assertQualificationJob(env, cwd);
+  const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } = env;
+  if (typeof CLOUDFLARE_API_TOKEN !== 'string' || !CLOUDFLARE_API_TOKEN.trim() || typeof recordRecovery !== 'function') {
+    throw new Error('Staging migrations require a token and recovery writer.');
   }
-  const app = join(cwd, 'apps/drive');
-  validateStagingTarget(app, CLOUDFLARE_ACCOUNT_ID);
-  const expected = migrationNames(cwd, sha);
-  const run = (args, options) => wrangler(app, {
+  signal?.throwIfAborted();
+  const { inputs: expected, config } = verifiedInputs(cwd, identity.sha, CLOUDFLARE_ACCOUNT_ID);
+  using snapshotDir = mkdtempDisposableSync(join(tmpdir(), 'drive-d1-inputs-'));
+  const migrations = join(snapshotDir.path, 'migrations');
+  mkdirSync(migrations, { mode: 0o700 });
+  const options = { mode: 0o400, flag: 'wx' };
+  writeFileSync(join(snapshotDir.path, 'wrangler.staging.json'), JSON.stringify(config), options);
+  for (const [name, bytes] of expected) writeFileSync(join(migrations, name), bytes, options);
+  const app = realpathSync(join(cwd, 'apps/drive'));
+  const binary = realpathSync(join(app, 'node_modules/.bin/wrangler'));
+  if (!binary.startsWith(`${app}${sep}`) || !lstatSync(binary).isFile()) throw new Error('Invalid staging Wrangler path.');
+  const run = (args, options) => wrangler(binary, snapshotDir.path, {
     PATH: env.PATH, HOME: env.HOME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
     CI: 'true', NO_COLOR: '1', WRANGLER_HIDE_BANNER: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false',
   }, ['d1', ...args], { ...options, signal });
@@ -108,7 +126,7 @@ export async function applyQualificationMigrations(env, cwd = process.cwd(), sig
     throw new Error('Invalid pre-apply staging D1 Time Travel bookmark.');
   }
   // Record the recovery point before any command that can initialize or change the ledger.
-  console.log(`Pre-apply staging D1 Time Travel bookmark (SHA ${sha}, run ${runId}, attempt ${attempt}): ${bookmark}`);
+  await recordRecovery({ ...identity, bookmark }, signal);
   await run(['migrations', 'list', target, '--remote'], { discard: true });
   const before = await snapshot();
   await run(['migrations', 'apply', target, '--remote'], { timeout: 120_000, discard: true });
@@ -117,5 +135,5 @@ export async function applyQualificationMigrations(env, cwd = process.cwd(), sig
     after[i]?.id !== id || after[i].name !== name || after[i].applied_at !== applied_at)) {
     throw new Error('Staging D1 post-apply ledger is incomplete or changed history.');
   }
-  return { sha, runId, attempt, bookmark, before, after };
+  return { ...identity, bookmark, before, after };
 }
