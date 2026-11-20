@@ -2,7 +2,7 @@ import { entryId } from '../download-id';
 import { browseFolder, type BrowseResult } from './browse';
 import { tokenHash } from './identity/sessions';
 import { PrivateMetadata } from './metadata/private';
-import { allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 
 export interface RootListing {
   entries: { id: string; name: string; kind: 'file' | 'folder' }[];
@@ -33,7 +33,8 @@ export async function loadRootListing(request: Request, env: RootListingEnv, pag
       if (parentId !== null) return null;
       const cursor = rootPageCursor(pageTokens);
       if (cursor === undefined) return 'invalid-page' as const;
-      const page = await new PrivateMetadata(db).list(principal.id, parentId, cursor, await tokenHash(token), env.DRIVE_ORIGIN === stagingOrigin);
+      const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
+      const page = await new PrivateMetadata(db).list(principal.id, parentId, cursor, await tokenHash(token), ownerOnly);
       if (!page || page === 'invalid-page') return page;
       return {
         entries: page.entries.map(({ id, name, kind }) => ({ id, name, kind })),

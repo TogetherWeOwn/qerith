@@ -232,14 +232,16 @@ try {
   } };
   const priorAssets = new Set(assets);
   await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
-    worker: inviteWorker, DB, ownerToken: session.value, staging: true });
+    worker: inviteWorker, DB, ownerToken: session.value,
+    stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerName: file.name } });
   const inviteNodes = [...assets].filter(path => path.startsWith('/_app/immutable/nodes/') && !priorAssets.has(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});
   assert.equal((await inviteWorker.fetch(`${origin}/invite`, { method: 'HEAD', headers: {
     cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'cross-site',
   } })).status, 403);
-  assert.equal((await inviteWorker.fetch(`${origin}/`, { headers: { cookie: `${sessionName}=${memberToken}` } })).status, 403);
+  await deny('/', 403, { cookie: `${sessionName}=${memberToken}` });
+  await deny('/', 401, { cookie: `${sessionName}=${memberToken}` }, 'HEAD');
 
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'owner'").run();
   for (const path of protectedPaths) await deny(path, 401, { cookie });

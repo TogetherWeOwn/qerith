@@ -8,7 +8,8 @@ const [{ Invitations }, { Membership }] = await Promise.all([
   tsImport('../src/lib/server/identity/membership.ts', import.meta.url),
 ]);
 
-export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken, staging = false }) {
+export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken, stagingRoot }) {
+  const staging = !!stagingRoot;
   const invites = new Invitations(DB);
   const first = await invites.issue(ownerToken, { displayName: 'Rook' });
   const { token } = await invites.issue(ownerToken, { displayName: 'Pell', note: 'Welcome to Drive!' });
@@ -154,12 +155,20 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
     await status.filter({ hasText: 'Drive unavailable' }).waitFor();
     if (staging) await captureState('unavailable');
-    const signIn = async expectedStatus => {
+    const signIn = async (expectedStatus, keyboard = false) => {
       // The server renders the button before its client-side handler is installed.
       await page.waitForLoadState('networkidle');
+      const primary = page.getByRole('button', { name: 'Sign in with a passkey' });
+      if (keyboard) {
+        await page.getByRole('heading', { name: 'Sign in to Drive', exact: true }).waitFor();
+        await page.getByText('Drive is invite-only. If you lost your passkey, ask the owner for a sign-in link.', { exact: true }).waitFor();
+        await page.keyboard.press('Tab');
+        assert.deepEqual(await primary.evaluate(el => [el === document.activeElement, getComputedStyle(el).outlineStyle]), [true, 'solid']);
+        await captureState('member-sign-in');
+      }
       const [verification] = await Promise.all([
         page.waitForResponse(response => new URL(response.url()).pathname === '/api/sign-in/verify'),
-        page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+        keyboard ? page.keyboard.press('Enter') : primary.click(),
       ]);
       assert.equal(verification.status(), expectedStatus);
     };
@@ -167,11 +176,15 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       page.waitForURL(`${origin}/sign-in`),
       page.getByRole('link', { name: 'Sign in', exact: true }).click(),
     ]);
-    await signIn(staging ? 401 : 204);
+    await signIn(204, staging);
+    await page.waitForURL(`${origin}/`);
+    await page.getByRole('heading', { name: 'Your drive is empty.', exact: true }).waitFor();
+    const id = await DB.prepare("SELECT id FROM drive_principals WHERE role = 'member' AND webauthn_user_handle IS NOT NULL").first('id');
+    let memberRoot;
     if (staging) {
-      assert.equal((await context.cookies(origin)).some(cookie => cookie.name === '__Host-drive-session'), false);
-      await context.addCookies([{ name: '__Host-drive-session', value: ownerToken, url: origin, secure: true, httpOnly: true }]);
-    } else await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
+      await captureState('member-root-empty');
+      memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, ...stagingRoot }, captureState);
+    }
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
     await status.filter({ hasText: "You're signed in" }).waitFor();
@@ -179,21 +192,68 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     if (staging) {
       assert.equal(await page.getByText("This invite is for someone else, so it wasn't used.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole('link', { name: 'Go to My Drive' }).getAttribute('href'), '/');
-      console.log('Staging-mode Worker + Chromium + D1: cross-site invite, keyboard enrollment, replay denial and owner-only sign-in passed');
-      return;
     }
-    const id = await DB.prepare("SELECT id FROM drive_principals WHERE role = 'member'").first('id');
     const members = new Membership(DB);
     assert.equal(await members.setStatus(ownerToken, id, (await members.get(ownerToken, id)).generation, 'revoked'), true);
     await page.evaluate(token => { location.hash = token; }, first.token);
     await field.waitFor();
     assert.equal(await field.inputValue(), 'Rook');
-    assert.equal(await page.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
+    if (staging) {
+      for (const [path, method] of [['/', 'GET'], ['/', 'HEAD'], [memberRoot.dataPath, 'GET'], [stagingRoot.asset, 'GET']]) {
+        await memberRoot.check(path, method, 401);
+      }
+    } else assert.equal(await page.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
     await page.goto(`${origin}/sign-in`);
     await signIn(403);
-    await page.getByRole('heading', { name: 'Your access is turned off' }).waitFor();
-    console.log('Generated Worker + Chromium + D1: invite redemption, replay denial, member sign-in, empty My Drive and revocation passed');
+    await page.getByRole('heading', { name: 'Your access is turned off', exact: true }).waitFor();
+    if (staging) {
+      await page.getByText('The owner turned off your access to Drive. Your files are kept. Ask them if you think this is a mistake.', { exact: true }).waitFor();
+      await captureState('member-revoked');
+    }
+    console.log(`${staging ? 'Staging-mode' : 'Generated'} Worker + Chromium + D1: invite enrollment, replay denial, member sign-in, private My Drive and revocation passed`);
   } finally {
     await context.close();
   }
+}
+
+async function proveMemberRoot(page, context, { origin, worker, DB, id, asset, ownerDownload, ownerName }, captureState) {
+  const session = (await context.cookies(origin)).find(cookie => cookie.name === '__Host-drive-session');
+  assert.ok(session?.httpOnly && session.secure);
+  const cookie = `${session.name}=${session.value}`;
+  const dataPath = '/__data.json?x-sveltekit-invalidated=01';
+  const check = async (path, method, status, headers = {}) => {
+    const response = await worker.fetch(origin + path, { method, headers: { origin, cookie, ...headers }, redirect: 'manual' });
+    assert.equal(response.status, status, `${method} ${path}`);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    return response;
+  };
+  assert.equal(await (await check('/', 'HEAD', 200)).text(), '');
+  await check(asset, 'GET', 200);
+  const fileId = crypto.randomUUID(), name = 'Member-only résumé.txt';
+  await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes)
+    VALUES (?, ?, ?, 'file', 'internal-member-fixture-key', 1)`).bind(fileId, id, name).run();
+  const rootDocument = await page.reload();
+  assert.equal(rootDocument.status(), 200);
+  assert.equal((await rootDocument.allHeaders())['cache-control'], 'private, no-store');
+  await page.getByRole('heading', { name: 'My Drive', exact: true }).waitFor();
+  await page.getByText(name, { exact: true }).first().waitFor();
+  assert.equal(await page.getByText(ownerName, { exact: true }).count(), 0);
+  assert.equal(await page.locator('a[href^="/api/download/"], input[type="file"]').count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
+  await captureState('member-root-listed');
+  const data = await (await check(dataPath, 'GET', 200)).text();
+  assert.ok(data.includes(name) && !data.includes(ownerName) && !data.includes('internal-member-fixture-key'));
+  await check(dataPath, 'GET', 403, { 'sec-fetch-site': 'cross-site' });
+  const nonce = crypto.randomUUID(), notice = `__Host-drive-download-failed-${nonce}`;
+  const document = await check(`/?download=${nonce}`, 'GET', 200, {
+    cookie: `${cookie}; ${notice}=${ownerDownload.split('/').at(-1)}`,
+    'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin',
+  });
+  assert.ok(!document.headers.getSetCookie().some(value => value.startsWith(`${notice}=`)));
+  assert.doesNotMatch(await document.text(), /didn’t download|Retry download/);
+  for (const [path, method, status] of [[ownerDownload, 'GET', 403], [`/api/download/${fileId}`, 'GET', 403],
+    ['/api/uploads', 'POST', 403], ['/api/owner/invitations', 'GET', 404], ['/people', 'GET', 404]]) {
+    await check(path, method, status);
+  }
+  return { check, dataPath };
 }
