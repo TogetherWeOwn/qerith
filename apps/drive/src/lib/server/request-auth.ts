@@ -3,6 +3,7 @@ import { driveNext, isDrivePageNavigation, isTopLevelDocumentNavigation } from '
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
+import { stagingOrigin } from './qualification-readiness';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
@@ -11,7 +12,7 @@ export interface DriveAuthEnv {
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
 
-export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
+export { stagingOrigin };
 
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;

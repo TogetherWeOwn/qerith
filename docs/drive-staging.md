@@ -134,9 +134,13 @@ its abort signal.
 
 The unwired Worker adapter requires a known, single-version staging baseline.
 It reads the uploaded version's SHA/attempt tag and records the prior deployment
-before changing traffic. A future live probe must independently read the SHA
-and version from the responding runtime, not from request inputs or the upload
-tag. The adapter restores the previous version after the checks, including on
+before changing traffic. The readiness helper uses a fresh, credential-free
+HEAD challenge on the fixed staging origin. The responding Worker proves its
+version-scoped `DRIVE_QUALIFICATION_SHA` and native `DRIVE_QUALIFICATION_VERSION`
+metadata ID when its D1, assets and reviewed storage bindings are ready. It
+reads no app data, and does not infer identity from the request or upload tag.
+Neither readiness binding is configured in the existing publisher or workflow.
+The adapter restores the previous version after the checks, including on
 cooperative cancellation, and confirms the restored deployment by readback.
 The probe and cases have separate deadlines; the callbacks must stop and settle
 all work before rollback. A hard stop is not verified cleanup. It
@@ -148,10 +152,11 @@ Worker rollback does not restore D1 or establish idle state.
 Remaining source slices, in dependency order:
 
 1. Implement immutable Worker upload without invalidating the baseline version
-   (no forced restore), and implement the runtime readiness probe. Wire the
-   protected lifecycle, including D1, Worker recovery, whole-estate zero-idle
-   inventory and attempt-specific prefix cleanup with verified native expiry
-   or stop for cancellation or runner loss. Keep artifact publication disabled.
+   (no forced restore) and configure the readiness bindings on the candidate
+   version only. Wire the protected lifecycle, including D1, Worker recovery and
+   readiness, whole-estate zero-idle inventory, and attempt-specific prefix
+   cleanup with verified native expiry or stop for cancellation or runner loss.
+   Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and

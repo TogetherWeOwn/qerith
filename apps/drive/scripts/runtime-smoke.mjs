@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
@@ -86,6 +87,7 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
   const release = 'a'.repeat(40);
+  const qualificationVersion = '00000000-0000-4000-8000-000000000002';
   const enrollmentToken = staging ? randomBytes(32).toString('base64url') : undefined;
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
@@ -98,7 +100,9 @@ if ('scheduled' in app) throw new Error('Generated preview must not expose a sch
 export default { fetch(request, env, ctx) {
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
-  if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };` : ''}
+  if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
+  if (request.headers.has('x-test-qualification')) env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
+    DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -162,6 +166,14 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
+      const nonce = randomBytes(16).toString('hex');
+      const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
+        headers: { [readinessHeaders.nonce]: nonce, ...headers } });
+      const off = await readiness();
+      assert.deepEqual([off.status, off.headers.get(readinessHeaders.sha)], [404, null], 'preview has no readiness binding');
+      const on = await readiness({ 'x-test-qualification': '1' });
+      assert.equal(on.status, 204);
+      assert.deepEqual(Object.values(readinessHeaders).map(name => on.headers.get(name)), [nonce, release, qualificationVersion]);
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
       const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
