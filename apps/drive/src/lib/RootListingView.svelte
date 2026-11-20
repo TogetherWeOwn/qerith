@@ -52,9 +52,9 @@
     }
   }
 
-  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
+  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
-    href: downloadAllowed && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
+    href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
     reload: true, size: '', bytes: null, modified: '', shared: false
   })) : []);
 </script>

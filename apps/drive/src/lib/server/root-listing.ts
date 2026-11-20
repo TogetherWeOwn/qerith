@@ -3,15 +3,19 @@ import { browseFolder, type BrowseResult } from './browse';
 import { tokenHash } from './identity/sessions';
 import { PrivateMetadata } from './metadata/private';
 import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { storageIdentity, type StorageBindings } from './storage-runtime';
 
 export interface RootListing {
-  entries: { id: string; name: string; kind: 'file' | 'folder' }[];
+  entries: { id: string; name: string; kind: 'file' | 'folder'; downloadable?: boolean }[];
   nextPage: string | null;
 }
 
 export type RootListingResult = BrowseResult<RootListing> | { status: 'invalid-page' };
 
-type RootListingEnv = DriveAuthEnv & { DB?: ConstructorParameters<typeof PrivateMetadata>[0] };
+type ListingDatabase = ConstructorParameters<typeof PrivateMetadata>[0];
+type RootListingEnv = DriveAuthEnv & StorageBindings & {
+  DB?: ListingDatabase & { withSession?(constraint: 'first-primary'): ListingDatabase };
+};
 
 // null starts the listing; undefined rejects a malformed continuation.
 export function rootPageCursor(tokens: readonly string[]): string | null | undefined {
@@ -33,11 +37,17 @@ export async function loadRootListing(request: Request, env: RootListingEnv, pag
       if (parentId !== null) return null;
       const cursor = rootPageCursor(pageTokens);
       if (cursor === undefined) return 'invalid-page' as const;
-      const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
-      const page = await new PrivateMetadata(db).list(principal.id, parentId, cursor, await tokenHash(token), ownerOnly);
+      const inviteMode = admitsStagingInvite(env);
+      const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
+      const invitee = inviteMode && principal.role === 'member';
+      const identity = invitee ? storageIdentity(env) : null;
+      const primary = identity && db.withSession?.('first-primary');
+      const page = await new PrivateMetadata(primary ?? db).list(principal.id, parentId, cursor, await tokenHash(token), ownerOnly,
+        primary && identity ? [identity.settings.endpoint, identity.settings.bucket, identity.epoch] : undefined);
       if (!page || page === 'invalid-page') return page;
       return {
-        entries: page.entries.map(({ id, name, kind }) => ({ id, name, kind })),
+        entries: page.entries.map(({ id, name, kind, downloadable }) => invitee && kind === 'file' ?
+          { id, name, kind, downloadable: downloadable === 1 } : { id, name, kind }),
         nextPage: page.nextCursor
       };
     }

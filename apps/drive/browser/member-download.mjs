@@ -68,6 +68,8 @@ export async function proveMemberDownload(page, { origin, defaultWorker, DB, id,
   const row = page.getByRole('link', { name, exact: true });
   assert.equal(await row.getAttribute('href'), path);
   assert.equal(await row.getAttribute('download'), null);
+  await page.getByText('Unpublished.txt', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Unpublished.txt', exact: true }).count(), 0);
   assert.equal(await page.getByText(ownerFile.name, { exact: true }).count(), 0);
   assert.equal(await page.locator('input[type="file"]').count(), 0);
   assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
@@ -116,7 +118,8 @@ export async function proveMemberDownload(page, { origin, defaultWorker, DB, id,
       full: { status: full.status, bytes: bytes.length, workerAndBrowserByteIdentical: true },
       range: { status: range.status, contentRange: partial[1], workerAndBrowserByteIdentical: true },
       deniedWithoutStorage: { grantedOtherOwner: 404, missing: 404, unpublished: 404, revoked: 401, flagOff: 403 },
-      ownerByteIdenticalInInviteMode: true, retryDownloaded: true, unavailableNoticeOmitsNameAndRetry: true,
+      unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
+      retryDownloaded: true, unavailableNoticeOmitsNameAndRetry: true,
     }, null, 2));
   } };
 }

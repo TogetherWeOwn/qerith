@@ -1,3 +1,5 @@
+import { publishedGenerationFilter, publishedGenerationJoins } from './published-generation-sql';
+
 // Identity integration must supply drive_active_members(id) from live membership.
 // This service accepts a server-authenticated principal, not a client owner ID.
 interface Statement {
@@ -18,7 +20,8 @@ export interface Entry {
 export interface Cursor { name: string; id: string }
 export interface ListedEntry extends Entry { item_count: number | null }
 export interface Page { entries: ListedEntry[]; nextCursor: Cursor | null }
-type RootEntry = Pick<Entry, 'id' | 'name' | 'kind'>;
+type RootEntry = Pick<Entry, 'id' | 'name' | 'kind'> & { downloadable: number };
+type RootDownloadScope = readonly [endpoint: string, bucket: string, epoch: string];
 interface RootPage { entries: RootEntry[]; nextCursor: string | null }
 type RootRead = RootPage | 'invalid-page' | null;
 
@@ -56,13 +59,14 @@ export class PrivateMetadata {
       .bind(id, principalId, principalId).first<Entry>();
   }
 
-  list(principalId: string, parentId: null, cursor: string | null, sessionHash: string, ownerOnly?: boolean): Promise<RootRead>;
+  list(principalId: string, parentId: null, cursor: string | null, sessionHash: string, ownerOnly?: boolean,
+    downloadScope?: RootDownloadScope): Promise<RootRead>;
   list(principalId: string, parentId: string | null, cursor?: Cursor | null): Promise<Page>;
   async list(principalId: string, parentId: string | null, cursor: Cursor | string | null = null,
-    sessionHash?: string, ownerOnly = false): Promise<Page | RootRead> {
+    sessionHash?: string, ownerOnly = false, downloadScope?: RootDownloadScope): Promise<Page | RootRead> {
     if (sessionHash !== undefined) {
       if (parentId !== null || (cursor !== null && typeof cursor !== 'string')) throw new TypeError('Invalid root listing');
-      return this.listSessionRoot(principalId, cursor, sessionHash, ownerOnly);
+      return this.listSessionRoot(principalId, cursor, sessionHash, ownerOnly, downloadScope);
     }
     if (cursor !== null && (typeof cursor !== 'object' || typeof cursor.name !== 'string' || typeof cursor.id !== 'string')) {
       throw new TypeError('Invalid cursor');
@@ -82,7 +86,8 @@ export class PrivateMetadata {
     return { entries, nextCursor: rows.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
-  private async listSessionRoot(principalId: string, cursor: string | null, sessionHash: string, ownerOnly: boolean): Promise<RootRead> {
+  private async listSessionRoot(principalId: string, cursor: string | null, sessionHash: string, ownerOnly: boolean,
+    downloadScope?: RootDownloadScope): Promise<RootRead> {
     const limit = 'ORDER BY kind DESC, name COLLATE BINARY ASC, id ASC LIMIT 101';
     const root = 'owner_id = (SELECT principal_id FROM authorized) AND parent_id IS NULL';
     const entries = `SELECT id, name, kind FROM drive_entries INDEXED BY drive_entries_listing_asc WHERE ${root}`;
@@ -96,15 +101,19 @@ export class PrivateMetadata {
     ), children AS (
       SELECT * FROM (SELECT * FROM same_kind UNION ALL SELECT * FROM later_kind) ${limit}
     )`;
+    // Compute only a listing hint on the bounded page; the download still authorizes every read.
+    const downloadable = downloadScope ? `EXISTS (SELECT 1 FROM drive_entries e
+      ${publishedGenerationJoins}
+      WHERE e.id = children.id AND ${publishedGenerationFilter})` : '0';
     // A sentinel distinguishes an authorized empty or stale page from a denied read.
     const invalidPage = cursor === null ? '0' : 'NOT EXISTS (SELECT 1 FROM boundary)';
     const { results } = await this.db.prepare(`WITH authorized AS (
       SELECT s.principal_id FROM drive_sessions s JOIN drive_active_members m ON m.id = s.principal_id
       WHERE s.principal_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
         ${requireActiveOwner(ownerOnly, 's.principal_id')}
-    ), ${ranges} SELECT id, name, kind, 0 AS invalid_page FROM children
-      UNION ALL SELECT NULL, NULL, NULL, ${invalidPage} FROM authorized ORDER BY kind DESC, name, id`)
-      .bind(principalId, sessionHash, ...(cursor === null ? [] : [cursor]))
+    ), ${ranges} SELECT id, name, kind, ${downloadable} AS downloadable, 0 AS invalid_page FROM children
+      UNION ALL SELECT NULL, NULL, NULL, 0, ${invalidPage} FROM authorized ORDER BY kind DESC, name, id`)
+      .bind(principalId, sessionHash, ...(cursor === null ? [] : [cursor]), ...(downloadScope ?? []))
       .all<RootEntry | { id: null; name: null; kind: null; invalid_page: number }>();
     const sentinel = results.find(row => row.id === null);
     if (!sentinel) return null;
