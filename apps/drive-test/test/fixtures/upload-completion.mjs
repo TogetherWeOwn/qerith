@@ -41,7 +41,9 @@ export async function seed(id, { legacy = false, endpoint = config.endpoint, key
   await sql('INSERT INTO drive_upload_part_operations VALUES (?, CAST(? AS TEXT), ?, ?, ?, ?, 2, 2, 7)', part, intent, owner, key, epoch, upload).run();
   await sql("INSERT INTO drive_upload_part_observations VALUES (?, 'reported', ?)", part, Uint8Array.from(parts[0].etag, (char) => char.charCodeAt(0)).buffer).run();
   await sql("INSERT INTO drive_upload_sealed_snapshots VALUES (?, '[2]', 7)", id).run();
-  return { token: (await sessions.issue(owner)).token, key, intent, part, bindStorage };
+  const identity = { operationId: id, ownerId: owner,
+    intentId: typeof intent === 'string' ? intent : new TextDecoder().decode(intent) };
+  return { token: (await sessions.issue(owner)).token, key, intent, part, bindStorage, identity };
 }
 
 export function loseAcknowledgement(table, loseBeforeCommit) {
