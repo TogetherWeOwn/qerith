@@ -95,8 +95,11 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     // Owner management is not admitted in preview, even before authentication.
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) return deny(404);
     const signInPage = routeId === '/sign-in';
+    const invitePage = routeId === '/invite' && fixture && pathname === '/invite' && !request.url.includes('?') &&
+      (request.method === 'GET' || request.method === 'HEAD');
     if ((signInPage && !(staging ? pathname === '/sign-in' : fixture && /^\/sign-in\/?$/.test(pathname))) ||
-        /^\/(?:invite|recover|api\/sign-in)(?:\/|$)/.test(pathname)) return deny(404);
+        (!invitePage && (routeId === '/invite' || /^\/invite(?:\/|$)/.test(pathname))) ||
+        /^\/(?:recover|api\/(?:invite|sign-in))(?:\/|$)/.test(pathname)) return deny(404);
 
     let session;
     try {
@@ -104,10 +107,14 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     } catch {
       return refuse(503);
     }
+    if (invitePage && request.method === 'HEAD') {
+      return new Response(null, { status: session ? 204 : 200,
+        headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
+    }
     if (staging && session && session.principal.role !== 'owner') {
       return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
     }
-    if (!session && !signInPage) {
+    if (!session && !signInPage && !invitePage) {
       if (event.route?.id === downloadRoute) {
         const downloadNavigation = fixture ? isDownloadDocumentNavigation(request) : isDownloadNavigation(request);
         if (downloadNavigation) return downloadRedirect(downloadSignIn);
@@ -120,6 +127,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const response = await resolve(event);
     const headers = new Headers(response.headers);
     headers.set('cache-control', 'private, no-store');
+    if (invitePage) headers.set('referrer-policy', 'no-referrer');
     for (const name of ['cdn-cache-control', 'cloudflare-cdn-cache-control', 'surrogate-control']) {
       headers.delete(name);
     }

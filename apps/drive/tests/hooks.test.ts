@@ -103,6 +103,23 @@ test('admitted signed-out cross-site download links redirect without changing AP
   }
 });
 
+test('only the canonical fixture invite exposes a bodyless live session probe', async () => {
+  const probe = (url: string, configuredOrigin: string, headers?: HeadersInit) =>
+    request(url, { method: 'HEAD', headers }, configuredOrigin, undefined, '/invite', '1');
+  const url = `${fixtureOrigin}/invite`;
+  for (const [headers, status, lookups] of [[undefined, 200, 0], [{ cookie }, 204, 1]] as const) {
+    const result = await probe(url, fixtureOrigin, headers);
+    assert.equal(result.response.status, status);
+    assert.equal(result.response.body, null);
+    assert.equal(result.response.headers.get('cache-control'), 'private, no-store');
+    assert.equal(result.response.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(result.lookups, lookups);
+    assert.equal(result.resolved, false);
+  }
+  assert.equal((await probe(`${url}?`, fixtureOrigin)).response.status, 404);
+  assert.equal((await probe(`${origin}/invite`, origin, { cookie })).response.status, 404);
+});
+
 test('same-origin authenticated requests resolve with a private, non-cacheable response', async () => {
   for (const method of ['GET', 'POST']) {
     const result = await request(`${origin}/private`, { method, headers: { origin, cookie } });
