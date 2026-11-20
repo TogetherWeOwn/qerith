@@ -121,7 +121,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const routeId = event.route?.id;
     const peoplePage = routeId === '/people';
     const folderPage = routeId === folderDocumentRoute;
-    if (folderPage && !fixture && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
+    if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
     if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${stagingOrigin}/people` ||
         (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {

@@ -54,7 +54,8 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
       const tree = await readFile(join(dir, `${label}-tree.txt`), 'utf8');
       const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
       if (!png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
-          png.length < 45 || png.readUInt32BE(16) !== width || !tree.trim() ||
+          png.length < 45 || png.readUInt32BE(16) !== width ||
+          !png.subarray(-12).equals(Buffer.from('0000000049454e44ae426082', 'hex')) || !tree.trim() ||
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid folder evidence: ${label}`);
     }
   }

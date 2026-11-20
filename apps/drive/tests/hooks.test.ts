@@ -270,6 +270,15 @@ test('page navigation gets a private human response when D1 is unavailable', asy
   }
 });
 
+test('a signed-in non-staging folder request reaches the unavailable page loader', async () => {
+  const { response, resolved, lookups, event } = await request(`${fixtureOrigin}/f/private`,
+    { headers: { cookie } }, fixtureOrigin, undefined, '/f/[folderId]');
+  assert.equal(resolved, true);
+  assert.equal(lookups, 1);
+  assert.equal(event.locals.driveSession?.token, token);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+});
+
 test('the app independently requires the staging folder opt-in and exact document', async () => {
   const folder = '/f/private';
   const visit = (path: string, flag?: string, headers: HeadersInit = { cookie }, method = 'GET') =>
