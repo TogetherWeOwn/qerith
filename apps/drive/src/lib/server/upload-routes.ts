@@ -141,7 +141,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       const access = await authorize(request, session, intentId).catch(() => reply(503));
       if (access instanceof Response) return access;
       const target = await destination(request).catch(() => null);
-      if (!target) return reply(400);
+      if (!target || request.signal.aborted) return reply(400);
       const { db, bindings, settings, epoch, ownerId, token, isQualified, verifier, timeoutMs, mode, bound, allocated } = access;
       const { parentId, name } = target, operationId = crypto.randomUUID();
       const destinationBindings = [parentId, parentId, parentId, name];

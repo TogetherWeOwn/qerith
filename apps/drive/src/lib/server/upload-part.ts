@@ -3,6 +3,7 @@ import { captureUploadPartAcknowledgement, type UploadPartByteEvidence,
 import type { createMultipartUpload } from './s3/multipart-upload';
 
 const maxPartBytes = 16 * 1024 * 1024;
+const uploadBodyReadMs = 60_000;
 type SendPart = ReturnType<typeof createMultipartUpload>;
 type PartReceipt = Awaited<ReturnType<SendPart>>;
 
@@ -32,22 +33,38 @@ const reply = (status: number, body: string | null = null) =>
 export const uploadIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 export async function readUploadBody(request: Request, size: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const { body, signal } = request;
   const bytes = new Uint8Array(size);
-  if (!request.body) return size === 0 ? bytes : null;
-  const reader = request.body.getReader();
-  let offset = 0;
+  if (!body) return size === 0 && !signal.aborted ? bytes : null;
+  const reader = body.getReader();
+  const deadline = performance.now() + uploadBodyReadMs;
+  let cancelled = false;
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    // Cancelling settles the pending read even if the source never finishes cleanup.
+    void reader.cancel().catch(() => {});
+  };
+  const expired = () => cancelled || signal.aborted || performance.now() >= deadline;
+  const timer = setTimeout(cancel, uploadBodyReadMs);
+  signal.addEventListener('abort', cancel, { once: true });
+  let offset = 0, reads = 0;
   try {
-    for (;;) {
+    while (!expired()) {
       const { done, value } = await reader.read();
+      if (expired()) break;
       if (done) return offset === size ? bytes : null;
-      if (value.byteLength > size - offset) {
-        void reader.cancel().catch(() => {});
-        return null;
-      }
+      if (value.byteLength > size - offset) break;
       bytes.set(value, offset);
       offset += value.byteLength;
+      // Immediately ready reads (even empty chunks) must not starve the timer.
+      if (++reads % 256 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
+    cancel();
+    return null;
   } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', cancel);
     reader.releaseLock();
   }
 }
@@ -69,7 +86,7 @@ export async function uploadPart(request: Request, intentId: string, part: strin
   const size = Number(length);
   if (size > maxPartBytes) return reply(413);
   const bytes = await readUploadBody(request, size).catch(() => null);
-  if (!bytes) return reply(400);
+  if (!bytes || request.signal.aborted) return reply(400);
 
   try {
     const attempt = await access.claim(partNumber, size);
