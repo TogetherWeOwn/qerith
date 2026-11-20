@@ -64,6 +64,24 @@ test('rejects unexpected fields, invalid names and IDs, bad UTF-8 and bounded-bo
   }
 });
 
+test('classifies a refused write after the session expires', async () => {
+  const prepare = (sql: string) => ({ sql, bind() { return this; } });
+  const db = {
+    prepare,
+    async batch<T>(statements: ReturnType<typeof prepare>[]) {
+      let expired = false;
+      return statements.map(({ sql }) => {
+        if (sql.startsWith('INSERT')) {
+          expired = true;
+          return { results: [] };
+        }
+        return { results: expired ? [] : [{ status: 404 } as T] };
+      });
+    },
+  };
+  await denied(await postFolder(post(), { ...fixture, DB: { withSession: () => db } }), 401);
+});
+
 test('cancels a stalled body on the read deadline', async () => {
   let cancelled = false;
   const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });

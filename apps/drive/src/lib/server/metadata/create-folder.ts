@@ -21,15 +21,15 @@ export async function createSessionFolder(db: Database, token: string, parentId:
   : Promise<Folder | 401 | 404 | 409> {
   validateName(name);
   const args = [await tokenHash(token), parentId, name] as const;
-  // Classify conflicts in the same transaction, without relying on D1 error strings.
-  // The insert independently requires live authority and an owned folder parent.
-  const [denial, created] = await db.batch<Denial | Folder>([
-    db.prepare(`SELECT CASE WHEN ${ownsParent} AND ${siblingExists} THEN 409 ELSE 404 END AS status ${live}`)
-      .bind(...args),
+  // Classify a refused insert afterward, in the same transaction, so an expired
+  // session cannot leave a stale denial reason from before the write attempt.
+  const [created, denial] = await db.batch<Denial | Folder>([
     db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind)
       SELECT ?4, s.principal_id, ?2, ?3, 'folder' ${live} AND ${ownsParent} AND NOT ${siblingExists}
       RETURNING id, parent_id AS parentId, name, kind`)
       .bind(...args, crypto.randomUUID()),
+    db.prepare(`SELECT CASE WHEN ${ownsParent} AND ${siblingExists} THEN 409 ELSE 404 END AS status ${live}`)
+      .bind(...args),
   ]);
   const folder = created.results[0];
   const reason = denial.results[0];
