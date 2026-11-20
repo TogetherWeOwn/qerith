@@ -123,7 +123,8 @@ export default { fetch(request, env, ctx) {
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
   if (request.headers.has('x-test-qualification')) {
     env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
-      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };
+      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} },
+      DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + (request.headers.has('x-test-expired') ? -1 : 60_000)) };
     const missing = request.headers.get('x-test-missing-binding');
     if (missing) delete env[missing];
   }
@@ -207,15 +208,28 @@ export default { fetch(request, env, ctx) {
         const unready = await readiness({ 'x-test-qualification': '1', 'x-test-missing-binding': binding });
         assert.deepEqual([unready.status, ...identity(unready)], [503, null, null, null], `candidate without ${binding}`);
       }
-      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage');
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
+      const grant = { 'x-test-bootstrap': '1' };
+      const expired = { 'x-test-qualification': '1', 'x-test-expired': '1' };
+      const expiredProbe = await readiness(expired);
+      assert.deepEqual([expiredProbe.status, ...identity(expiredProbe)], [503, null, null, null]);
+      for (const path of ['/', '/_app/version.json', '/api/deployer/owner-enrollment']) {
+        const stopped = await get(path, expired);
+        assert.deepEqual([stopped.status, stopped.headers.get('cache-control')], [503, 'no-store'], path);
+      }
+      const enrollment = '/api/deployer/owner-enrollment';
+      // GET reaches the active shortcut without starting an enrollment ceremony.
+      const activeEnrollment = await get(enrollment, { ...grant, 'x-test-qualification': '1' });
+      assert.deepEqual([activeEnrollment.status, activeEnrollment.headers.get('allow')], [405, 'POST']);
+      const stoppedEnrollment = await get(enrollment, { ...grant, ...expired });
+      assert.deepEqual([stoppedEnrollment.status, stoppedEnrollment.headers.get('cache-control')], [503, 'no-store']);
+      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage; expired candidates refuse requests');
       const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
         body: '{"operation":"challenge"}',
       });
       const inactive = await bootstrap();
       assert.deepEqual([inactive.status, await inactive.text()], [404, ''], 'qualified preview has no enrollment route');
-      const grant = { 'x-test-bootstrap': '1' };
       const closed = { ...grant, cookie, 'x-test-closed': '1' };
       for (const path of ['/', '/sign-in', '/_app/version.json', '/invite']) {
         assert.equal((await get(path, closed)).status, 503, path);

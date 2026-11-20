@@ -1,7 +1,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
+import {
+  qualificationTimeLeft, qualificationWindowMs, readinessHeaders, readinessPath, stagingOrigin,
+} from '../src/lib/server/qualification-readiness.ts';
 import { stagingStorage, validateStagingConfig, validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
 import { uploadVersion } from './staging-qualification-upload.mjs';
@@ -9,6 +11,19 @@ import { uploadVersion } from './staging-qualification-upload.mjs';
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const isUuid = value => typeof value === 'string' && uuid.test(value);
 const sameDeployment = (left, right) => left.id === right.id && left.version === right.version;
+const expiryBinding = 'DRIVE_QUALIFICATION_EXPIRES_AT';
+const hasCandidateBinding = bindings => [...bindings.keys()].some(name => name.startsWith('DRIVE_QUALIFICATION_'));
+const apiTimeout = 15_000;
+const probeBudget = 30_000;
+const caseBudget = 18 * 60_000;
+const cleanupBudget = 60_000;
+
+function requireActivationWindow(expiresAt) {
+  // Deployment write and readback also consume part of the immutable window.
+  if (qualificationTimeLeft(expiresAt) <= 2 * apiTimeout + probeBudget + caseBudget + cleanupBudget) {
+    throw new Error('Staging candidate has insufficient time left to activate.');
+  }
+}
 
 export async function probeQualificationWorker({ sha, version }, signal, request = fetch) {
   const nonce = randomBytes(16).toString('hex');
@@ -45,7 +60,7 @@ function workerApi(account, name, token, request) {
   const script = `scripts/${name}`;
   async function call(path, signal, body) {
     try {
-      const deadline = AbortSignal.timeout(15_000);
+      const deadline = AbortSignal.timeout(apiTimeout);
       const bounded = signal ? AbortSignal.any([deadline, signal]) : deadline;
       bounded.throwIfAborted();
       const response = await request(`${base}/${path}`, {
@@ -158,7 +173,7 @@ export async function inspectQualificationWorker(env, cwd, signal, request = fet
     const before = await api.current(bounded);
     const deployed = await api.version(before.version, bounded);
     const bindings = checkedBindings(deployed, config, {});
-    if (deployed.id !== before.version || bindings.has('DRIVE_QUALIFICATION_SHA') || bindings.has('DRIVE_QUALIFICATION_VERSION')) {
+    if (deployed.id !== before.version || hasCandidateBinding(bindings)) {
       throw new Error();
     }
     await api.assertNoSchedules(bounded);
@@ -189,18 +204,20 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   const baselineBindings = checkedBindings(baseline, config, storage.vars);
   const secretNames = bindings => [...bindings.values()].filter(({ type }) => type === 'secret_text').map(({ name }) => name).sort();
   const secrets = secretNames(baselineBindings);
-  if (baseline.id !== previous.version || baselineBindings.has('DRIVE_QUALIFICATION_SHA') ||
-      baselineBindings.has('DRIVE_QUALIFICATION_VERSION') || Object.keys(storage.secrets).some(name => !secrets.includes(name))) {
+  if (baseline.id !== previous.version || hasCandidateBinding(baselineBindings) ||
+      Object.keys(storage.secrets).some(name => !secrets.includes(name))) {
     throw new Error('Staging baseline must already bind the reviewed storage secrets without candidate identity.');
   }
 
-  const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
-    DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const tag = `${sha}-${runId}-${attempt}`;
   // Wrangler inherits from the latest upload, not the deployment serving traffic.
   if ((await api.recentUploads(signal))[0] !== previous.version) {
     throw new Error('Staging baseline is not the latest uploaded version; refusing to inherit secrets. Reconcile staging before retrying.');
   }
+  const expiresAt = String(Date.now() + qualificationWindowMs);
+  const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
+    [expiryBinding]: expiresAt, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
+    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
   const candidate = checkedBindings(await api.assertUploaded(version, tag, signal), config, vars);
@@ -214,7 +231,8 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
     throw new Error('Cannot prove isolated candidate upload with unchanged staging baseline.');
   }
   signal?.throwIfAborted();
-  return { version, previousDeployment: previous.id, previousVersion: previous.version };
+  requireActivationWindow(expiresAt);
+  return { version, expiresAt, previousDeployment: previous.id, previousVersion: previous.version };
 }
 
 export async function runQualificationPhase(task, identity, parentSignal, timeout) {
@@ -259,37 +277,41 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
   env, cwd = process.cwd(), signal, request = fetch) {
   const { sha, runId, attempt } = assertQualificationJob(env, cwd);
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
-  const { version: candidate, previousDeployment, previousVersion } = upload ?? {};
+  const { version: candidate, expiresAt, previousDeployment, previousVersion } = upload ?? {};
   if (typeof token !== 'string' || !token.trim() || ![candidate, previousDeployment, previousVersion].every(isUuid) ||
       candidate === previousVersion || [recordRecovery, probe, exercise, cleanup].some(fn => typeof fn !== 'function')) {
     throw new Error('Worker lifecycle requires the protected qualification attempt and an uploaded version.');
   }
-  const { name } = validateStagingTarget(join(cwd, 'apps/drive'), account);
-  const api = workerApi(account, name, token, request);
+  requireActivationWindow(expiresAt);
+  const config = validateStagingTarget(join(cwd, 'apps/drive'), account);
+  const api = workerApi(account, config.name, token, request);
   const tag = `${sha}-${runId}-${attempt}`;
   const previous = await api.current(signal);
   if (!sameDeployment(previous, { id: previousDeployment, version: previousVersion })) {
     throw new Error('Staging baseline changed since candidate upload.');
   }
-  await api.assertUploaded(candidate, tag, signal);
+  checkedBindings(await api.assertUploaded(candidate, tag, signal), config, {
+    DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt,
+  });
   const identity = { sha, runId, attempt, version: candidate };
-  await recordRecovery({ ...identity, previousVersion: previous.version, previousDeployment: previous.id });
+  await recordRecovery({ ...identity, expiresAt, previousVersion: previous.version, previousDeployment: previous.id });
   if (!sameDeployment(await api.current(signal), previous)) throw new Error('Staging deployment changed before activation.');
   signal?.throwIfAborted();
+  requireActivationWindow(expiresAt);
 
   let active;
   let restored;
   const cases = await withQualificationRecovery(async () => {
     active = await api.deploy(candidate, tag, signal);
     if (!sameDeployment(await api.current(signal), active)) throw new Error('Cannot verify the active qualification deployment.');
-    const evidence = await runQualificationPhase(probe, identity, signal, 30_000);
+    const evidence = await runQualificationPhase(probe, identity, signal, probeBudget);
     if (evidence?.ready !== true || evidence.sha !== sha || evidence.version !== candidate) {
       throw new Error('Staging Worker did not prove exact-SHA runtime readiness.');
     }
     signal?.throwIfAborted();
-    return withQualificationRecovery(() => runQualificationPhase(exercise, identity, signal, 18 * 60_000), async () => {
+    return withQualificationRecovery(() => runQualificationPhase(exercise, identity, signal, caseBudget), async () => {
       // Cleanup must finish before rollback and has its own budget after cancellation.
-      if (await runQualificationPhase(cleanup, identity, undefined, 60_000) !== true) {
+      if (await runQualificationPhase(cleanup, identity, undefined, cleanupBudget) !== true) {
         throw new Error('Qualification prefix cleanup is unverified.');
       }
     });

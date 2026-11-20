@@ -11,6 +11,26 @@ export interface QualificationReadinessEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
   DRIVE_QUALIFICATION_SHA?: string;
   DRIVE_QUALIFICATION_VERSION?: { id: string };
+  DRIVE_QUALIFICATION_EXPIRES_AT?: string;
+}
+
+export const qualificationWindowMs = 25 * 60_000;
+const shaPattern = /^[0-9a-f]{40}$/;
+const versionPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+
+export function qualificationTimeLeft(expiresAt: unknown, now = Date.now()): number {
+  if (typeof expiresAt !== 'string' || !/^[1-9][0-9]{12}$/.test(expiresAt)) return 0;
+  const remaining = Number(expiresAt) - now;
+  return remaining > 0 && remaining <= qualificationWindowMs ? remaining : 0;
+}
+
+export function allowsQualificationTraffic(env: QualificationReadinessEnv, now = Date.now()): boolean {
+  const { DRIVE_QUALIFICATION_SHA: sha, DRIVE_QUALIFICATION_VERSION: version,
+    DRIVE_QUALIFICATION_EXPIRES_AT: expiresAt } = env;
+  if (sha === undefined && version === undefined && expiresAt === undefined) return true;
+  return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_SIGN_IN_FIXTURE !== '1' &&
+    typeof sha === 'string' && shaPattern.test(sha) && typeof version?.id === 'string' && versionPattern.test(version.id) &&
+    qualificationTimeLeft(expiresAt, now) > 0;
 }
 
 export function qualificationReadiness(request: Request, env: QualificationReadinessEnv, ready: boolean): Response {
@@ -23,8 +43,7 @@ export function qualificationReadiness(request: Request, env: QualificationReadi
   if (env.DRIVE_ORIGIN !== stagingOrigin || env.DRIVE_SIGN_IN_FIXTURE === '1' ||
       request.url !== stagingOrigin + readinessPath || request.method !== 'HEAD' ||
       (origin !== null && origin !== stagingOrigin) || nonce === null || !/^[0-9a-f]{32}$/.test(nonce) ||
-      typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) || typeof version !== 'string' ||
-      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(version)) {
+      typeof sha !== 'string' || !shaPattern.test(sha) || typeof version !== 'string' || !versionPattern.test(version)) {
     return new Response(null, { status: 404, headers });
   }
   if (!ready) return new Response(null, { status: 503, headers });

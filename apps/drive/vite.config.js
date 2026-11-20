@@ -85,7 +85,7 @@ import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.t
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
-import { qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
+import { allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
@@ -111,7 +111,7 @@ const unavailableAssets = { fetch: unavailable };
 
 export default {
   async fetch(request, env, ctx) {
-    if (env.DRIVE_ORIGIN === 'disabled') return unavailable();
+    if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.

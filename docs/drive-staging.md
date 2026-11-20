@@ -195,7 +195,18 @@ configuration for the pinned staging script. It requires no schedules, one
 unchanged non-candidate deployment, and no resource bindings beyond the pinned
 D1 database and assets. This does not see external invokers, unbound resources,
 D1 fixture rows, or billing. It cannot satisfy whole-estate zero-idle inventory
-or establish that a lost runner's candidate was stopped.
+or establish that a lost runner's deployment was restored.
+
+A qualification candidate carries an immutable 25-minute request window starting
+at version upload. Upload and activation read back the exact deadline; activation
+requires more than 20 minutes left for deployment, readiness, cases and cleanup.
+The generated Worker rejects new requests at or after the deadline before app,
+asset or readiness routing. This bounds candidate request admission without a
+runner, but does not stop in-flight work, revoke issued storage URLs, restore the
+previous deployment, or clean up D1. Neither existing staging workflow uses it.
+Before wiring the protected caller, reconcile its pre-activation budget with
+this window: D1 command timeouts alone can consume the five-minute margin,
+before accounting for upload, readback and recovery recording.
 
 Remaining source slices, in dependency order:
 
