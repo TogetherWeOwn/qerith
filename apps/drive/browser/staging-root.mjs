@@ -185,6 +185,7 @@ try {
   assert.equal(await noticeRetry.getAttribute('href'), failedDownload, 'refresh preserves the document notice');
 
   // Damage only the disposable listing index; upload and live-owner admission still work.
+  const index = await DB.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first('sql');
   await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -202,6 +203,7 @@ try {
   await notice.getByText('The file didn’t download.', { exact: true }).waitFor();
   assert.equal(await notice.getByRole('link').count(), 0);
   assert.equal(await listingRetry.getAttribute('href'), '/');
+  await DB.prepare(index).run();
 
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
