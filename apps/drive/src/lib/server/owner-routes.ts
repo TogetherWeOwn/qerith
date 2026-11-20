@@ -4,7 +4,7 @@ import { readUploadBody } from './upload-part';
 
 type Database = NonNullable<typeof env.DB>;
 export const ownerReply = (status: number) => new Response(null, { status, headers: { 'cache-control': 'private, no-store' } });
-export const ownerResourceId = /^[A-Za-z0-9_-]{1,512}$/;
+export { ownerResourceId } from './owner-lifecycle-route';
 
 export async function ownerAction({ request, locals }: { request: Request; locals: App.Locals },
   action: (db: Database, token: string) => Promise<Response>): Promise<Response> {

@@ -151,12 +151,52 @@ test('invite mode admits live members only to My Drive and its exact data and as
       else assert.ok(!(enabled instanceof Response) && enabled.kind === target.kind);
     }
   }
-  for (const path of ['/people', '/api/owner/invitations', '/__data.json/', '/api/root-listing', `${root}.map`]) {
+  for (const path of ['/people', '/api/owner/members', '/__data.json/', '/api/root-listing', `${root}.map`]) {
     denied(await admit(request(path), '1'), 404);
   }
   denied(await admit(request(data, 'GET', { cookie, 'sec-fetch-site': 'cross-site' }), '1'), 403);
   revoke();
   for (const path of ['/', data, root]) denied(await admit(request(path), '1'), 401);
+});
+
+test('staging owner lifecycle routes require the exact invite flag and a live owner', async () => {
+  const list = '/api/owner/invitations';
+  const routes = [[list, 'GET'], [`${list}?after=${id}`, 'GET'], [list, 'POST'],
+    [`${list}/${id}/cancel`, 'POST'], [`/api/owner/members/${id}/revoke`, 'POST']] as const;
+  for (const [path, method] of routes) {
+    const { env, reads, revoke } = runtime();
+    const input = request(path, method);
+    const enabled = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+    for (const flag of [undefined, '0', '1 ']) {
+      denied(await admitStagingRequest(input, { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag }, true, assets), 404);
+    }
+    denied(await admitStagingRequest(input, enabled, false, assets), 503);
+    denied(await admitStagingRequest(request(path, method, { origin: stagingOrigin }), enabled, true, assets), 401);
+    denied(await admitStagingRequest(request(path, method, { origin: stagingOrigin, cookie, 'sec-fetch-site': 'same-site' }),
+      enabled, true, assets), 403);
+    assert.equal(reads(), 0);
+    denied(await admitStagingRequest(input, { ...runtime('member').env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' }, true, assets), 403);
+    const unexpected = async () => assert.fail('owner route reached a public handler');
+    assert.equal((await dispatchStagingRequest(input, enabled, true, assets, {
+      adapter: async forwarded => { assert.equal(forwarded, input); return new Response(null, { status: 204 }); },
+      asset: unexpected, ceremony: unexpected, invite: unexpected,
+    })).status, 204);
+    revoke();
+    denied(await admitStagingRequest(input, enabled, true, assets), 401);
+  }
+});
+
+test('owner lifecycle admission rejects unlisted methods, paths and query forms before D1', async () => {
+  const { env, reads } = runtime();
+  const enabled = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  const list = '/api/owner/invitations';
+  for (const [path, method] of [[list, 'HEAD'], [list, 'DELETE'], [`${list}/`, 'GET'], [`${list}?`, 'GET'],
+    [`${list}?after=`, 'GET'], [`${list}?after=a&after=b`, 'GET'], [`${list}?token=a`, 'GET'], [`${list}?after=a`, 'POST'],
+    [`${list}/${id}/cancel`, 'GET'], [`${list}/${id}/cancel?after=a`, 'POST'], [`${list}/%61/cancel`, 'POST'],
+    [`/api/owner/members/${id}/restore`, 'POST'], [`/api/owner/members/${id}/revoke/`, 'POST']]) {
+    denied(await admitStagingRequest(request(path, method), enabled, true, assets), 404);
+  }
+  assert.equal(reads(), 0);
 });
 
 test('denials and signed-out redirects do not enter any downstream handler', async () => {

@@ -2,6 +2,7 @@ import { entryId } from '../download-id';
 import { isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn } from './download-navigation';
 import { Sessions } from './identity/sessions';
+import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadIdPattern } from './upload-part';
 
@@ -13,7 +14,7 @@ interface PreviewAssets {
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
   { kind: 'private-asset' | 'root'; deadline?: number };
 
@@ -64,10 +65,13 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   assets: PreviewAssets): Promise<Target | Response> {
   if (env.DRIVE_ORIGIN !== stagingOrigin || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
   if (!allowsOrigin(request, stagingOrigin)) return deny(403);
-  const { pathname, search } = new URL(request.url);
+  const url = new URL(request.url);
+  const { pathname, search } = url;
   const invite = admitsStagingInvite(env);
-  const target = route(request.method, pathname, assets, invite);
+  const target: Target | null = invite && ownerLifecycleRoute(request, url)
+    ? { kind: 'owner-lifecycle' } : route(request.method, pathname, assets, invite);
   if (!target) return deny(404);
+  if (target.kind === 'owner-lifecycle' && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
     if (request.url !== stagingOrigin + pathname) return deny(404);
@@ -138,6 +142,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'root':
     case 'download':
     case 'upload':
+    case 'owner-lifecycle':
       return dispatch.adapter(request);
   }
 }
