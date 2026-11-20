@@ -285,6 +285,7 @@ export default { fetch(request, env, ctx) {
       assert.match(html, /Your drive is empty/);
       assert.match(html, /type="file"/, 'the staging owner gets the upload picker');
       assert.match(html, /<script\b/, 'the staging root can hydrate');
+      assert.equal((await get('/f/private', { cookie })).status, 404, 'the staging owner cannot open the folder route');
       const notice = '00000000-0000-4000-8000-000000000001';
       const document = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin',
         cookie: `${cookie}; __Host-drive-download-failed-${notice}=unavailable` };
@@ -400,6 +401,7 @@ export default { fetch(request, env, ctx) {
     const closedFolder = await createFolder('Fixture disabled', null);
     assert.deepEqual([closedFolder.status, closedFolder.headers.get('cache-control'), await closedFolder.text()], [404, 'private, no-store', '']);
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
+    assert.match(await (await worker.fetch(`${origin}/f/${fileId}`, { headers: { cookie } })).text(), /<title>Folder unavailable · Drive<\/title>/);
     const unadmitted = await (await access({ headers: { cookie } })).text();
     assert.match(unadmitted, /Service unavailable\./);
     assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder|type="file"|<script\b/);
@@ -533,7 +535,7 @@ async function exerciseRootPages(DB, worker, origin, cookie, fileId) {
 const root = '.svelte-kit/cloudflare';
 const asset = '/_app/version.json';
 await access(`${root}${asset}`);
-const unavailable = [['/', 503, 'Service unavailable'], [asset, 503, 'Service unavailable']];
+const unavailable = ['/', '/f/private', asset].map(path => [path, 503, 'Service unavailable']);
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   await exercise(['--config', config], unavailable);
 }
