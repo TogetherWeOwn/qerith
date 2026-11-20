@@ -95,7 +95,16 @@ jobs:
           timeout --signal=TERM --kill-after=10s 90s node_modules/.bin/wrangler deploy \
             .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run \
             --outdir "$RUNNER_TEMP/drive-staging"
-      - name: Migrate and publish staging Worker
+      - name: Verify staging storage qualification before migration
+        env:
+          QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: ${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+        run: node scripts/staging-publish.mjs --check-storage
+      - name: Migrate staging D1
         shell: bash
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
@@ -190,4 +199,17 @@ jobs:
             printf '%s\n' 'Migration apply or post-list failed; restore the bookmark or recreate the staging database before retry.' >&2
             exit 1
           fi
-          DRIVE_OWNER_ENROLLMENT="$enrollment" node scripts/staging-publish.mjs --publish
+      - name: Publish staging Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
+          DRIVE_OWNER_ENROLLMENT: ${{ secrets.QERITH_STAGING_OWNER_ENROLLMENT }}
+          QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: ${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+          NO_COLOR: '1'
+          WRANGLER_HIDE_BANNER: 'true'
+        run: node scripts/staging-publish.mjs --publish
