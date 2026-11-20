@@ -16,9 +16,42 @@ test('does not read without authorization or with a malformed page', async () =>
   assert.equal(read.mock.callCount(), 0);
 });
 
+test('rejects invalid folder IDs before authorization or metadata reads', async () => {
+  const auth = test.mock.fn(authorize);
+  const readFolder = test.mock.fn(get);
+  const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
+  const deps = { authorize: auth, readAccess: { get: readFolder, list } };
+  for (const [label, id] of [['empty', ''], ['dot', '.'], ['dot-dot', '..'], ['129 characters', 'x'.repeat(129)]]) {
+    assert.deepEqual(await folderPage(request(), id, deps), unavailable, label);
+    assert.equal(auth.mock.callCount(), 0, label);
+    assert.equal(readFolder.mock.callCount(), 0, label);
+    assert.equal(list.mock.callCount(), 0, label);
+  }
+
+  const id = 'x'.repeat(128);
+  const req = request();
+  assert.deepEqual(await folderPage(req, id, deps), {
+    status: 'ok', folder: { name: 'Receipts', entries: [], nextPage: null, paged: false }
+  });
+  assert.deepEqual(auth.mock.calls.map(call => call.arguments), [[req]]);
+  assert.deepEqual(readFolder.mock.calls.map(call => call.arguments), [[await authorize(), id]]);
+  assert.deepEqual(list.mock.calls.map(call => call.arguments), [[await authorize(), id, null]]);
+});
+
+test('stops before listing when the folder lookup is denied or returns a file', async () => {
+  for (const folder of [null, { ...await get('', 'private'), kind: 'file' as const }]) {
+    const readFolder = test.mock.fn(async () => folder);
+    const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
+    assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get: readFolder, list } }), unavailable);
+    assert.equal(readFolder.mock.callCount(), 1);
+    assert.equal(list.mock.callCount(), 0);
+  }
+});
+
 test('projects safe fields and resumes a stable opaque boundary for an overlong entry ID', async () => {
   const cursor = { id: 'x'.repeat(4096), name: `Résumé ${'é'.repeat(123)}` };
   const later = { id: 'next', name: 'Z', kind: 'file' as const };
+  const last = { id: 'last', name: 'ZZ', kind: 'file' as const };
   for (const anchor of [cursor, { ...cursor, name: 'A' }]) {
     const item = { ...anchor, kind: 'file' as const };
     const readAccess = { get, list: async () => ({ entries: [{ ...item, object_key: 'private-key' }], nextCursor: anchor }) };
@@ -29,10 +62,24 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
     const next = request(`page=${page.folder.nextPage}`);
     // An entry that takes the boundary name is behind the cursor too.
     for (const entries of [[later], [{ ...item, id: 'replacement', name: anchor.name }, later], null]) {
-      const list = test.mock.fn(async (_token: string, _id: string, _after?: typeof cursor | null) => entries && { entries, nextCursor: null });
-      const expected = entries ? { status: 'ok', folder: { name: 'Receipts', entries: [later], nextPage: null, paged: true } } : unavailable;
-      assert.deepEqual(await folderPage(next, 'private', { authorize, readAccess: { get, list } }), expected);
+      const list = test.mock.fn(async (_token: string, _id: string, after?: typeof cursor | null) =>
+        after?.name === later.name ? { entries: [last], nextCursor: null } : entries && { entries, nextCursor: later });
+      const deps = { authorize, readAccess: { get, list } };
+      const continuation = await folderPage(next, 'private', deps);
       assert.deepEqual(list.mock.calls.map(call => call.arguments), [[await authorize(), 'private', { name: anchor.name, id: '' }]]);
+      if (!entries) {
+        assert.deepEqual(continuation, unavailable);
+        continue;
+      }
+      assert(continuation.status === 'ok' && continuation.folder.nextPage);
+      const { nextPage, ...rest } = continuation.folder;
+      assert.deepEqual(rest, { name: 'Receipts', entries: [later], paged: true });
+      assert.match(nextPage, /^[A-Za-z0-9_-]{378}$/);
+      assert.deepEqual(await folderPage(request(`page=${nextPage}`), 'private', deps), {
+        status: 'ok', folder: { name: 'Receipts', entries: [last], nextPage: null, paged: true }
+      });
+      assert.equal(list.mock.callCount(), 2);
+      assert.deepEqual(list.mock.calls[1].arguments, [await authorize(), 'private', { name: later.name, id: '' }]);
     }
     assert.deepEqual(await folderPage(next, 'other', { authorize, readAccess }), unavailable);
     assert.deepEqual(await folderPage(next, 'private', { authorize: async () => 'another-session', readAccess }), unavailable);
