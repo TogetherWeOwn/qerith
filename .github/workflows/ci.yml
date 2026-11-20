@@ -353,6 +353,9 @@ jobs:
       - name: Test staging qualification migrations without provider access
         if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-migrations.test.mjs
+      - name: Test staging qualification Worker lifecycle without provider access
+        if: hashFiles('apps/drive/scripts/staging-qualification-worker.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-worker.test.mjs
       - name: Test offline bundle validation
         run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
 
