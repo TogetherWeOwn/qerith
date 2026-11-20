@@ -418,6 +418,10 @@ async function exerciseListingPages(DB, worker, origin, cookie) {
     assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store'], path);
     assert.deepEqual(await response.json(), body, path);
   }
+  for (const path of ['/api/folder-listing?folderId=listing-folder&x-sveltekit-test=1', '/api/shared-listing?x-sveltekit-test=1']) {
+    const response = await worker.fetch(`${origin}${path}`, { headers: { cookie }, redirect: 'manual' });
+    assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [400, 'private, no-store', ''], path);
+  }
 }
 
 async function exerciseRootPages(DB, worker, origin, cookie, fileId) {

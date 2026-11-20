@@ -26,6 +26,12 @@ async function listPage(request: Request, url: URL, env: ListingEnv, folder: boo
   const site = request.headers.get('sec-fetch-site');
   if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || (site !== null && site !== 'same-origin')) return reply(403);
   if (url.search.length > 8192) return reply(400);
+  // URLSearchParams silently repairs malformed percent escapes and UTF-8.
+  try {
+    decodeURIComponent(url.search);
+  } catch {
+    return reply(400);
+  }
   const params = url.searchParams;
   const allowed = folder ? ['folderId', 'cursor', 'direction'] : ['cursor'];
   if ([...params.keys()].some(key => !allowed.includes(key) || params.getAll(key).length !== 1)) return reply(400);

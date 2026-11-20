@@ -45,6 +45,21 @@ test('listing rejects method, origin and malformed inputs and hides binding fail
   await denied(await list(shared, { headers: { origin, 'sec-fetch-site': 'same-origin' } }), 503);
 });
 
+test('listing rejects invalid query encoding before opening a D1 session', async () => {
+  let sessions = 0;
+  const DB = { ...db, withSession() { sessions++; return db; } };
+  const env = { DB, DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' };
+  for (const value of ['%', '%GG', '%C3%28']) {
+    for (const query of [`${folder}?folderId=${value}`, `${shared}?cursor=${value}`]) {
+      await denied(await listingRequest(new Request(origin + query), env), 400);
+    }
+  }
+  assert.equal(sessions, 0);
+  // A correctly encoded replacement character is a valid opaque ID, not a decoding error.
+  await denied(await listingRequest(new Request(`${origin}${shared}?cursor=%EF%BF%BD`), env), 401);
+  assert.equal(sessions, 1);
+});
+
 test('folder session lookup and page read each start a fresh primary session', async () => {
   const sessions: { constraint: string; reads: string[] }[] = [];
   const DB = { ...db, withSession(constraint: string) {
