@@ -70,6 +70,13 @@ export function assertQualificationJob(env, cwd) {
   return { sha: testedSha, runId, attempt };
 }
 
+export function qualificationPrefix({ runId, attempt }) {
+  if (!requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
+    throw new Error('Invalid qualification run or attempt.');
+  }
+  return `drive-qualification/full-v0/${runId}/${attempt}/`;
+}
+
 // This is a policy predicate, not a live-evidence source or an artifact writer.
 export function qualificationReceiptName(env, evidence, status, cwd) {
   const testedSha = assertDispatch(env, cwd);
