@@ -2,7 +2,8 @@
   export type InviteAcceptanceView =
     | { kind: 'invite'; inviter?: string; displayName?: string; note?: string }
     | { kind: 'dead-link' }
-    | { kind: 'signed-in'; signedInName: string };
+    | { kind: 'unavailable' }
+    | { kind: 'signed-in'; signedInName?: string };
   export type InvitePasskeyPhase = 'valid' | 'waiting' | 'cancelled' | 'unsupported' | 'rate-limited';
 </script>
 
@@ -11,50 +12,62 @@
   import SignInPage from './SignInPage.svelte';
   import { signInCopy } from './sign-in-state';
 
-  // The caller resolves the link and keys this view per invite. It owns the ceremony and navigation.
-  export let view: InviteAcceptanceView;
+  // The caller resolves the link and owns the ceremony and navigation.
+  export let view: InviteAcceptanceView | undefined;
   export let phase: InvitePasskeyPhase = 'valid';
   // Return a promise while preparing the ceremony, or set the waiting phase synchronously.
   export let onSetup: (displayName: string) => void | Promise<void>;
   export let onCancel: () => void;
+  export let cancellable = true;
 
   let heading: HTMLHeadingElement;
   let card: HTMLElement;
   let field: HTMLInputElement;
   let primary: HTMLButtonElement;
-  let rendered: InviteAcceptanceView['kind'] | undefined;
+  type ViewKind = InviteAcceptanceView['kind'] | 'loading';
+  let kind: ViewKind;
+  let rendered: ViewKind | undefined;
   let previousPhase: InvitePasskeyPhase | undefined;
   let announcement = '';
   let nameError = '';
   let ready = false;
   let pending: symbol | undefined;
-  const deadTitle = "This link doesn't work any more";
-  $: kind = view.kind;
-  $: invite = view.kind === 'invite' ? view : null;
+  const titles = {
+    loading: 'Accept invite',
+    invite: "You're invited to Drive",
+    'dead-link': "This link doesn't work any more",
+    unavailable: 'Drive unavailable',
+    'signed-in': "You're signed in",
+  };
+  $: kind = view?.kind ?? 'loading';
+  $: invite = view?.kind === 'invite' ? view : null;
   // The preparation latch lasts only until the caller changes the view kind or phase.
   $: { kind; phase; pending = undefined; }
   $: shown = pending ? 'waiting' : phase;
-  $: status = shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
+  $: saving = shown === 'waiting' && !cancellable;
+  $: status = !invite ? undefined : saving ? 'Saving your passkey…' :
+    shown === 'waiting' || shown === 'unsupported' || shown === 'rate-limited' ? signInCopy[shown].notice : undefined;
   $: unavailable = shown !== 'valid' && shown !== 'cancelled';
   $: updateFocus(kind, shown);
 
   onMount(() => { ready = true; });
 
-  async function updateFocus(kind: InviteAcceptanceView['kind'], nextPhase: InvitePasskeyPhase) {
+  async function updateFocus(kind: ViewKind, nextPhase: InvitePasskeyPhase) {
     if (kind === rendered && nextPhase === previousPhase) return;
     // Capture focus once, before a view or phase change can remove its control.
     const active = typeof document === 'undefined' ? null : document.activeElement;
     const focused = card?.contains(active) ? active : null;
+    announcement = kind !== rendered && (rendered === 'loading' || (rendered === 'invite' && !focused))
+      ? titles[kind] : '';
     if (kind !== rendered) {
-      announcement = rendered === 'invite' && kind === 'dead-link' && !focused ? deadTitle : '';
       rendered = kind;
       nameError = '';
     }
     previousPhase = nextPhase;
-    if (!focused) return;
+    if (!focused || kind === 'loading') return;
     await tick();
     if (card?.isConnected && !card.contains(focused) && document.activeElement === document.body) {
-      (view.kind === 'invite' ? primary : heading)?.focus();
+      (view?.kind === 'invite' ? primary : heading)?.focus();
     }
   }
 
@@ -70,22 +83,28 @@
   }
 
   function cancelSetup() {
+    if (!cancellable) return;
     pending = undefined;
     onCancel();
   }
 </script>
 
 <SignInPage title="Accept invite">
-  <section aria-labelledby="invite-title" bind:this={card}>
-    <h1 id="invite-title" tabindex="-1" aria-describedby={invite ? undefined : 'invite-description'} bind:this={heading}>
-      {#if view.kind === 'dead-link'}{deadTitle}
-      {:else if view.kind === 'signed-in'}You're signed in as <bdi>{view.signedInName}</bdi>
-      {:else if view.inviter}<bdi>{view.inviter}</bdi> invited you to Drive
-      {:else}You're invited to Drive{/if}
+  <section class:resolved={!!view} aria-labelledby="invite-title" bind:this={card}>
+    <h1 id="invite-title" tabindex="-1" aria-describedby={view && !invite ? 'invite-description' : undefined} bind:this={heading}>
+      {#if view?.kind === 'signed-in' && view.signedInName}{titles[kind]}{' as '}<bdi>{view.signedInName}</bdi>
+      {:else if invite?.inviter}<bdi>{invite.inviter}</bdi> invited you to Drive
+      {:else}{titles[kind]}{/if}
     </h1>
-    <p class="sr-only" role="status" aria-live="polite">{invite ? status ?? '' : announcement}</p>
-    {#if view.kind === 'dead-link'}
+    <!-- Keep the live region in the DOM while the invite resolves. -->
+    <p class:sr-only={!!view} role="status" aria-live="polite" aria-atomic="true">{view ? status ?? announcement : 'Checking the invite…'}</p>
+    {#if !view}
+      <noscript>Turn on JavaScript to set up a passkey.</noscript>
+    {:else if view.kind === 'dead-link'}
       <p id="invite-description">Invite and sign-in links work once and expire after 7 days. Ask the owner for a new one.</p>
+    {:else if view.kind === 'unavailable'}
+      <p id="invite-description">Try signing in if you saved a passkey. Otherwise, open the invite again and try again.</p>
+      <a class="ghost" data-sveltekit-reload href="/sign-in">Sign in</a>
     {:else if view.kind === 'signed-in'}
       <p id="invite-description">This invite is for someone else, so it wasn't used.</p>
       <a class="ghost" href="/">Go to My Drive</a>
@@ -100,10 +119,10 @@
         <button class="primary" class:quiet={shown === 'unsupported' || shown === 'rate-limited'} type="submit"
           bind:this={primary} disabled={!ready} aria-disabled={unavailable} aria-busy={shown === 'waiting'}
           aria-describedby={status ? 'invite-status' : undefined}>
-          {shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
+          {saving ? status : shown === 'waiting' || shown === 'rate-limited' ? signInCopy[shown].action : 'Set up a passkey'}
         </button>
         <p id="invite-status" class:notice={shown === 'unsupported'}>{status ?? ''}</p>
-        {#if shown === 'waiting'}<button class="cancel" type="button" on:click={cancelSetup}>Cancel</button>{/if}
+        {#if shown === 'waiting'}<button class="cancel" type="button" aria-disabled={!cancellable} on:click={cancelSetup}>Cancel</button>{/if}
         {#if shown === 'cancelled'}<p class="notice info" role="alert">{signInCopy.cancelled.notice}</p>{/if}
       </form>
       <p class="explanation">Your device asks to save a passkey for this site. That's how you sign in from now on.</p>
@@ -113,9 +132,9 @@
 </SignInPage>
 
 <style>
-  section { padding: var(--drive-space-inset-card-lg); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
-  h1 { font-size: var(--drive-font-size-h3); line-height: var(--drive-line-height-heading); font-weight: var(--drive-font-weight-display); font-stretch: var(--drive-font-width-display); letter-spacing: var(--drive-tracking-h3); text-wrap: balance; }
-  p, blockquote { font-size: var(--drive-font-size-body); line-height: var(--drive-line-height-body); color: var(--drive-color-text-secondary); }
+  .resolved { padding: var(--drive-space-inset-card-lg); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
+  :where(.resolved) h1 { font-size: var(--drive-font-size-h3); line-height: var(--drive-line-height-heading); font-weight: var(--drive-font-weight-display); font-stretch: var(--drive-font-width-display); letter-spacing: var(--drive-tracking-h3); text-wrap: balance; }
+  :where(.resolved) p, blockquote { font-size: var(--drive-font-size-body); line-height: var(--drive-line-height-body); color: var(--drive-color-text-secondary); }
   blockquote { margin-inline: 0; padding-inline-start: var(--drive-space-3); border-inline-start: var(--drive-size-line) solid var(--drive-color-line-control); white-space: pre-wrap; }
   label { display: block; font-size: var(--drive-font-size-ui); margin-block-end: var(--drive-space-2); }
   input, button, .ghost { box-sizing: border-box; min-height: var(--drive-size-control-md); font: inherit; font-size: var(--drive-font-size-ui); }

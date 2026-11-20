@@ -181,7 +181,7 @@ export default { fetch(request, env, ctx) {
         assert.deepEqual([asset.status, asset.headers.get('cache-control')], [200, 'private, no-store'], path);
       }
       for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list',
-        '/api/root-listing', '/api/deployer/owner-enrollment', '/api/entries/fixture/delete']) {
+        '/api/root-listing', '/api/deployer/owner-enrollment', '/api/entries/fixture/delete', '/invite']) {
         assert.equal((await get(path, { cookie })).status, 404, path);
       }
       const crossSite = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' };
@@ -199,6 +199,9 @@ export default { fetch(request, env, ctx) {
       const post = (step, headers = {}, body) => worker.fetch(`${origin}/api/sign-in/${step}`, {
         method: 'POST', headers: { origin, ...headers }, body,
       });
+      for (const step of ['present', 'challenge', 'enroll']) {
+        assert.equal((await worker.fetch(`${origin}/api/invite/${step}`, { method: 'POST', headers: { origin, cookie } })).status, 404);
+      }
       const verify = await post('verify');
       assert.deepEqual([verify.status, await verify.json()], [401, { code: 'denied' }]);
       async function signIn(principalId, browserCookie) {
