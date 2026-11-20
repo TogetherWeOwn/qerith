@@ -6,7 +6,7 @@ import { publishedGenerationFilter, publishedGenerationJoins } from './published
 import { decodeUploadIdentity, uploadStorageEvidence } from './upload-storage-evidence';
 
 interface Statement {
-  bind(...values: (string | null)[]): Statement;
+  bind(...values: string[]): Statement;
   first<T>(): Promise<T | null>;
   all<T>(): Promise<{ results: T[] }>;
 }
@@ -22,6 +22,8 @@ export interface FolderPage {
   direction: ListingDirection;
   nextCursor: string | null;
 }
+export class InvalidFolderPage extends TypeError {}
+
 type FolderPageRow = (ReadEntry & { total: null }) | { id: null; name: null; kind: null; total: number };
 const pageSize = 200;
 
@@ -217,7 +219,7 @@ export class ReadAccess {
       .all<FolderPageRow>();
     const sentinel = rows.find(row => row.id === null);
     if (!sentinel) return null;
-    if (invalid) throw new TypeError('Invalid cursor or direction');
+    if (invalid) throw new InvalidFolderPage('Invalid cursor or direction');
     const items = rows.filter(row => row.id !== null);
     const entries = items.slice(0, pageSize).map(({ id, name, kind }) => ({ id, name, kind }));
     const nextCursor = items.length > pageSize
