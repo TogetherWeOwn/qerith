@@ -2,6 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
+import { UploadPartByteEvidence } from '../../drive/src/lib/server/metadata/upload-part-byte-evidence.ts';
 import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
 import { privateRequests, readSession, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
@@ -12,7 +13,7 @@ import { etag, headOk, qualified, setup } from './fixtures/upload-publication-ge
 const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
-async function fixture({ fail, verify, beforeHead, isQualified = qualified, endpoint = config.endpoint,
+async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualified, endpoint = config.endpoint,
   size = 7, completionTimeoutMs = () => 15_000, staging = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
   const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
@@ -34,7 +35,9 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
     const url = new URL(request.url);
     expect(url.pathname).toBe(`/${config.bucket}/${key}`);
     if (request.method === 'PUT') {
-      parts.push({ partNumber: Number(url.searchParams.get('partNumber')), etag: tag, size: (await request.arrayBuffer()).byteLength });
+      const body = await request.arrayBuffer();
+      parts.push({ partNumber: Number(url.searchParams.get('partNumber')), etag: tag, size: body.byteLength });
+      await onPart?.(body);
       return new Response(null, { headers: { etag: fail === 'receipt' ? `"${'a'.repeat(8191)}"` : tag } });
     }
     if (request.method === 'POST') {
@@ -47,13 +50,13 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
   } });
   const handle = privateRequests(bindings);
   function send(number, { auth = token, source = requestOrigin, host = requestOrigin, name = 'file', parentId = null,
-    intentId = intent, bytes = 7, runtime = false } = {}) {
-    const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
+    intentId = intent, bytes = 7, runtime = false, signal } = {}) {
+    const body = number ? (typeof bytes === 'number' ? new Uint8Array(bytes) : bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
     if (auth) headers.cookie = `__Host-drive-session=${auth}`;
     if (source) headers.origin = source;
     const request = new Request(`${host}/api/uploads/${intentId}/${number ? `parts/${number}` : 'complete'}`,
-      { method: number ? 'PUT' : 'POST', body, headers });
+      { method: number ? 'PUT' : 'POST', body, headers, signal });
     const execute = (session) => number ? routes.part(request, session, intentId, String(number))
       : routes.complete(request, session, intentId);
     // Test the closed execution path separately from the unchanged public hook.
@@ -61,8 +64,75 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
       : handle({ event: { request, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
-  return { send, generation, calls, foreign, key, principal, other, headPins };
+  return { send, generation, calls, foreign, key, principal, other, headPins, intent };
 }
+
+const partObservation = (key) => sql(`SELECT o.intent_id, o.owner_id, o.object_key, o.storage_epoch, o.upload_id,
+  o.intent_version, o.part_number, o.size_bytes, r.kind, CAST(r.reported_etag AS TEXT) AS etag,
+  lower(hex(e.sha256)) AS digest FROM drive_upload_part_operations o
+  JOIN drive_upload_part_observations r USING (operation_id)
+  LEFT JOIN drive_upload_part_byte_evidence e USING (operation_id)
+  WHERE o.object_key = ? AND o.part_number = 1`, key).first();
+
+it('records the exact acknowledged provider body for a fresh owner part', async () => {
+  const bytes = Uint8Array.of(0, 1, 127, 128, 255, 23, 32);
+  let digest;
+  const { send, key, principal, intent, calls, foreign } = await fixture({ staging: true, async onPart(body) {
+    expect(new Uint8Array(body)).toEqual(bytes);
+    digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', body)),
+      (byte) => byte.toString(16).padStart(2, '0')).join('');
+  } });
+  expect((await send(1, { auth: foreign, bytes })).status).toBe(403);
+  expect(await partObservation(key)).toBeNull();
+  const result = await send(1, { bytes });
+  expect([result.status, await result.text()]).toEqual([204, '']);
+  expect(digest).toMatch(/^[0-9a-f]{64}$/);
+  expect(await partObservation(key)).toEqual({ intent_id: intent, owner_id: principal, object_key: key,
+    storage_epoch: epoch, upload_id: uploadId, intent_version: 2, part_number: 1, size_bytes: bytes.length,
+    kind: 'reported', etag: tag, digest });
+  expect((await send(1, { bytes: bytes.slice().reverse() })).status).toBe(404);
+  expect(await partObservation(key)).toMatchObject({ digest });
+  expect(calls).toEqual(['PUT']);
+});
+
+it('does not record byte evidence for a cancelled provider attempt', async () => {
+  const controller = new AbortController();
+  const { send, key, calls } = await fixture({ onPart: () => controller.abort() });
+  expect((await send(1, { signal: controller.signal })).status).toBe(409);
+  expect(await partObservation(key)).toMatchObject({ kind: 'uncertain', etag: null, digest: '' });
+  expect((await send(1)).status).toBe(404);
+  expect(calls).toEqual(['PUT']);
+});
+
+it('does not retrofit byte evidence onto a legacy receipt', async () => {
+  const { send, intent, key, principal, calls } = await fixture();
+  const operation = crypto.randomUUID();
+  await sql('INSERT INTO drive_upload_part_operations VALUES (?, ?, ?, ?, ?, ?, 2, 1, 7)',
+    operation, intent, principal, key, epoch, uploadId).run();
+  await sql("INSERT INTO drive_upload_part_observations VALUES (?, 'reported', CAST(? AS BLOB))", operation, tag).run();
+  expect((await send(1)).status).toBe(404);
+  expect(await partObservation(key)).toMatchObject({ kind: 'reported', etag: tag, digest: '' });
+  expect(calls).toEqual([]);
+});
+
+it.each(['rejected', 'acknowledgment lost'])('preserves the receipt without redispatch when the byte evidence write is %s', async (failure) => {
+  const { send, key, calls } = await fixture();
+  const record = UploadPartByteEvidence.prototype.recordAcknowledged;
+  const write = vi.spyOn(UploadPartByteEvidence.prototype, 'recordAcknowledged').mockImplementationOnce(async function (proof) {
+    if (failure === 'acknowledgment lost') await record.call(this, proof);
+    throw new Error('Byte evidence write failed');
+  });
+  try {
+    expect((await send(1)).status).toBe(204);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(await partObservation(key)).toMatchObject({ kind: 'reported', etag: tag,
+      digest: failure === 'rejected' ? '' : expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect((await send(1)).status).toBe(404);
+    expect(calls).toEqual(['PUT']);
+  } finally {
+    write.mockRestore();
+  }
+});
 
 async function occupy(owner, name, parentId = null) {
   const id = crypto.randomUUID();
@@ -410,8 +480,7 @@ it.each(['PUT', 'POST', 'qualification', 'receipt'])('preserves send fences and 
   expect([first.status, await first.text()]).toEqual([partFailed ? 409 : 204, '']);
   checkPart = false;
   if (partFailed) {
-    expect(await sql(`SELECT r.kind FROM drive_upload_part_operations p JOIN drive_upload_part_observations r
-      USING (operation_id) WHERE p.object_key = ? AND p.part_number = 1`, key).first()).toEqual({ kind: 'uncertain' });
+    expect(await partObservation(key)).toMatchObject({ kind: 'uncertain', etag: null, digest: '' });
     expect([(await send(1, part)).status, (await send(2)).status]).toEqual([404, 404]);
   }
   expect([(await send()).status, (await send()).status, await generation()]).toEqual([409, partFailed ? 409 : 404, null]);
