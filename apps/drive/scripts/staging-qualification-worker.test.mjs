@@ -155,6 +155,7 @@ function fixture(t, upload = false) {
       calls.push('cases');
       return 'synthetic cases';
     },
+    cleanup: () => true,
   };
   async function request(url, { method, body, redirect, signal, headers }) {
     const prefix = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/qerith-drive-staging/`;
@@ -366,9 +367,40 @@ test('rejects wrong runtime SHA or version, and restores after case failure or c
   }
 });
 
-test('probe and case deadlines abort and settle work before rollback', async t => {
+test('runs cleanup after cancellation and preserves an unverified cleanup even when rollback fails', async t => {
+  for (const restoreLost of [false, true]) {
+    const { run, options, calls, controller, state } = fixture(t);
+    state.restoreLost = restoreLost;
+    const exercise = options.exercise;
+    options.exercise = async (...args) => {
+      exercise(...args);
+      controller.abort();
+      await Promise.resolve();
+      calls.push('settled');
+    };
+    const cleanupFailure = new Error('Qualification prefix cleanup is unverified.');
+    options.cleanup = (identity, signal) => {
+      assert.equal(identity.version, candidate);
+      assert.equal(signal.aborted, false);
+      calls.push('cleanup');
+      throw cleanupFailure;
+    };
+    await assert.rejects(run(), error => {
+      assert.ok(error instanceof AggregateError);
+      const outcome = restoreLost ? error.errors[0] : error;
+      assert.ok(outcome instanceof AggregateError);
+      assert.equal(outcome.errors[0].name, 'AbortError');
+      assert.equal(outcome.errors[1], cleanupFailure);
+      if (restoreLost) assert.match(error.errors[1].message, /rollback is unverified; reconcile/);
+      return true;
+    });
+    assert.deepEqual(calls.slice(7), ['cases', 'settled', 'cleanup', 'current', 'restore', ...(restoreLost ? [] : ['current'])]);
+  }
+});
+
+test('probe, case and cleanup deadlines abort and settle work before rollback', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 20 * 60_000]]) {
+  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 18 * 60_000], ['cleanup', 60_000]]) {
     const { run, options, calls } = fixture(t);
     const started = Promise.withResolvers();
     let aborted = false;
@@ -378,7 +410,7 @@ test('probe and case deadlines abort and settle work before rollback', async t =
       started.resolve();
       await drained.promise;
       calls.push('settled');
-      return { ...identity, ready: true };
+      return phase === 'cleanup' ? true : { ...identity, ready: true };
     };
     const outcome = assert.rejects(run(), { name: 'TimeoutError' });
     await Promise.race([started.promise, outcome]);
@@ -398,7 +430,7 @@ test('probe and case deadlines abort and settle work before rollback', async t =
 test('aborts overdue probe and case settlements even when the timer has not fired', async t => {
   let now = 0;
   t.mock.method(performance, 'now', () => now);
-  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 20 * 60_000]]) {
+  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 18 * 60_000]]) {
     for (const reject of [false, true]) {
       await t.test(`${phase} ${reject ? 'rejects' : 'fulfills'} at its deadline`, async t => {
         const { run, options, calls } = fixture(t);
@@ -432,7 +464,15 @@ test('does not overwrite a different deployment or report an unverified rollback
     if (failure === 'late-activation') state.activateIgnored = state.activateLost = true;
     if (failure === 'restore-ignored') state.restoreIgnored = true;
     if (failure === 'restore-lost') state.restoreLost = true;
-    await assert.rejects(run(), /rollback is unverified/);
+    await assert.rejects(run(), error => {
+      if (failure === 'late-activation') {
+        assert.ok(error instanceof AggregateError);
+        assert.match(error.errors[0].message, /Bounded staging Worker API call failed/);
+        error = error.errors[1];
+      }
+      assert.match(error.message, /rollback is unverified/);
+      return true;
+    });
     assert.equal(calls.includes('restore'), failure.startsWith('restore'));
   }
 });

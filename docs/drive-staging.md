@@ -143,7 +143,12 @@ reads back the candidate's tag and bindings and requires unchanged deployment
 identity before activation. This check does not attest secret values; live
 storage checks must use the qualified signer. An older baseline restored after
 a prior attempt is not eligible for another upload while a newer version
-remains. The caller must build from the tested SHA under the shared lock.
+remains. The lifecycle stops before D1 changes on this retry path. Reconcile
+staging through the reviewed recovery path before retrying: a non-candidate
+baseline with the reviewed bindings must both serve traffic and be the newest
+upload. Qualification does not automatically republish the baseline or change
+secrets to make it eligible. The caller must build from the tested SHA under
+the shared lock.
 The adapter records the prior deployment before changing traffic and never
 forces a restore. The readiness helper uses a fresh, credential-free
 HEAD challenge on the fixed staging origin. The responding Worker proves its
@@ -160,12 +165,22 @@ the shared lock must cover all active writers. An ambiguous write without proof
 of rollback, hard cancellation, or runner loss still requires reconciliation.
 Worker rollback does not restore D1 or establish idle state.
 
+The offline lifecycle coordinator now sequences full-v0 preflight and initial
+inventory, immutable upload, D1 migration, Worker activation and readiness,
+then cases. It requires the recovery writer to acknowledge the D1 bookmark and
+previous Worker deployment before their respective changes. Any case that starts
+must settle before cleanup, which uses its own bounded signal and the exact
+run/attempt prefix while the candidate is still active. Final inventory is
+checked after Worker recovery, even after an error or cooperative cancellation.
+These are ordering checks with offline callbacks, not provider evidence. The
+qualification workflow still has no caller and cannot issue a receipt.
+
 Remaining source slices, in dependency order:
 
-1. Wire the protected lifecycle, including D1, immutable Worker upload and
-   recovery, readiness, whole-estate zero-idle inventory, and attempt-specific
-   prefix cleanup with verified native expiry or stop for cancellation or runner loss.
-   Keep artifact publication disabled.
+1. Implement whole-estate zero-idle inventory and attempt-specific prefix
+   cleanup with verified native expiry or stop for cancellation or runner loss.
+   Wire the protected caller only with those implementations, the durable
+   recovery writer and reviewed full-v0 prerequisites. Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and
