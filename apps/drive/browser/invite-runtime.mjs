@@ -111,18 +111,19 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     }
     const releaseEnrollment = holdNext('/api/invite/enroll');
     const enrollPath = message => new URL(message.url()).pathname === '/api/invite/enroll';
-    const dispatched = page.waitForRequest(enrollPath);
-    const enrolled = page.waitForResponse(enrollPath);
-    try {
-      await (staging ? page.keyboard.press('Enter') : field.press('Enter'));
-      await dispatched;
-      await page.evaluate(token => { location.hash = token; }, first.token);
-      await page.waitForFunction(() => location.hash === '');
-      await page.getByRole('button', { name: 'Saving your passkey…' }).waitFor();
-      assert.equal(await field.inputValue(), 'Pell');
-      if (staging) await captureState('saving');
-    } finally { releaseEnrollment(); }
-    const result = await enrolled;
+    const [result] = await Promise.all([
+      page.waitForResponse(enrollPath),
+      (async () => {
+        try {
+          await Promise.all([page.waitForRequest(enrollPath), staging ? page.keyboard.press('Enter') : field.press('Enter')]);
+          await page.evaluate(token => { location.hash = token; }, first.token);
+          await page.waitForFunction(() => location.hash === '');
+          await page.getByRole('button', { name: 'Saving your passkey…' }).waitFor();
+          assert.equal(await field.inputValue(), 'Pell');
+          if (staging) await captureState('saving');
+        } finally { releaseEnrollment(); }
+      })(),
+    ]);
     assert.equal(result.status(), 204);
     assert.equal((await result.allHeaders())['set-cookie'], undefined);
     await page.waitForURL(`${origin}/sign-in`);
@@ -130,14 +131,17 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
     const releasePresent = holdNext('/api/invite/present');
-    const presented = page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present');
     const status = page.getByRole('status');
-    let loading;
-    try {
-      await open();
-      loading = await status.filter({ hasText: 'Checking the invite…' }).elementHandle();
-    } finally { releasePresent.resolve(); }
-    assert.equal((await presented).status(), 404);
+    const [presented, loading] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present'),
+      (async () => {
+        try {
+          await open();
+          return await status.filter({ hasText: 'Checking the invite…' }).elementHandle();
+        } finally { releasePresent(); }
+      })(),
+    ]);
+    assert.equal(presented.status(), 404);
     await dead.waitFor();
     await status.filter({ hasText: "This link doesn't work any more" }).waitFor();
     assert.equal(await loading.evaluate(el => el === document.querySelector('[role="status"]')), true);
