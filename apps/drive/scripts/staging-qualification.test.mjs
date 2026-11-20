@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
+import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
 
 function history(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-'));
@@ -297,6 +298,94 @@ test('R2 cleanup withholds success on leftovers, failed deletion or cancellation
   io.request = async () => { trace.push('request settled'); controller.abort(); return { status: 204 }; };
   await assert.rejects(cleanQualificationR2(r2Attempt, controller.signal, io), /cleanup is unverified/);
   assert.deepEqual(trace, ['uploads', 'objects', 'request settled']);
+});
+
+function multipartFixture({ bad = '', stop } = {}) {
+  const trace = [];
+  const parts = new Map();
+  const uploadId = 'synthetic-upload', etag = '"stored"', partBytes = 8;
+  const key = `${r2Attempt.prefix}provider-multipart-fixture`;
+  let stored;
+  let writes = 0;
+  function record(step, actualKey, signal) {
+    assert.equal(actualKey, key);
+    signal.throwIfAborted();
+    trace.push(step);
+  }
+  return { trace, io: { partBytes,
+    async head(key, { ifMatch, signal }) {
+      record(ifMatch ? 'head' : 'empty', key, signal);
+      if (!ifMatch) return { status: bad === 'preexisting' ? 200 : 404 };
+      assert.equal(ifMatch, etag);
+      return { status: 200, etag: bad === 'generation' ? '"other"' : etag, contentLength: String(stored.length) };
+    },
+    async create(key, signal) { record('create', key, signal); return { uploadId }; },
+    async upload(key, id, partNumber, bytes, signal) {
+      record(`part ${partNumber}`, key, signal);
+      assert.equal(id, uploadId);
+      writes++;
+      const hash = bad === 'unchanged-ack' ? 0 : bad === 'retry-drift' && writes === 3 ? 1 : bytes[0];
+      const etag = `"part-${partNumber}-${hash}"`;
+      if (!(bad === 'no-replacement' && parts.has(partNumber))) parts.set(partNumber, { partNumber, bytes: Buffer.from(bytes), etag });
+      return { partNumber, etag, size: bytes.length };
+    },
+    async listParts(key, id, { partNumberMarker, maxParts, signal }) {
+      record('list', key, signal);
+      assert.equal(id, uploadId);
+      assert.equal(maxParts, 1);
+      const { partNumber, bytes, etag } = parts.get((partNumberMarker ?? 0) + 1);
+      return { parts: [{ partNumber, size: bytes.length, etag }], nextPartNumberMarker: partNumber === 1 ? 1 : undefined };
+    },
+    async complete(key, id, manifest, signal) {
+      record('complete', key, signal);
+      assert.equal(id, uploadId);
+      assert.deepEqual(manifest.map(part => part.partNumber), [1, 2]);
+      stored = Buffer.concat(manifest.map(part => {
+        const source = parts.get(part.partNumber);
+        assert.equal(part.etag, source.etag);
+        return source.bytes;
+      }));
+      if (bad === 'ambiguous-complete') throw new Error('private provider diagnostic');
+      return { etag };
+    },
+    async request({ method, key, headers, maxResponseBytes, signal }) {
+      record(headers.range ? 'range' : 'full', key, signal);
+      assert.equal(method, 'GET');
+      assert.equal(headers['if-match'], etag);
+      const ranged = Boolean(headers.range);
+      if (ranged) assert.equal(headers.range, 'bytes=6-9');
+      const body = Buffer.from(ranged ? stored.subarray(6, 10) : stored);
+      assert.equal(maxResponseBytes, body.length);
+      if (bad === 'range' && ranged || bad === 'content' && !ranged) body[0] ^= 1;
+      if (ranged) stop?.abort();
+      return { status: ranged ? 206 : 200, body, headers: new Headers({ etag, 'content-length': String(body.length),
+        ...(ranged ? { 'content-range': 'bytes 6-9/265' } : {}) }) };
+    },
+  } };
+}
+
+test('provider storage cases require a part replacement and exact full and ranged readback', async () => {
+  const { trace, io } = multipartFixture();
+  assert.deepEqual(await exerciseQualificationStorage(r2Attempt, undefined, io), {
+    's3-multipart': 'pass', 's3-range': 'pass', 's3-retry': 'pass', 's3-persistence': 'pass',
+  });
+  assert.deepEqual(trace, ['empty', 'create', 'part 1', 'part 1', 'part 1', 'part 2', 'list', 'list', 'complete', 'head', 'full', 'range']);
+});
+
+test('provider storage cases fail closed on partial results, uncertain completion and cancellation', async () => {
+  for (const bad of ['preexisting', 'unchanged-ack', 'retry-drift', 'no-replacement', 'ambiguous-complete', 'generation', 'content', 'range']) {
+    const { trace, io } = multipartFixture({ bad });
+    await assert.rejects(exerciseQualificationStorage(r2Attempt, undefined, io), { message: 'Qualification S3 cases are unverified.' }, bad);
+    assert.ok(trace.filter(step => step === 'complete').length <= 1);
+    if (bad === 'preexisting') assert.deepEqual(trace, ['empty']);
+  }
+  const stop = new AbortController();
+  const { trace, io } = multipartFixture({ stop });
+  await assert.rejects(exerciseQualificationStorage(r2Attempt, stop.signal, io), /cases are unverified/);
+  assert.equal(trace.at(-1), 'range');
+  trace.length = 0;
+  await assert.rejects(exerciseQualificationStorage({ ...r2Attempt, prefix: 'drive-qualification/' }, undefined, io), /cases are unverified/);
+  assert.deepEqual(trace, []);
 });
 
 test('the staged workflow has no producer or provider path', () => {

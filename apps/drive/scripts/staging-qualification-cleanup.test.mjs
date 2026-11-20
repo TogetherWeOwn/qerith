@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
+import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -187,6 +188,64 @@ test('the protected R2 adapter signs and scopes every request with a reviewed bi
   assert.deepEqual(trace, []);
   assert.equal(await cleanup(context), true);
   assert.deepEqual(trace, ['GET', 'GET', 'DELETE', 'DELETE', 'GET', 'GET']);
+});
+
+test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
+  const { cwd, env, context } = job(t);
+  const key = `${prefix}provider-multipart-fixture`;
+  const split = 5 * 1024 * 1024;
+  const whole = Buffer.concat([Buffer.alloc(split, 0x35), Buffer.alloc(257, 0x9a)]);
+  const tag = '"stored"';
+  const trace = [];
+  const send = async request => {
+    const url = new URL(request.url);
+    assert.equal(url.origin, endpoint);
+    assert.equal(url.pathname, `/${bucket}/${key}`);
+    assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
+    assert.equal(request.redirect, 'manual');
+    const query = url.searchParams;
+    const op = trace.length;
+    trace.push(request.method);
+    if (op === 0) return new Response(null, { status: 404 });
+    if (op === 1) {
+      assert.ok(query.has('uploads'));
+      return new Response(`<InitiateMultipartUploadResult><UploadId>${uploadId}</UploadId></InitiateMultipartUploadResult>`);
+    }
+    if (op < 9) assert.equal(query.get('uploadId'), uploadId);
+    if (op <= 5) {
+      assert.equal(query.get('partNumber'), op === 5 ? '2' : '1');
+      const bytes = Buffer.from(await request.arrayBuffer());
+      assert.deepEqual(bytes, op === 2 ? Buffer.alloc(split, 0x71) : op < 5 ? whole.subarray(0, split) : whole.subarray(split));
+      return new Response(null, { headers: { etag: `"p${op === 4 ? 3 : op}"` } });
+    }
+    if (op <= 7) {
+      const first = op === 6;
+      assert.equal(query.get('part-number-marker'), first ? null : '1');
+      assert.equal(query.get('max-parts'), '1');
+      return new Response(`<ListPartsResult><Bucket>${bucket}</Bucket><Key>${key}</Key><UploadId>${uploadId}</UploadId>` +
+        `<IsTruncated>${first}</IsTruncated>${first ? '<NextPartNumberMarker>1</NextPartNumberMarker>' : '<PartNumberMarker>1</PartNumberMarker>'}` +
+        `<Part><PartNumber>${first ? 1 : 2}</PartNumber><ETag>"p${first ? 3 : 5}"</ETag><Size>${first ? split : 257}</Size></Part></ListPartsResult>`);
+    }
+    if (op === 8) {
+      assert.equal(request.headers.get('if-none-match'), '*');
+      const manifest = await request.text();
+      assert.match(manifest, /p3.*p5/);
+      assert.doesNotMatch(manifest, /p2/);
+      return new Response(`<CompleteMultipartUploadResult><ETag>${tag}</ETag></CompleteMultipartUploadResult>`);
+    }
+    assert.equal(request.headers.get('if-match'), tag);
+    if (op === 9) return new Response(null, { headers: { etag: tag, 'content-length': String(whole.length) } });
+    const ranged = op === 11;
+    assert.equal(request.headers.get('range'), ranged ? `bytes=${split - 2}-${split + 1}` : null);
+    const bytes = ranged ? whole.subarray(split - 2, split + 2) : whole;
+    return new Response(bytes, { status: ranged ? 206 : 200, headers: { etag: tag, 'content-length': String(bytes.length),
+      ...(ranged && { 'content-range': `bytes ${split - 2}-${split + 1}/${whole.length}` }) } });
+  };
+  const exercise = await createQualificationStorageCases(env, cwd, { send });
+  assert.throws(() => exercise({ ...context, runId: '183' }), /cases are unverified/);
+  assert.deepEqual(trace, []);
+  assert.deepEqual(await exercise(context), { 's3-multipart': 'pass', 's3-range': 'pass', 's3-retry': 'pass', 's3-persistence': 'pass' });
+  assert.deepEqual(trace, ['HEAD', 'POST', 'PUT', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET']);
 });
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {
