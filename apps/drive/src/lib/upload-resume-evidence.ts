@@ -39,6 +39,7 @@ export async function verifyUploadResumePrefix(file: Blob, evidence: unknown): P
     // Validate the whole projection before any reads, keeping only the hashes across awaits.
     const hashes: string[] = [];
     for (let index = 0; index < count; index++) {
+      if (!Object.hasOwn(parts, index)) return null;
       const part: unknown = parts[index];
       if (!hasFields(part, 'partNumber', 'sizeBytes', 'sha256')) return null;
       const { partNumber, sizeBytes, sha256 } = part;

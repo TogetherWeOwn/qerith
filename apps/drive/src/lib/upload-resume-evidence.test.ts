@@ -60,12 +60,14 @@ test('distinguishes an empty prefix from a verified zero-byte part', async () =>
 
 test('rejects malformed evidence, wrong sizes, and noncontiguous parts before any slice', async () => {
   const file = new ObservedBlob([first, last]);
+  const inheritedPart = [firstPart, ,];
+  Object.setPrototypeOf(inheritedPart, { 1: lastPart });
   const invalid = [
     null, { declaredSize }, { declaredSize, parts: {} }, { declaredSize, parts: [], extra: true },
     { declaredSize: String(declaredSize), parts: [] }, { declaredSize: declaredSize - 1, parts: [] },
     ...[
       Array(321).fill(firstPart), [lastPart, firstPart], [firstPart, firstPart],
-      [firstPart, { ...lastPart, partNumber: 3 }], [firstPart, ,],
+      [firstPart, { ...lastPart, partNumber: 3 }], [firstPart, ,], inheritedPart,
       [firstPart, { ...lastPart, sizeBytes: partBytes }], [{ ...firstPart, sizeBytes: 0 }],
       [firstPart, { ...lastPart, sha256: lastPart.sha256.toUpperCase() }],
       [firstPart, { ...lastPart, sha256: `${lastPart.sha256}\n` }],
