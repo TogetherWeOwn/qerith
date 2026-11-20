@@ -132,9 +132,20 @@ uncertain apply. The future caller must validate storage and recovery
 preconditions before invoking the adapter and route runner termination into
 its abort signal.
 
-The unwired Worker adapter requires a known, single-version staging baseline.
-It reads the uploaded version's SHA/attempt tag and records the prior deployment
-before changing traffic. The readiness helper uses a fresh, credential-free
+The unwired Worker adapter requires a known, single-version staging baseline
+with the reviewed storage configuration, the staging D1 binding, and assets.
+It uses pinned Wrangler `versions upload`, with version previews disabled on the
+existing target. Wrangler inherits secrets from the latest upload, which may
+not be serving traffic. The adapter requires the baseline to be the newest
+upload before it runs Wrangler, then requires the candidate and baseline to
+be the two newest versions in order. It does not write or rotate secrets. It
+reads back the candidate's tag and bindings and requires unchanged deployment
+identity before activation. This check does not attest secret values; live
+storage checks must use the qualified signer. An older baseline restored after
+a prior attempt is not eligible for another upload while a newer version
+remains. The caller must build from the tested SHA under the shared lock.
+The adapter records the prior deployment before changing traffic and never
+forces a restore. The readiness helper uses a fresh, credential-free
 HEAD challenge on the fixed staging origin. The responding Worker proves its
 version-scoped `DRIVE_QUALIFICATION_SHA` and native `DRIVE_QUALIFICATION_VERSION`
 metadata ID when its D1, assets and reviewed storage bindings are ready. It
@@ -151,11 +162,9 @@ Worker rollback does not restore D1 or establish idle state.
 
 Remaining source slices, in dependency order:
 
-1. Implement immutable Worker upload without invalidating the baseline version
-   (no forced restore) and configure the readiness bindings on the candidate
-   version only. Wire the protected lifecycle, including D1, Worker recovery and
-   readiness, whole-estate zero-idle inventory, and attempt-specific prefix
-   cleanup with verified native expiry or stop for cancellation or runner loss.
+1. Wire the protected lifecycle, including D1, immutable Worker upload and
+   recovery, readiness, whole-estate zero-idle inventory, and attempt-specific
+   prefix cleanup with verified native expiry or stop for cancellation or runner loss.
    Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,

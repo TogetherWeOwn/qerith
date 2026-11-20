@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
-import { probeQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
+import { probeQualificationWorker, uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -91,7 +93,17 @@ test('the readiness probe rejects exact evidence at or after its deadline before
   }
 });
 
-function fixture(t) {
+const storageEnv = { QERITH_S3_ENDPOINT: 'https://storage.example.test', QERITH_S3_BUCKET: 'fixture',
+  QERITH_S3_REGION: 'auto', QERITH_S3_STORAGE_EPOCH: 'epoch', QERITH_S3_ACCESS_KEY_ID: 'fake-access',
+  QERITH_S3_SECRET_ACCESS_KEY: 'fake-storage-secret' };
+const storageConfigId = JSON.stringify([storageEnv.QERITH_S3_ENDPOINT, storageEnv.QERITH_S3_BUCKET, storageEnv.QERITH_S3_STORAGE_EPOCH]);
+const evidence = { version: 1, storageConfigId, region: 'auto', sourceSha: sha, runId: '42', runAttempt: 1, completionTimeoutMs: 3000 };
+const storageVars = { DRIVE_S3_ENDPOINT: storageEnv.QERITH_S3_ENDPOINT, DRIVE_S3_BUCKET: storageEnv.QERITH_S3_BUCKET,
+  DRIVE_S3_REGION: 'auto', DRIVE_S3_STORAGE_EPOCH: 'epoch', DRIVE_S3_QUALIFICATION: JSON.stringify(evidence) };
+const secretBindings = ['DRIVE_OWNER_ENROLLMENT', 'DRIVE_S3_ACCESS_KEY_ID', 'DRIVE_S3_SECRET_ACCESS_KEY'];
+const varsToBindings = vars => Object.entries(vars).map(([name, text]) => ({ name, type: 'plain_text', text }));
+
+function fixture(t, upload = false) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-worker-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const app = join(cwd, 'apps/drive');
@@ -102,6 +114,15 @@ function fixture(t) {
   const git = (...args) => execFileSync('git', ['-c', 'user.name=Drive', '-c', 'user.email=drive@example.test',
     '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' }).trim();
   git('init', '-q', '--initial-branch=main', '--template=');
+  if (upload) {
+    mkdirSync(join(app, 'scripts'));
+    const receipt = { ...evidence, passed: true, failures: [], cleanup: 'verified', scope: { policySha256: 'b'.repeat(64),
+      identitySha256: createHash('sha256').update(JSON.stringify([storageConfigId, 'auto', 'fake-access'])).digest('hex') } };
+    writeFileSync(join(app, 'scripts/staging-storage-qualification.json'), JSON.stringify(receipt));
+    git('add', 'apps/drive/scripts/staging-storage-qualification.json');
+    // Qualification reads the reviewed Git blob, never the working-copy proof.
+    writeFileSync(join(app, 'scripts/staging-storage-qualification.json'), 'unreviewed');
+  }
   git('commit', '-q', '--allow-empty', '-m', 'dispatch');
   const sha = git('rev-parse', 'HEAD');
   git('update-ref', 'refs/remotes/origin/main', sha);
@@ -117,7 +138,7 @@ function fixture(t) {
   const controller = new AbortController();
   const identity = { sha, runId: '18', attempt: '2', version: candidate };
   const options = {
-    candidate,
+    upload: { version: candidate, previousVersion: baseline, previousDeployment: prior },
     recordRecovery(point) {
       assert.deepEqual(point, { ...identity, previousVersion: baseline, previousDeployment: prior });
       calls.push('record');
@@ -164,9 +185,129 @@ function fixture(t) {
     if (state[`${name}Lost`]) throw new Error('untrusted diagnostic fake-token');
     return json({ id: isActivation ? active : restored });
   }
-  return { calls, state, options, controller, identity,
+  return { calls, state, options, controller, identity, cwd, app, env,
     run: (override, fetcher = request) => withQualificationWorker(options, { ...env, ...override }, cwd, controller.signal, fetcher) };
 }
+
+function uploadFixture({ cwd, app, env }) {
+  const state = { current: deployment(prior, baseline), tag: `${env.GITHUB_SHA}-18-2` };
+  const calls = [];
+  const controller = new AbortController();
+  const { name, d1_databases: [db] } = JSON.parse(readFileSync(join(app, 'wrangler.staging.json'), 'utf8'));
+  const shared = [{ name: 'DB', type: 'd1', id: db.database_id }, { name: 'ASSETS', type: 'assets' },
+    ...secretBindings.map(name => ({ name, type: 'secret_text' }))];
+  const setup = { previews_enabled: false, tags: ['staging'], baselineBindings: [...shared, ...varsToBindings(storageVars)],
+    uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
+  const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
+    DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
+  const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
+  async function request(url, { method, body, headers }) {
+    const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/`;
+    assert.ok(url.startsWith(prefix));
+    assert.equal(headers.authorization, 'Bearer fake-token');
+    assert.equal(method, 'GET');
+    assert.equal(body, undefined);
+    const path = url.slice(prefix.length);
+    calls.push(path);
+    if (path === `scripts/${name}/subdomain`) return json({ previews_enabled: setup.previews_enabled });
+    if (path === `services/${name}`) return json({ default_environment: { script: { tags: setup.tags } } });
+    if (path === `scripts/${name}/deployments`) return json({ deployments: [state.current] });
+    if (path === `scripts/${name}/versions`) return json({ items: setup.history.map(id => ({ id })) });
+    if (path === `scripts/${name}/versions/${baseline}`) return json({ id: baseline, resources: { bindings: setup.baselineBindings } });
+    assert.equal(path, `scripts/${name}/versions/${candidate}`);
+    return json({ id: candidate, annotations: { 'workers/tag': setup.readbackTag }, resources: { bindings: setup.adjust(uploaded) } });
+  }
+  let scratch;
+  function runner(binary, args, options) {
+    calls.push('upload');
+    assert.equal(binary, join(app, 'node_modules/.bin/wrangler'));
+    assert.deepEqual(args, ['versions', 'upload', '--config', args[3], '--env-file', args[5], '--tag', state.tag]);
+    const config = JSON.parse(readFileSync(args[3], 'utf8'));
+    assert.deepEqual(config.vars, vars);
+    assert.deepEqual(config.version_metadata, { binding: 'DRIVE_QUALIFICATION_VERSION' });
+    assert.deepEqual(config.secrets, { required: secretBindings });
+    assert.equal(config.main, join(app, '.svelte-kit/cloudflare/_worker.js'));
+    assert.equal(config.assets.directory, join(app, '.svelte-kit/cloudflare'));
+    assert.equal(readFileSync(args[5], 'utf8'), '');
+    assert.equal(statSync(args[3]).mode & 0o777, 0o600);
+    assert.equal(options.env.CLOUDFLARE_API_TOKEN, 'fake-token');
+    assert.doesNotMatch(JSON.stringify([config, args, options.env]), /fake-access|fake-storage-secret|unsafe-override/);
+    scratch = options.env.HOME;
+    const record = { type: 'version-upload', version: 1, worker_name: name, worker_name_overridden: false, version_id: setup.uploadId };
+    writeFileSync(options.env.WRANGLER_OUTPUT_FILE_PATH, setup.output ?? JSON.stringify(record));
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    process.nextTick(() => {
+      if (setup.interleavedUpload) setup.history.unshift(foreign);
+      setup.history.unshift(setup.uploadId);
+      if (setup.superseded) state.current = deployment(foreign, baseline);
+      if (setup.abort) controller.abort();
+      child.stderr.emit('data', setup.overflow ? Buffer.alloc(65_537) : Buffer.from('untrusted diagnostic with fake-token'));
+      child.emit('close', 0);
+    });
+    return child;
+  }
+  return { setup, calls, scratch: () => scratch, run: override => uploadQualificationWorker({ ...env, ...storageEnv,
+    WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override }, cwd, controller.signal, request, runner) };
+}
+
+test('uploads only the exact-attempt version with inherited secrets and an unchanged baseline', async t => {
+  const { run, calls, scratch } = uploadFixture(fixture(t, true));
+  assert.deepEqual(await run(), { version: candidate, previousVersion: baseline, previousDeployment: prior });
+  assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['subdomain', 'qerith-drive-staging', 'deployments',
+    baseline, 'versions', 'upload', candidate, 'versions', 'deployments']);
+  assert.ok(!existsSync(scratch()));
+});
+
+test('rejects a newer undeployed version before inheriting staging secrets', async t => {
+  const { setup, calls, run } = uploadFixture(fixture(t, true));
+  setup.history = [foreign, baseline];
+  await assert.rejects(run(), /baseline is not the latest uploaded version/);
+  assert.ok(!calls.includes('upload'));
+});
+
+test('rejects an intervening upload even when the candidate binding names and deployment match', async t => {
+  const { setup, calls, run } = uploadFixture(fixture(t, true));
+  setup.interleavedUpload = true;
+  await assert.rejects(run(), /candidate did not immediately follow the staging baseline/);
+  assert.ok(calls.includes('upload'));
+});
+
+test('rejects unreviewed storage, unsafe targets and incompatible baselines before upload', async t => {
+  const source = fixture(t, true);
+  for (const [mutate, message, override] of [
+    [() => {}, /passing qualification/, { QERITH_S3_ACCESS_KEY_ID: 'wrong-key' }],
+    [c => { c.previews_enabled = true; }, /previews disabled/],
+    [c => { c.tags = ['cf:service=group']; }, /ungrouped target/],
+    [c => { c.baselineBindings[0].id = foreign; }, /incompatible resource/],
+    [c => { c.baselineBindings = c.baselineBindings.filter(binding => binding.name !== 'DRIVE_S3_SECRET_ACCESS_KEY'); }, /storage secrets/],
+  ]) {
+    const { setup, calls, run } = uploadFixture(source);
+    mutate(setup);
+    await assert.rejects(run(override), message);
+    assert.ok(!calls.includes('upload'));
+  }
+});
+
+test('does not return candidates on cancellation, ambiguous output, binding drift or a changed baseline', async t => {
+  const source = fixture(t, true);
+  for (const [overrides, message] of [
+    [{ abort: true }, /upload could not be verified/],
+    [{ overflow: true }, /upload could not be verified/],
+    [{ output: '{fake-token' }, /upload could not be verified/],
+    [{ uploadId: baseline }, /new version ID/],
+    [{ readbackTag: 'another-attempt' }, /SHA and attempt/],
+    [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_QUALIFICATION_VERSION') }, /unchanged staging baseline/],
+    [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_OWNER_ENROLLMENT') }, /unchanged staging baseline/],
+    [{ superseded: true }, /unchanged staging baseline/],
+  ]) {
+    const { setup, run, scratch, calls } = uploadFixture(source);
+    Object.assign(setup, overrides);
+    await assert.rejects(run(), error => message.test(error.message) && !error.message.includes('fake-token'));
+    assert.ok(calls.includes('upload'));
+    assert.ok(!existsSync(scratch()));
+  }
+});
 
 test('records the rollback point, proves exact-SHA readiness, and reads back the restored version', async t => {
   const { run, calls, identity } = fixture(t);
@@ -186,6 +327,8 @@ test('refuses wrong source or target, missing or split prior traffic, and stale 
     state.current = current;
     await assert.rejects(run(), /known single-version/);
   }
+  state.current = deployment(foreign, baseline);
+  await assert.rejects(run(), /baseline changed since candidate upload/);
   state.current = deployment(prior, baseline);
   state.tag = 'old-attempt';
   await assert.rejects(run(), /SHA and attempt/);
