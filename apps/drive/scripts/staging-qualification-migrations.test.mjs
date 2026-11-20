@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
 
-const first = { id: 1, name: '0001_first.sql' };
-const second = { id: 2, name: '0002_second.sql' };
+const first = { id: 1, name: '0001_first.sql', applied_at: '2026-11-20 10:00:00' };
+const second = { id: 2, name: '0002_second.sql', applied_at: '2026-11-20 10:02:00' };
 const rows = (...results) => JSON.stringify([{ success: true, results }]);
 
 function fixture(t) {
@@ -62,7 +62,7 @@ const target = 'qerith-drive-staging';
 const config = '--config wrangler.staging.json';
 const bookmarkCommand = `d1 time-travel info ${target} --json ${config}`;
 const list = `d1 migrations list ${target} --remote ${config}`;
-const ledger = `d1 execute ${target} --remote --json --command SELECT id, name FROM d1_migrations ORDER BY id ${config}`;
+const ledger = `d1 execute ${target} --remote --json --command SELECT id, name, applied_at FROM d1_migrations ORDER BY id ${config}`;
 const apply = `d1 migrations apply ${target} --remote ${config}`;
 
 test('records the exact-attempt bookmark before mutation and returns the complete native ledger', async t => {
@@ -106,10 +106,20 @@ test('rejects invalid bookmarks, foreign ledger entries and cancellation before 
     await assert.rejects(run({ bookmark }));
     assert.deepEqual(calls(), [bookmarkCommand]);
   }
-  for (const before of [rows({ id: 1, name: 'foreign.sql' }), rows(first, { ...first, id: 2 }), '[{"success":false,"results":[]}]']) {
+  for (const before of [rows({ ...first, name: 'foreign.sql' }), rows(first, { ...first, id: 2 }),
+    rows({ ...first, applied_at: undefined }), rows({ ...first, applied_at: 'invalid' }), '[{"success":false,"results":[]}]']) {
     await assert.rejects(run({ before }), /staging D1 migration ledger/);
     assert.deepEqual(calls(), [bookmarkCommand, list, ledger]);
   }
+});
+
+test('rejects a changed historical application timestamp', async t => {
+  const { calls, run } = fixture(t);
+  t.mock.method(console, 'log', () => {});
+  await assert.rejects(run({
+    after: rows({ ...first, applied_at: '2026-11-20 10:01:00' }, second),
+  }), /post-apply ledger is incomplete or changed history/);
+  assert.deepEqual(calls(), [bookmarkCommand, list, ledger, apply, ledger]);
 });
 
 test('does not return evidence after failed apply, incomplete ledger or rewritten history', async t => {

@@ -6,7 +6,8 @@ import { validateStagingTarget } from './staging-publish.mjs';
 
 const directory = 'apps/drive/migrations';
 const target = 'qerith-drive-staging';
-const sql = 'SELECT id, name FROM d1_migrations ORDER BY id';
+const sql = 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id';
+const ledgerTime = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 const migrationName = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/;
 const runNumber = /^[1-9][0-9]{0,19}$/;
 
@@ -76,13 +77,14 @@ function readLedger(text, expected) {
   const names = new Set();
   let id = 0;
   for (const row of rows) {
-    if (!Number.isSafeInteger(row?.id) || row.id <= id || !expected.has(row.name) || names.has(row.name)) {
+    if (!Number.isSafeInteger(row?.id) || row.id <= id || !expected.has(row.name) || names.has(row.name) ||
+        typeof row.applied_at !== 'string' || !ledgerTime.test(row.applied_at)) {
       throw new Error('Unexpected staging D1 migration ledger entry.');
     }
     names.add(row.name);
     id = row.id;
   }
-  return rows.map(({ id, name }) => ({ id, name }));
+  return rows.map(({ id, name, applied_at }) => ({ id, name, applied_at }));
 }
 
 // No CLI entry point. The protected orchestrator must verify storage and recovery preconditions before calling.
@@ -111,7 +113,8 @@ export async function applyQualificationMigrations(env, cwd = process.cwd(), sig
   const before = await snapshot();
   await run(['migrations', 'apply', target, '--remote'], { timeout: 120_000, discard: true });
   const after = await snapshot();
-  if (after.length !== expected.size || before.some(({ id, name }, i) => after[i]?.id !== id || after[i]?.name !== name)) {
+  if (after.length !== expected.size || before.some(({ id, name, applied_at }, i) =>
+    after[i]?.id !== id || after[i].name !== name || after[i].applied_at !== applied_at)) {
     throw new Error('Staging D1 post-apply ledger is incomplete or changed history.');
   }
   return { sha, runId, attempt, bookmark, before, after };
