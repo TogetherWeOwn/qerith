@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { uploadToRoot } from './root-upload';
+  import { uploadMultipartToRoot, uploadToRoot } from './root-upload';
+  import type { DriveUploadMode } from './server/request-auth';
   import './tokens.css';
 
-  let { announce, refresh, paginated, busy = $bindable(false) }: {
+  let { mode, announce, refresh, paginated, busy = $bindable(false) }: {
+    mode: Exclude<DriveUploadMode, 'disabled'>;
     announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
   } = $props();
   const id = $props.id();
@@ -31,7 +33,9 @@
     try {
       announce(`Uploading ${file.name} to My Drive.`);
       message = 'Uploading…';
-      const result = await uploadToRoot(file, () => { acceptedBytes = file.size; });
+      const result = mode === 'multipart'
+        ? await uploadMultipartToRoot(file, bytes => { acceptedBytes = bytes; })
+        : await uploadToRoot(file, () => { acceptedBytes = file.size; });
       if (result.status === 'published') {
         published = true;
         message = 'Uploaded.';

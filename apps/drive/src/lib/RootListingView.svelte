@@ -5,11 +5,12 @@
   import FileList from './FileList.svelte';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
+  import type { DriveUploadMode } from './server/request-auth';
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadConfigured, staging, downloadAllowed }: {
-    result: RootListingResult; page: string | null; uploadConfigured: boolean; staging: boolean; downloadAllowed: boolean;
+  let { result: initial, page, uploadMode, staging, downloadAllowed }: {
+    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean;
   } = $props();
   let status = $state('');
   let refreshed = $state<RootListingResult>();
@@ -61,8 +62,8 @@
 
 <header bind:this={header}>
   <h1>My Drive</h1>
-  {#if uploadConfigured && result.status === 'ok'}
-    <RootUpload announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
+  {#if uploadMode !== 'disabled' && result.status === 'ok'}
+    <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
 </header>
 <p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>

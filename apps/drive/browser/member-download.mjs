@@ -7,7 +7,7 @@ const name = 'Member-only résumé.txt';
 const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' };
 
 export async function proveMemberDownload(page, { origin, worker, defaultWorker, DB, id, cookie, otherMemberCookie, check,
-  ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState }) {
+  ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState, holdNext }) {
   assert.notDeepEqual(bytes.subarray(1, 4), ownerFile.buffer.subarray(1, 4), 'the tested range distinguishes member and owner bytes');
   const noStorage = async action => {
     const before = await storageCalls();
@@ -95,9 +95,8 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
   await unpublishedName.filter({ visible: true }).waitFor();
   assert.equal(await unpublishedName.and(page.locator('a')).count(), 0);
   assert.equal(await page.getByText(ownerFile.name, { exact: true }).count(), 0);
-  assert.equal(await page.locator('input[type="file"]').count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
   await captureState('member-root-listed');
+  const multipartPicker = await proveMemberMultipartPicker(page, { check, holdNext });
   const activate = async link => {
     const [download] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
     assert.equal(download.suggestedFilename(), name);
@@ -148,8 +147,59 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
       upload: { allocated: 201, part: 204, published: 201, ownFile: true, deniedWithoutStorage: {
         flagOff: 403, revoked: 401, otherMember: 404, grantedFolder: 404, noncanonical: 404, wrongMethod: 404, crossOrigin: 403,
       } },
-      unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
+      multipartPicker, unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
       retryDownloaded: true, unavailableNoticeOmitsNameAndRetry: true,
     }, null, 2));
   } };
+}
+
+async function proveMemberMultipartPicker(page, { check, holdNext }) {
+  const cap = 16 * 1024 * 1024;
+  const file = { name: 'Multipart picker.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(cap + 1, 91) };
+  file.buffer[cap] = 173; // Distinguish the short final part from the first.
+  const upload = page.getByRole('button', { name: 'Upload', exact: true });
+  const progress = page.getByRole('progressbar', { name: file.name, exact: true });
+  const responses = [];
+  const track = response => {
+    const path = new URL(response.url()).pathname;
+    if (!path.startsWith('/api/uploads')) return;
+    const request = response.request();
+    responses.push([request.method(), path, response.status(), request.method() === 'PUT' ? request.postDataBuffer()?.length : null]);
+  };
+  // Hold inside the context relay; expiring a page route during fallback can continue the same request.
+  const secondPart = /^\/api\/uploads\/[^/]+\/parts\/2$/;
+  const releaseSecondPart = holdNext(secondPart);
+  page.on('response', track);
+  try {
+    await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), upload.press('Enter')]);
+    await Promise.all([
+      page.waitForRequest(request => request.method() === 'PUT' && secondPart.test(new URL(request.url()).pathname)),
+      chooser.setFiles(file),
+    ]);
+    await progress.and(page.locator(`progress[value="${cap}"][max="${cap + 1}"]`)).waitFor();
+    assert.equal(await upload.getAttribute('aria-disabled'), 'true');
+    assert.equal(responses.length, 2, 'the second part has not been acknowledged');
+    releaseSecondPart();
+    await page.getByRole('status').filter({ hasText: `${file.name}: Uploaded.` }).waitFor();
+    const row = page.getByRole('link', { name: file.name, exact: true });
+    await row.waitFor();
+    assert.equal(await progress.getAttribute('value'), String(cap + 1));
+    assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+    assert.equal(responses.length, 4);
+    const intent = responses[1][1].replace(/\/parts\/1$/, '');
+    assert.match(intent, /^\/api\/uploads\/[A-Za-z0-9_-]+$/);
+    assert.deepEqual(responses, [
+      ['POST', '/api/uploads', 201, null], ['PUT', `${intent}/parts/1`, 204, cap],
+      ['PUT', `${intent}/parts/2`, 204, 1], ['POST', `${intent}/complete`, 201, null],
+    ]);
+    const href = await row.getAttribute('href');
+    assert.match(href, /^\/api\/download\/[0-9a-f-]{36}$/);
+    const download = await check(href, 'GET', 200);
+    assert.ok(Buffer.from(await download.arrayBuffer()).equals(file.buffer), 'download matches both uploaded parts');
+    return { parts: [cap, 1], acknowledgedProgress: [cap, cap + 1], refreshedListing: true, retainedFocus: true, byteIdentical: true };
+  } finally {
+    releaseSecondPart();
+    page.off('response', track);
+  }
 }

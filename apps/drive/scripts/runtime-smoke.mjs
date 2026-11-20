@@ -85,12 +85,12 @@ function fixtureStorage() {
 
 const rootDataPath = '/__data.json?x-sveltekit-invalidated=01';
 
-async function assertRootUploadData(response, mode, configured) {
+async function assertRootUploadData(response, mode) {
   assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
   const { nodes } = JSON.parse((await response.text()).split('\n', 1)[0]);
   // SvelteKit serializes the page as a flattened devalue table; slot zero is the root object.
   const { data } = nodes.at(-1);
-  assert.deepEqual([data[data[0].uploadMode], data[data[0].uploadConfigured]], [mode, configured]);
+  assert.equal(data[data[0].uploadMode], mode);
 }
 
 async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false } = {}) {
@@ -292,9 +292,9 @@ export default { fetch(request, env, ctx) {
       const refresh = await get(`/__data.json?download=${notice}&x-sveltekit-trailing-slash=1&x-sveltekit-invalidated=01`, document);
       assert.deepEqual([refresh.status, refresh.headers.get('cache-control'), refresh.headers.get('set-cookie')],
         [200, 'private, no-store', null], 'root data cannot consume a download notice');
-      await assertRootUploadData(refresh, 'preview', true);
+      await assertRootUploadData(refresh, 'preview');
       const memberHeaders = { cookie: member, 'x-test-invite': '1' };
-      await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart', false);
+      await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart');
       const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
       assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
         [503, 'private, no-store', ''], 'staging rejects mismatched storage qualification before serializing page data');
@@ -385,7 +385,7 @@ export default { fetch(request, env, ctx) {
       await exerciseRootPages(DB, worker, origin, cookie, fileId);
       const owner = await session('owner-fixture', 'owner');
       const data = await worker.fetch(`${origin}${rootDataPath}`, { headers: { cookie: owner }, redirect: 'manual' });
-      await assertRootUploadData(data, 'disabled', false);
+      await assertRootUploadData(data, 'disabled');
       await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       await exerciseListingPages(DB, worker, origin, cookie);

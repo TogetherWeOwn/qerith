@@ -2,7 +2,8 @@
 import { wireUploadStorage } from '../src/lib/server/storage-runtime.ts';
 const endpoint = 'https://storage.example.test', bucket = 'drive-fixture', epoch = 'browser-fixture';
 const region = 'test', accessKeyId = 'fixture-key', secretAccessKey = 'synthetic-secret';
-const partTag = '"fixture-part"', etag = '"fixture-object"';
+const partTag = number => `"fixture-part-${number}"`;
+const etag = '"fixture-object"';
 const uploads = new Map(), objects = new Map();
 let calls = 0, shortNext = false;
 export const storageCalls = () => calls;
@@ -27,22 +28,35 @@ export async function storageFetch(request) {
   const upload = uploads.get(key);
   if (request.method === 'POST' && query.has('uploads') && !upload && !objects.has(key)) {
     const id = crypto.randomUUID();
-    uploads.set(key, { id });
+    uploads.set(key, { id, parts: new Map() });
     return new Response(`<InitiateMultipartUploadResult><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`);
   }
   if (upload && query.get('uploadId') === upload.id) {
-    if (request.method === 'PUT' && query.get('partNumber') === '1' && !upload.bytes) {
-      upload.bytes = await request.arrayBuffer();
-      return new Response(null, { headers: { etag: partTag } });
+    const { parts } = upload;
+    const next = parts.size + 1;
+    if (request.method === 'PUT' && query.get('partNumber') === String(next)) {
+      parts.set(next, new Uint8Array(await request.arrayBuffer()));
+      return new Response(null, { headers: { etag: partTag(next) } });
     }
-    if (request.method === 'GET' && upload.bytes) {
+    const partHeader = number => `<Part><PartNumber>${number}</PartNumber><ETag>${partTag(number)}</ETag>`;
+    if (request.method === 'GET' && parts.size) {
+      const listed = [...parts].map(([number, bytes]) => `${partHeader(number)}<Size>${bytes.byteLength}</Size></Part>`).join('');
       return new Response(`<ListPartsResult><Bucket>${bucket}</Bucket><Key>${key}</Key><UploadId>${upload.id}</UploadId>
-        <IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><ETag>${partTag}</ETag>
-        <Size>${upload.bytes.byteLength}</Size></Part></ListPartsResult>`);
+        <IsTruncated>false</IsTruncated>${listed}</ListPartsResult>`);
     }
-    if (request.method === 'POST' && upload.bytes && (await request.text()).includes(`<ETag>${partTag}</ETag>`)) {
+    if (request.method === 'POST' && parts.size) {
+      const manifest = [...parts.keys()].map(number => `${partHeader(number)}</Part>`).join('');
+      if (await request.text() !== `<CompleteMultipartUpload>${manifest}</CompleteMultipartUpload>`) {
+        throw new Error('Unexpected fixture completion manifest');
+      }
+      const bytes = new Uint8Array([...parts.values()].reduce((size, part) => size + part.byteLength, 0));
+      let offset = 0;
+      for (const part of parts.values()) {
+        bytes.set(part, offset);
+        offset += part.byteLength;
+      }
       uploads.delete(key);
-      objects.set(key, upload.bytes);
+      objects.set(key, bytes.buffer);
       return new Response(`<CompleteMultipartUploadResult><ETag>${etag}</ETag></CompleteMultipartUploadResult>`);
     }
   }
