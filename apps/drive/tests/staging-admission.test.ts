@@ -10,7 +10,10 @@ const root = '/_app/immutable/nodes/root.js';
 const data = '/__data.json?x-sveltekit-invalidated=01';
 const invite = '/_app/immutable/nodes/invite.js';
 const people = '/_app/immutable/nodes/people.js';
-const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]), invite: new Set([shared, invite]), people: new Set([shared, people]) };
+const folder = '/_app/immutable/assets/folder.css';
+const ownerStyle = '/_app/immutable/assets/people.css';
+const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]), invite: new Set([shared, invite]),
+  people: new Set([shared, people, ownerStyle]), folder: new Set([folder, ownerStyle]) };
 const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
   new Request(stagingOrigin + path, { method, headers: headers ?? { origin: stagingOrigin, cookie } });
@@ -58,6 +61,32 @@ test('people document and its exclusive assets require the invite flag and live 
   assert.equal(redirect.headers.get('location'), '/sign-in?next=%2Fpeople');
   denied(await check(people, 'GET', expired, nav), 401);
   for (const path of ['/people/__data.json', '/%70eople', `${people}.map`]) denied(await check(path, 'GET'), 404);
+});
+
+test('folder document and its styles require opt-in and a live owner or member', async () => {
+  const enabled = (role?: 'owner' | 'member' | 'revoked') => ({ ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' });
+  const check = (path: string, method: string, env = enabled(), headers?: HeadersInit) =>
+    admitStagingRequest(request(path, method, headers), env, true, assets);
+  const document = `/f/${id}`;
+  for (const [path, kind] of [[document, 'folder'], [`${document}?page=opaque`, 'folder'], [folder, 'folder-asset']]) {
+    for (const method of ['GET', 'HEAD']) {
+      assert.equal((await check(path, method) as { kind: string }).kind, kind);
+      assert.equal((await check(path, method, enabled('member')) as { kind: string }).kind, kind);
+      denied(await check(path, method, runtime().env), 404);
+      denied(await check(path, method, enabled(), {}), 401);
+      denied(await check(path, method, enabled('revoked')), 401);
+    }
+    denied(await check(path, 'POST'), 404);
+  }
+  for (const path of [`${document}/`, `${document}/__data.json`, '/f/%61', '/f/a%2Fb',
+    '/f/', '/api/folder-listing', `${folder}?`, `${folder}.map`, '/_app/immutable/nodes/folder.js', people, ownerStyle]) {
+    denied(await check(path, 'GET', enabled('member')), 404);
+  }
+  denied(await check(document, 'GET', enabled(), { cookie, 'sec-fetch-site': 'cross-site' }), 404);
+  denied(await check(document, 'GET', enabled(), { cookie, 'sec-fetch-dest': 'empty' }), 404);
+  const raw = request(document);
+  Object.defineProperty(raw, 'url', { value: `${stagingOrigin}/other/%2e%2e${document}` });
+  denied(await admitStagingRequest(raw, enabled(), true, assets), 404);
 });
 
 const publicRoutes = [

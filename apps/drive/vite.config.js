@@ -57,6 +57,7 @@ function generatedAssets(builder) {
   const people = [...assets];
   assets.clear();
   visited.clear();
+  // SSR-only: ship styles and their font, not the generated client entry.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
   return { signIn, root, invite, people, folder: [...assets].filter(path => /\.(?:css|woff2)$/.test(path)) };
 }
@@ -97,7 +98,8 @@ const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),
   invite: new Set(generated.invite),
-  people: new Set(generated.people)
+  people: new Set(generated.people),
+  folder: new Set(generated.folder)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;

@@ -59,6 +59,23 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, file), content);
     }
     await verifyEvidence(dir, head);
+    const verifyFolder = () => verifyEvidence(dir, head, false, false, false, true);
+    await assert.rejects(verifyFolder(), /staging-folder-keyboard-390/);
+    await writeFile(join(dir, 'staging-folder-keyboard-390.json'), JSON.stringify({ viewport: [390, 844], visibleTabFocus: true,
+      enterDocumentNavigation: ['Child folder', 'Go to My Drive', 'Next page', 'First page'] }));
+    await assert.rejects(verifyFolder(), /staging-folder-listed-390.png/);
+    const folderLabel = 'staging-folder-listed-390';
+    const folderPng = Buffer.alloc(64);
+    Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(folderPng);
+    folderPng.writeUInt32BE(390, 16);
+    folderPng.writeUInt32BE(844, 20);
+    await writeFile(join(dir, `${folderLabel}.png`), folderPng);
+    await writeFile(join(dir, `${folderLabel}-tree.txt`), 'Child folder');
+    await writeFile(join(dir, `axe-${folderLabel}.json`), '{"violations":[]}');
+    await assert.rejects(verifyFolder(), { message: `Invalid folder evidence: ${folderLabel}` });
+    Buffer.from('0000000049454e44ae426082', 'hex').copy(folderPng, folderPng.length - 12);
+    await writeFile(join(dir, `${folderLabel}.png`), folderPng);
+    await assert.rejects(verifyFolder(), /staging-folder-empty-390.png/);
     const stagingPath = join(dir, 'staging-root-round-trip.json');
     await assert.rejects(verifyEvidence(dir, head, false, false, true), /staging-root-round-trip\.json/);
     const staging = { mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations: 0,
