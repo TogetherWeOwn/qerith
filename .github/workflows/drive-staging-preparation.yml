@@ -2,6 +2,18 @@ name: Drive staging source preparation
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_main_sha:
+        description: Exact lowercase 40-character main commit SHA
+        required: true
+        type: string
+      activate_preview:
+        description: Activate the owner-only preview (false publishes closed)
+        type: boolean
+        default: false
+
+env:
+  EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
 
 permissions:
   contents: read
@@ -28,6 +40,10 @@ jobs:
           fi
           if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             printf '%s\n' 'invalid source SHA' >&2
+            exit 1
+          fi
+          if [[ "$EXPECTED_MAIN_SHA" != "$GITHUB_SHA" ]]; then
+            printf '%s\n' 'expected main SHA does not match dispatch SHA' >&2
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,7 +86,7 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_REPOSITORY" != TogetherWeOwn/qerith ||
                 "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ||
-                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ||
+                ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || "$EXPECTED_MAIN_SHA" != "$GITHUB_SHA" ||
                 "$(git rev-parse --verify HEAD)" != "$GITHUB_SHA" ]]; then
             printf '%s\n' 'Invalid staging source or checkout.' >&2
             exit 1
@@ -109,15 +125,13 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
-          DRIVE_OWNER_ENROLLMENT: ${{ secrets.QERITH_STAGING_OWNER_ENROLLMENT }}
           NO_COLOR: '1'
           WRANGLER_HIDE_BANNER: 'true'
         run: |
           set -euo pipefail
-          enrollment="${DRIVE_OWNER_ENROLLMENT:-}"
           unset DRIVE_OWNER_ENROLLMENT
           : "${CLOUDFLARE_API_TOKEN:?missing staging deploy token}"
-          DRIVE_OWNER_ENROLLMENT="$enrollment" node scripts/staging-publish.mjs --check-target
+          node scripts/staging-publish.mjs --check-target
           # The native ledger is the staging authority. Keep the bookmark and
           # before/after lists in the Actions log for this exact dispatch SHA.
           wrangler=node_modules/.bin/wrangler
@@ -201,9 +215,9 @@ jobs:
           fi
       - name: Publish staging Worker
         env:
+          ACTIVATE_PREVIEW: ${{ inputs.activate_preview }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.QERITH_STAGING_CLOUDFLARE_API_TOKEN }}
-          DRIVE_OWNER_ENROLLMENT: ${{ secrets.QERITH_STAGING_OWNER_ENROLLMENT }}
           QERITH_S3_ENDPOINT: ${{ secrets.QERITH_S3_ENDPOINT }}
           QERITH_S3_BUCKET: ${{ secrets.QERITH_S3_BUCKET }}
           QERITH_S3_REGION: ${{ secrets.QERITH_S3_REGION }}

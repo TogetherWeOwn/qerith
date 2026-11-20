@@ -18,7 +18,10 @@ const storageEnv = { QERITH_S3_ENDPOINT: 'https://storage.example.test/', QERITH
   QERITH_S3_STORAGE_EPOCH: 'test-epoch', QERITH_S3_ACCESS_KEY_ID: 'test-access-key', QERITH_S3_SECRET_ACCESS_KEY: 'test-secret-key' };
 
 test('staging credentials stay in their main-only protected steps', () => {
-  assert.match(workflow, /\non:\n  workflow_dispatch:\n\npermissions:/);
+  assert.match(workflow, /\non:\n  workflow_dispatch:\n    inputs:\n      expected_main_sha:[^]*?required: true\n        type: string/);
+  assert.match(workflow, /activate_preview:[^]*?type: boolean\n        default: false/);
+  assert.match(before, /EXPECTED_MAIN_SHA: \$\{\{ inputs\.expected_main_sha \}\}/);
+  assert.match(publish, /ACTIVATE_PREVIEW: \$\{\{ inputs\.activate_preview \}\}/);
   assert.match(workflow, /\nconcurrency:\n  group: drive-staging-lifecycle\n  cancel-in-progress: false/);
   assert.doesNotMatch(before, /\bsecrets\b\s*(?:\.|\[)|CLOUDFLARE_API_TOKEN/);
   assert.match(before, /\n  publish:\n    if: github\.repository == 'TogetherWeOwn\/qerith' && github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'\n    needs: preparation\n    environment: staging\n/);
@@ -28,13 +31,13 @@ test('staging credentials stay in their main-only protected steps', () => {
   const deploySecrets = [
     ['CLOUDFLARE_ACCOUNT_ID', 'QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID'],
     ['CLOUDFLARE_API_TOKEN', 'QERITH_STAGING_CLOUDFLARE_API_TOKEN'],
-    ['DRIVE_OWNER_ENROLLMENT', 'QERITH_STAGING_OWNER_ENROLLMENT'],
   ];
   const storageSecrets = Object.keys(storageEnv).map(name => [name, name]);
   assert.deepEqual(mapping(preflight), storageSecrets);
   assert.deepEqual(mapping(migration), deploySecrets);
   assert.deepEqual(mapping(publish), [...deploySecrets, ...storageSecrets]);
-  assert.match(migration, /unset DRIVE_OWNER_ENROLLMENT[\s\S]*DRIVE_OWNER_ENROLLMENT="\$enrollment" node scripts\/staging-publish\.mjs --check-target/);
+  assert.match(migration, /unset DRIVE_OWNER_ENROLLMENT[\s\S]*node scripts\/staging-publish\.mjs --check-target/);
+  assert.doesNotMatch(workflow, /QERITH_STAGING_OWNER_ENROLLMENT/);
   assert.doesNotMatch(workflow, /DRIVE_ORIGIN|DRIVE_SIGN_IN_FIXTURE|continue-on-error|always\(\)/);
 });
 
@@ -51,7 +54,7 @@ test('workflow rejects mismatched source, SHA and checkout', (t) => {
   const sha = 'a'.repeat(40);
   const env = { PATH: `${root}:/usr/bin:/bin`, GITHUB_REPOSITORY: 'TogetherWeOwn/qerith',
     GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
-    GITHUB_SHA: sha, FAKE_CHECKOUT_SHA: sha };
+    GITHUB_SHA: sha, EXPECTED_MAIN_SHA: sha, FAKE_CHECKOUT_SHA: sha };
   const check = (overrides) => spawnSync('/bin/bash', ['-c', script], {
     cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 5000,
   });
@@ -59,7 +62,7 @@ test('workflow rejects mismatched source, SHA and checkout', (t) => {
   for (const overrides of [
     { GITHUB_REPOSITORY: 'togetherweown/qerith' }, { GITHUB_EVENT_NAME: 'push' },
     { GITHUB_REF: 'refs/heads/other' }, { GITHUB_SHA: 'A'.repeat(40) },
-    { FAKE_CHECKOUT_SHA: 'b'.repeat(40) },
+    { FAKE_CHECKOUT_SHA: 'b'.repeat(40) }, { EXPECTED_MAIN_SHA: 'b'.repeat(40) },
   ]) {
     assert.notEqual(check(overrides).status, 0, JSON.stringify(overrides));
   }
@@ -91,11 +94,11 @@ function migrationFixture(t) {
   const wrangler = join(root, 'node_modules/.bin/wrangler');
   writeFileSync(wrangler, `#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
-if env | grep -q '^QERITH_S3_'; then exit 90; fi
+if env | grep -Eq '^(QERITH_S3_|DRIVE_OWNER_ENROLLMENT=)'; then exit 90; fi
 if [ "$1" = deploy ]; then
-  [ "$3" = --config ] && [ "$7" = --secrets-file ] || exit 91
-  [ "$(stat -c %a "$4")" = 600 ] && [ "$(stat -c %a "$8")" = 600 ] || exit 92
-  cp "$4" "$RUNNER_TEMP/publish-config" && cp "$8" "$RUNNER_TEMP/publish-secrets" || exit 93
+  [ "$3" = --config ] && [ "$5" = --secrets-file ] || exit 91
+  [ "$(stat -c %a "$4")" = 600 ] && [ "$(stat -c %a "$6")" = 600 ] || exit 92
+  cp "$4" "$RUNNER_TEMP/publish-config" && cp "$6" "$RUNNER_TEMP/publish-secrets" || exit 93
 fi
 phase=other
 case "$*" in
@@ -127,7 +130,8 @@ esac
 `);
   chmodSync(wrangler, 0o700);
   const calls = join(root, 'calls');
-  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, RUNNER_TEMP: root, GITHUB_SHA: 'a'.repeat(40),
+  const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, RUNNER_TEMP: root,
+    GITHUB_SHA: 'a'.repeat(40), EXPECTED_MAIN_SHA: 'a'.repeat(40),
     GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', CALLS: calls,
     GITHUB_ACTIONS: 'true', GITHUB_JOB: 'publish', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith',
     GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
@@ -153,13 +157,15 @@ esac
 
 test('publishes only matching proof bindings and keeps signer credentials out of argv and config', (t) => {
   const { root, run, calls, storageConfigId } = migrationFixture(t);
-  const result = run({});
+  const grant = `${'a'.repeat(40)}:${Date.now() + 60_000}:${'b'.repeat(43)}`;
+  const result = run({ DRIVE_OWNER_ENROLLMENT: grant });
   assert.equal(result.status, 0, result.stderr);
   const config = JSON.parse(readFileSync(join(root, 'publish-config'), 'utf8'));
   assert.equal(config.assets.directory, join(root, '.svelte-kit/cloudflare'));
   assert.equal(config.main, join(root, '.svelte-kit/cloudflare/_worker.js'));
   assert.equal(config.d1_databases[0].binding, 'DB');
   assert.deepEqual(config.vars, {
+    DRIVE_ORIGIN: 'disabled', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled',
     DRIVE_S3_ENDPOINT: 'https://storage.example.test', DRIVE_S3_BUCKET: 'fixture', DRIVE_S3_REGION: 'auto',
     DRIVE_S3_STORAGE_EPOCH: 'test-epoch', DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId,
       region: 'auto', sourceSha: 'b'.repeat(40), runId: '42', runAttempt: 1, completionTimeoutMs: 3000 }),
@@ -168,8 +174,18 @@ test('publishes only matching proof bindings and keeps signer credentials out of
     DRIVE_S3_ACCESS_KEY_ID: 'test-access-key', DRIVE_S3_SECRET_ACCESS_KEY: 'test-secret-key',
   });
   assert.doesNotMatch(calls() + result.stdout + result.stderr, /storage\.example\.test|test-access-key|test-secret-key/);
+  assert.ok(!(calls() + result.stdout + result.stderr).includes(grant));
   const args = calls().trim().split('\n').at(-1).split(' ');
-  for (const index of [3, 7]) assert.equal(existsSync(args[index]), false);
+  for (const index of [3, 5]) assert.equal(existsSync(args[index]), false);
+
+  const active = run({ ACTIVATE_PREVIEW: 'true', DRIVE_OWNER_ENROLLMENT: grant });
+  assert.equal(active.status, 0, active.stderr);
+  const activeConfig = JSON.parse(readFileSync(join(root, 'publish-config'), 'utf8'));
+  assert.deepEqual(activeConfig, { ...config, vars: { ...config.vars,
+    DRIVE_ORIGIN: 'https://qerith-drive-staging.5150.workers.dev' } });
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'publish-secrets'), 'utf8')), {
+    DRIVE_S3_ACCESS_KEY_ID: 'test-access-key', DRIVE_S3_SECRET_ACCESS_KEY: 'test-secret-key',
+  });
 });
 
 test('stale, failed or incomplete storage proof stops before any migration or publish', (t) => {
@@ -208,7 +224,7 @@ test('migration workflow records the native ledger and fails closed on a pending
     `d1 migrations apply ${target} --remote ${config}`,
     `d1 migrations list ${target} --remote ${config}`,
   ]);
-  assert.match(lines.at(-1), /^deploy .* --config .* --var DRIVE_OWNER_ENROLLMENT_RELEASE:disabled --secrets-file /);
+  assert.match(lines.at(-1), /^deploy .* --config .* --secrets-file /);
   assert.ok(firstApply.stdout.indexOf('Pending migrations before apply:') < firstApply.stdout.indexOf('Pre-apply Time Travel bookmark:'));
   for (const after of [pending, `${emptyList}\n${pending}`, `${emptyList}\n✅ No migrations to apply!`,
     `${emptyList}\n│ 0033_pending.sql │`, emptyList.replace('remote', 'local')]) {
@@ -239,11 +255,6 @@ test('migration workflow refuses missing credentials or an unexpected account be
   assert.equal(calls(), '');
   assert.match(run({ CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) }).stderr, /invalid staging Cloudflare account/);
   assert.equal(calls(), '');
-  for (const [sha, expiry] of [['b'.repeat(40), Date.now() + 60_000], ['a'.repeat(40), 1000000000000]]) {
-    const result = run({ DRIVE_OWNER_ENROLLMENT: `${sha}:${expiry}:${'a'.repeat(43)}` });
-    assert.match(result.stderr, /invalid, mismatched or expired staging enrollment authorization/);
-    assert.equal(calls(), '');
-  }
 });
 
 test('migration capture terminates process groups on overflow and timeout', async (t) => {

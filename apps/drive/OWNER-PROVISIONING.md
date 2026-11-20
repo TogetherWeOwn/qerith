@@ -5,8 +5,10 @@ staging SHA, including coverage or disablement of all alternate hosts, and
 Security and QA have accepted that evidence. Verify the protected publish run,
 staging D1 migration ledger and rollback target. Confirm live `/sign-in` has
 been activated on that same SHA; source or CI enrollment alone does not open
-it. Never use the real owner's identity or files in CI. Staging data is not
-backed up.
+it. The [staging preview publisher](../../docs/drive-staging.md) does not arm
+owner enrollment in either mode. The procedure below applies only to a
+separately authorized release that binds an enrollment grant. Never use the real
+owner's identity or files in CI. Staging data is not durable or backed up.
 
 1. Agree on a short live enrollment window with the owner and deployer. The
    authorized Operator supplies `QERITH_STAGING_OWNER_ENROLLMENT` in the GitHub
@@ -36,8 +38,10 @@ backed up.
    `/sign-in`. Confirm bootstrap is closed: a still-unexpired authorization now
    gets `409`, even if the owner is later revoked. Clear the temporary GitHub secret
    and local exchange material. The next approved publish without a grant
-   disables any inherited Worker secret. The endpoint returns `503` without an
-   active binding. Never direct-insert or reset an owner in D1 to retry.
+   disarms any inherited Worker secret. Without an active release-bound grant,
+   an unready preview returns `503`; a qualified preview returns a bodyless `404`
+   without dispatching enrollment. Neither response means enrollment is open.
+   Never direct-insert or reset an owner in D1 to retry.
 
 If the enrollment response was lost, verify using sign-in before requesting
 another ceremony. If the window or the challenge expired before an owner was

@@ -97,6 +97,7 @@ const unavailableAssets = { fetch: unavailable };
 
 export default {
   async fetch(request, env, ctx) {
+    if (env.DRIVE_ORIGIN === 'disabled') return unavailable();
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.

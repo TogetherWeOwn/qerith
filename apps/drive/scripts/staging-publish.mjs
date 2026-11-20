@@ -25,7 +25,9 @@ export function validateStagingTarget(root, accountId) {
   requireContained(root, assetsPath, 'isDirectory');
   const config = JSON.parse(readFileSync(resolve(root, configPath), 'utf8'));
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
-      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,compatibility_flags,d1_databases,main,name' ||
+      Object.keys(config).sort().join(',') !== 'assets,compatibility_date,compatibility_flags,d1_databases,main,name,vars' ||
+      !config.vars || Object.keys(config.vars).join(',') !== 'DRIVE_ORIGIN' ||
+      config.vars.DRIVE_ORIGIN !== 'https://qerith-drive-staging.5150.workers.dev' ||
       config.compatibility_date !== '2026-07-30' ||
       !Array.isArray(config.compatibility_flags) || config.compatibility_flags.length !== 2 ||
       config.compatibility_flags[0] !== 'nodejs_compat' || config.compatibility_flags[1] !== 'enable_request_signal' ||
@@ -83,43 +85,25 @@ function reviewedStorage(env) {
   return stagingStorage(env, receipt);
 }
 
-function enrollmentForRelease(grant, sha, preflight) {
-  if (!grant) return '';
-  const expiresAt = Number(grant.slice(41, 54));
-  const now = Date.now();
-  if (grant.length !== 98 || !/^[a-f0-9]{40}:\d{13}:[A-Za-z0-9_-]{43}$/.test(grant) ||
-      !grant.startsWith(`${sha}:`) || expiresAt > now + 300_000 || (preflight && expiresAt <= now)) {
-    throw new Error('invalid, mismatched or expired staging enrollment authorization');
-  }
-  // A grant that expires during migrations must not prevent publishing the compatible Worker.
-  return expiresAt > now ? grant : '';
-}
-
-export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, grant = '', sha = '', storage) {
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, storage, activate = false) {
   const config = validateStagingTarget(root, accountId);
-  return deploy(root, run, enrollmentForRelease(grant, sha, false), sha, config, storage);
+  if (typeof activate !== 'boolean') throw new Error('invalid staging activation mode');
+  return deploy(root, run, config, storage, activate);
 }
 
-async function deploy(root, run, enrollment, sha, config, storage) {
-  // Wrangler inherits prior secrets. An inactive publish must explicitly disarm them.
-  const args = ['deploy', entryPath, '--config', configPath, '--var',
-    `DRIVE_OWNER_ENROLLMENT_RELEASE:${enrollment ? sha : 'disabled'}`];
-  using deployDir = storage || enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
-  if (storage) {
-    const file = resolve(deployDir.path, configPath);
-    writeFileSync(file, JSON.stringify({ ...config, main: resolve(root, config.main),
-      assets: { ...config.assets, directory: resolve(root, config.assets.directory) },
-      d1_databases: config.d1_databases.map(db => ({ ...db, migrations_dir: resolve(root, db.migrations_dir) })),
-      vars: storage.vars }), { mode: 0o600, flag: 'wx' });
-    args[1] = resolve(root, entryPath);
-    args[3] = file;
-  }
-  if (deployDir) {
-    const file = resolve(deployDir.path, 'secrets.json');
-    const secrets = { ...storage?.secrets, ...(enrollment ? { DRIVE_OWNER_ENROLLMENT: enrollment } : {}) };
-    writeFileSync(file, JSON.stringify(secrets), { mode: 0o600, flag: 'wx' });
-    args.push('--secrets-file', file);
-  }
+async function deploy(root, run, config, storage, activate) {
+  using deployDir = mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-'));
+  const file = resolve(deployDir.path, configPath);
+  writeFileSync(file, JSON.stringify({ ...config, main: resolve(root, config.main),
+    assets: { ...config.assets, directory: resolve(root, config.assets.directory) },
+    d1_databases: config.d1_databases.map(db => ({ ...db, migrations_dir: resolve(root, db.migrations_dir) })),
+    // Replace any previous admission vars and disarm inherited enrollment secrets.
+    vars: { ...storage.vars, DRIVE_ORIGIN: activate ? config.vars.DRIVE_ORIGIN : 'disabled',
+      DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' },
+  }), { mode: 0o600, flag: 'wx' });
+  const secretsFile = resolve(deployDir.path, 'secrets.json');
+  writeFileSync(secretsFile, JSON.stringify(storage.secrets), { mode: 0o600, flag: 'wx' });
+  const args = ['deploy', resolve(root, entryPath), '--config', file, '--secrets-file', secretsFile];
   const env = { ...process.env };
   delete env.DRIVE_OWNER_ENROLLMENT;
   for (const key of storageKeys) delete env[`QERITH_S3_${key}`];
@@ -152,7 +136,6 @@ async function deploy(root, run, enrollment, sha, config, storage) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
-    enrollmentForRelease(process.env.DRIVE_OWNER_ENROLLMENT, process.env.GITHUB_SHA, true);
   } else if (process.argv.length === 3 && process.argv[2] === '--check-storage') {
     await reviewedStorage(process.env);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
@@ -160,11 +143,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'publish' ||
         env.GITHUB_REPOSITORY !== 'TogetherWeOwn/qerith' || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
         env.GITHUB_REF !== 'refs/heads/main' || !/^[0-9a-f]{40}$/.test(env.GITHUB_SHA ?? '') ||
-        !env.CLOUDFLARE_API_TOKEN) {
+        env.EXPECTED_MAIN_SHA !== env.GITHUB_SHA || !env.CLOUDFLARE_API_TOKEN) {
       throw new Error('publication requires the protected staging dispatch job');
     }
-    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT, env.GITHUB_SHA,
-      await reviewedStorage(env));
+    const mode = env.ACTIVATE_PREVIEW ?? 'false';
+    if (mode !== 'false' && mode !== 'true') throw new Error('invalid staging activation mode');
+    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, await reviewedStorage(env), mode === 'true');
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }
