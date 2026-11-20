@@ -8,7 +8,8 @@ const shared = '/_app/immutable/chunks/runtime.js';
 const signIn = '/_app/immutable/nodes/sign-in.js';
 const root = '/_app/immutable/nodes/root.js';
 const data = '/__data.json?x-sveltekit-invalidated=01';
-const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]) };
+const invite = '/_app/immutable/nodes/invite.js';
+const assets = { signIn: new Set([shared, signIn]), root: new Set([shared, root]), invite: new Set([shared, invite]) };
 const cookie = `__Host-drive-session=${'A'.repeat(43)}`;
 const request = (path: string, method = 'GET', headers?: HeadersInit) =>
   new Request(stagingOrigin + path, { method, headers: headers ?? { origin: stagingOrigin, cookie } });
@@ -137,7 +138,7 @@ test('every protected request checks a live owner, including assets after revoca
 
 test('denials and signed-out redirects do not enter any downstream handler', async () => {
   const unexpected = async () => assert.fail('denied request reached downstream dispatch');
-  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected, invite: unexpected };
   const { env, reads, revoke } = runtime();
   for (const [req, status] of [
     [request(data, 'HEAD'), 404],
@@ -170,14 +171,14 @@ test('private assets are not dispatched when the session lifetime runs out durin
   const { env, reads } = runtime('owner', 1, 10);
   const unexpected = async () => assert.fail('expired owner session reached downstream dispatch');
   denied(await dispatchStagingRequest(request(root), env, true, assets, {
-    adapter: unexpected, asset: unexpected, ceremony: unexpected,
+    adapter: unexpected, asset: unexpected, ceremony: unexpected, invite: unexpected,
   }), 401);
   assert.equal(reads(), 1);
 });
 
 test('the staged sign-in probe reports a live owner without dispatching the root page', async () => {
   const unexpected = async () => assert.fail('sign-in probe reached downstream dispatch');
-  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected };
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected, invite: unexpected };
   for (const [fixture, status] of [[runtime(), 200], [runtime('member'), 401], [runtime('owner', 1, 10), 401]] as const) {
     denied(await dispatchStagingRequest(request('/', 'HEAD'), fixture.env, true, assets, dispatch), status);
     assert.equal(fixture.reads(), 1);
@@ -192,7 +193,8 @@ test('admitted traffic reaches one handler; assets and root data cannot carry CD
     const response = new Response(null, { headers: Object.fromEntries(cacheHeaders.map(name => [name, 'public, max-age=3600'])) });
     const handle = async (name: string) => (calls.push(name), response);
     const result = await dispatchStagingRequest(request(path, method), env, true, assets, {
-      adapter: () => handle('adapter'), ceremony: (_, step) => handle(`ceremony:${step}`), asset: () => handle('asset')
+      adapter: () => handle('adapter'), ceremony: (_, step) => handle(`ceremony:${step}`),
+      invite: (_, step) => handle(`invite:${step}`), asset: () => handle('asset')
     });
     const expected = target.kind === 'ceremony' ? `ceremony:${target.step}` : target.kind.endsWith('-asset') ? 'asset' : 'adapter';
     assert.deepEqual(calls, [expected]);
@@ -200,4 +202,68 @@ test('admitted traffic reaches one handler; assets and root data cannot carry CD
     assert.equal(result.headers.get('cache-control'), 'private, no-store');
     for (const name of cacheHeaders) assert.equal(result.headers.get(name), null);
   }
+});
+
+const inviteRoutes = [
+  ['/invite', ['GET', 'HEAD'], { kind: 'invite' }],
+  [invite, ['GET', 'HEAD'], { kind: 'invite-asset' }],
+  ...(['present', 'challenge', 'enroll'] as const).map(step =>
+    [`/api/invite/${step}`, ['POST'], { kind: 'invite-ceremony', step }] as const),
+] as const;
+
+test('staging invite mode is default-off and admits only exact route and asset methods', async () => {
+  const { env, reads } = runtime();
+  const enabled = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  for (const [path, methods, target] of inviteRoutes) {
+    for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS']) {
+      const input = request(path, method);
+      for (const value of [undefined, '0', 'true']) {
+        denied(await admitStagingRequest(input, { ...enabled, DRIVE_STAGING_INVITE_ACCEPTANCE: value }, true, assets), 404);
+      }
+      const result = await admitStagingRequest(input, enabled, true, assets);
+      if ((methods as readonly string[]).includes(method)) assert.deepEqual(result, target);
+      else denied(result, 404);
+    }
+    const [method] = methods;
+    for (const suffix of ['/', '?', '?token=fixture', '#fixture', '.map']) {
+      denied(await admitStagingRequest(request(path + suffix, method), enabled, true, assets), 404);
+    }
+    denied(await admitStagingRequest(request(path, method), enabled, false, assets), 503);
+  }
+  for (const path of ['/%69nvite', '//invite', '/invite/__data.json', '/api/invite', '/api/invite/present/extra',
+    '/api/invite/%70resent', '/api/invite/present%2F', '/api/invite/recover']) {
+    denied(await admitStagingRequest(request(path), enabled, true, assets), 404);
+    denied(await admitStagingRequest(request(path, 'POST'), enabled, true, assets), 404);
+  }
+  // Preserve the raw value to exercise spellings the Request constructor would normalize.
+  const raw = request('/invite');
+  Object.defineProperty(raw, 'url', { value: `${stagingOrigin}/other/%2e%2e/invite` });
+  denied(await admitStagingRequest(raw, enabled, true, assets), 404);
+  denied(await admitStagingRequest(request(root, 'GET', {}), enabled, true, assets), 401);
+  assert.equal(reads(), 0);
+});
+
+test('foreign site metadata permits only the top-level invite document and never dispatches HEAD or a ceremony', async () => {
+  const { env, reads } = runtime();
+  const enabled = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  const calls: string[] = [];
+  const handle = async (name: string) => (calls.push(name), new Response(null));
+  const dispatch = { adapter: () => handle('document'), asset: () => handle('asset'),
+    ceremony: () => handle('sign-in'), invite: (_: Request, step: string) => handle(step) };
+  const navigation = { cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  for (const req of [request('/invite', 'HEAD', navigation), request('/invite', 'GET', { 'sec-fetch-site': 'cross-site' }),
+    request(invite, 'GET', navigation), request('/api/invite/enroll', 'POST', { ...navigation, origin: stagingOrigin }),
+    request('/api/invite/enroll', 'POST', {}), request('/invite', 'GET', { ...navigation, origin: 'null' }),
+    new Request('https://other.example.test/invite')]) {
+    denied(await dispatchStagingRequest(req, enabled, true, assets, dispatch), 403);
+  }
+  assert.deepEqual(calls, []);
+  await dispatchStagingRequest(request('/invite', 'GET', navigation), enabled, true, assets, dispatch);
+  const asset = await dispatchStagingRequest(request(invite), enabled, true, assets, dispatch);
+  assert.equal(asset.headers.get('cache-control'), 'private, no-store');
+  for (const step of ['present', 'challenge', 'enroll']) {
+    await dispatchStagingRequest(request(`/api/invite/${step}`, 'POST'), enabled, true, assets, dispatch);
+  }
+  assert.deepEqual(calls, ['document', 'asset', 'present', 'challenge', 'enroll']);
+  assert.equal(reads(), 0);
 });

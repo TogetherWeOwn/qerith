@@ -8,13 +8,34 @@ const [{ Invitations }, { Membership }] = await Promise.all([
   tsImport('../src/lib/server/identity/membership.ts', import.meta.url),
 ]);
 
-export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken }) {
+export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken, staging = false }) {
   const invites = new Invitations(DB);
   const first = await invites.issue(ownerToken, { displayName: 'Rook' });
   const { token } = await invites.issue(ownerToken, { displayName: 'Pell', note: 'Welcome to Drive!' });
   const context = await browser.newContext({ serviceWorkers: 'block' });
   try {
-    await context.route('**/*', route => new URL(route.request().url()).origin === origin ? relay(route) : route.abort());
+    const linkSource = 'https://message.example.test/';
+    let followedLink = false;
+    await context.route('**/*', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (staging && url.href === linkSource) return route.fulfill({ contentType: 'text/html',
+        body: `<a href="${origin}/invite#${first.token}">Open invitation</a>` });
+      if (url.origin !== origin) return route.abort();
+      if (staging) {
+        assert.ok([first.token, token].every(value => !request.url().includes(value)), 'token absent from request URL');
+        if (request.isNavigationRequest() && url.pathname === '/invite' && !followedLink) {
+          assert.equal((await request.allHeaders())['sec-fetch-site'], 'cross-site');
+          followedLink = true;
+        }
+        if (url.pathname.startsWith('/api/invite/')) {
+          const headers = await request.allHeaders();
+          assert.equal(headers.origin, origin);
+          assert.equal(headers.referer, undefined);
+        }
+      }
+      return relay(route);
+    });
     const page = await context.newPage();
     const cdp = await context.newCDPSession(page);
     await cdp.send('WebAuthn.enable');
@@ -23,7 +44,18 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       isUserVerified: true, automaticPresenceSimulation: true,
     } });
     const open = () => page.goto(`${origin}/invite#${token}`);
-    const document = await page.goto(`${origin}/invite#${first.token}`);
+    const scope = staging ? 'staging-invite' : 'generated-invite';
+    const captureState = async state => {
+      for (const [width, height] of widths) {
+        await page.setViewportSize({ width, height });
+        await capture(page, state, width, true, scope);
+      }
+    };
+    let document;
+    if (staging) {
+      await page.goto(linkSource);
+      [document] = await Promise.all([page.waitForResponse(`${origin}/invite`), page.getByRole('link', { name: 'Open invitation' }).click()]);
+    } else document = await page.goto(`${origin}/invite#${first.token}`);
     assert.equal(document.status(), 200);
     const headers = await document.allHeaders();
     assert.equal(headers['referrer-policy'], 'no-referrer');
@@ -47,9 +79,19 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     await dead.waitFor();
     await page.evaluate(token => { location.hash = token; }, token);
     await note.waitFor();
-    for (const [width, height] of widths) {
-      await page.setViewportSize({ width, height });
-      await capture(page, 'valid', width, true, 'generated-invite');
+    await captureState('valid');
+    if (staging) {
+      const primary = page.getByRole('button', { name: 'Set up a passkey' });
+      await page.getByRole('heading', { name: "You're invited to Drive", exact: true }).waitFor();
+      await page.setViewportSize({ width: 320, height: 844 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.keyboard.press('Tab');
+      assert.deepEqual(await field.evaluate(el => [el === document.activeElement, getComputedStyle(el).outlineStyle]), [true, 'solid']);
+      await page.keyboard.press('Tab');
+      assert.deepEqual(await primary.evaluate(el => [el === document.activeElement, getComputedStyle(el).outlineStyle]), [true, 'solid']);
+      await page.keyboard.press('Shift+Tab');
+      assert.equal(await field.evaluate(el => el === document.activeElement), true);
     }
     const pending = Promise.withResolvers();
     await page.route('**/api/invite/enroll', async route => { await pending.promise; await relay(route); }, { times: 1 });
@@ -57,12 +99,13 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     const dispatched = page.waitForRequest(enrollPath);
     const enrolled = page.waitForResponse(enrollPath);
     try {
-      await field.press('Enter');
+      await (staging ? page.keyboard.press('Enter') : field.press('Enter'));
       await dispatched;
       await page.evaluate(token => { location.hash = token; }, first.token);
       await page.waitForFunction(() => location.hash === '');
       await page.getByRole('button', { name: 'Saving your passkey…' }).waitFor();
       assert.equal(await field.inputValue(), 'Pell');
+      if (staging) await captureState('saving');
     } finally { pending.resolve(); }
     const result = await enrolled;
     assert.equal(result.status(), 204);
@@ -87,10 +130,12 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(await status.count(), 1);
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
     await loading.dispose();
+    if (staging) await captureState('dead-link');
     await page.route('**/api/invite/present', route => route.fulfill({ status: 503 }), { times: 1 });
     await page.evaluate(token => { location.hash = token; }, first.token);
     await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
     await status.filter({ hasText: 'Drive unavailable' }).waitFor();
+    if (staging) await captureState('unavailable');
     const signIn = async expectedStatus => {
       // The server renders the button before its client-side handler is installed.
       await page.waitForLoadState('networkidle');
@@ -104,14 +149,20 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       page.waitForURL(`${origin}/sign-in`),
       page.getByRole('link', { name: 'Sign in', exact: true }).click(),
     ]);
-    await signIn(204);
-    await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
+    await signIn(staging ? 401 : 204);
+    if (staging) {
+      assert.equal((await context.cookies(origin)).some(cookie => cookie.name === '__Host-drive-session'), false);
+      await context.addCookies([{ name: '__Host-drive-session', value: ownerToken, url: origin, secure: true, httpOnly: true }]);
+    } else await page.getByRole('heading', { name: 'Your drive is empty.' }).waitFor();
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
     await status.filter({ hasText: "You're signed in" }).waitFor();
-    for (const [width, height] of widths) {
-      await page.setViewportSize({ width, height });
-      await capture(page, 'signed-in', width, true, 'generated-invite');
+    await captureState('signed-in');
+    if (staging) {
+      assert.equal(await page.getByText("This invite is for someone else, so it wasn't used.", { exact: true }).count(), 1);
+      assert.equal(await page.getByRole('link', { name: 'Go to My Drive' }).getAttribute('href'), '/');
+      console.log('Staging-mode Worker + Chromium + D1: cross-site invite, keyboard enrollment, replay denial and owner-only sign-in passed');
+      return;
     }
     const id = await DB.prepare("SELECT id FROM drive_principals WHERE role = 'member'").first('id');
     const members = new Membership(DB);
