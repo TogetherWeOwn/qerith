@@ -1,9 +1,8 @@
 import { join } from 'node:path';
 import { validateStagingTarget } from './staging-publish.mjs';
-import { assertDispatch } from './staging-qualification.mjs';
+import { assertQualificationJob } from './staging-qualification.mjs';
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-const isRunNumber = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
 const isUuid = value => typeof value === 'string' && uuid.test(value);
 const sameDeployment = (left, right) => left.id === right.id && left.version === right.version;
 
@@ -66,14 +65,33 @@ function workerApi(base, token, request) {
   };
 }
 
+async function runPhase(task, identity, parentSignal, timeout) {
+  const controller = new AbortController();
+  const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+  signal.throwIfAborted();
+  const deadline = performance.now() + timeout;
+  const expire = () => controller.abort(new DOMException('Qualification phase timed out.', 'TimeoutError'));
+  const timer = setTimeout(expire, timeout);
+  try {
+    // The callback must stop and drain its work on abort. Racing the promise
+    // would allow a still-running case to mutate staging during rollback.
+    return await task({ ...identity }, signal);
+  } finally {
+    // A blocked event loop can settle the callback before the timer gets a turn.
+    if (performance.now() >= deadline) expire();
+    clearTimeout(timer);
+    signal.throwIfAborted();
+  }
+}
+
 // No workflow caller. The protected runner must upload the immutable exact-SHA
-// build with the attempt tag, hold the lifecycle lock, and supply a live probe.
+// build with the attempt tag without changing rollback compatibility, hold
+// the lifecycle lock, and supply abortable probe and case callbacks.
 export async function withQualificationWorker({ candidate, recordRecovery, probe, exercise },
   env, cwd = process.cwd(), signal, request = fetch) {
-  const sha = assertDispatch(env, cwd);
-  const { GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt, CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
-  if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' || typeof token !== 'string' || !token.trim() ||
-      !isRunNumber(runId) || !isRunNumber(attempt) || !isUuid(candidate) ||
+  const { sha, runId, attempt } = assertQualificationJob(env, cwd);
+  const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
+  if (typeof token !== 'string' || !token.trim() || !isUuid(candidate) ||
       [recordRecovery, probe, exercise].some(fn => typeof fn !== 'function')) {
     throw new Error('Worker lifecycle requires the protected qualification attempt and an uploaded version.');
   }
@@ -94,12 +112,12 @@ export async function withQualificationWorker({ candidate, recordRecovery, probe
   try {
     active = await api.deploy(candidate, tag, signal);
     if (!sameDeployment(await api.current(signal), active)) throw new Error('Cannot verify the active qualification deployment.');
-    const evidence = await probe({ ...identity }, signal);
+    const evidence = await runPhase(probe, identity, signal, 30_000);
     if (evidence?.ready !== true || evidence.sha !== sha || evidence.version !== candidate) {
       throw new Error('Staging Worker did not prove exact-SHA runtime readiness.');
     }
     signal?.throwIfAborted();
-    cases = await exercise({ ...identity }, signal);
+    cases = await runPhase(exercise, identity, signal, 20 * 60_000);
   } finally {
     // Recovery has its own bounded requests, even if the exercise was cancelled.
     // With an ambiguous activation response, recover only an observed attempt-owned deployment.
