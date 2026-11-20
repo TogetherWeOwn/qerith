@@ -108,3 +108,37 @@ migrations.
 Recreation requires reviewed updates to the Wrangler binding and publisher UUID
 pin before dispatching the new SHA; do not relax validation. Record the previous
 Worker version or its absence; Worker rollback is separate from D1 recovery.
+
+## Exact-SHA qualification (disabled)
+
+`drive-staging-qualification.yml` verifies that `tested_sha` is one lowercase
+40-hex SHA, equal to the manual dispatch head and checked-out commit, and an
+ancestor of fetched `origin/main`. A dispatch of today's head with yesterday's
+SHA as input cannot qualify yesterday's head. The protected `staging` job
+intentionally fails: it has no live runner, secrets or upload step. Do not
+dispatch this increment. Required CI tests the policy with local Git history
+and in-memory evidence only; neither is live qualification.
+
+Remaining source slices, in dependency order:
+
+1. Wire the protected lifecycle: the exact deployed SHA and readiness, native
+   migration ledger and pre-apply Time Travel bookmark, rollback to the prior
+   Worker version or verified disablement, whole-estate zero-idle inventory,
+   and attempt-specific prefix-scoped cleanup with verified native expiry for
+   cancellation or runner loss. Keep artifact publication disabled.
+2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
+   invite acceptance and revocation, cross-user and signed-out denial,
+   authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and
+   download with matching digests, a ≥1 GiB interrupted/resumed transfer,
+   folders, sharing and revocation, and qualified deletion (combined envelope,
+   boundary and safe fallback, rollback/retry, and exact-provider cleanup).
+   Keep the receipt disabled until all these cases and lifecycle checks are
+   wired and covered offline.
+3. Wire the sole upload, last and success-only after verified cleanup, named
+   `drive-staging-qualification-<tested-sha>-attempt-<GITHUB_RUN_ATTEMPT>`.
+   The consumer also requires the matching successful workflow attempt on
+   `main`. Preview, fixture, skipped, failed and cancelled runs do not qualify.
+
+Before a live dispatch, verify that its exact SHA includes reviewed full-v0
+app admission and the reviewed S3 binding, and that the protected staging
+prerequisites above are satisfied. This does not change preview or production.
