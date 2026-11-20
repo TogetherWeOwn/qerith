@@ -202,15 +202,32 @@ export async function runQualificationPhase(task, identity, parentSignal, timeou
   }
 }
 
+export async function withQualificationRecovery(task, recover) {
+  let failure;
+  try {
+    return await task();
+  } catch (error) {
+    failure = [error];
+    throw error;
+  } finally {
+    try {
+      await recover();
+    } catch (error) {
+      if (!failure) throw error;
+      throw new AggregateError([...failure, error], 'Qualification and recovery both failed.');
+    }
+  }
+}
+
 // No workflow caller. Hold the lifecycle lock from upload through restore and
-// supply abortable probe and case callbacks.
-export async function withQualificationWorker({ upload, recordRecovery, probe, exercise },
+// supply abortable probe, case and scoped cleanup callbacks.
+export async function withQualificationWorker({ upload, recordRecovery, probe, exercise, cleanup },
   env, cwd = process.cwd(), signal, request = fetch) {
   const { sha, runId, attempt } = assertQualificationJob(env, cwd);
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
   const { version: candidate, previousDeployment, previousVersion } = upload ?? {};
   if (typeof token !== 'string' || !token.trim() || ![candidate, previousDeployment, previousVersion].every(isUuid) ||
-      candidate === previousVersion || [recordRecovery, probe, exercise].some(fn => typeof fn !== 'function')) {
+      candidate === previousVersion || [recordRecovery, probe, exercise, cleanup].some(fn => typeof fn !== 'function')) {
     throw new Error('Worker lifecycle requires the protected qualification attempt and an uploaded version.');
   }
   const { name } = validateStagingTarget(join(cwd, 'apps/drive'), account);
@@ -228,8 +245,7 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
 
   let active;
   let restored;
-  let cases;
-  try {
+  const cases = await withQualificationRecovery(async () => {
     active = await api.deploy(candidate, tag, signal);
     if (!sameDeployment(await api.current(signal), active)) throw new Error('Cannot verify the active qualification deployment.');
     const evidence = await runQualificationPhase(probe, identity, signal, 30_000);
@@ -237,8 +253,13 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
       throw new Error('Staging Worker did not prove exact-SHA runtime readiness.');
     }
     signal?.throwIfAborted();
-    cases = await runQualificationPhase(exercise, identity, signal, 20 * 60_000);
-  } finally {
+    return withQualificationRecovery(() => runQualificationPhase(exercise, identity, signal, 18 * 60_000), async () => {
+      // Cleanup must finish before rollback and has its own budget after cancellation.
+      if (await runQualificationPhase(cleanup, identity, undefined, 60_000) !== true) {
+        throw new Error('Qualification prefix cleanup is unverified.');
+      }
+    });
+  }, async () => {
     // Recovery has its own bounded requests, even if the exercise was cancelled.
     // With an ambiguous activation response, recover only an observed attempt-owned deployment.
     try {
@@ -249,7 +270,7 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
     } catch {
       throw new Error('Staging Worker rollback is unverified; reconcile the recorded deployment before retrying.');
     }
-  }
+  });
   signal?.throwIfAborted();
   return { ...identity, previousVersion: previous.version, restoredDeployment: restored.id, cases };
 }

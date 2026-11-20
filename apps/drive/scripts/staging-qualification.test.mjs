@@ -116,9 +116,10 @@ function lifecycle(t, failure, controller = new AbortController()) {
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
   const events = [];
   const prefix = 'drive-qualification/full-v0/182/3/';
+  const failures = [].concat(failure);
   const step = name => {
     events.push(name);
-    return failure !== name;
+    return !failures.includes(name);
   };
   const candidate = { version: 'candidate' };
   const ops = {
@@ -164,15 +165,21 @@ function lifecycle(t, failure, controller = new AbortController()) {
       return { bookmark: 'bookmark' };
     },
     probe: () => step('probe'),
-    async worker({ upload, recordRecovery, probe, exercise }, _env, _cwd, signal) {
+    async worker({ upload, recordRecovery, probe, exercise, cleanup }, _env, _cwd, signal) {
       assert.equal(upload, candidate);
       await recordRecovery({ previousVersion: 'baseline' });
       step('activate');
       try {
         if (!probe()) throw new Error('Readiness failed');
-        return { cases: await exercise(candidate, signal), restoredDeployment: 'restored' };
+        try {
+          return { cases: await exercise(candidate, signal), restoredDeployment: 'restored' };
+        } finally {
+          if (await cleanup(candidate, new AbortController().signal) !== true) {
+            throw new Error('Qualification prefix cleanup is unverified.');
+          }
+        }
       } finally {
-        step('restore');
+        if (!step('restore')) throw new Error('Worker rollback is unverified; reconcile before retrying.');
       }
     },
   };
@@ -216,6 +223,17 @@ test('qualification failures and cancellation suppress the result without skippi
   const { run, events } = lifecycle(t, 'probe');
   await assert.rejects(run(), /Readiness failed/);
   assert.deepEqual(events, [...successOrder.slice(0, 8), 'restore', 'inventory-after']);
+});
+
+test('final inventory failure preserves Worker rollback reconciliation', async t => {
+  const { run, events } = lifecycle(t, ['restore', 'inventory-after']);
+  await assert.rejects(run(), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.errors[0].message, /rollback is unverified; reconcile/);
+    assert.match(error.errors[1].message, /inventory is unverified \(after\)/);
+    return true;
+  });
+  assert.deepEqual(events, successOrder);
 });
 
 test('the staged workflow has no producer or provider path', () => {

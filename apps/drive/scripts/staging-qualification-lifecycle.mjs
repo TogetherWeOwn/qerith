@@ -1,7 +1,7 @@
 import { assertQualificationJob } from './staging-qualification.mjs';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
 import {
-  probeQualificationWorker, runQualificationPhase, uploadQualificationWorker, withQualificationWorker,
+  probeQualificationWorker, runQualificationPhase, uploadQualificationWorker, withQualificationRecovery, withQualificationWorker,
 } from './staging-qualification-worker.mjs';
 
 const stagingAdapters = Object.freeze({
@@ -31,8 +31,7 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
   // No staging mutation before reviewed admission and inventory checks.
   await requireProof(assertFullV0, context, signal, 30_000, 'Reviewed full-v0 admission is unverified.');
   await inspect('before', signal);
-  let result;
-  try {
+  const result = await withQualificationRecovery(async () => {
     signal?.throwIfAborted();
     // Reject a stale upload-history baseline before any D1 changes. Do not
     // force inheritance or automatically republish a baseline to make it eligible.
@@ -44,22 +43,11 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
       upload: candidate,
       recordRecovery: record('worker'),
       probe,
-      async exercise(active, caseSignal) {
-        const attempt = { ...active, ...context };
-        try {
-          return await runQualificationPhase(exercise, attempt, caseSignal, 18 * 60_000);
-        } finally {
-          // Keep the candidate active for scoped cleanup, with a separate
-          // budget even after the parent or case signal has been cancelled.
-          await requireProof(cleanup, attempt, undefined, 60_000, 'Qualification prefix cleanup is unverified.');
-        }
-      },
+      exercise: (active, phaseSignal) => exercise({ ...active, ...context }, phaseSignal),
+      cleanup: (active, phaseSignal) => cleanup({ ...active, ...context }, phaseSignal),
     }, env, cwd, signal);
-    result = { migrations, deployment };
-  } finally {
-    // Worker recovery completes (or fails) before checking the estate again.
-    await inspect('after');
-  }
+    return { migrations, deployment };
+  }, () => inspect('after'));
   signal?.throwIfAborted();
   return result;
 }
