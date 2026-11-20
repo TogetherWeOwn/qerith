@@ -3,18 +3,20 @@ import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
+import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
+import { admitStagingRequest } from '../../drive/src/lib/server/staging-admission.ts';
 import { createUploadIntent, maxUploadIntentBytes, postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 
 const origin = 'https://drive.example';
 const config = { endpoint: 'https://storage.example', bucket: 'drive-test', region: 'us-east-1', accessKeyId: 'fixture-key', secretAccessKey: 'fixture-secret' };
-async function fixture() {
+async function fixture(requestOrigin = origin) {
   const db = env.DB, owner = crypto.randomUUID();
   await applyD1Migrations(db, env.DRIVE_MIGRATIONS);
   await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(owner).run();
   const sessions = new Sessions(db), { token } = await sessions.issue(owner);
-  const bindings = { DB: db, DRIVE_ORIGIN: origin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
+  const bindings = { DB: db, DRIVE_ORIGIN: requestOrigin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: 'fixture',
     DRIVE_UPLOAD_VERIFIER: { isQualified: vi.fn(async () => true), completionTimeoutMs: () => 5000 } };
-  const request = (source = origin, cookie = `__Host-drive-session=${token}`, target = origin) =>
+  const request = (source = requestOrigin, cookie = `__Host-drive-session=${token}`, target = requestOrigin) =>
     new Request(`${target}/api/uploads`, { method: 'POST', headers: { ...(source ? { origin: source } : {}), cookie } });
   const fetch = vi.fn(), transport = { fetch, timeoutMs: 5000 };
   const create = (req = request(), size = 4, overrides = {}) =>
@@ -38,6 +40,49 @@ it('allocates from a browser JSON body and returns only the intent ID', async ()
   expect(response.status).toBe(201);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
   expect(await response.json()).toEqual({ id: intent.id });
+});
+
+it('allocates only for the live staging member behind the exact flag, without admitting upload routes', async () => {
+  const { bindings, db, owner, post, request, row, revoke, fetch } = await fixture(stagingOrigin);
+  const body = '{"size":4}', enabled = { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  for (const flag of [undefined, '0', 'true']) {
+    expect((await post(body, { overrides: { DRIVE_STAGING_INVITE_ACCEPTANCE: flag } })).status).toBe(401);
+  }
+  expect((await post(body, { req: request(origin), overrides: enabled })).status).toBe(403);
+  const other = crypto.randomUUID();
+  await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(other).run();
+  expect((await post(JSON.stringify({ size: 4, ownerId: other }), { overrides: enabled })).status).toBe(400);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+
+  fetch.mockImplementation(async () => new Response(
+    `<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`));
+  const result = await post(body, { overrides: enabled }), intent = await row();
+  expect(result.status).toBe(201);
+  expect(await result.json()).toEqual({ id: intent.id });
+  expect(intent).toMatchObject({ owner_id: owner, declared_size: 4, state: 'allocated', upload_id: 'provider-only' });
+  expect(fetch).toHaveBeenCalledOnce();
+  const [[signed]] = fetch.mock.calls;
+  expect(signed.method).toBe('POST');
+  expect(signed.url).toBe(`${config.endpoint}/${config.bucket}/${intent.object_key}?uploads=`);
+  expect(signed.headers.get('authorization')).toMatch(/^AWS4-HMAC-SHA256 /);
+
+  const runtime = { ...bindings, ...enabled }, handle = privateRequests(runtime), resolve = vi.fn();
+  const empty = new Set(), assets = { signIn: empty, root: empty, invite: empty };
+  for (const [path, routeId, method] of [
+    ['', '', 'POST'], [`/${intent.id}/parts/1`, '/[intentId]/parts/[partNumber]', 'PUT'],
+    [`/${intent.id}/complete`, '/[intentId]/complete', 'POST'],
+  ]) {
+    const req = new Request(`${stagingOrigin}/api/uploads${path}`, { method, headers: request().headers });
+    expect((await admitStagingRequest(req, runtime, true, assets)).status).toBe(403);
+    const denied = await handle({ event: { request: req, route: { id: `/api/uploads${routeId}` }, locals: {} }, resolve });
+    expect(denied.status).toBe(403);
+  }
+  expect(resolve).not.toHaveBeenCalled();
+  expect(await db.prepare('SELECT 1 FROM drive_published_generations WHERE intent_id = ?').bind(intent.id).first()).toBeNull();
+  await revoke();
+  expect((await post(body, { overrides: enabled })).status).toBe(401);
+  expect(fetch).toHaveBeenCalledOnce();
 });
 
 it('rejects malformed, oversized and truncated JSON before claiming or dispatching', async () => {
@@ -110,15 +155,18 @@ it('requires exact configured target and source origins, a live cookie and quali
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each(['mutation', 'dispatch'])('denies revocation at the %s boundary', async (boundary) => {
-  const { db, owner, bindings, create, row, revoke, fetch } = await fixture();
+it.each([
+  ['fixture', 'mutation', origin], ['fixture', 'dispatch', origin],
+  ['staging invite', 'mutation', stagingOrigin], ['staging invite', 'dispatch', stagingOrigin],
+])('%s denies revocation at the %s boundary', async (_mode, boundary, requestOrigin) => {
+  const { db, owner, bindings, create, row, revoke, fetch } = await fixture(requestOrigin);
   const check = bindings.DRIVE_UPLOAD_VERIFIER.isQualified;
   check.mockImplementation(async () => {
     if (boundary === 'mutation') await revoke();
     else if (check.mock.calls.length === 2) await db.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(owner).run();
     return true;
   });
-  expect((await create()).status).toBe(boundary === 'mutation' ? 401 : 503);
+  expect((await create(undefined, 4, { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' })).status).toBe(boundary === 'mutation' ? 401 : 503);
   expect(fetch).not.toHaveBeenCalled();
   expect(await row()).toEqual(boundary === 'mutation' ? null : expect.objectContaining({ state: 'created', upload_id: null }));
 });

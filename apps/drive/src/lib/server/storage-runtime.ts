@@ -1,4 +1,5 @@
 import { uploadStorageEvidence } from './metadata/upload-storage-evidence';
+import type { DriveAuthEnv } from './request-auth';
 import { createS3Listing } from './s3/listing';
 import { MAX_PARTS, type CompletedPart } from './s3/multipart-completion';
 import type { UploadRouteEnv } from './upload-routes';
@@ -83,12 +84,14 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
   };
 }
 
-export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB; DRIVE_ORIGIN?: string },
+export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB } &
+  Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>,
   transport: typeof fetch = (input, init) => fetch(input, init)) {
   const identity = storageIdentity(env);
   return {
     DB: env.DB,
     DRIVE_ORIGIN: env.DRIVE_ORIGIN,
+    DRIVE_STAGING_INVITE_ACCEPTANCE: env.DRIVE_STAGING_INVITE_ACCEPTANCE,
     DRIVE_UPLOAD_S3: identity?.settings,
     DRIVE_UPLOAD_EPOCH: identity?.epoch,
     DRIVE_UPLOAD_VERIFIER: identity ? storageVerifier(identity, env.DRIVE_S3_QUALIFICATION, transport) : undefined

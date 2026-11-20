@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { uploadStorageEvidence } from '../src/lib/server/metadata/upload-storage-evidence';
 import { downloadStorage } from '../src/lib/server/published-download';
+import { stagingOrigin } from '../src/lib/server/request-auth';
 import { wireUploadStorage } from '../src/lib/server/storage-runtime';
 import { uploadRoutes, type UploadRouteEnv } from '../src/lib/server/upload-routes';
 
@@ -38,6 +39,15 @@ test('upload and download derive the same storage identity and configuration', a
   const invalid = { ...env, DRIVE_S3_ENDPOINT: 'http://storage.example.test' };
   assert.equal(wireUploadStorage(invalid, noFetch).DRIVE_UPLOAD_S3, undefined);
   assert.equal(downloadStorage(invalid), null);
+});
+
+test('passes through the staging invite flag without qualifying storage', () => {
+  const env = { ...bindings(), DRIVE_ORIGIN: stagingOrigin, DRIVE_S3_QUALIFICATION: undefined };
+  for (const flag of [undefined, '0', '1']) {
+    const upload = wireUploadStorage({ ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag }, noFetch);
+    assert.equal(upload.DRIVE_STAGING_INVITE_ACCEPTANCE, flag);
+    assert.equal(upload.DRIVE_UPLOAD_VERIFIER, undefined);
+  }
 });
 
 test('unqualified uploads stay unavailable without touching D1 or storage', async () => {

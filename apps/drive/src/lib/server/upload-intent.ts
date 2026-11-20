@@ -1,7 +1,7 @@
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { createMultipartCreate } from './s3/multipart-create';
 
@@ -62,9 +62,10 @@ export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
   const size = await readIntentSize(request);
   if (size === null) return reply(400);
-  const { DB, DRIVE_ORIGIN, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH, DRIVE_UPLOAD_VERIFIER: verifier } = env;
+  const { DB, DRIVE_ORIGIN, DRIVE_STAGING_INVITE_ACCEPTANCE, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
+    DRIVE_UPLOAD_VERIFIER: verifier } = env;
   return createUploadIntent(request, size, {
-    DB, DRIVE_ORIGIN, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
+    DB, DRIVE_ORIGIN, DRIVE_STAGING_INVITE_ACCEPTANCE, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
     // Do not allocate against storage the part and completion routes cannot use.
     DRIVE_UPLOAD_VERIFIER: verifier && { async isQualified(id, signal) {
       return await verifier.isQualified(id, signal) === true && uploadCompletionBudget(verifier, id) !== null;
@@ -80,7 +81,8 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!origin || !db) return reply(503);
   if (request.method !== 'POST') return reply(405);
   if (!allowsOrigin(request, origin.origin)) return reply(403);
-  const ownerOnly = env.DRIVE_ORIGIN === stagingOrigin;
+  // Allocation only; staging request admission and part/publication policy are separate.
+  const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
   let sent = false;
   try {
     const session = await readSession(request, db);
