@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
+import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 
 function history(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-'));
@@ -107,6 +108,114 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   }
   assert.throws(() => name({ ...evidence, results: { ...results, 'passkey-positive': 'skip' } }), /must pass/);
   assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
+});
+
+function lifecycle(t, failure, controller = new AbortController()) {
+  const { cwd, env } = history(t);
+  Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
+  const events = [];
+  const prefix = 'drive-qualification/full-v0/182/3/';
+  const step = name => {
+    events.push(name);
+    return failure !== name;
+  };
+  const candidate = { version: 'candidate' };
+  const ops = {
+    assertFullV0: () => step('full-v0'),
+    inventory({ phase, sha }, signal) {
+      assert.equal(sha, env.TESTED_SHA);
+      assert.equal(signal.aborted, false);
+      if (failure === 'cancel-after-restore' && phase === 'after') controller.abort();
+      return step(`inventory-${phase}`);
+    },
+    async recordRecovery({ kind, ...data }) {
+      await Promise.resolve();
+      assert.equal(data.prefix, prefix);
+      assert.equal(kind === 'd1' ? data.bookmark : data.previousVersion, kind === 'd1' ? 'bookmark' : 'baseline');
+      return step(`record-${kind}`);
+    },
+    async exercise({ version, prefix: keyPrefix }, signal) {
+      assert.equal(version, 'candidate');
+      assert.equal(keyPrefix, prefix);
+      step('exercise');
+      if (failure === 'cancel') controller.abort();
+      await Promise.resolve();
+      step('exercise-settled');
+      signal.throwIfAborted();
+      if (failure === 'exercise') throw new Error('Case failed');
+      return { 'passkey-positive': 'pass' };
+    },
+    cleanup({ prefix: keyPrefix, version }, signal) {
+      assert.equal(keyPrefix, prefix);
+      assert.equal(version, 'candidate');
+      assert.equal(signal.aborted, false);
+      return step('cleanup');
+    },
+  };
+  const adapters = {
+    upload() {
+      if (!step('upload')) throw new Error('Reconcile staging before retrying');
+      return candidate;
+    },
+    async migrate({ recordRecovery }) {
+      await recordRecovery({ bookmark: 'bookmark' });
+      step('migrate');
+      return { bookmark: 'bookmark' };
+    },
+    probe: () => step('probe'),
+    async worker({ upload, recordRecovery, probe, exercise }, _env, _cwd, signal) {
+      assert.equal(upload, candidate);
+      await recordRecovery({ previousVersion: 'baseline' });
+      step('activate');
+      try {
+        if (!probe()) throw new Error('Readiness failed');
+        return { cases: await exercise(candidate, signal), restoredDeployment: 'restored' };
+      } finally {
+        step('restore');
+      }
+    },
+  };
+  return { events, run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
+}
+
+const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'migrate', 'record-worker',
+  'activate', 'probe', 'exercise', 'exercise-settled', 'cleanup', 'restore', 'inventory-after'];
+
+test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
+  const { run, events } = lifecycle(t);
+  assert.deepEqual(await run(), { migrations: { bookmark: 'bookmark' },
+    deployment: { cases: { 'passkey-positive': 'pass' }, restoredDeployment: 'restored' } });
+  assert.deepEqual(events, successOrder);
+});
+
+test('qualification lifecycle rejects missing admission, a stale baseline and unrecorded recovery', async t => {
+  for (const [failure, error, finalInventory] of [
+    ['full-v0', /admission is unverified/, false],
+    ['inventory-before', /inventory is unverified/, false],
+    ['upload', /Reconcile staging before retrying/, true],
+    ['record-d1', /recovery record is unverified/, true],
+    ['record-worker', /recovery record is unverified/, true],
+  ]) {
+    const { run, events } = lifecycle(t, failure);
+    await assert.rejects(run(), error);
+    assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(failure) + 1),
+      ...(finalInventory ? ['inventory-after'] : [])]);
+  }
+});
+
+test('qualification failures and cancellation suppress the result without skipping recovery', async t => {
+  for (const [failure, error] of [
+    ['exercise', /Case failed/], ['cancel', { name: 'AbortError' }], ['cleanup', /prefix cleanup is unverified/],
+    ['inventory-after', /inventory is unverified/], ['cancel-after-restore', { name: 'AbortError' }],
+  ]) {
+    const { run, events } = lifecycle(t, failure);
+    await assert.rejects(run(), error);
+    assert.deepEqual(events, successOrder);
+  }
+  const { run, events } = lifecycle(t, 'probe');
+  await assert.rejects(run(), /Readiness failed/);
+  assert.deepEqual(events, [...successOrder.slice(0, 8), 'restore', 'inventory-after']);
 });
 
 test('the staged workflow has no producer or provider path', () => {

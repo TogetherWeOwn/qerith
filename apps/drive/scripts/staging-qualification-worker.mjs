@@ -165,7 +165,7 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   const tag = `${sha}-${runId}-${attempt}`;
   // Wrangler inherits from the latest upload, not the deployment serving traffic.
   if ((await api.recentUploads(signal))[0] !== previous.version) {
-    throw new Error('Staging baseline is not the latest uploaded version; refusing to inherit secrets.');
+    throw new Error('Staging baseline is not the latest uploaded version; refusing to inherit secrets. Reconcile staging before retrying.');
   }
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
@@ -183,7 +183,7 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   return { version, previousDeployment: previous.id, previousVersion: previous.version };
 }
 
-async function runPhase(task, identity, parentSignal, timeout) {
+export async function runQualificationPhase(task, identity, parentSignal, timeout) {
   const controller = new AbortController();
   const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
   signal.throwIfAborted();
@@ -232,12 +232,12 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
   try {
     active = await api.deploy(candidate, tag, signal);
     if (!sameDeployment(await api.current(signal), active)) throw new Error('Cannot verify the active qualification deployment.');
-    const evidence = await runPhase(probe, identity, signal, 30_000);
+    const evidence = await runQualificationPhase(probe, identity, signal, 30_000);
     if (evidence?.ready !== true || evidence.sha !== sha || evidence.version !== candidate) {
       throw new Error('Staging Worker did not prove exact-SHA runtime readiness.');
     }
     signal?.throwIfAborted();
-    cases = await runPhase(exercise, identity, signal, 20 * 60_000);
+    cases = await runQualificationPhase(exercise, identity, signal, 20 * 60_000);
   } finally {
     // Recovery has its own bounded requests, even if the exercise was cancelled.
     // With an ambiguous activation response, recover only an observed attempt-owned deployment.
