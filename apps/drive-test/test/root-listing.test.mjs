@@ -4,6 +4,8 @@ import { expect, it } from 'vitest';
 import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { loadRootListing } from '../../drive/src/lib/server/root-listing.ts';
+import { config, epoch, sql } from './fixtures/upload-completion.mjs';
+import { seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
 const origin = 'https://drive.example.test';
 const auth = { DB: env.DB, DRIVE_ORIGIN: origin };
@@ -72,6 +74,27 @@ it('lists bounded pages of only the session owner’s root and projects client-s
     return env.DB.prepare(sql);
   } };
   expect(await loadRootListing(request(token), { ...auth, DB: failedDb }, [page])).toEqual({ status: 'unavailable' });
+});
+
+it('projects only an availability bit for invitee files on a continuation page', async () => {
+  const operation = 'invitee-listing';
+  const { id, token } = await seedBoundPublication(operation);
+  const boundary = crypto.randomUUID();
+  const owner = `owner-${operation}`;
+  await sql("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Boundary', 'folder')", boundary, owner).run();
+  const staged = { DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  const storage = { ...staged, DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket,
+    DRIVE_S3_REGION: config.region, DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId,
+    DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey, DRIVE_S3_STORAGE_EPOCH: epoch };
+  const load = bindings => loadRootListing(request(token, undefined, stagingOrigin), bindings, [boundary]);
+  const expected = downloadable => ({ status: 'ok', folder: {
+    entries: [{ id, name: 'file', kind: 'file', downloadable }], nextPage: null
+  } });
+  expect(await load(storage)).toEqual(expected(true));
+  expect(await load({ ...storage, DRIVE_S3_STORAGE_EPOCH: 'epoch-2' })).toEqual(expected(false));
+  expect(await load(staged)).toEqual(expected(false));
+  await sql('INSERT INTO drive_upload_completion_quarantine VALUES (?)', operation).run();
+  expect(await load(storage)).toEqual(expected(false));
 });
 
 it('denies absent, wrong-origin, and revoked sessions rather than returning an empty drive', async () => {

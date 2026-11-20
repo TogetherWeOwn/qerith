@@ -2,6 +2,7 @@ import type { S3Config } from '../s3/config';
 import type { ImmutableS3Reference } from '../s3/objects';
 import { decodeCursor, encodeCursor, folderScope, type ListingDirection } from './listing-cursor';
 import { validateName } from './private';
+import { publishedGenerationFilter, publishedGenerationJoins } from './published-generation-sql';
 import { decodeUploadIdentity, uploadStorageEvidence } from './upload-storage-evidence';
 
 interface Statement {
@@ -95,15 +96,8 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
           SELECT hex(g.object_key) AS keyHex, hex(e.name) AS nameHex, g.etag,
             g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex${ownFileOnly ? ', a.remainingMs' : ''}
           FROM permitted a JOIN drive_entries e ON e.id = a.id
-          JOIN drive_published_generations g ON g.entry_id = e.id AND g.owner_id = e.owner_id
-            AND g.object_key = e.object_key AND g.size_bytes = e.size_bytes
-          JOIN drive_upload_publications p ON p.entry_id = g.entry_id
-            AND p.object_etag = g.etag AND p.size_bytes = g.size_bytes
-          WHERE e.kind = 'file' AND g.endpoint = ? AND g.bucket = ? AND g.storage_epoch = ?
-            AND NOT EXISTS (SELECT 1 FROM drive_deleted_entries d WHERE d.entry_id = e.id)
-            AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones t WHERE t.intent_id = g.intent_id)
-            AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = g.intent_id)
-            AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_quarantine q WHERE q.operation_id = p.completion_operation_id)`)
+          ${publishedGenerationJoins}
+          WHERE ${publishedGenerationFilter}`)
           .bind(...scope, endpoint, bucket, epoch).first<PublishedRow>();
         if (!row || (ownFileOnly && !(performance.now() - started < (row.remainingMs ?? 0)))) return null;
         const { etag, sizeBytes } = row;

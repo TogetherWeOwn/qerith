@@ -177,10 +177,13 @@ test('the hook resolves owner lifecycle only for a live owner on an admitted sta
   }
 });
 
-test('the staging hook admits members only to the exact root routes in invite mode', async () => {
+test('the staging hook admits members only to My Drive and the exact download GET in invite mode', async () => {
+  const exactDownload = '/api/download/01234567-89ab-cdef-0123-456789abcdef';
   for (const [path, method, routeId, allowed] of [
     ['/', 'GET', '/', true], ['/', 'HEAD', '/', true], ['/__data.json?page=cursor', 'GET', '/', true],
     ['/__data.json', 'HEAD', '/', false], ['/', 'POST', '/', false], ['/api/root-listing', 'GET', '/api/root-listing', false],
+    [exactDownload, 'GET', downloadRouteId, true], [exactDownload, 'HEAD', downloadRouteId, false],
+    [`${exactDownload}/`, 'GET', downloadRouteId, false], [exactDownload.replace('/0', '/%30'), 'GET', downloadRouteId, false],
     [downloadPath, 'GET', downloadRouteId, false], ['/api/uploads', 'POST', '/api/uploads', false],
     ['/api/owner/invitations', 'GET', '/api/owner/invitations', false],
   ] as const) {

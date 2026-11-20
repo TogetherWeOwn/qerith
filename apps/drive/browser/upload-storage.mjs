@@ -4,6 +4,9 @@ const endpoint = 'https://storage.example.test', bucket = 'drive-fixture', epoch
 const region = 'test', accessKeyId = 'fixture-key', secretAccessKey = 'synthetic-secret';
 const partTag = '"fixture-part"', etag = '"fixture-object"';
 const uploads = new Map(), objects = new Map();
+let calls = 0, shortNext = false;
+export const storageCalls = () => calls;
+export const truncateNextDownload = () => { shortNext = true; };
 export const bindings = {
   DRIVE_S3_ENDPOINT: endpoint, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: region,
   DRIVE_S3_ACCESS_KEY_ID: accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,
@@ -16,6 +19,7 @@ const { DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH, DRIVE_UPLOAD_VERIFIER } = wireUploa
 export const storage = { ...bindings, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH, DRIVE_UPLOAD_VERIFIER };
 
 export async function storageFetch(request) {
+  calls++;
   const url = new URL(request.url), prefix = `/${bucket}/`;
   if (url.origin !== endpoint || !url.pathname.startsWith(prefix)) throw new Error('Unexpected fixture fetch');
   const key = url.pathname.slice(prefix.length), query = url.searchParams;
@@ -54,8 +58,12 @@ export async function storageFetch(request) {
       return new Response(part, { status: 206, headers: { etag, 'content-length': String(part.byteLength),
         'content-range': `bytes ${start}-${end}/${bytes.byteLength}` } });
     }
-    return new Response(request.method === 'GET' ? bytes.slice(0) : null,
-      { headers: { etag, 'content-length': String(bytes.byteLength) } });
+    const headers = { etag, 'content-length': String(bytes.byteLength) };
+    if (request.method === 'GET' && shortNext) {
+      shortNext = false;
+      return new Response(new ReadableStream({ start(output) { output.close(); } }), { headers });
+    }
+    return new Response(request.method === 'GET' ? bytes.slice(0) : null, { headers });
   }
   throw new Error(`Unexpected fixture storage operation: ${request.method}`);
 }

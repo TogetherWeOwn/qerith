@@ -1,6 +1,5 @@
-import { entryId } from '../download-id';
 import { isTopLevelDocumentNavigation } from '../drive-navigation';
-import { downloadRedirect, downloadSignIn } from './download-navigation';
+import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
@@ -44,9 +43,7 @@ function route(method: string, path: string, assets: PreviewAssets, invite: bool
       (id === 'challenge' || id === 'restart' || id === 'verify')) return { kind: 'ceremony', step: id };
   if (invite && method === 'POST' && resource === 'invite' && action === undefined &&
       (id === 'present' || id === 'challenge' || id === 'enroll')) return { kind: 'invite-ceremony', step: id };
-  if (method === 'GET' && resource === 'download' && id && entryId.test(id) && action === undefined) {
-    return { kind: 'download' };
-  }
+  if (isExactDownloadGet(method, path)) return { kind: 'download' };
   if (resource !== 'uploads') return null;
   if (method === 'POST' && (id === undefined ||
       (uploadIdPattern.test(id) && action === 'complete' && part === undefined))) return { kind: 'upload' };
@@ -94,8 +91,9 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
-      const memberRoot = invite && (target.kind === 'root' || target.kind === 'root-data' || target.kind === 'private-asset');
-      if (session.role === 'owner' || memberRoot) {
+      const memberRoute = invite && (target.kind === 'root' || target.kind === 'root-data' ||
+        target.kind === 'private-asset' || target.kind === 'download');
+      if (session.role === 'owner' || memberRoute) {
         return target.kind === 'private-asset' || (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
       }

@@ -8,8 +8,8 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadConfigured, staging, bytesAllowed }: {
-    result: RootListingResult; page: string | null; uploadConfigured: boolean; staging: boolean; bytesAllowed: boolean;
+  let { result: initial, page, uploadConfigured, staging, downloadAllowed }: {
+    result: RootListingResult; page: string | null; uploadConfigured: boolean; staging: boolean; downloadAllowed: boolean;
   } = $props();
   let status = $state('');
   let refreshed = $state<RootListingResult>();
@@ -52,9 +52,9 @@
     }
   }
 
-  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind }) => ({
+  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
-    href: bytesAllowed && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
+    href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
     reload: true, size: '', bytes: null, modified: '', shared: false
   })) : []);
 </script>

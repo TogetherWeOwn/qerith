@@ -136,14 +136,14 @@ test('every protected request checks a live owner, including assets after revoca
   assert.equal(reads(), 2);
 });
 
-test('invite mode admits live members only to My Drive and its exact data and assets', async () => {
+test('invite mode admits live members to My Drive, its data and assets, and the exact download GET', async () => {
   const { env, revoke } = runtime('member');
   const admit = (input: Request, flag?: string) =>
     admitStagingRequest(input, { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag }, true, assets);
   for (const [path, methods, target] of protectedRoutes) {
     for (const method of methods) {
       const input = request(path, method);
-      const ownerOnly = target.kind === 'download' || target.kind === 'upload';
+      const ownerOnly = target.kind === 'upload';
       const disabledStatus = target.kind === 'root' && method === 'HEAD' ? 401 : 403;
       for (const flag of [undefined, '0', 'true', '1 ']) denied(await admit(input, flag), disabledStatus);
       const enabled = await admit(input, '1');
@@ -156,7 +156,7 @@ test('invite mode admits live members only to My Drive and its exact data and as
   }
   denied(await admit(request(data, 'GET', { cookie, 'sec-fetch-site': 'cross-site' }), '1'), 403);
   revoke();
-  for (const path of ['/', data, root]) denied(await admit(request(path), '1'), 401);
+  for (const path of ['/', data, root, `/api/download/${id}`]) denied(await admit(request(path), '1'), 401);
 });
 
 test('staging owner lifecycle routes require the exact invite flag and a live owner', async () => {
