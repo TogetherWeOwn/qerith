@@ -175,12 +175,19 @@ checked after Worker recovery, even after an error or cooperative cancellation.
 These are ordering checks with offline callbacks, not provider evidence. The
 qualification workflow still has no caller and cannot issue a receipt.
 
+The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
+and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects
+other providers, incomplete listings and more than 100 objects plus uploads;
+it validates both listings before any deletion and rereads both after cleanup.
+The cases must stop all writes before cleanup and keep all fixture keys in that
+prefix. This is not evidence of D1 cleanup or native expiry after runner loss.
+
 Remaining source slices, in dependency order:
 
-1. Implement whole-estate zero-idle inventory and attempt-specific prefix
-   cleanup with verified native expiry or stop for cancellation or runner loss.
-   Wire the protected caller only with those implementations, the durable
-   recovery writer and reviewed full-v0 prerequisites. Keep artifact publication disabled.
+1. Implement whole-estate zero-idle inventory, D1 fixture cleanup, and verified
+   native expiry or stop for cancellation or runner loss. Wire the protected
+   caller only with those implementations, the durable recovery writer and
+   reviewed full-v0 prerequisites. Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and
