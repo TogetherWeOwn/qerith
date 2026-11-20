@@ -17,9 +17,22 @@ async function patch(worker, origin, cookie, path, command, headers = {}) {
   return response;
 }
 
-export async function assertEntryChangeClosed({ worker, origin, cookie, headers }) {
-  const response = await patch(worker, origin, cookie, pathFor(file), rename('Closed'), headers);
-  assert.deepEqual([response.status, await response.text()], [404, '']);
+export async function assertEntryChangeClosed({ worker, DB, origin, owner, member }) {
+  await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES
+    ('closed-owner', 'fixture', 'Owner original', 'folder'),
+    ('closed-member', 'member', 'Member original', 'folder')`).run();
+  for (const [id, cookie, headers] of [
+    ['closed-owner', owner, {}],
+    ['closed-owner', owner, { 'x-test-invite': '1' }],
+    ['closed-member', member, { 'x-test-invite': '1' }],
+  ]) {
+    const row = DB.prepare('SELECT * FROM drive_entries WHERE id = ?').bind(id);
+    const before = await row.first();
+    assert.ok(before);
+    const response = await patch(worker, origin, cookie, pathFor(id), rename('Should not change'), headers);
+    assert.deepEqual([response.status, await response.text()], [404, '']);
+    assert.deepEqual(await row.first(), before);
+  }
 }
 
 export async function exerciseEntryChange({ worker, DB, origin, session }) {

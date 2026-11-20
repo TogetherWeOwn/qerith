@@ -338,9 +338,8 @@ export default { fetch(request, env, ctx) {
       const range = await get(file, { cookie, range: 'bytes=1-2' });
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
+      await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
-      await assertEntryChangeClosed({ worker, origin, cookie });
-      await assertEntryChangeClosed({ worker, origin, cookie: member, headers: { 'x-test-invite': '1' } });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
       assert.equal((await get(file, { cookie })).status, 401);

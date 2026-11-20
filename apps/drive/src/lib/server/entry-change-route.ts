@@ -53,7 +53,7 @@ async function patchEntry(request: Request, env: EntryChangeEnv, url: URL, wireI
   if (!token) return reply(401);
   const db = env.DB;
   if (typeof db?.withSession !== 'function') return reply(503);
-  const change = parseChange(await readMetadataJson(request));
+  const change = parseChange(await readMetadataJson(request, { uniqueFields: true }));
   if (!change || request.signal.aborted) return reply(400);
   try {
     const result = await moveSessionEntry(db, token, sourceId, change);

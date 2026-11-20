@@ -53,10 +53,21 @@ test('rejects invalid commands and invalid or oversized JSON before dispatch', a
   }
 });
 
-test('sanitizes an unexpected D1 batch failure', async () => {
+test('rejects duplicate command fields before opening a D1 session', async () => {
+  for (const body of [
+    '{"kind":"rename","name":"First","name":"Second"}',
+    '{"kind":"move","parentId":"folder","parentId":null}',
+    String.raw`{"kind":"rename","ki\u006ed":"rename","name":"New name"}`,
+  ]) {
+    await denied(entryChangeRequest(patch({ body }), fixture), 400);
+  }
+});
+
+test('accepts JSON string escapes and punctuation, and sanitizes unexpected D1 failures', async () => {
   const prepare = () => ({ bind() { return this; } });
   const failing = { ...DB, withSession() {
     return { prepare, async batch() { throw new Error('fixture-private failure'); } };
   } };
-  await denied(entryChangeRequest(patch(), { ...fixture, DB: failing }), 503);
+  const body = JSON.stringify({ kind: 'rename', name: 'Plan: ["draft"]' });
+  await denied(entryChangeRequest(patch({ body }), { ...fixture, DB: failing }), 503);
 });
