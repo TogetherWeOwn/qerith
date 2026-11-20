@@ -114,16 +114,38 @@ test('denied, lost, malformed, or oversized evidence never causes progress or a 
   }
 });
 
-test('rejects invalid candidates and oversized files locally, and bounds the destination before PUT', async () => {
+test('duplicate evidence keys never cause progress or a write', async () => {
+  const nested = `{"declaredSize":0,"parts":[{"partNumber":2,"partNumber":1,"sizeBytes":0,"sha256":"${part(1, '').sha256}"}]}`;
+  for (const body of [
+    '{"declaredSize":1,"declaredSize":0,"parts":[]}',
+    nested,
+    nested.replace('partNumber', 'part\\u004eumber'),
+  ]) {
+    const run = transfer(empty, [new Response(body, { headers: { 'content-type': 'application/json' } })]);
+    assert.deepEqual(await run.result, interrupted);
+    assert.deepEqual(run.paths(), [`${path}/resume`]);
+    assert.equal(run.calls[0].init?.method, 'GET');
+    assert.deepEqual(run.milestones, []);
+  }
+});
+
+test('an invalid destination name never causes progress or a write', async () => {
+  for (const [name, acknowledged] of [['...', false], ['...', true], ['界'.repeat(86), false], ['界'.repeat(1500), false]] as const) {
+    const run = transfer(new File([], name), [emptyEvidence(acknowledged)]);
+    assert.deepEqual(await run.result, interrupted);
+    assert.deepEqual(run.paths(), [`${path}/resume`]);
+    assert.equal(run.calls[0].init?.method, 'GET');
+    assert.deepEqual(run.milestones, []);
+  }
+});
+
+test('rejects invalid candidates and oversized files locally', async () => {
   const oversized = new File([], 'large.bin');
   Object.defineProperty(oversized, 'size', { value: 5 * 1024 ** 3 + 1 });
   for (const run of [transfer(oversized, []), transfer(empty, [], 'not/a-candidate'), transfer(empty, [], candidate.toUpperCase())]) {
     assert.deepEqual(await run.result, interrupted);
     assert.deepEqual(run.paths(), []);
   }
-  const run = transfer(new File([], '界'.repeat(1500)), [emptyEvidence(false)]);
-  assert.deepEqual(await run.result, interrupted);
-  assert.deepEqual(run.paths(), [`${path}/resume`]);
 });
 
 test('completion failures are not retried; only the explicit conflict is name-taken', async () => {

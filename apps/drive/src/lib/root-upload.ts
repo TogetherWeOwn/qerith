@@ -1,4 +1,5 @@
 import { entryId } from './download-id';
+import { validateName } from './entry-name';
 import { verifyUploadResumePrefix } from './upload-resume-evidence';
 
 // Match the multipart HTTP contract: 16 MiB per part, at least 5 MiB except for the final part.
@@ -41,7 +42,9 @@ export async function resumeMultipartToRoot(intentId: string, file: File, partAc
     // A nonempty suffix cannot be filled safely: claims protect individual slots, not file identity.
     // With a declared size of zero there are no competing nonempty bytes to admit. Still require
     // a 204 for the one empty slot if it was not already acknowledged by the evidence.
-    const destination = JSON.stringify({ parentId: null, name: file.name });
+    const name = file.name;
+    validateName(name);
+    const destination = JSON.stringify({ parentId: null, name });
     if (destination.length > destinationLimit || new TextEncoder().encode(destination).length > destinationLimit)
       return interrupted;
     if (prefix.parts === 0 && !await putPart(path, 1, file, fetcher)) return interrupted;
@@ -52,6 +55,24 @@ export async function resumeMultipartToRoot(intentId: string, file: File, partAc
   }
 }
 
+function parseUniqueJson(text: string): unknown {
+  const parsed: unknown = JSON.parse(text);
+  // With valid syntax, a string followed by a colon is a member name. Match whole
+  // strings so braces and colons inside them cannot affect object boundaries.
+  const objects: Set<string>[] = [];
+  for (const [token, key, colon] of text.matchAll(/("(?:[^"\\]|\\.)*")([ \t\r\n]*:)?|[{}]/gs)) {
+    if (token === '{') objects.push(new Set());
+    else if (token === '}') objects.pop();
+    else if (colon) {
+      const keys = objects[objects.length - 1];
+      const name = JSON.parse(key) as string;
+      if (keys.has(name)) return null;
+      keys.add(name);
+    }
+  }
+  return parsed;
+}
+
 async function readJsonWithin(response: Response, limit: number): Promise<unknown> {
   if (!response.body || response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== json['content-type'])
     return null;
@@ -60,7 +81,7 @@ async function readJsonWithin(response: Response, limit: number): Promise<unknow
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, offset)));
+      if (done) return parseUniqueJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, offset)));
       if (value.byteLength > limit - offset) {
         void reader.cancel().catch(() => {});
         return null;
