@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 
 function history(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-'));
@@ -234,6 +235,68 @@ test('final inventory failure preserves Worker rollback reconciliation', async t
     return true;
   });
   assert.deepEqual(events, successOrder);
+});
+
+const r2Attempt = { runId: '182', attempt: '3', prefix: 'drive-qualification/full-v0/182/3/' };
+const r2Key = `${r2Attempt.prefix}fixture`;
+
+function r2Fixture({ pending = { uploads: [{ key: r2Key, uploadId: 'fixture-upload' }] },
+  objects = { keys: [r2Key] }, afterUploads = { uploads: [] }, afterObjects = { keys: [] }, status = 204 } = {}) {
+  const trace = [];
+  const list = (kind, first, after) => async ({ prefix, verifyScope, signal }) => {
+    assert.equal(prefix, r2Attempt.prefix);
+    assert.equal(verifyScope, true);
+    assert.equal(signal.aborted, false);
+    const seen = trace.includes(kind);
+    trace.push(kind);
+    return seen ? after : first;
+  };
+  return { trace, io: { listing: { uploads: list('uploads', pending, afterUploads), objects: list('objects', objects, afterObjects) },
+    request: async ({ method, key, query, signal }) => {
+      assert.equal(method, 'DELETE');
+      assert.equal(signal.aborted, false);
+      trace.push([key, query]);
+      return { status };
+    } } };
+}
+
+test('R2 cleanup validates both lists before deleting and proves the exact prefix empty', async () => {
+  const { trace, io } = r2Fixture();
+  assert.equal(await cleanQualificationR2(r2Attempt, undefined, io), true);
+  assert.deepEqual(trace, ['uploads', 'objects', [r2Key, { uploadId: 'fixture-upload' }], [r2Key, undefined], 'uploads', 'objects']);
+});
+
+test('R2 cleanup refuses unsafe or partial snapshots before the first mutation', async () => {
+  const invalid = [
+    { objects: { keys: [r2Key, r2Key.replace('/182/3/', '/182/30/')] } },
+    { objects: { keys: [`${r2Attempt.prefix}../sibling`] } },
+    { objects: { keys: [r2Key, r2Key] } },
+    { objects: { keys: [], nextContinuationToken: 'partial' } },
+    { pending: { uploads: [], nextKeyMarker: r2Key, nextUploadIdMarker: 'partial' } },
+    { pending: { uploads: [{ key: r2Key, uploadId: '' }] } },
+    { objects: { keys: Array.from({ length: 100 }, (_, i) => `${r2Key}-${i}`) } },
+  ];
+  for (const options of invalid) {
+    const { trace, io } = r2Fixture(options);
+    await assert.rejects(cleanQualificationR2(r2Attempt, undefined, io), /cleanup is unverified/);
+    assert.deepEqual(trace, ['uploads', 'objects']);
+  }
+  const { trace, io } = r2Fixture();
+  await assert.rejects(cleanQualificationR2({ ...r2Attempt, prefix: 'drive-qualification/' }, undefined, io), /cleanup is unverified/);
+  await assert.rejects(cleanQualificationR2({ ...r2Attempt, attempt: '../3' }, undefined, io), /Invalid qualification run or attempt/);
+  assert.deepEqual(trace, []);
+});
+
+test('R2 cleanup withholds success on leftovers, failed deletion or cancellation', async () => {
+  for (const options of [{ afterObjects: { keys: [r2Key] } },
+    { afterUploads: { uploads: [{ key: r2Key, uploadId: 'late-upload' }] } }, { status: 403 }]) {
+    await assert.rejects(cleanQualificationR2(r2Attempt, undefined, r2Fixture(options).io), /cleanup is unverified/);
+  }
+  const controller = new AbortController();
+  const { trace, io } = r2Fixture();
+  io.request = async () => { trace.push('request settled'); controller.abort(); return { status: 204 }; };
+  await assert.rejects(cleanQualificationR2(r2Attempt, controller.signal, io), /cleanup is unverified/);
+  assert.deepEqual(trace, ['uploads', 'objects', 'request settled']);
 });
 
 test('the staged workflow has no producer or provider path', () => {

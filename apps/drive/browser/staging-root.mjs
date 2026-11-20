@@ -4,6 +4,7 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 
@@ -266,9 +267,17 @@ try {
   await deny('/', 403, { cookie: `${sessionName}=${memberToken}` });
   await deny('/', 401, { cookie: `${sessionName}=${memberToken}` }, 'HEAD');
 
+  await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'owner', 'Receipts', 'folder')").run();
+  await deny('/f/fixture-parent', 404, { cookie });
+  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
+  await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
+  assert.ok(await page.evaluate(async () => {
+    await document.fonts.ready;
+    return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
+  }), 'the opted-in SSR folder loads its actual font');
+
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
-  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
   await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });
   await Promise.all([page.waitForURL(`${origin}/people`), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
   const recovered = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);

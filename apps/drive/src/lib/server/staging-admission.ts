@@ -1,4 +1,4 @@
-import { isTopLevelDocumentNavigation } from '../drive-navigation';
+import { isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
@@ -10,13 +10,14 @@ interface PreviewAssets {
   root: ReadonlySet<string>;
   invite: ReadonlySet<string>;
   people: ReadonlySet<string>;
+  folder: ReadonlySet<string>;
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
-  { kind: 'private-asset' | 'people-asset' | 'root'; deadline?: number };
+  { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -32,6 +33,7 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
     if (path === '/sign-in') return { kind: 'sign-in' };
     if (invite && path === '/invite') return { kind: 'invite' };
     if (invite && path === '/people') return { kind: 'people' };
+    if (invite && isExactFolderDocument(request, url)) return { kind: 'folder' };
     if (path === '/') return { kind: 'root' };
     if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
     // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
@@ -40,6 +42,8 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
       if (invite && assets.invite.has(path)) return { kind: 'invite-asset' };
       if (assets.root.has(path)) return { kind: 'private-asset' };
       if (invite && assets.people.has(path)) return { kind: 'people-asset' };
+      // Preserve prior classifications even if the folder shares a build dependency.
+      if (invite && assets.folder.has(path) && request.url === stagingOrigin + path) return { kind: 'folder-asset' };
     }
   }
   const [, api, resource, id, action] = path.split('/', 5);
@@ -96,9 +100,11 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       const memberRoute = target.kind === 'upload'
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
         : invite && (target.kind === 'root' || target.kind === 'root-data' ||
-          target.kind === 'private-asset' || target.kind === 'download');
+          target.kind === 'private-asset' || target.kind === 'download' ||
+          target.kind === 'folder' || target.kind === 'folder-asset');
       if (session.role === 'owner' || memberRoute) {
-        return target.kind === 'private-asset' || target.kind === 'people-asset' || (target.kind === 'root' && request.method === 'HEAD')
+        return target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
+          (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
       }
       if (ownerPage) return deny(404);
@@ -118,7 +124,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
   const rootProbe = target.kind === 'root' && request.method === 'HEAD';
-  if (target.kind === 'private-asset' || target.kind === 'people-asset' || rootProbe) {
+  if (target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' || rootProbe) {
     if (!(performance.now() < (target.deadline ?? 0))) return deny(401);
     // The sign-in probe reports authorization, not whether the listing rendered.
     if (rootProbe) return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
@@ -132,6 +138,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'public-asset':
     case 'private-asset':
     case 'people-asset':
+    case 'folder-asset':
     case 'root-data': {
       const result = await (target.kind === 'root-data' ? dispatch.adapter(request) : dispatch.asset(request));
       const response = new Response(result.body, result);
@@ -148,6 +155,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'upload':
     case 'owner-lifecycle':
     case 'people':
+    case 'folder':
       return dispatch.adapter(request);
   }
 }
