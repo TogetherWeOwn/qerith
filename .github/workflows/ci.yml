@@ -423,10 +423,9 @@ jobs:
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
       - name: Resolve private qualification migrations with pinned Wrangler locally
-        if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
-        env:
-          DRIVE_QUALIFICATION_WRANGLER_LOCAL: '1'
-        run: timeout --signal=TERM --kill-after=10s 60s node --test --test-name-pattern '^pinned Wrangler' scripts/staging-qualification-migrations.test.mjs
+        # Older PR checkouts may have the unit tests but predate this integration check.
+        if: hashFiles('apps/drive/scripts/test-qualification-wrangler.sh') != ''
+        run: bash scripts/test-qualification-wrangler.sh
       - name: Check Drive project types and configuration coverage
         run: |
           npm run check
