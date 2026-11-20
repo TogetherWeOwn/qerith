@@ -62,6 +62,18 @@ before any S3 request. The receipt correlates the run to the independent
 review; the probe cannot itself establish exclusive writer scope. Only a
 passing exact-run artifact with verified cleanup can qualify storage.
 
+The publisher uses the reviewed copy of [the passing protected proof][proof]
+(artifact [14601057765][artifact]). It recomputes the storage identity from
+protected settings before migrations and again at publish. The recorded 932 ms
+completion uses a 3,000 ms budget. A signer namespace or writer-scope change
+requires a fresh epoch and a newly reviewed passing receipt, even if the bucket
+and endpoint are unchanged; the local digest check is not a policy readback.
+The signer credentials are passed only as Worker secrets. The publish does not
+set `DRIVE_ORIGIN` or `DRIVE_SIGN_IN_FIXTURE` and does not qualify admission.
+
+[proof]: https://github.com/TogetherWeOwn/qerith/actions/runs/44674630242/attempts/1
+[artifact]: https://github.com/TogetherWeOwn/qerith/actions/runs/44674630242/artifacts/14601057765
+
 The dry run and fake tests do not prove live readiness. Before the first
 main dispatch, require exact-head Actions, independent Security then QA review,
 and verify that `staging` is restricted to `main`. Place only the authorized

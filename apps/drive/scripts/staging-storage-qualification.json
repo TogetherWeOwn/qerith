@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "sourceSha": "1ab9957fd5d6ec014c2472a918817eff04b6dd4f",
+  "runId": "44674630242",
+  "runAttempt": 1,
+  "passed": true,
+  "failures": [],
+  "scope": {
+    "identitySha256": "4a480080ee60d15e002c34bb191dba3dbca9d52b0b34eed20b6b3e6e1d95d705",
+    "policySha256": "c35fa60d1c1864dc45b442e8a450cf2a0f157bd41b10c84cdf19fdcb03660fa3"
+  },
+  "cleanup": "verified",
+  "pages": 2,
+  "parts": [
+    {
+      "partNumber": 1,
+      "size": 5242880,
+      "etagSha256": "03e59d5760fec2305916923aa06ffa9550f9c4a046afe63896069ae718a5e507"
+    },
+    {
+      "partNumber": 2,
+      "size": 257,
+      "etagSha256": "755e99bc65a7a22197adb2adabe4715a6255b94ec958d04608308724cc32ee95"
+    }
+  ],
+  "completionMs": 932,
+  "completionTimeoutMs": 3000,
+  "timeoutRationale": "Twice the observed sign-through-body time, plus one second, rounded up to a second",
+  "generation": {
+    "etagSha256": "83f23637089b07e7b33c5d30f224a264081cf64bfeb60ac0f1f4c6bdea89facb",
+    "bytes": 5243137
+  },
+  "fullBytes": 5243137,
+  "rangeBytes": 4
+}

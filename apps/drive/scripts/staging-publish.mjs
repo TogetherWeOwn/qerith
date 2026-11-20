@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempDisposableSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
@@ -43,6 +44,43 @@ export function validateStagingTarget(root, accountId) {
     throw new Error('invalid staging Worker configuration');
   }
   requireContained(root, 'node_modules/.bin/wrangler', 'isFile');
+  return config;
+}
+
+const storageKeys = ['ENDPOINT', 'BUCKET', 'REGION', 'STORAGE_EPOCH', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'];
+
+async function stagingStorage(env, receipt) {
+  const names = storageKeys.map(key => `QERITH_S3_${key}`);
+  const missing = names.filter(name => !env[name]?.trim());
+  if (missing.length) throw new Error(`missing staging storage settings: ${missing.join(', ')}`);
+  const [endpoint, bucket, region, epoch, accessKeyId, secretAccessKey] = names.map(name => env[name]);
+  const { validateConfig } = await import('../src/lib/server/s3/config.ts');
+  const settings = validateConfig({ endpoint, bucket, region, accessKeyId, secretAccessKey });
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(epoch) || settings.endpoint.length > 2048) {
+    throw new Error('invalid staging storage identity');
+  }
+  const storageConfigId = JSON.stringify([settings.endpoint, bucket, epoch]);
+  const identitySha256 = createHash('sha256').update(JSON.stringify([storageConfigId, region, accessKeyId])).digest('hex');
+  const { version, sourceSha, runId, runAttempt, completionTimeoutMs } = receipt ?? {};
+  if (version !== 1 || receipt.passed !== true || !Array.isArray(receipt.failures) || receipt.failures.length !== 0 ||
+      receipt.cleanup !== 'verified' ||
+      receipt.scope?.identitySha256 !== identitySha256 || !/^[0-9a-f]{64}$/.test(receipt.scope.policySha256 ?? '') ||
+      typeof sourceSha !== 'string' || !/^[0-9a-f]{40}$/.test(sourceSha) ||
+      typeof runId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(runId) || !Number.isSafeInteger(runAttempt) || runAttempt < 1 ||
+      !Number.isSafeInteger(completionTimeoutMs) || completionTimeoutMs < 1 || completionTimeoutMs > 60_000) {
+    throw new Error('staging storage does not match a passing qualification');
+  }
+  return {
+    vars: { DRIVE_S3_ENDPOINT: settings.endpoint, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: region,
+      DRIVE_S3_STORAGE_EPOCH: epoch,
+      DRIVE_S3_QUALIFICATION: JSON.stringify({ version, storageConfigId, region, sourceSha, runId, runAttempt, completionTimeoutMs }) },
+    secrets: { DRIVE_S3_ACCESS_KEY_ID: accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey },
+  };
+}
+
+function reviewedStorage(env) {
+  const receipt = JSON.parse(readFileSync(new URL('./staging-storage-qualification.json', import.meta.url), 'utf8'));
+  return stagingStorage(env, receipt);
 }
 
 function enrollmentForRelease(grant, sha, preflight) {
@@ -57,23 +95,34 @@ function enrollmentForRelease(grant, sha, preflight) {
   return expiresAt > now ? grant : '';
 }
 
-export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, grant = '', sha = '') {
-  validateStagingTarget(root, accountId);
-  return deploy(root, run, enrollmentForRelease(grant, sha, false), sha);
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, grant = '', sha = '', storage) {
+  const config = validateStagingTarget(root, accountId);
+  return deploy(root, run, enrollmentForRelease(grant, sha, false), sha, config, storage);
 }
 
-async function deploy(root, run, enrollment, sha) {
+async function deploy(root, run, enrollment, sha, config, storage) {
   // Wrangler inherits prior secrets. An inactive publish must explicitly disarm them.
   const args = ['deploy', entryPath, '--config', configPath, '--var',
     `DRIVE_OWNER_ENROLLMENT_RELEASE:${enrollment ? sha : 'disabled'}`];
-  using secretDir = enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
-  if (secretDir) {
-    const file = resolve(secretDir.path, 'secrets.json');
-    writeFileSync(file, JSON.stringify({ DRIVE_OWNER_ENROLLMENT: enrollment }), { mode: 0o600, flag: 'wx' });
+  using deployDir = storage || enrollment ? mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-')) : undefined;
+  if (storage) {
+    const file = resolve(deployDir.path, configPath);
+    writeFileSync(file, JSON.stringify({ ...config, main: resolve(root, config.main),
+      assets: { ...config.assets, directory: resolve(root, config.assets.directory) },
+      d1_databases: config.d1_databases.map(db => ({ ...db, migrations_dir: resolve(root, db.migrations_dir) })),
+      vars: storage.vars }), { mode: 0o600, flag: 'wx' });
+    args[1] = resolve(root, entryPath);
+    args[3] = file;
+  }
+  if (deployDir) {
+    const file = resolve(deployDir.path, 'secrets.json');
+    const secrets = { ...storage?.secrets, ...(enrollment ? { DRIVE_OWNER_ENROLLMENT: enrollment } : {}) };
+    writeFileSync(file, JSON.stringify(secrets), { mode: 0o600, flag: 'wx' });
     args.push('--secrets-file', file);
   }
   const env = { ...process.env };
   delete env.DRIVE_OWNER_ENROLLMENT;
+  for (const key of storageKeys) delete env[`QERITH_S3_${key}`];
   await new Promise((resolveRun, reject) => {
     const child = run(resolve(root, 'node_modules/.bin/wrangler'), args, {
       cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -104,6 +153,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (process.argv.length === 3 && process.argv[2] === '--check-target') {
     validateStagingTarget(process.cwd(), process.env.CLOUDFLARE_ACCOUNT_ID);
     enrollmentForRelease(process.env.DRIVE_OWNER_ENROLLMENT, process.env.GITHUB_SHA, true);
+  } else if (process.argv.length === 3 && process.argv[2] === '--check-storage') {
+    await reviewedStorage(process.env);
   } else if (process.argv.length === 3 && process.argv[2] === '--publish') {
     const env = process.env;
     if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'publish' ||
@@ -112,7 +163,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         !env.CLOUDFLARE_API_TOKEN) {
       throw new Error('publication requires the protected staging dispatch job');
     }
-    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT, env.GITHUB_SHA);
+    await publishStaging(process.cwd(), spawn, env.CLOUDFLARE_ACCOUNT_ID, env.DRIVE_OWNER_ENROLLMENT, env.GITHUB_SHA,
+      await reviewedStorage(env));
   } else {
     throw new Error('unrecognized staging publisher arguments');
   }
