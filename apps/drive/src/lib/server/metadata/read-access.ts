@@ -34,15 +34,17 @@ async function sessionHash(token: string): Promise<string | null> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+const sessionRemainingMs = "s.expires_at - CAST(unixepoch('subsec') * 1000 AS INTEGER)";
+
 // Anchor at the requested entry, not at a previously authorized ancestor. Each
 // statement rechecks both parties and the session against the current tree.
-const access = `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
+const entryAccess = (includeLifetime: boolean) => `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
   SELECT id, parent_id, owner_id FROM drive_entries WHERE id = ?
   UNION
   SELECT e.id, e.parent_id, e.owner_id FROM drive_entries e
     JOIN ancestors a ON e.id = a.parent_id AND e.owner_id = a.owner_id
 ), permitted AS (
-  SELECT target.id FROM drive_entries target
+  SELECT target.id${includeLifetime ? `, ${sessionRemainingMs} AS remainingMs` : ''} FROM drive_entries target
   JOIN drive_principals owner ON owner.id = target.owner_id AND owner.status = 'active'
   JOIN drive_sessions s ON s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
   JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active'
@@ -52,8 +54,11 @@ const access = `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
   ))
 )`;
 
+const access = entryAccess(false);
+const publishedGrantAccess = entryAccess(true);
+
 const ownAccess = (allowMembers: boolean) => `WITH permitted AS (
-  SELECT e.id, s.expires_at - CAST(unixepoch('subsec') * 1000 AS INTEGER) AS remainingMs FROM drive_entries e
+  SELECT e.id, ${sessionRemainingMs} AS remainingMs FROM drive_entries e
   JOIN drive_sessions s ON s.principal_id = e.owner_id
   JOIN drive_principals p ON p.id = s.principal_id AND p.status = 'active'
     AND ${allowMembers ? "p.role IN ('owner', 'member')" : "p.role = 'owner'"}
@@ -73,15 +78,17 @@ interface PublishedRow {
   revisionHex: string;
   etag: string;
   sizeBytes: number;
-  remainingMs?: number;
+  remainingMs: number;
 }
+
+/** Compatibility: false allows grants; true requires the owner role on an own file. */
+export type PublishedReadMode = boolean | 'own-file' | 'grant-aware';
 
 /** Server-only. Use fresh primary reads; never serialize or cache the reference. */
 export function createPublishedReadAccess(db: { withSession(constraint: 'first-primary'): Database }, epoch: string, config: S3Config,
-  mode: boolean | 'own-file' = false) {
-  // Keep existing boolean callers: false allows grants, true requires the owner role.
-  const ownFileOnly = mode !== false;
-  const permitted = ownFileOnly ? ownAccess(mode === 'own-file') : access;
+  mode: PublishedReadMode = false) {
+  const ownFileOnly = mode !== false && mode !== 'grant-aware';
+  const permitted = ownFileOnly ? ownAccess(mode === 'own-file') : publishedGrantAccess;
   const { settings: { endpoint, bucket }, storageConfigId } = uploadStorageEvidence(config, epoch);
   return {
     storageConfigId,
@@ -96,12 +103,13 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
         const started = performance.now();
         const row = await db.withSession('first-primary').prepare(`${permitted}
           SELECT hex(g.object_key) AS keyHex, hex(e.name) AS nameHex, g.etag,
-            g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex${ownFileOnly ? ', a.remainingMs' : ''}
+            g.size_bytes AS sizeBytes, hex(g.evidence_revision) AS revisionHex, a.remainingMs
           FROM permitted a JOIN drive_entries e ON e.id = a.id
           ${publishedGenerationJoins}
           WHERE ${publishedGenerationFilter}`)
           .bind(...scope, endpoint, bucket, epoch).first<PublishedRow>();
-        if (!row || (ownFileOnly && !(performance.now() - started < (row.remainingMs ?? 0)))) return null;
+        // D1 measured the budget at statement time. Charge the whole round trip.
+        if (!row || !(performance.now() - started < (row.remainingMs ?? 0))) return null;
         const { etag, sizeBytes } = row;
         if (typeof etag !== 'string' || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag) ||
             !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return null;
