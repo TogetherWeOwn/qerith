@@ -126,7 +126,7 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       assert.equal(await link.evaluate(el => el.selectionStart === 0 && el.selectionEnd === el.value.length), true);
       await dialog.getByRole('alert').filter({ hasText: 'Press Ctrl+C or ⌘C to copy.' }).waitFor();
       await audit('clipboard-refused');
-      const greyscale = await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
+      const greyscale = await page.addStyleTag({ content: 'html, dialog:modal { filter: grayscale(1); } dialog:modal::backdrop { backdrop-filter: grayscale(1); filter: grayscale(1); }' });
       await snapshot('greyscale');
       await greyscale.evaluate(el => el.remove());
       await tab(copy); await tab(done);
