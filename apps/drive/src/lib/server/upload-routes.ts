@@ -4,9 +4,11 @@ import { accessibleUploadParent, availableUploadDestination, createUploadComplet
   occupiedUploadName } from './metadata/upload-completion-receipts';
 import { UploadPartByteEvidence } from './metadata/upload-part-byte-evidence';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
+import { readUploadResumeEvidence } from './metadata/upload-resume-evidence';
 import { decodeUploadIdentity, uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
-import { admitsStagingInvite, allowsOrigin, authOrigin, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsSignInFixture, admitsStagingInvite, allowsOrigin, allowsStagingInviteSite,
+  authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartUpload } from './s3/multipart-upload';
@@ -79,7 +81,39 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     const bindings = [intentId, ownerId, await tokenHash(token), settings.endpoint, settings.bucket, epoch];
     return { db, bindings, settings, epoch, verifier, ownerId, token, isQualified, storageConfigId, timeoutMs, mode, bound, allocated };
   }
+  async function resumeEvidence(request: Request, url: URL, intentId: string): Promise<Response> {
+    if (!admitsSignInFixture(env)) return reply(404);
+    if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } });
+    if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || !allowsStagingInviteSite(request)) return reply(403);
+    const length = request.headers.get('content-length');
+    if (request.url !== url.origin + url.pathname || request.body !== null ||
+      (length !== null && length !== '0') || request.headers.has('transfer-encoding')) return reply(400);
+
+    const db = env.DB;
+    if (!db || typeof db.withSession !== 'function') return reply(503);
+    try {
+      const primary = db.withSession('first-primary');
+      const access = await authorize(request, (await readSession(request, primary)) ?? undefined, intentId);
+      if (access instanceof Response) return access;
+      const { ownerId, token, settings, epoch } = access;
+      const login = await primary.prepare('SELECT generation FROM drive_login_generations WHERE principal_id = ?')
+        .bind(ownerId).first<{ generation: string }>();
+      if (!login) return reply(404);
+      // The reader rechecks token, membership, generation and storage in its evidence snapshot.
+      const evidence = await readUploadResumeEvidence(db, intentId,
+        { token, principalId: ownerId, generation: login.generation },
+        { endpoint: settings.endpoint, bucket: settings.bucket, storageEpoch: epoch });
+      return evidence === null ? reply(404) : Response.json(evidence, { headers });
+    } catch { return reply(503); }
+  }
+
   return {
+    // The disposable Worker alone dispatches this candidate route.
+    resume(request: Request): Promise<Response> | undefined {
+      const url = new URL(request.url);
+      const id = /^\/api\/uploads\/([^/]{36})\/resume$/.exec(url.pathname)?.[1];
+      if (id && uploadIdPattern.test(id)) return resumeEvidence(request, url, id);
+    },
     async part(request: Request, session: Session | undefined, intentId: string, number: string): Promise<Response> {
       try {
         const access = await authorize(request, session, intentId);
