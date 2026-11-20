@@ -10,8 +10,10 @@ const sameDeployment = (left, right) => left.id === right.id && left.version ===
 
 export async function probeQualificationWorker({ sha, version }, signal, request = fetch) {
   const nonce = randomBytes(16).toString('hex');
-  const deadline = AbortSignal.timeout(10_000);
-  const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const timeout = 10_000;
+  const deadline = performance.now() + timeout;
+  const timeoutSignal = AbortSignal.timeout(timeout);
+  const bounded = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   try {
     bounded.throwIfAborted();
     if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) || !isUuid(version)) throw new Error();
@@ -28,6 +30,8 @@ export async function probeQualificationWorker({ sha, version }, signal, request
     const actualVersion = response.headers.get(readinessHeaders.version);
     if (response.status !== 204 || response.headers.get('cache-control') !== 'private, no-store' ||
         response.headers.get(readinessHeaders.nonce) !== nonce || actualSha !== sha || actualVersion !== version) throw new Error();
+    // Fetch can settle after the deadline before the abort timer gets a turn.
+    if (performance.now() >= deadline) throw new Error();
     return { ready: true, sha: actualSha, version: actualVersion };
   } catch {
     throw new Error('Staging Worker did not prove fresh exact-SHA runtime readiness.');
