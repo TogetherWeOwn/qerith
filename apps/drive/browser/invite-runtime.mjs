@@ -10,9 +10,29 @@ const [{ Invitations }, { Membership }] = await Promise.all([
 
 export async function proveInvite(browser, { origin, relay, worker, DB, ownerToken, stagingRoot }) {
   const staging = !!stagingRoot;
-  const invites = new Invitations(DB);
-  const first = await invites.issue(ownerToken, { displayName: 'Rook' });
-  const { token } = await invites.issue(ownerToken, { displayName: 'Pell', note: 'Welcome to Drive!' });
+  const invitations = '/api/owner/invitations';
+  const owner = async (path, status, { method = 'GET', metadata } = {}) => {
+    const body = metadata && JSON.stringify(metadata);
+    const response = await worker.fetch(origin + path, { method, redirect: 'manual', body, headers: {
+      origin, cookie: `__Host-drive-session=${ownerToken}`,
+      ...(body && { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body).toString() }),
+    } });
+    assert.deepEqual([response.status, response.headers.get('cache-control')], [status, 'private, no-store']);
+    return response;
+  };
+  const issue = async metadata => staging
+    ? (await owner(invitations, 201, { method: 'POST', metadata })).json()
+    : new Invitations(DB).issue(ownerToken, metadata);
+  const list = async (suffix = '') => (await (await owner(invitations + suffix, 200)).json()).invitations;
+  const first = await issue({ displayName: 'Rook' });
+  const { id: invitationId, token } = await issue({ displayName: 'Pell', note: 'Welcome to Drive!' });
+  if (staging) {
+    const ids = [first.id, invitationId].sort();
+    const entries = await list();
+    assert.deepEqual(entries.map(entry => entry.id), ids);
+    assert.ok(![first.token, token].some(value => JSON.stringify(entries).includes(value)), 'list never returns invite tokens');
+    assert.deepEqual((await list(`?after=${ids[0]}`)).map(entry => entry.id), ids.slice(1));
+  }
   const context = await browser.newContext({ serviceWorkers: 'block' });
   try {
     const linkSource = 'https://message.example.test/';
@@ -193,15 +213,25 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       assert.equal(await page.getByText("This invite is for someone else, so it wasn't used.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole('link', { name: 'Go to My Drive' }).getAttribute('href'), '/');
     }
-    const members = new Membership(DB);
-    assert.equal(await members.setStatus(ownerToken, id, (await members.get(ownerToken, id)).generation, 'revoked'), true);
+    if (staging) await owner(`/api/owner/members/${id}/revoke`, 204, { method: 'POST' });
+    else {
+      const members = new Membership(DB);
+      assert.equal(await members.setStatus(ownerToken, id, (await members.get(ownerToken, id)).generation, 'revoked'), true);
+    }
     await page.evaluate(token => { location.hash = token; }, first.token);
     await field.waitFor();
     assert.equal(await field.inputValue(), 'Rook');
     if (staging) {
-      for (const [path, method] of [['/', 'GET'], ['/', 'HEAD'], [memberRoot.dataPath, 'GET'], [stagingRoot.asset, 'GET']]) {
+      for (const [path, method] of [['/', 'GET'], ['/', 'HEAD'], [memberRoot.dataPath, 'GET'],
+        [stagingRoot.asset, 'GET'], [invitations, 'GET']]) {
         await memberRoot.check(path, method, 401);
       }
+      assert.deepEqual((await list()).map(entry => entry.id), [first.id]);
+      await owner(`${invitations}/${first.id}/cancel`, 204, { method: 'POST' });
+      assert.deepEqual(await list(), []);
+      const cancelled = await worker.fetch(`${origin}/api/invite/present`, { method: 'POST',
+        headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: first.token }) });
+      assert.equal(cancelled.status, 404);
     } else assert.equal(await page.evaluate(async () => (await fetch('/api/root-listing')).status), 401);
     await page.goto(`${origin}/sign-in`);
     await signIn(403);
@@ -252,7 +282,7 @@ async function proveMemberRoot(page, context, { origin, worker, DB, id, asset, o
   assert.ok(!document.headers.getSetCookie().some(value => value.startsWith(`${notice}=`)));
   assert.doesNotMatch(await document.text(), /didn’t download|Retry download/);
   for (const [path, method, status] of [[ownerDownload, 'GET', 403], [`/api/download/${fileId}`, 'GET', 403],
-    ['/api/uploads', 'POST', 403], ['/api/owner/invitations', 'GET', 404], ['/people', 'GET', 404]]) {
+    ['/api/uploads', 'POST', 403], ['/api/owner/invitations', 'GET', 403], ['/people', 'GET', 404]]) {
     await check(path, method, status);
   }
   return { check, dataPath };

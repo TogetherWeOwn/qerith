@@ -7,13 +7,13 @@ const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
 function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable',
-  routeId?: string, fixture?: '1', stagingInvite?: string) {
+  routeId?: string, fixture?: '1', stagingInvite?: string, role = 'member') {
   let lookups = 0;
   let resolved = false;
   const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DRIVE_STAGING_INVITE_ACCEPTANCE: stagingInvite, DB: fault === 'unbound' ? undefined : { prepare: () => {
     lookups++;
     if (fault === 'unavailable') throw new Error('database unavailable');
-    return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
+    return { bind: () => ({ first: async () => ({ id: role, role }) }) };
   } } };
   const event = { request: new Request(url, init), locals: {}, route: { id: routeId ?? null } };
   const handle = privateRequests(env);
@@ -157,6 +157,23 @@ test('same-origin authenticated requests resolve with a private, non-cacheable r
     }
     assert.equal(result.lookups, 1);
     assert.deepEqual(result.event.locals, { driveSession: { token, principal: { id: 'member', role: 'member' } } });
+  }
+});
+
+test('the hook resolves owner lifecycle only for a live owner on an admitted staging route', async () => {
+  const route = '/api/owner/invitations';
+  for (const [site, path, flag, role, status, lookups] of [
+    [null, route, undefined, 'owner', 404, 0], ['same-origin', route, '1', 'member', 403, 1],
+    ['same-origin', `${route}?after=a`, '1', 'owner', 200, 1], ['same-origin', `${route}/`, '1', 'owner', 404, 0],
+    ['cross-site', route, '1', 'owner', 403, 0], ['none', route, '1', 'owner', 403, 0],
+  ] as const) {
+    const headers = new Headers({ cookie });
+    if (site) headers.set('sec-fetch-site', site);
+    const result = await request(stagingOrigin + path, { headers }, stagingOrigin, undefined, route, undefined, flag, role);
+    assert.equal(result.response.status, status);
+    assert.equal(result.lookups, lookups);
+    assert.equal(result.resolved, status === 200);
+    assert.equal(result.response.headers.get('cache-control'), 'private, no-store');
   }
 });
 

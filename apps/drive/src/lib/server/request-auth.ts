@@ -2,6 +2,7 @@ import type { Handle } from '@sveltejs/kit/hooks';
 import { driveNext, isDrivePageNavigation, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
+import { ownerLifecycleRoute } from './owner-lifecycle-route';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
@@ -16,7 +17,7 @@ export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
 
-// Default-off staging mode for invitation acceptance and member My Drive.
+// Default-off staging mode for invitation lifecycle, acceptance and member My Drive.
 export function admitsStagingInvite(env: DriveAuthEnv): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
@@ -92,7 +93,8 @@ function pageDenial(request: Request, status: 403 | 503): Response {
 export function privateRequests(env: DriveAuthEnv): Handle {
   return async ({ event, resolve }) => {
     const { request } = event;
-    const { pathname, search } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname, search } = url;
     const navigation = isDrivePageNavigation(request);
     const refuse = (status: 403 | 503) => navigation ? pageDenial(request, status) : deny(status);
     const origin = authOrigin(env.DRIVE_ORIGIN);
@@ -105,8 +107,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const fixture = admitsSignInFixture(env);
     const staging = origin.origin === stagingOrigin;
     const routeId = event.route?.id;
-    // Owner management is not admitted in preview, even before authentication.
-    if ((fixture || staging) && routeId?.startsWith('/api/owner/')) return deny(404);
+    if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {
+      if (fixture || !admitsStagingInvite(env) || ownerLifecycleRoute(request, url) !== routeId) return deny(404);
+      if (!allowsStagingInviteSite(request)) return deny(403);
+    }
     const signInPage = routeId === '/sign-in';
     const invitePage = routeId === '/invite' && (fixture || admitsStagingInvite(env)) &&
       request.url === `${origin.origin}/invite` && (request.method === 'GET' || request.method === 'HEAD');
