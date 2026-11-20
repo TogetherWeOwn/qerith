@@ -14,9 +14,6 @@ export const load: PageServerLoad = async ({ request, params, locals, setHeaders
   const primary = () => new ReadAccess(db.withSession('first-primary'));
   return { result: await folderPage(request, params.folderId, {
     authorize: async () => locals.driveSession?.token ?? null,
-    readAccess: {
-      get: (...args) => primary().get(...args),
-      list: (...args) => primary().list(...args),
-    },
+    readAccess: { get: (...args) => primary().get(...args), list: (...args) => primary().list(...args) },
   }) };
 };

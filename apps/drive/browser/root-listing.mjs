@@ -12,23 +12,22 @@ const href = `/api/download/${id}`;
 
 export async function capture(page, state, width, audit = true, scope = 'root') {
   const label = `${scope}-${state}-${width}`;
-  const screenshot = await page.screenshot({ path: resolve(output, `${label}.png`), fullPage: true });
-  if (!audit) return screenshot;
+  await page.screenshot({ path: resolve(output, `${label}.png`), fullPage: true });
+  if (!audit) return;
   await page.evaluate(axe);
   const result = await page.evaluate(() => window.axe.run(document, {
     runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa'] },
   }));
   await writeFile(resolve(output, `axe-${label}.json`), JSON.stringify(result, null, 2));
   assert.deepEqual(result.violations.map(({ id }) => id), [], label);
-  return screenshot;
 }
 
-export async function captureSignedOut(page, scope = 'root') {
+export async function captureSignedOut(page) {
   await page.getByRole('button', { name: 'Sign in with a passkey' }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
-    await capture(page, 'signed-out', width, true, scope);
+    await capture(page, 'signed-out', width);
   }
 }
 

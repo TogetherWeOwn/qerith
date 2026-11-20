@@ -58,8 +58,7 @@ function generatedAssets(builder) {
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
-  const folder = [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
-  return { signIn, root, invite, people, folder };
+  return { signIn, root, invite, people, folder: [...assets].filter(path => /\.(?:css|woff2)$/.test(path)) };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
