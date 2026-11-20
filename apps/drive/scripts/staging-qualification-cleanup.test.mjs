@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mjs';
+import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -38,6 +39,100 @@ function job(t, target = endpoint) {
     QERITH_S3_ACCESS_KEY_ID: 'fixture-key', QERITH_S3_SECRET_ACCESS_KEY: 'fixture-secret' };
   return { cwd, env, context: { sha, prefix, runId: '182', attempt: '3' } };
 }
+
+const r2Account = new URL(endpoint).hostname.split('.')[0];
+const objectAge = 3 * 86400;
+const uploadAge = 7 * 86400;
+const transition = maxAge => ({ condition: { type: 'Age', maxAge } });
+const expiryRule = (prefix, extra) => ({ enabled: true, conditions: { prefix }, ...extra });
+const objects = expiryRule('drive-qualification/', { deleteObjectsTransition: transition(objectAge) });
+const uploads = expiryRule('', { abortMultipartUploadsTransition: transition(uploadAge) });
+const expiryPayload = rules => ({ success: true, errors: [], result: { rules } });
+
+function expiryFixture(t) {
+  const { cwd, env } = job(t);
+  env.CLOUDFLARE_API_TOKEN = 'fixture-api-token';
+  const urls = [];
+  const verify = ({ overrides, signal, rules = [objects, uploads], respond = () => Response.json(expiryPayload(rules)) } = {}) =>
+    verifyQualificationR2Expiry({ ...env, ...overrides }, cwd, signal, async (url, init) => {
+      urls.push(url);
+      assert.equal(init.method, 'GET');
+      assert.equal(init.redirect, 'error');
+      assert.equal(init.headers.authorization, 'Bearer fixture-api-token');
+      assert.equal(init.headers['cf-r2-jurisdiction'], 'default');
+      assert.equal(init.signal.aborted, false);
+      return respond(init.signal);
+    });
+  return { verify, urls, cwd };
+}
+
+test('native R2 expiry reads only the reviewed bucket and covers both fixture types', async t => {
+  const { verify, urls, cwd } = expiryFixture(t);
+  writeFileSync(join(cwd, 'apps/drive/scripts/staging-storage-qualification.json'), '{}');
+  const rules = [objects, uploads, expiryRule('unrelated/', { deleteObjectsTransition: transition(objectAge + 1) })];
+  assert.equal(await verify({ rules }), true);
+  assert.deepEqual(urls, [`https://api.cloudflare.com/client/v4/accounts/${r2Account}/r2/buckets/${bucket}/lifecycle`]);
+  for (const overrides of [{ QERITH_S3_BUCKET: 'another-bucket' }, { GITHUB_RUN_ATTEMPT: '0' },
+    { CLOUDFLARE_API_TOKEN: '' }, { GITHUB_JOB: 'preview' }]) {
+    await assert.rejects(verify({ overrides }), /expiry is unverified/);
+  }
+  await assert.rejects(verify({ signal: AbortSignal.abort() }), /expiry is unverified/);
+  assert.equal(urls.length, 1);
+});
+
+test('native R2 expiry rejects missing, partial, conflicting and non-age coverage', async t => {
+  const { verify } = expiryFixture(t);
+  for (const rules of [[], [objects], [uploads], [{ ...objects, enabled: false }, uploads],
+    [expiryRule('', { deleteObjectsTransition: transition(objectAge) }), uploads],
+    [expiryRule(`${prefix}partial/`, { deleteObjectsTransition: transition(objectAge) }), uploads],
+    [objects, expiryRule('drive-qualification/full-v0/182/30/', { abortMultipartUploadsTransition: transition(uploadAge) })],
+    [objects, uploads, expiryRule(`${prefix}narrower/`, { deleteObjectsTransition: transition(objectAge + 1) })],
+    [objects, uploads, expiryRule(prefix, { abortMultipartUploadsTransition: transition(uploadAge + 1) })],
+    [objects, uploads, expiryRule(prefix, { deleteObjectsTransition: { condition: { type: 'Date', date: '2026-12-01' } } })],
+    [objects, uploads, { ...objects, conditions: { prefix, unknownFilter: true } }]]) {
+    await assert.rejects(verify({ rules }), /expiry is unverified/);
+  }
+});
+
+test('native R2 expiry rejects provider errors, excessive bodies and cancellation without diagnostics', async t => {
+  const { verify, urls } = expiryFixture(t);
+  const controller = new AbortController();
+  const payload = expiryPayload([objects, uploads]);
+  for (const respond of [() => new Response('private diagnostic', { status: 403 }),
+    () => Response.json({ ...payload, errors: ['private diagnostic'] }),
+    () => new Response(' '.repeat(65_537) + JSON.stringify(payload)),
+    () => { controller.abort(new Error('private diagnostic')); return Response.json(payload); }]) {
+    await assert.rejects(verify({ respond, signal: controller.signal }), { message: 'Qualification R2 native expiry is unverified.' });
+  }
+  assert.equal(urls.length, 4);
+  assert.equal(controller.signal.aborted, true);
+});
+
+test('native R2 expiry rejects cancellation while reading a stalled response body', { timeout: 5000 }, async t => {
+  const { verify } = expiryFixture(t);
+  const controller = new AbortController();
+  const stalled = Promise.withResolvers();
+  let sentChunk = false;
+  const respond = active => new Response(new ReadableStream({
+    start(body) {
+      // Like fetch, the transport errors a pending body read on request abort.
+      active.addEventListener('abort', () => body.error(active.reason), { once: true });
+    },
+    pull(body) {
+      if (sentChunk) {
+        stalled.resolve();
+      } else {
+        sentChunk = true;
+        body.enqueue(new TextEncoder().encode('{"success":true,'));
+      }
+    },
+  }, { highWaterMark: 0 }));
+  const rejected = assert.rejects(verify({ respond, signal: controller.signal }),
+    { message: 'Qualification R2 native expiry is unverified.' });
+  await stalled.promise;
+  controller.abort(new Error('private diagnostic'));
+  await rejected;
+});
 
 function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket, postPendingPrefix = prefix,
   initialUploadsXml = '', finalUploadsXml = '', finalObjectsXml = '', listedKey = key, namespaced = false } = {}) {
@@ -74,13 +169,19 @@ function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket,
   return { send, trace };
 }
 
+test('the protected R2 adapter rejects unverified bindings before sending requests', async t => {
+  const { cwd, env } = job(t);
+  const { send, trace } = signedFixture();
+  await assert.rejects(createQualificationR2Cleanup({ ...env, QERITH_S3_BUCKET: 'other-bucket' }, cwd, { send }), /cleanup is unverified/);
+  await assert.rejects(createQualificationR2Cleanup({ ...env, GITHUB_JOB: 'preview' }, cwd, { send }), /protected staging/);
+  const nonNativeProvider = job(t, 'https://storage.example.test');
+  await assert.rejects(createQualificationR2Cleanup(nonNativeProvider.env, nonNativeProvider.cwd, { send }), /cleanup is unverified/);
+  assert.deepEqual(trace, []);
+});
+
 test('the protected R2 adapter signs and scopes every request with a reviewed binding', async t => {
   const { cwd, env, context } = job(t);
   const { send, trace } = signedFixture();
-  await assert.rejects(createQualificationR2Cleanup({ ...env, QERITH_S3_BUCKET: 'other-bucket' }, cwd, { send }), /does not match/);
-  await assert.rejects(createQualificationR2Cleanup({ ...env, GITHUB_JOB: 'preview' }, cwd, { send }), /protected staging/);
-  const unreviewedProvider = job(t, 'https://storage.example.test');
-  await assert.rejects(createQualificationR2Cleanup(unreviewedProvider.env, unreviewedProvider.cwd, { send }), /cleanup is unverified/);
   const cleanup = await createQualificationR2Cleanup(env, cwd, { send });
   assert.throws(() => cleanup({ ...context, sha: 'f'.repeat(40) }), /cleanup is unverified/);
   assert.deepEqual(trace, []);

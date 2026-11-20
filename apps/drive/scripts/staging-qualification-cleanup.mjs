@@ -1,7 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
+import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
-import { stagingStorage } from './staging-publish.mjs';
 
 const maxTargets = 100;
 const unverified = () => new Error('Qualification R2 prefix cleanup is unverified.');
@@ -59,14 +58,7 @@ export async function cleanQualificationR2(context, signal, { listing, request }
 // only after checking native expiry and establishing exclusive fixture scope.
 export async function createQualificationR2Cleanup(env, cwd, { send = fetch } = {}) {
   const identity = assertQualificationJob(env, cwd);
-  const receipt = JSON.parse(execFileSync('git', ['show', `${identity.sha}:apps/drive/scripts/staging-storage-qualification.json`],
-    { cwd, encoding: 'utf8', maxBuffer: 16_384, stdio: ['ignore', 'pipe', 'pipe'] }));
-  const { vars, secrets } = await stagingStorage(env, receipt);
-  // Current-object listing cannot certify cleanup of hidden object versions on
-  // an arbitrary S3 provider. Admit only a native, unversioned R2 endpoint.
-  if (!/^https:\/\/[0-9a-f]{32}\.r2\.cloudflarestorage\.com$/.test(vars.DRIVE_S3_ENDPOINT)) throw unverified();
-  const settings = { endpoint: vars.DRIVE_S3_ENDPOINT, bucket: vars.DRIVE_S3_BUCKET, region: vars.DRIVE_S3_REGION,
-    accessKeyId: secrets.DRIVE_S3_ACCESS_KEY_ID, secretAccessKey: secrets.DRIVE_S3_SECRET_ACCESS_KEY };
+  const { settings } = await readQualificationR2Binding(env, cwd, identity.sha).catch(() => { throw unverified(); });
   const { createS3Listing } = await import('../src/lib/server/s3/listing.ts');
   const { createS3Transport } = await import('../src/lib/server/s3/transport.ts');
   const options = { fetch: send, timeoutMs: 8000 };
