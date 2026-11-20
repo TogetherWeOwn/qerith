@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { privateRequests } from '../src/lib/server/request-auth';
+import { privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
 
 const origin = 'https://example.test';
 const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
-function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable', routeId?: string, fixture?: '1') {
+function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable',
+  routeId?: string, fixture?: '1', stagingInvite?: '1') {
   let lookups = 0;
   let resolved = false;
-  const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DB: fault === 'unbound' ? undefined : { prepare: () => {
+  const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DRIVE_STAGING_INVITE_ACCEPTANCE: stagingInvite, DB: fault === 'unbound' ? undefined : { prepare: () => {
     lookups++;
     if (fault === 'unavailable') throw new Error('database unavailable');
     return { bind: () => ({ first: async () => ({ id: 'member', role: 'member' }) }) };
@@ -118,6 +119,32 @@ test('only the canonical fixture invite exposes a bodyless live session probe', 
   }
   assert.equal((await probe(`${url}?`, fixtureOrigin)).response.status, 404);
   assert.equal((await probe(`${origin}/invite`, origin, { cookie })).response.status, 404);
+});
+
+test('staging invite GET is session-independent; only the same-origin HEAD probes a live session', async () => {
+  const url = `${stagingOrigin}/invite`;
+  const navigation = { cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' };
+  const page = await request(url, { headers: navigation }, stagingOrigin, 'unavailable', '/invite', undefined, '1');
+  assert.equal(page.response.status, 200);
+  assert.equal(page.response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(page.response.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal(page.resolved, true);
+  assert.equal(page.lookups, 0);
+  assert.deepEqual(page.event.locals, {});
+
+  for (const [headers, status, lookups] of [[navigation, 403, 0], [{}, 200, 0], [{ cookie }, 204, 1]] as const) {
+    const result = await request(url, { method: 'HEAD', headers }, stagingOrigin, undefined, '/invite', undefined, '1');
+    assert.equal(result.response.status, status);
+    assert.equal(result.response.body, null);
+    assert.equal(result.resolved, false);
+    assert.equal(result.lookups, lookups);
+  }
+  for (const [raw, configuredOrigin, enabled] of [[url, stagingOrigin, undefined], [`${url}?`, stagingOrigin, '1'],
+    [`${origin}/invite`, origin, '1']] as const) {
+    const result = await request(raw, { headers: { cookie } }, configuredOrigin, undefined, '/invite', undefined, enabled);
+    assert.equal(result.response.status, 404);
+    assert.equal(result.lookups, 0);
+  }
 });
 
 test('same-origin authenticated requests resolve with a private, non-cacheable response', async () => {

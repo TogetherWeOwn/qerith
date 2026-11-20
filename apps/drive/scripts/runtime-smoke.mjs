@@ -202,6 +202,9 @@ export default { fetch(request, env, ctx) {
       for (const step of ['present', 'challenge', 'enroll']) {
         assert.equal((await worker.fetch(`${origin}/api/invite/${step}`, { method: 'POST', headers: { origin, cookie } })).status, 404);
       }
+      for (const headers of [{ cookie }, crossSite]) {
+        assert.equal((await worker.fetch(`${origin}/invite`, { method: 'HEAD', headers })).status, 404);
+      }
       const verify = await post('verify');
       assert.deepEqual([verify.status, await verify.json()], [401, { code: 'denied' }]);
       async function signIn(principalId, browserCookie) {

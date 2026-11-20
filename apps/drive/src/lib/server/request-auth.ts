@@ -1,10 +1,11 @@
 import type { Handle } from '@sveltejs/kit/hooks';
-import { driveNext, isDrivePageNavigation } from '../drive-navigation';
+import { driveNext, isDrivePageNavigation, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation } from './download-navigation';
 import { Sessions } from './identity/sessions';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
+  DRIVE_STAGING_INVITE_ACCEPTANCE?: string;
   DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
@@ -13,6 +14,18 @@ export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
 
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
+}
+
+// This mode is source-only until the complete invite-to-sign-in path is ready.
+export function admitsStagingInvite(env: DriveAuthEnv): boolean {
+  return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
+}
+
+export function allowsStagingInviteSite(request: Request, document = false): boolean {
+  const site = request.headers.get('sec-fetch-site');
+  if (site === null || site === 'same-origin') return true;
+  return document && request.method === 'GET' && isTopLevelDocumentNavigation(request) &&
+    (site === 'none' || site === 'same-site' || site === 'cross-site');
 }
 
 export const sessionCookie = '__Host-drive-session';
@@ -95,15 +108,17 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     // Owner management is not admitted in preview, even before authentication.
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) return deny(404);
     const signInPage = routeId === '/sign-in';
-    const invitePage = routeId === '/invite' && fixture && pathname === '/invite' && !request.url.includes('?') &&
-      (request.method === 'GET' || request.method === 'HEAD');
+    const invitePage = routeId === '/invite' && (fixture || admitsStagingInvite(env)) &&
+      request.url === `${origin.origin}/invite` && (request.method === 'GET' || request.method === 'HEAD');
+    if (invitePage && staging && !allowsStagingInviteSite(request, true)) return deny(403);
     if ((signInPage && !(staging ? pathname === '/sign-in' : fixture && /^\/sign-in\/?$/.test(pathname))) ||
         (!invitePage && (routeId === '/invite' || /^\/invite(?:\/|$)/.test(pathname))) ||
         /^\/(?:recover|api\/(?:invite|sign-in))(?:\/|$)/.test(pathname)) return deny(404);
 
     let session;
     try {
-      session = signInPage ? null : await readSession(request, env.DB);
+      // The document is public, including a cross-site link. Only HEAD reads session state.
+      session = signInPage || (invitePage && request.method === 'GET') ? null : await readSession(request, env.DB);
     } catch {
       return refuse(503);
     }

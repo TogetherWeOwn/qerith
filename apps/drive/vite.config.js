@@ -84,7 +84,8 @@ const generated = ${JSON.stringify(generatedAssets(builder))};
 const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite]);
 const assets = {
   signIn: new Set(generated.signIn),
-  root: new Set(generated.root)
+  root: new Set(generated.root),
+  invite: new Set(generated.invite)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;
@@ -105,6 +106,7 @@ export default {
       return dispatchStagingRequest(request, env, ready, assets, {
         adapter: request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx),
         ceremony: (request, step) => signIn(request, step, env),
+        invite: (request, step) => handleInviteAcceptance(request, step, env),
         asset: request => env.ASSETS.fetch(request)
       });
     }

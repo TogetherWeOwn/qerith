@@ -2,32 +2,38 @@ import { entryId } from '../download-id';
 import { isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn } from './download-navigation';
 import { Sessions } from './identity/sessions';
-import { allowsOrigin, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadIdPattern } from './upload-part';
 
 interface PreviewAssets {
   signIn: ReadonlySet<string>;
   root: ReadonlySet<string>;
+  invite: ReadonlySet<string>;
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' } |
-  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'private-asset' | 'root'; deadline?: number };
+type InviteStep = 'present' | 'challenge' | 'enroll';
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' } |
+  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
+  { kind: 'private-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
   ceremony(request: Request, step: CeremonyStep): Promise<Response>;
+  invite(request: Request, step: InviteStep): Promise<Response>;
   asset(request: Request): Promise<Response>;
 }
 
-function route(method: string, path: string, assets: PreviewAssets): Target | null {
+function route(method: string, path: string, assets: PreviewAssets, invite: boolean): Target | null {
   if (method === 'GET' || method === 'HEAD') {
     if (path === '/sign-in') return { kind: 'sign-in' };
+    if (invite && path === '/invite') return { kind: 'invite' };
     if (path === '/') return { kind: 'root' };
     if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
     // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
     if (path.startsWith('/_app/immutable/')) {
       if (assets.signIn.has(path)) return { kind: 'public-asset' };
+      if (invite && assets.invite.has(path)) return { kind: 'invite-asset' };
       if (assets.root.has(path)) return { kind: 'private-asset' };
     }
   }
@@ -35,6 +41,8 @@ function route(method: string, path: string, assets: PreviewAssets): Target | nu
   if (api !== 'api' || extra !== undefined) return null;
   if (method === 'POST' && resource === 'sign-in' && action === undefined &&
       (id === 'challenge' || id === 'restart' || id === 'verify')) return { kind: 'ceremony', step: id };
+  if (invite && method === 'POST' && resource === 'invite' && action === undefined &&
+      (id === 'present' || id === 'challenge' || id === 'enroll')) return { kind: 'invite-ceremony', step: id };
   if (method === 'GET' && resource === 'download' && id && entryId.test(id) && action === undefined) {
     return { kind: 'download' };
   }
@@ -57,8 +65,13 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   if (env.DRIVE_ORIGIN !== stagingOrigin || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
   if (!allowsOrigin(request, stagingOrigin)) return deny(403);
   const { pathname, search } = new URL(request.url);
-  const target = route(request.method, pathname, assets);
+  const target = route(request.method, pathname, assets, admitsStagingInvite(env));
   if (!target) return deny(404);
+  if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
+    // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
+    if (request.url !== stagingOrigin + pathname) return deny(404);
+    return allowsStagingInviteSite(request, target.kind === 'invite') ? target : deny(403);
+  }
   const site = request.headers.get('sec-fetch-site');
   const navigation = isTopLevelDocumentNavigation(request);
   const signInRedirect = () => downloadRedirect(`/sign-in?${new URLSearchParams({ next: pathname + search })}`);
@@ -104,6 +117,9 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
   switch (target.kind) {
     case 'ceremony':
       return dispatch.ceremony(request, target.step);
+    case 'invite-ceremony':
+      return dispatch.invite(request, target.step);
+    case 'invite-asset':
     case 'public-asset':
     case 'private-asset':
     case 'root-data': {
@@ -115,6 +131,7 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
       }
       return response;
     }
+    case 'invite':
     case 'sign-in':
     case 'root':
     case 'download':

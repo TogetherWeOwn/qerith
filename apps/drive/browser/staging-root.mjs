@@ -4,6 +4,7 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 
 const origin = 'https://qerith-drive-staging.5150.workers.dev';
@@ -27,6 +28,10 @@ export default { fetch(request, env, ctx) {
     input.headers.delete('x-fixture-navigation');
   }
   const configured = { ...env, ...bindings };
+  if (input.headers.get('x-fixture-invite') === '1') {
+    configured.DRIVE_STAGING_INVITE_ACCEPTANCE = '1';
+    input.headers.delete('x-fixture-invite');
+  }
   return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
 await writeFile(configPath, JSON.stringify({ ...config, main,
@@ -77,13 +82,15 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  await context.route('**/*', async route => {
+  const relay = async (route, target = worker, navigationSite) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
     let seededNotice;
     if (request.isNavigationRequest()) {
       headers['x-fixture-navigation'] = '1';
+      // Playwright can intercept a navigation before Chromium adds fetch metadata.
+      if (navigationSite) headers['sec-fetch-site'] = navigationSite;
       if (pendingNotice && url.pathname === '/' && url.search === `?download=${pendingNotice.nonce}`) {
         // Seed this Worker document request only; the relay is not a browser cookie transport.
         seededNotice = pendingNotice;
@@ -94,7 +101,7 @@ try {
     }
     const body = request.postDataBuffer();
     if (body) headers['content-length'] ??= String(body.length);
-    const response = await worker.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
+    const response = await target.fetch(url, { method: request.method(), headers, body, redirect: 'manual' });
     if (seededNotice) {
       seededNotice.expired = response.headers.getSetCookie().some(value =>
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
@@ -102,7 +109,8 @@ try {
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
     if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
-  });
+  };
+  await context.route('**/*', route => relay(route));
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
   const signInAssets = new Set(assets);
   await Promise.all([page.waitForURL(origin + '/'), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
@@ -217,6 +225,22 @@ try {
   }
   await deny(dataPath, 404, { cookie }, 'HEAD');
   await deny(dataPath, 404, { cookie, origin }, 'POST');
+  const inviteWorker = { fetch(url, init) {
+    const headers = new Headers(init.headers);
+    headers.set('x-fixture-invite', '1');
+    return worker.fetch(url, { ...init, headers });
+  } };
+  const priorAssets = new Set(assets);
+  await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
+    worker: inviteWorker, DB, ownerToken: session.value, staging: true });
+  const inviteNodes = [...assets].filter(path => path.startsWith('/_app/immutable/nodes/') && !priorAssets.has(path));
+  assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
+  for (const path of inviteNodes) await deny(path, 404, {});
+  assert.equal((await inviteWorker.fetch(`${origin}/invite`, { method: 'HEAD', headers: {
+    cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'cross-site',
+  } })).status, 403);
+  assert.equal((await inviteWorker.fetch(`${origin}/`, { headers: { cookie: `${sessionName}=${memberToken}` } })).status, 403);
+
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'owner'").run();
   for (const path of protectedPaths) await deny(path, 401, { cookie });
 
