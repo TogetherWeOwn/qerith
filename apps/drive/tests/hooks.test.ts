@@ -177,14 +177,14 @@ test('the hook resolves owner lifecycle only for a live owner on an admitted sta
   }
 });
 
-test('the staging hook admits members only to My Drive and the exact download GET in invite mode', async () => {
+test('the staging hook admits members to My Drive and the exact download GET in invite mode', async () => {
   const exactDownload = '/api/download/01234567-89ab-cdef-0123-456789abcdef';
   for (const [path, method, routeId, allowed] of [
     ['/', 'GET', '/', true], ['/', 'HEAD', '/', true], ['/__data.json?page=cursor', 'GET', '/', true],
     ['/__data.json', 'HEAD', '/', false], ['/', 'POST', '/', false], ['/api/root-listing', 'GET', '/api/root-listing', false],
     [exactDownload, 'GET', downloadRouteId, true], [exactDownload, 'HEAD', downloadRouteId, false],
     [`${exactDownload}/`, 'GET', downloadRouteId, false], [exactDownload.replace('/0', '/%30'), 'GET', downloadRouteId, false],
-    [downloadPath, 'GET', downloadRouteId, false], ['/api/uploads', 'POST', '/api/uploads', false],
+    [downloadPath, 'GET', downloadRouteId, false],
     ['/api/owner/invitations', 'GET', '/api/owner/invitations', false],
   ] as const) {
     for (const flag of [undefined, '1 ', '1']) {
@@ -193,6 +193,32 @@ test('the staging hook admits members only to My Drive and the exact download GE
       assert.equal(resolved, flag === '1' && allowed, `${method} ${path}, flag=${flag}`);
       assert.equal(response.headers.get('cache-control'), 'private, no-store');
     }
+  }
+});
+
+test('the staging hook binds member upload methods and canonical URLs to the exact route ID', async () => {
+  const base = '/api/uploads';
+  const intent = `${base}/01234567-89ab-cdef-0123-456789abcdef`;
+  for (const [path, method, route] of [
+    [base, 'POST', base], [`${intent}/parts/1`, 'PUT', `${base}/[intentId]/parts/[partNumber]`],
+    [`${intent}/complete`, 'POST', `${base}/[intentId]/complete`],
+  ]) {
+    const check = async (expected: number, target = path, verb = method, routeId: string | null = route,
+      flag = '1', source = stagingOrigin, site = 'same-origin') => {
+      const { response, resolved } = await request(stagingOrigin + target, {
+        method: verb, headers: { cookie, origin: source, 'sec-fetch-site': site },
+      }, stagingOrigin, undefined, routeId ?? undefined, undefined, flag);
+      assert.equal(response.status, expected, `${verb} ${target} for route ${routeId}`);
+      assert.equal(resolved, expected === 200);
+    };
+    await check(200);
+    await check(403, path, method, null);
+    await check(403, path, method, '/');
+    await check(403, path, method, route, '0');
+    await check(403, path, method, route, '1', 'https://other.test');
+    await check(403, path, method, route, '1', stagingOrigin, 'none');
+    await check(403, path, 'GET');
+    for (const suffix of ['/', '?', '?page=1']) await check(403, path + suffix);
   }
 });
 
