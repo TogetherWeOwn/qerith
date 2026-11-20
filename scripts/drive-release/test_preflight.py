@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 from preflight import preflight
 
-ACCEPTED, TIP, PIN = "a" * 40, "b" * 40, "Team:42"
+ACCEPTED, TIP = "a" * 40, "b" * 40
 BRANCH = "branches/main"
 COMPARE = f"compare/{ACCEPTED}...{TIP}?per_page=1"
 ENV = "environments/production"
@@ -18,11 +18,6 @@ ARTIFACTS = f"actions/runs/123/artifacts?name={RECEIPT}&per_page=2"
 
 class PreflightTests(unittest.TestCase):
     def setUp(self):
-        self.rule = {
-            "type": "required_reviewers",
-            "prevent_self_review": True,
-            "reviewers": [{"type": "Team", "reviewer": {"id": 42}}],
-        }
         self.run_record = {
             "id": 123,
             "run_attempt": 2,
@@ -42,12 +37,10 @@ class PreflightTests(unittest.TestCase):
             },
             ENV: {
                 "name": "production",
-                "can_admins_bypass": False,
                 "deployment_branch_policy": {
                     "custom_branch_policies": True,
                     "protected_branches": False,
                 },
-                "protection_rules": [self.rule],
             },
             POLICIES: {
                 "total_count": 1,
@@ -60,20 +53,26 @@ class PreflightTests(unittest.TestCase):
 
     def reject(self, reason):
         with self.assertRaisesRegex(SystemExit, reason):
-            preflight(ACCEPTED, PIN, self.get)
+            preflight(ACCEPTED, ACCEPTED, self.get)
 
     def test_accepts_exact_receipt_from_later_page_and_main_workflow(self):
         other = self.run_record | {"head_sha": TIP}
         self.responses[RUNS].insert(0, {"workflow_runs": [other] * 100})
-        self.assertEqual(preflight(ACCEPTED, PIN, self.get), 123)
+        self.assertEqual(preflight(ACCEPTED, ACCEPTED, self.get), 123)
         self.get.assert_any_call(RUNS, paginate=True)
 
-    def test_rejects_bad_sha_or_pin_before_api_access(self):
+    def test_rejects_bad_sha_or_unaccepted_sha_before_api_access(self):
         for sha in ["abc", ACCEPTED.upper(), f"{ACCEPTED}\n"]:
             with self.subTest(sha=sha), self.assertRaisesRegex(SystemExit, "40-hex"):
-                preflight(sha, PIN, self.get)
-        with self.assertRaisesRegex(SystemExit, "reviewer pin"):
-            preflight(ACCEPTED, "", self.get)
+                preflight(sha, sha, self.get)
+        for configured in ["", "UNAPPROVED", TIP, ACCEPTED.upper(), f"{ACCEPTED}\n"]:
+            with (
+                self.subTest(configured=configured),
+                self.assertRaisesRegex(
+                    SystemExit, "does not match PRODUCTION_ACCEPTED_SHA"
+                ),
+            ):
+                preflight(ACCEPTED, configured, self.get)
         self.get.assert_not_called()
 
     def test_rejects_unprotected_main_and_non_ancestor(self):
@@ -91,24 +90,20 @@ class PreflightTests(unittest.TestCase):
         ]
         self.reject("GitHub 404")
 
-    def test_rejects_missing_wrong_or_bypassable_review(self):
-        for overrides in [
-            {"reviewers": []},
-            {"reviewers": [{"type": "Team", "reviewer": {"id": 43}}]},
-            {"reviewers": self.rule["reviewers"] * 2},
-            {"prevent_self_review": False},
-        ]:
-            self.responses[ENV]["protection_rules"] = [self.rule | overrides]
-            with self.subTest(overrides=overrides):
-                self.reject("Production (environment|reviewer)")
-        self.responses[ENV]["protection_rules"] = [self.rule]
-        self.responses[ENV]["can_admins_bypass"] = True
-        self.reject("missing required protections")
-        del self.responses[ENV]["can_admins_bypass"]
-        self.reject("missing required protections")
+    def test_rejects_noncustom_environment_policy(self):
+        policy = self.responses[ENV]["deployment_branch_policy"]
+        policy["custom_branch_policies"] = False
+        self.reject("must use a custom branch policy")
+        policy.update(custom_branch_policies=True, protected_branches=True)
+        self.reject("must use a custom branch policy")
 
-    def test_rejects_tag_named_main(self):
-        self.responses[POLICIES]["branch_policies"][0]["type"] = "tag"
+    def test_rejects_tag_named_main_or_additional_branch(self):
+        policies = self.responses[POLICIES]
+        policies["branch_policies"][0]["type"] = "tag"
+        self.reject("only the main branch")
+        policies["branch_policies"][0]["type"] = "branch"
+        policies["branch_policies"].append({"type": "branch", "name": "release/*"})
+        policies["total_count"] = 2
         self.reject("only the main branch")
 
     def test_rejects_wrong_run_even_when_exactly_named_artifact_exists(self):

@@ -31,10 +31,12 @@ def require(condition, message):
         raise SystemExit(message)
 
 
-def preflight(accepted, reviewer, get=github_get):
+def preflight(accepted, production_accepted, get=github_get):
     require(SHA.fullmatch(accepted), "accepted_sha must be lowercase 40-hex.")
-    pin = re.fullmatch(r"(User|Team):([1-9][0-9]{0,15})", reviewer)
-    require(pin, "Missing or invalid production reviewer pin.")
+    require(
+        accepted == production_accepted,
+        "accepted_sha does not match PRODUCTION_ACCEPTED_SHA.",
+    )
 
     main = get("branches/main")
     require(main["protected"] is True, "main must be protected.")
@@ -50,21 +52,11 @@ def preflight(accepted, reviewer, get=github_get):
 
     env = get("environments/production")
     policy = env["deployment_branch_policy"]
-    rules = [r for r in env["protection_rules"] if r["type"] == "required_reviewers"]
     require(
         env["name"] == "production"
-        and env.get("can_admins_bypass") is False
         and policy["custom_branch_policies"] is True
-        and policy["protected_branches"] is False
-        and len(rules) == 1
-        and rules[0]["prevent_self_review"] is True
-        and len(rules[0]["reviewers"]) == 1,
-        "Production environment is missing required protections.",
-    )
-    actual = rules[0]["reviewers"][0]
-    require(
-        actual["type"] == pin[1] and actual["reviewer"]["id"] == int(pin[2]),
-        "Production reviewer does not match the Release Manager pin.",
+        and policy["protected_branches"] is False,
+        "Production environment must use a custom branch policy.",
     )
     branches = get("environments/production/deployment-branch-policies?per_page=2")
     require(
@@ -105,7 +97,7 @@ if __name__ == "__main__":
     try:
         run_id = preflight(
             os.environ.get("ACCEPTED_SHA", ""),
-            os.environ.get("DRIVE_PRODUCTION_REVIEWER", ""),
+            os.environ.get("PRODUCTION_ACCEPTED_SHA", ""),
         )
     except (KeyError, TypeError, ValueError):
         raise SystemExit(

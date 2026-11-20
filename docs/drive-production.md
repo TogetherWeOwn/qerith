@@ -8,17 +8,18 @@ of the exact SHA. Never reuse staging storage or credentials.
 
 ## Prerequisites and preflight
 
-- Before merging the inert workflow, verify the existing `production` GitHub
-  environment. Allow only the `main` branch (no tags), prevent self-review and
-  disable admin bypass. Set exactly one required reviewer: the GitHub user or
-  team assigned the independent Release Manager path. Set the nonsecret repo
-  Actions variable `DRIVE_PRODUCTION_REVIEWER` to that identity's `User:<id>` or
-  `Team:<id>`. GitHub accepts any configured reviewer, so do not add alternates.
-  Record a readback of these settings. Do not let a workflow create the
-  environment, and do not add secrets for this scaffold.
+- Before merging the inert workflow, verify the `production` GitHub environment
+  exists and its custom policy allows only the `main` branch (no tags). Do not
+  let a workflow create the environment or add secrets during scaffold setup.
+- Release Manager approval is recorded on the release task, not in GitHub
+  environment reviewers. The Operator initializes the nonsecret repository
+  Actions variable `PRODUCTION_ACCEPTED_SHA` to `UNAPPROVED` and writes a real
+  SHA only after the Release Manager accepts that exact SHA on the release task.
+  Reset it to `UNAPPROVED` if that acceptance is withdrawn.
 - The only trigger is a manual dispatch from `main`. `accepted_sha` must be a
-  lowercase full commit SHA reachable from protected `main`, not merely the
-  latest main tip or the commit that supplied the release workflow.
+  lowercase full commit SHA reachable from protected `main` and match
+  `PRODUCTION_ACCEPTED_SHA` exactly. An unset variable, the setup sentinel,
+  or a different SHA fails before the GitHub evidence lookups.
 - Only after staging verification and cleanup succeed, publish
   `drive-staging-qualification-<tested-sha>-attempt-<GITHUB_RUN_ATTEMPT>`
   from the same-repo, main-only `drive-staging-qualification.yml` dispatch at
