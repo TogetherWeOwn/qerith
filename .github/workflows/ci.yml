@@ -426,7 +426,7 @@ jobs:
         # Older PR checkouts may have the unit tests but predate this integration check.
         if: hashFiles('apps/drive/scripts/test-qualification-wrangler.sh') != ''
         run: bash scripts/test-qualification-wrangler.sh
-      - name: Test signed qualification cleanup without provider access
+      - name: Test signed qualification cleanup and native R2 expiry offline
         if: hashFiles('apps/drive/scripts/staging-qualification-cleanup.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --import tsx --test scripts/staging-qualification-cleanup.test.mjs
       - name: Check Drive project types and configuration coverage
