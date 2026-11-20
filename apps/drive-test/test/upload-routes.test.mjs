@@ -56,9 +56,9 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
       { method: number ? 'PUT' : 'POST', body: stream ?? body, headers, signal });
     const execute = (session) => number ? routes.part(request, session, intentId, String(number))
       : routes.complete(request, session, intentId);
-    // Test the closed execution path separately from the unchanged public hook.
+    const route = { id: `/api/uploads/[intentId]/${number ? 'parts/[partNumber]' : 'complete'}` };
     return runtime ? readSession(request, env.DB).then((session) => execute(session ?? undefined))
-      : handle({ event: { request, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
+      : handle({ event: { request, route, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
   return { send, generation, calls, foreign, key, principal, other, headPins };
@@ -233,12 +233,12 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   ({ principal } = upload);
   try {
     const foreign = await upload.send(1, { auth: upload.foreign });
-    expect([foreign.status, await foreign.text()]).toEqual([403, '']);
+    expect([foreign.status, await foreign.text()]).toEqual([inviteFlag === '1' ? 404 : 403, '']);
     const partDenied = change === 'part claim';
     expect((await upload.send(1)).status).toBe(partDenied ? 409 : 204);
     const completion = await upload.send();
-    // A prior demotion fails at the hook; a demotion during completion fails in the route.
-    expect([completion.status, await completion.text()]).toEqual([partDenied ? 403 : 404, '']);
+    // A fresh member request can reach the route only with the flag, but cannot seal an uncertain part.
+    expect([completion.status, await completion.text()]).toEqual([partDenied ? (inviteFlag === '1' ? 409 : 403) : 404, '']);
     expect(await upload.generation()).toBeNull();
     const expected = { 'part claim': [], 'parts verification': ['PUT'], 'completion claim': ['PUT'],
       'publication send': ['PUT', 'POST'], 'generation HEAD': ['PUT', 'POST', 'HEAD'] };
@@ -266,26 +266,37 @@ it.each([undefined, '1'])('keeps owner publication unchanged in staging (%s)', a
   }
 });
 
-it.each([undefined, 'true', '1'])('prepares only the live member’s own intent with the exact invite flag (%s)', async (inviteFlag) => {
+it.each([undefined, 'true', '1'])('publishes only the live member’s own intent with the exact invite flag (%s)', async (inviteFlag) => {
   const { send, calls, foreign, generation, principal, headPins } = await fixture({ staging: true, inviteFlag, role: 'member' });
-  const runtime = { runtime: true };
-  for (const number of [1, undefined]) expect((await send(number)).status).toBe(403);
-  for (const number of [1, undefined]) expect((await send(number, { ...runtime, auth: foreign })).status).toBe(404);
+  for (const number of [1, undefined]) expect((await send(number, { auth: foreign })).status).toBe(inviteFlag === '1' ? 404 : 403);
   expect(calls).toEqual([]);
   if (inviteFlag !== '1') {
-    for (const number of [1, undefined]) expect((await send(number, runtime)).status).toBe(404);
+    for (const number of [1, undefined]) {
+      expect((await send(number)).status).toBe(403);
+      expect((await send(number, { runtime: true })).status).toBe(404);
+    }
+    expect(await generation()).toBeNull();
     expect(calls).toEqual([]);
   } else {
-    expect((await send(1, runtime)).status).toBe(204);
-    expect((await send(undefined, runtime)).status).toBe(409); // Verified receipt, but no member publication.
-    const receipt = await sql(`SELECT r.etag FROM drive_upload_completion_receipts r
-      JOIN drive_upload_completion_operations o USING (operation_id) WHERE o.owner_id = ?`, principal).first();
-    expect(receipt).toEqual({ etag });
-    expect((await send(undefined, { ...runtime, auth: foreign })).status).toBe(404);
-    expect(await generation()).toBeNull();
+    expect((await send(1)).status).toBe(204);
+    const published = await send();
+    expect(published.status).toBe(201);
+    const { id } = await published.json();
+    expect(await generation()).toEqual({ entry_id: id, size_bytes: 7, etag });
+    expect(await sql('SELECT owner_id FROM drive_entries WHERE id = ?', id).first()).toEqual({ owner_id: principal });
+    expect((await send(undefined, { auth: foreign })).status).toBe(404);
     expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
-    expect(headPins).toEqual([receipt.etag]);
+    expect(headPins).toEqual([etag]);
   }
+});
+
+it('does not publish if the member loses their session during generation HEAD', async () => {
+  const { send, calls, generation } = await fixture({ staging: true, inviteFlag: '1', role: 'member',
+    beforeHead: (token) => sessions.revoke(token) });
+  expect((await send(1)).status).toBe(204);
+  expect((await send()).status).toBe(404);
+  expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+  expect(await generation()).toBeNull();
 });
 
 it.each([
