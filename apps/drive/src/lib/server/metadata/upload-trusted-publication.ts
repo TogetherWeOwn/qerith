@@ -1,4 +1,4 @@
-import { Sessions, tokenHash } from '../identity/sessions';
+import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from '../identity/sessions';
 import { createImmutableS3Reader, createS3Objects } from '../s3/objects';
 import { requireActiveOwner, validateName } from './private';
 import { decodeUploadIdentity, uploadIdentityBytes, uploadStorageEvidence } from './upload-storage-evidence';
@@ -24,16 +24,18 @@ const publishable = `FROM drive_upload_publishable_completions e
 // qualify the exact namespace for conditional writes/reads and exclusive mutation.
 // No environmental or provider-name heuristic substitutes for that evidence.
 export function createTrustedUploadPublication(db: Database, epoch: string, config: Parameters<typeof createS3Objects>[0],
-  transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>, ownerOnly = false) {
-  const candidate = `${publishable} ${requireActiveOwner(ownerOnly, 'e.owner_id')}`;
+  transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>, mode?: LivePrincipalMode) {
+  const candidate = `${publishable} ${requireActiveOwner(mode === 'owner', 'e.owner_id')}`;
+  // Invite mode prepares receipt verification, not member publication.
+  const writable = `${publishable} ${requireActiveOwner(mode !== undefined, 'e.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { beforeSend, streamBudget, ...options } = transport;
   const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
-  const makeReader = (checkOwner?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
+  const makeReader = (checkPrincipal?: () => Promise<boolean>) => createImmutableS3Reader(createS3Objects(settings, { ...options,
     streamBudget: budget, beforeSend: async () => (!beforeSend || await beforeSend() === true) &&
-      await isQualified?.(storageConfigId) === true && (!checkOwner || await checkOwner()) }));
-  const reader = makeReader(); // Validate the transport even when each request needs its own owner check.
+      await isQualified?.(storageConfigId) === true && (!checkPrincipal || await checkPrincipal()) }));
+  const reader = makeReader(); // Validate the transport even when each request needs its own session check.
   return {
     async publish(token: string, principalId: string, intentId: string, claimVersion: number,
       operationId: string, parentId: string | null, name: string): Promise<{ id: string } | null> {
@@ -52,8 +54,8 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
       try {
         const key = decodeUploadIdentity(key_hex);
         if (key.includes('\0')) return null;
-        const current = ownerOnly
-          ? makeReader(() => new Sessions(db.withSession('first-primary')).isLiveOwner(token, principalId)) : reader;
+        const checkPrincipal = livePrincipalCheck(db, mode, token, principalId);
+        const current = checkPrincipal ? makeReader(checkPrincipal) : reader;
         const head = await current.head({ key, etag });
         if (head.status !== 200 || typeof head.contentLength !== 'string' || !/^\d+$/.test(head.contentLength) ||
             Number(head.contentLength) !== size_bytes || await isQualified(storageConfigId) !== true) return null;
@@ -66,7 +68,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
           (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag,
             completion_operation_id, evidence_revision)
           SELECT e.intent_id, e.claim_version, ?, e.owner_id, e.object_key, ?, ?, e.size_bytes, e.etag,
-            e.operation_id, e.evidence_revision ${candidate}
+            e.operation_id, e.evidence_revision ${writable}
             AND e.evidence_revision = ? AND e.etag = ? AND e.size_bytes = ?
           RETURNING entry_id AS id`)
           .bind(crypto.randomUUID(), parentId, name, ...binding, evidence_revision, etag, size_bytes).first<{ id: string }>();

@@ -38,7 +38,7 @@ it('does not backfill earlier deletions or infer authority from a missing entry'
 it('journals only authorized removal of a bound object, never revocation or an unresolved upload', async () => {
   const { id, token, key, intent, evidenceRevision } = await seedBoundPublication('authorized', { key: `${String.fromCodePoint(0xFEFF)}folder/é+%` });
   const unresolved = await seed('unresolved');
-  expect(await producer(async () => { throw new Error('unknown completion'); }).complete(unresolved.token, 'unresolved')).toBe('uncertain');
+  expect(await producer(async () => { throw new Error('unknown completion'); }).complete(unresolved.token, unresolved.identity)).toBe('uncertain');
   expect(await evidence('quarantine', 'unresolved')).not.toBeNull();
   await sql("INSERT INTO drive_principals (id, role, status) VALUES ('delete-grantee', 'member', 'active')").run();
   const recipient = (await sessions.issue('delete-grantee')).token;

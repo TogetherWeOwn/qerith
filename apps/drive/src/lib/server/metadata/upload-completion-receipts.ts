@@ -1,4 +1,4 @@
-import { Sessions } from '../identity/sessions';
+import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from '../identity/sessions';
 import { createMultipartComplete } from '../s3/multipart-complete';
 import { completionXml, type CompletedPart } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
@@ -13,8 +13,6 @@ interface Session { prepare(sql: string): Statement }
 interface Database extends Session { withSession(constraint: 'first-primary'): Session }
 
 interface SealedUpload {
-  intent_id: string;
-  owner_id: string;
   object_key: string;
   upload_id: string;
   intent_version: number;
@@ -50,9 +48,9 @@ export const occupiedUploadName = (owner: UploadOwner) =>
 export const availableUploadDestination = (owner: UploadOwner) =>
   `${accessibleUploadParent(owner)} AND NOT ${occupiedUploadName(owner)}`;
 
-const utf8 = new TextEncoder();
 const sealed = `FROM drive_upload_sealed_candidates o
-  WHERE o.operation_id = CAST(? AS TEXT) AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?
+  WHERE o.operation_id = CAST(? AS TEXT) AND o.intent_id = CAST(? AS TEXT) AND o.owner_id = CAST(? AS TEXT)
+    AND o.storage_epoch = ? AND o.endpoint = ? AND o.bucket = ? AND o.session_hash = ?
     AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = o.intent_id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts a WHERE a.intent_id = o.intent_id)`;
 
@@ -89,15 +87,15 @@ async function matchesSealedParts(db: Session, operation: ArrayBuffer, upload: S
 
 /** Unwired server-only producer; there is no default qualified verifier. */
 export function createUploadCompletionReceipts(db: Database, epoch: string, config: Parameters<typeof createMultipartComplete>[0],
-  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier, ownerOnly = false) {
-  const allocated = `${sealed} ${requireActiveOwner(ownerOnly, 'o.owner_id')}`;
+  transport: Parameters<typeof createMultipartComplete>[1], verifier?: UploadPublicationVerifier, mode?: LivePrincipalMode) {
+  const allocated = `${sealed} ${requireActiveOwner(mode === 'owner', 'o.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { streamBudget, ...options } = transport;
   const budget = streamBudget && { idleMs: streamBudget.idleMs, totalMs: streamBudget.totalMs };
-  const makeComplete = (checkOwner?: () => Promise<boolean>) => createMultipartComplete(settings, { ...options,
+  const makeComplete = (checkPrincipal?: () => Promise<boolean>) => createMultipartComplete(settings, { ...options,
     streamBudget: budget, beforeSend: async () => await verifier?.isQualified(storageConfigId) === true &&
-      (!checkOwner || await checkOwner()) });
+      (!checkPrincipal || await checkPrincipal()) });
   const completeMultipart = makeComplete();
 
   async function quarantine(operation: ArrayBuffer): Promise<void> {
@@ -131,26 +129,26 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
 
   return {
     storageConfigId,
-    async complete(token: string, operationId: string, target?: { parentId: string | null; name: string }):
-      Promise<'recorded' | 'not-admitted' | 'dispatch-denied' | 'uncertain'> {
+    async complete(token: string, { operationId, intentId, ownerId }: { operationId: string; intentId: string; ownerId: string },
+      target?: { parentId: string | null; name: string }): Promise<'recorded' | 'not-admitted' | 'dispatch-denied' | 'uncertain'> {
       if (!verifier || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return 'not-admitted';
       const operation = uploadIdentityBytes(operationId);
-      const admission = [operation, epoch, endpoint, bucket, await digest(utf8.encode(token))] as const;
+      const admission = [operation, uploadIdentityBytes(intentId), uploadIdentityBytes(ownerId), epoch, endpoint, bucket,
+        await tokenHash(token)] as const;
       const primary = db.withSession('first-primary');
-      const upload = await primary.prepare(`SELECT hex(o.intent_id) AS intent_id, hex(o.owner_id) AS owner_id,
-        hex(o.object_key) AS object_key, hex(o.upload_id) AS upload_id, o.intent_version, o.part_numbers, o.size_bytes
-        ${allocated}`).bind(...admission).first<SealedUpload>();
+      const upload = await primary.prepare(`SELECT hex(o.object_key) AS object_key, hex(o.upload_id) AS upload_id,
+        o.intent_version, o.part_numbers, o.size_bytes ${allocated}`).bind(...admission).first<SealedUpload>();
       if (!upload) return 'not-admitted';
-      let intentId: string, ownerId: string, objectKey: string, uploadId: string;
+      let objectKey: string, uploadId: string;
       try {
-        [intentId, ownerId, objectKey, uploadId] = [upload.intent_id, upload.owner_id, upload.object_key, upload.upload_id].map(decodeUploadIdentity);
+        [objectKey, uploadId] = [upload.object_key, upload.upload_id].map(decodeUploadIdentity);
       } catch { return 'not-admitted'; }
-      if ([intentId, ownerId, objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
+      if ([objectKey, uploadId].some((value) => !value || value.includes('\0')) ||
         objectKey.split('/').some((segment) => segment === '.' || segment === '..') ||
         await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
-      const checkOwner = ownerOnly ? () => new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId) : undefined;
+      const checkPrincipal = livePrincipalCheck(db, mode, token, ownerId);
       const verified = await verifier.verifyParts(Object.freeze({ storageConfigId, operationId, intentId, ownerId,
-        objectKey, uploadId, intentVersion: upload.intent_version, ...(checkOwner && { beforeSend: checkOwner }) }));
+        objectKey, uploadId, intentVersion: upload.intent_version, ...(checkPrincipal && { beforeSend: checkPrincipal }) }));
       if (!verified || !Array.isArray(verified) || verified.length < 1 || verified.length > 10000) return 'not-admitted';
       const parts = verified.map(({ partNumber, etag, size }) => ({ partNumber, etag, size }));
       let manifest: Uint8Array<ArrayBuffer>;
@@ -158,7 +156,7 @@ export function createUploadCompletionReceipts(db: Database, epoch: string, conf
       if (!await matchesSealedParts(primary, operation, upload, parts)) return 'not-admitted';
       const manifestDigest = await digest(manifest);
       if (await verifier.isQualified(storageConfigId) !== true) return 'not-admitted';
-      const complete = checkOwner ? makeComplete(checkOwner) : completeMultipart;
+      const complete = checkPrincipal ? makeComplete(checkPrincipal) : completeMultipart;
 
       // Only an acknowledged insert can dispatch, even if a later read finds the claim.
       try {

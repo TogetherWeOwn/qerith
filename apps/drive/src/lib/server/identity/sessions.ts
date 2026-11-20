@@ -4,6 +4,13 @@ interface Statement {
   all<T>(): Promise<{ results: T[] }>;
 }
 interface Database { prepare(sql: string): Statement }
+export type LivePrincipalMode = 'owner' | 'active';
+
+// Open a fresh primary session at each provider send, not when the operation is claimed.
+export function livePrincipalCheck(db: { withSession(constraint: 'first-primary'): Database },
+  mode: LivePrincipalMode | undefined, token: string, id: string): (() => Promise<boolean>) | undefined {
+  return mode && (() => new Sessions(db.withSession('first-primary')).isLivePrincipal(token, id, mode));
+}
 
 const lifetimeMs = 12 * 60 * 60 * 1000;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
@@ -45,10 +52,11 @@ export class Sessions {
       .bind(hash).first<{ id: string; role: 'owner' | 'member'; remaining_ms: number }>();
   }
 
-  async isLiveOwner(token: string, id: string): Promise<boolean> {
+  async isLivePrincipal(token: string, id: string, mode: LivePrincipalMode): Promise<boolean> {
     const started = performance.now();
     const session = await this.lookupWithRemainingLifetime(token);
-    return session?.id === id && session.role === 'owner' && performance.now() - started < session.remaining_ms;
+    return session?.id === id && (mode === 'active' || session.role === 'owner') &&
+      performance.now() - started < session.remaining_ms;
   }
 
   // Trusted server maintenance only: one atomic, indexed batch per invocation.

@@ -14,14 +14,14 @@ it('retains a dispatch whose D1 acknowledgement was lost', checkHistoricalDispat
 
 it('rechecks cleanup at dispatch after preflight and prevents direct dispatch', async () => {
   await applyD1Migrations(env.DB, migrations);
-  const id = 'cleanup-first', { token, intent } = await seed(id);
+  const id = 'cleanup-first', { token, intent, identity } = await seed(id);
   const fetch = vi.fn(), verify = vi.fn(async () => {
     await claim(intent);
     return parts;
   });
   const service = producer(fetch, verify);
-  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
-  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
+  await expect(service.complete(token, identity)).resolves.toBe('not-admitted');
+  await expect(service.complete(token, identity)).resolves.toBe('not-admitted');
   expect(verify).toHaveBeenCalledOnce();
   expect(fetch).not.toHaveBeenCalled();
   await expect(sql(`INSERT INTO drive_upload_completion_dispatches
@@ -41,7 +41,7 @@ it('rechecks cleanup at dispatch after preflight and prevents direct dispatch', 
 
 it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s without changing tombstones', async (outcome) => {
   await applyD1Migrations(env.DB, migrations);
-  const id = `dispatch-first-${outcome}`, { token, intent, key } = await seed(id);
+  const id = `dispatch-first-${outcome}`, { token, intent, key, identity } = await seed(id);
   const fetch = vi.fn(async () => {
     expect(await intentRow(intent)).toMatchObject({ state: 'completing', version: 3 });
     await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
@@ -50,7 +50,7 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
     return response(key);
   });
   const service = producer(fetch);
-  await expect(service.complete(token, id)).resolves.toBe(outcome === 'receipt' ? 'recorded' : 'uncertain');
+  await expect(service.complete(token, identity)).resolves.toBe(outcome === 'receipt' ? 'recorded' : 'uncertain');
   expect(await evidence(outcome === 'receipt' ? 'receipts' : 'quarantine', id)).not.toBeNull();
   expect(await intents.recordUncertain(`owner-${id}`, intent, 3, 'completion')).toBe(false);
   expect(await intents.recordSuccess(`owner-${id}`, intent, 3, { kind: 'completion' })).toBe(false);
@@ -58,20 +58,20 @@ it.each(['receipt', 'quarantine'])('rejects cleanup during dispatch and after %s
   expect(await storedClaim(intent)).toBeNull();
   expect(await sql('SELECT intent_id FROM drive_upload_publication_tombstones WHERE intent_id = ?', intent).first())
     .toEqual({ intent_id: intent });
-  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
+  await expect(service.complete(token, identity)).resolves.toBe('not-admitted');
   expect(fetch).toHaveBeenCalledOnce();
 });
 
 async function checkHistoricalDispatch() {
   await applyD1Migrations(env.DB, preGenerationMigrations);
-  const id = 'unconfirmed-dispatch', { token, intent } = await seed(id), fetch = vi.fn();
+  const id = 'unconfirmed-dispatch', { token, intent, identity } = await seed(id), fetch = vi.fn();
   const service = producer(fetch, async () => parts, loseAcknowledgement('dispatches', false));
-  await expect(service.complete(token, id)).resolves.toBe('uncertain');
+  await expect(service.complete(token, identity)).resolves.toBe('uncertain');
   expect(await evidence('dispatches', id)).not.toBeNull();
   expect(await evidence('receipts', id)).toBeNull();
   expect(await evidence('quarantine', id)).toBeNull();
   await expect(claim(intent)).rejects.toThrow('upload cleanup not admitted');
-  await expect(service.complete(token, id)).resolves.toBe('not-admitted');
+  await expect(service.complete(token, identity)).resolves.toBe('not-admitted');
   expect(fetch).not.toHaveBeenCalled();
 
   // Acknowledge only the journal before upgrading; the dispatch alone must reject cleanup.
@@ -84,9 +84,9 @@ async function checkHistoricalDispatch() {
 
 it('keeps an existing tombstone effective before dispatch without treating it as a cleanup claim', async () => {
   await applyD1Migrations(env.DB, migrations);
-  const id = 'tombstone-first', { token, intent } = await seed(id), fetch = vi.fn();
+  const id = 'tombstone-first', { token, intent, identity } = await seed(id), fetch = vi.fn();
   await tombstone(intent);
-  await expect(producer(fetch).complete(token, id)).resolves.toBe('not-admitted');
+  await expect(producer(fetch).complete(token, identity)).resolves.toBe('not-admitted');
   expect(fetch).not.toHaveBeenCalled();
   expect(await evidence('dispatches', id)).toBeNull();
   expect(await storedClaim(intent)).toBeNull();

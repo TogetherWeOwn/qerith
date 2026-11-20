@@ -27,7 +27,7 @@ beforeAll(async () => {
 });
 
 it('keeps cleanup and legacy completion fenced after an attempt and journal reset', async () => {
-  const { intent, token } = await sized('attempt-first'), owner = 'owner-attempt-first';
+  const { intent, token, identity } = await sized('attempt-first'), owner = 'owner-attempt-first';
   const row = await intentRow(intent);
   expect(row).toMatchObject({ state: 'allocated', version: 2, declared_size: 7 });
   await expect(attempt(row, 1)).rejects.toThrow('upload completion claim is stale');
@@ -52,7 +52,7 @@ it('keeps cleanup and legacy completion fenced after an attempt and journal rese
   await sql('UPDATE drive_upload_intents SET version = 2 WHERE id = ?', intent).run();
   await expect(dispatch('attempt-first')).rejects.toThrow('upload completion already attempted');
   const fetch = vi.fn(), verify = vi.fn(async () => parts);
-  await expect(producer(fetch, verify).complete(token, 'attempt-first')).resolves.toBe('not-admitted');
+  await expect(producer(fetch, verify).complete(token, identity)).resolves.toBe('not-admitted');
   expect(verify).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
   expect(await evidence('dispatches', 'attempt-first')).toBeNull();

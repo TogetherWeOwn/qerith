@@ -79,7 +79,7 @@ it('rejects a stale version and a valid session from another principal before HE
 
 it('rejects a bare seal, an unresolved dispatch and a late receipt on a quarantined dispatch', async () => {
   const operation = 'late-completion';
-  const { publish, token, key, intent } = await setup(operation);
+  const { publish, token, key, intent, identity } = await setup(operation);
   const head = vi.fn(headOk);
   const service = publisher(head);
   expect(await publish(service)).toBeNull();
@@ -88,7 +88,7 @@ it('rejects a bare seal, an unresolved dispatch and a late receipt on a quaranti
     await completion.quarantineUnresolved(operation);
     return response(key);
   });
-  expect(await completion.complete(token, operation)).toBe('recorded');
+  expect(await completion.complete(token, identity)).toBe('recorded');
   expect(await evidence('receipts', operation)).not.toBeNull();
   expect(await evidence('quarantine', operation)).not.toBeNull();
   expect(await publish(service)).toBeNull();
