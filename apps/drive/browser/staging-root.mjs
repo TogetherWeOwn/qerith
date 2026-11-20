@@ -82,13 +82,15 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker) => {
+  const relay = async (route, target = worker, navigationSite) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
     let seededNotice;
     if (request.isNavigationRequest()) {
       headers['x-fixture-navigation'] = '1';
+      // Playwright can intercept a navigation before Chromium adds fetch metadata.
+      if (navigationSite) headers['sec-fetch-site'] = navigationSite;
       if (pendingNotice && url.pathname === '/' && url.search === `?download=${pendingNotice.nonce}`) {
         // Seed this Worker document request only; the relay is not a browser cookie transport.
         seededNotice = pendingNotice;
@@ -229,8 +231,8 @@ try {
     return worker.fetch(url, { ...init, headers });
   } };
   const priorAssets = new Set(assets);
-  await proveInvite(browser, { origin, relay: route => relay(route, inviteWorker), worker: inviteWorker,
-    DB, ownerToken: session.value, staging: true });
+  await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
+    worker: inviteWorker, DB, ownerToken: session.value, staging: true });
   const inviteNodes = [...assets].filter(path => path.startsWith('/_app/immutable/nodes/') && !priorAssets.has(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});

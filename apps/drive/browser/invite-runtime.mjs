@@ -25,8 +25,9 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       if (staging) {
         assert.ok([first.token, token].every(value => !request.url().includes(value)), 'token absent from request URL');
         if (request.isNavigationRequest() && url.pathname === '/invite' && !followedLink) {
-          assert.equal((await request.allHeaders())['sec-fetch-site'], 'cross-site');
+          assert.equal(request.frame().url(), linkSource);
           followedLink = true;
+          return relay(route, 'cross-site');
         }
         if (url.pathname.startsWith('/api/invite/')) {
           const headers = await request.allHeaders();
@@ -56,6 +57,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       await page.goto(linkSource);
       [document] = await Promise.all([page.waitForResponse(`${origin}/invite`), page.getByRole('link', { name: 'Open invitation' }).click()]);
     } else document = await page.goto(`${origin}/invite#${first.token}`);
+    if (staging) assert.ok(followedLink, 'followed the cross-site invitation link');
     assert.equal(document.status(), 200);
     const headers = await document.allHeaders();
     assert.equal(headers['referrer-policy'], 'no-referrer');
@@ -94,7 +96,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       assert.equal(await field.evaluate(el => el === document.activeElement), true);
     }
     const pending = Promise.withResolvers();
-    await page.route('**/api/invite/enroll', async route => { await pending.promise; await relay(route); }, { times: 1 });
+    await page.route('**/api/invite/enroll', async route => { await pending.promise; await route.fallback(); }, { times: 1 });
     const enrollPath = message => new URL(message.url()).pathname === '/api/invite/enroll';
     const dispatched = page.waitForRequest(enrollPath);
     const enrolled = page.waitForResponse(enrollPath);
@@ -115,7 +117,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
     const releasePresent = Promise.withResolvers();
-    await page.route('**/api/invite/present', async route => { await releasePresent.promise; await relay(route); }, { times: 1 });
+    await page.route('**/api/invite/present', async route => { await releasePresent.promise; await route.fallback(); }, { times: 1 });
     const presented = page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present');
     const status = page.getByRole('status');
     let loading;
