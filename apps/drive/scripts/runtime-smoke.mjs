@@ -11,6 +11,7 @@ import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from 
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
+import { exerciseStagingFolderCreate } from '../tests/staging-folder-create-worker-fixture.mjs';
 import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
@@ -139,7 +140,7 @@ export default { fetch(request, env, ctx) {
     if (missing) delete env[missing];
   }
   if (request.headers.has('x-test-invite')) {
-    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
@@ -369,6 +370,8 @@ export default { fetch(request, env, ctx) {
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
       await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
+      await exerciseEntryChange({ worker, DB, origin, session, staging });
+      await exerciseStagingFolderCreate({ worker, DB, origin, session });
       await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();

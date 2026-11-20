@@ -21,21 +21,20 @@ export async function assertEntryChangeClosed({ worker, DB, origin, owner, membe
   await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES
     ('closed-owner', 'fixture', 'Owner original', 'folder'),
     ('closed-member', 'member', 'Member original', 'folder')`).run();
-  for (const [id, cookie, headers] of [
-    ['closed-owner', owner, {}],
-    ['closed-owner', owner, { 'x-test-invite': '1' }],
-    ['closed-member', member, { 'x-test-invite': '1' }],
-  ]) {
+  for (const [id, cookie] of [['closed-owner', owner], ['closed-member', member]]) {
     const row = DB.prepare('SELECT * FROM drive_entries WHERE id = ?').bind(id);
     const before = await row.first();
     assert.ok(before);
-    const response = await patch(worker, origin, cookie, pathFor(id), rename('Should not change'), headers);
-    assert.deepEqual([response.status, await response.text()], [404, '']);
+    for (const [path, headers] of [[pathFor(id), {}], [pathFor(id), { 'x-test-invite': 'true' }],
+      ...['/', '?alias=1', '/delete', '/read-grants'].map(suffix => [pathFor(id) + suffix, { 'x-test-invite': '1' }])]) {
+      const response = await patch(worker, origin, cookie, path, rename('Should not change'), headers);
+      assert.deepEqual([response.status, await response.text()], [404, ''], path);
+    }
     assert.deepEqual(await row.first(), before);
   }
 }
 
-export async function exerciseEntryChange({ worker, DB, origin, session }) {
+export async function exerciseEntryChange({ worker, DB, origin, session, staging = false }) {
   const owner = await session('move-owner', 'member');
   const other = await session('move-other', 'member');
   await DB.batch([
@@ -47,7 +46,9 @@ export async function exerciseEntryChange({ worker, DB, origin, session }) {
     DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
       VALUES (?, 'move-owner', 'move-parent', 'Original', 'file', 'fixture-object', 1)`).bind(file),
   ]);
-  const change = (command, id = file, cookie = owner, headers) => patch(worker, origin, cookie, pathFor(id), command, headers);
+  const withInvite = staging ? { 'x-test-invite': '1' } : {};
+  const change = (command, id = file, cookie = owner, headers) =>
+    patch(worker, origin, cookie, pathFor(id), command, { ...withInvite, ...headers });
   const denied = async (pending, status) => {
     const response = await pending;
     assert.deepEqual([response.status, await response.text()], [status, '']);

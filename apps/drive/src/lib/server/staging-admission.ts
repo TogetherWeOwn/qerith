@@ -1,5 +1,7 @@
 import { isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
+import { entryChangeRequest, entryChangeSource, type MetadataWriteEnv } from './entry-change-route';
+import { postFolder } from './folder-route';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
@@ -17,6 +19,7 @@ interface PreviewAssets {
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
 type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
+  { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
   { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'root'; deadline?: number };
 
@@ -47,6 +50,14 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
       if (invite && assets.folder.has(path) && request.url === stagingOrigin + path) return { kind: 'folder-asset' };
     }
   }
+  if (invite) {
+    if (method === 'POST' && request.url === `${stagingOrigin}/api/folders`) {
+      return { kind: 'metadata-write', operation: 'create-folder' };
+    }
+    if (method === 'PATCH' && entryChangeSource(request, url) !== null) {
+      return { kind: 'metadata-write', operation: 'change-entry' };
+    }
+  }
   const [, api, resource, id, action] = path.split('/', 5);
   if (api !== 'api') return null;
   if (method === 'POST' && resource === 'sign-in' && action === undefined &&
@@ -74,7 +85,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const target: Target | null = readGrant ? { kind: 'read-grant' } : invite && ownerLifecycleRoute(request, url)
     ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite);
   if (!target) return deny(404);
-  if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant') && !allowsStagingInviteSite(request)) return deny(403);
+  if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant' || target.kind === 'metadata-write') &&
+      !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
     if (request.url !== stagingOrigin + pathname) return deny(404);
@@ -103,7 +115,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
         : target.kind === 'read-grant' || invite && (target.kind === 'root' || target.kind === 'root-data' ||
           target.kind === 'private-asset' || target.kind === 'download' ||
-          target.kind === 'folder' || target.kind === 'folder-asset');
+          target.kind === 'folder' || target.kind === 'folder-asset' || target.kind === 'metadata-write');
       if (session.role === 'owner' || memberRoute) {
         return target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
           (target.kind === 'root' && request.method === 'HEAD')
@@ -121,7 +133,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   }
 }
 
-export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv, storageReady: boolean,
+export async function dispatchStagingRequest(request: Request, env: MetadataWriteEnv, storageReady: boolean,
   assets: PreviewAssets, dispatch: PreviewDispatch): Promise<Response> {
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
@@ -159,6 +171,8 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'people':
     case 'folder':
       return dispatch.adapter(request);
+    case 'metadata-write':
+      return target.operation === 'create-folder' ? postFolder(request, env) : entryChangeRequest(request, env) ?? deny(404);
     case 'read-grant': {
       const url = new URL(request.url);
       // The adapter can reject reserved query keys before Drive's hook runs.
