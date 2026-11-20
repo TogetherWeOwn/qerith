@@ -19,7 +19,7 @@ async function denied(response: Response | undefined, status: number) {
 }
 
 test('both listing paths stay closed in staging and outside the disposable fixture', async () => {
-  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>() };
+  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>(), folder: new Set<string>() };
   for (const path of [folder, shared]) {
     const request = new Request(stagingOrigin + path);
     const admission = await admitStagingRequest(request, staging, true, assets);

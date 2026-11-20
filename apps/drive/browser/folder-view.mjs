@@ -7,14 +7,14 @@ const path = '/f/fixture-parent';
 const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
 const fileName = 'Résumé 2026.pdf';
 
-export async function captureFolderView(page, origin, db) {
+export async function captureFolderView(page, origin, db, { owner = 'fixture-owner', scope = 'folder' } = {}) {
   await db.batch([
     db.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('fixture-folder-member', 'member', 'active')"),
     db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES
-      ('fixture-child', 'fixture-owner', 'fixture-parent', 'Child folder', 'folder', NULL, NULL),
-      ('legacy:receipts', 'fixture-owner', 'fixture-parent', 'Imported folder', 'folder', NULL, NULL),
+      ('fixture-child', ?1, 'fixture-parent', 'Child folder', 'folder', NULL, NULL),
+      ('legacy:receipts', ?1, 'fixture-parent', 'Imported folder', 'folder', NULL, NULL),
       ('fixture-denied', 'fixture-folder-member', NULL, 'Private title sentinel', 'folder', NULL, NULL),
-      ('fixture-file', 'fixture-owner', 'fixture-parent', ?, 'file', 'internal-folder-key', 1)`).bind(fileName),
+      ('fixture-file', ?1, 'fixture-parent', ?2, 'file', 'internal-folder-key', 1)`).bind(owner, fileName),
   ]);
   const main = page.getByRole('main');
   const visit = async suffix => {
@@ -28,8 +28,8 @@ export async function captureFolderView(page, origin, db) {
     const tree = await main.ariaSnapshot();
     for (const fragment of expected) assert(tree.includes(fragment), `${state}: ${fragment}`);
     assert.doesNotMatch(await page.content(), /internal-folder-key|fixture-filler-key-|fixture-owner|fixture-folder-member|Private title sentinel/);
-    await writeFile(resolve(output, `folder-${state}-${width}-tree.txt`), tree);
-    await capture(page, state, width, true, 'folder');
+    await writeFile(resolve(output, `${scope}-${state}-${width}-tree.txt`), tree);
+    await capture(page, state, width, true, scope);
     return tree;
   };
   const tab = async name => {
@@ -52,7 +52,7 @@ export async function captureFolderView(page, origin, db) {
     await evidence('empty', width, 'Child folder', ['heading "Child folder" [level=1]', 'heading "This folder is empty." [level=2]']);
     const denied = await evidence('denied', width, 'Folder unavailable', ['heading "This folder isn\'t available." [level=1]', "It may have been deleted or moved, or it isn't shared with you.", 'link "Go to My Drive"'], '/f/fixture-denied');
     assert.equal(await evidence('missing', width, 'Folder unavailable', [], '/f/fixture-missing'), denied);
-    const screenshot = state => readFile(resolve(output, `folder-${state}-${width}.png`));
+    const screenshot = state => readFile(resolve(output, `${scope}-${state}-${width}.png`));
     assert.deepEqual(await screenshot('missing'), await screenshot('denied'));
     await activate('Go to My Drive');
     assert.equal(new URL(page.url()).pathname, '/');
@@ -60,22 +60,22 @@ export async function captureFolderView(page, origin, db) {
   await page.setViewportSize({ width: 320, height: 844 });
   await visit(path);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await capture(page, 'reflow', 320, false, 'folder');
+  await capture(page, 'reflow', 320, false, scope);
   await page.addStyleTag({ content: 'html { filter: grayscale(1); }' });
-  await capture(page, 'greyscale', 320, false, 'folder');
+  await capture(page, 'greyscale', 320, false, scope);
   await page.emulateMedia({ reducedMotion: 'reduce', forcedColors: 'active' });
   await visit(path);
   await tab('Child folder');
   assert.equal(await page.evaluate(() => document.getAnimations().length), 0);
-  await capture(page, 'forced-colours-focus', 320, false, 'folder');
+  await capture(page, 'forced-colours-focus', 320, false, scope);
   await page.emulateMedia({ reducedMotion: null, forcedColors: null });
 
   await db.prepare(`WITH RECURSIVE filler(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM filler WHERE n < 97)
     INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
-    SELECT 'fixture-file-' || n, 'fixture-owner', 'fixture-parent', printf('Part %02d', n), 'file', 'fixture-filler-key-' || n, 1 FROM filler`).run();
+    SELECT 'fixture-file-' || n, ?, 'fixture-parent', printf('Part %02d', n), 'file', 'fixture-filler-key-' || n, 1 FROM filler`).bind(owner).run();
   for (const [width, height] of widths) {
     await page.setViewportSize({ width, height });
-    await db.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('fixture-tail', 'fixture-owner', 'fixture-parent', 'Z last', 'folder')").run();
+    await db.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('fixture-tail', ?, 'fixture-parent', 'Z last', 'folder')").bind(owner).run();
     await visit(path);
     assert.equal(await main.getByRole('listitem').count(), 100);
     await tab('Child folder');
@@ -87,6 +87,8 @@ export async function captureFolderView(page, origin, db) {
     await evidence('end', width, 'Receipts', ['No more items.', 'link "First page"'], path + new URL(page.url()).search);
     await activate('First page');
     assert.equal(new URL(page.url()).search, '');
+    await writeFile(resolve(output, `${scope}-keyboard-${width}.json`), JSON.stringify({ viewport: [width, height],
+      visibleTabFocus: true, enterDocumentNavigation: ['Child folder', 'Go to My Drive', 'Next page', 'First page'] }));
   }
   await db.prepare("DELETE FROM drive_entries WHERE parent_id = 'fixture-parent' OR id IN ('fixture-parent', 'fixture-denied')").run();
   await db.prepare("DELETE FROM drive_principals WHERE id = 'fixture-folder-member'").run();

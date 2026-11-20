@@ -269,3 +269,24 @@ test('page navigation gets a private human response when D1 is unavailable', asy
     assert.equal(resolved, false);
   }
 });
+
+test('the app independently requires the staging folder opt-in and exact document', async () => {
+  const folder = '/f/private';
+  const visit = (path: string, flag?: string, headers: HeadersInit = { cookie }, method = 'GET') =>
+    request(stagingOrigin + path, { headers, method }, stagingOrigin, undefined, '/f/[folderId]', undefined, flag);
+  for (const [path, flag, headers, method, status] of [
+    [folder, undefined, { cookie }, 'GET', 404],
+    [folder, '0', { cookie }, 'HEAD', 404],
+    [folder, '1', {}, 'GET', 401],
+    [folder + '/__data.json', '1', { cookie }, 'GET', 404],
+    [folder, '1', { cookie, origin: stagingOrigin }, 'POST', 404],
+    [folder, '1', { cookie, 'sec-fetch-site': 'cross-site' }, 'GET', 404],
+  ] as const) {
+    const { response, resolved, lookups } = await visit(path, flag, headers, method);
+    assert.deepEqual([response.status, response.headers.get('cache-control'), resolved, lookups],
+      [status, 'private, no-store', false, 0]);
+  }
+  const { response, resolved, lookups } = await visit(`${folder}?page=opaque`, '1');
+  assert.deepEqual([response.status, response.headers.get('cache-control'), resolved, lookups],
+    [200, 'private, no-store', true, 1]);
+});

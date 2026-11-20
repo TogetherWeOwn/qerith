@@ -8,6 +8,7 @@ import { readinessHeaders, readinessPath } from '../src/lib/server/qualification
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
+import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -285,7 +286,6 @@ export default { fetch(request, env, ctx) {
       assert.match(html, /Your drive is empty/);
       assert.match(html, /type="file"/, 'the staging owner gets the upload picker');
       assert.match(html, /<script\b/, 'the staging root can hydrate');
-      assert.equal((await get('/f/private', { cookie })).status, 404, 'the staging owner cannot open the folder route');
       const notice = '00000000-0000-4000-8000-000000000001';
       const document = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin',
         cookie: `${cookie}; __Host-drive-download-failed-${notice}=unavailable` };
@@ -327,6 +327,7 @@ export default { fetch(request, env, ctx) {
       const range = await get(file, { cookie, range: 'bytes=1-2' });
       assert.deepEqual([range.status, range.headers.get('content-range'), await range.text()], [206, 'bytes 1-2/5', 'ri']);
       assert.equal((await get(file, { cookie: member })).status, 403);
+      await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
       assert.equal((await get(file, { cookie })).status, 401);

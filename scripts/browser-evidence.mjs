@@ -8,7 +8,7 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false) {
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -43,6 +43,21 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
         proof.rangeDownload.contentRange !== 'bytes 1-3/6' || proof.rangeDownload.byteIdentical !== true ||
         Object.entries(denied).some(([key, status]) => proof.denied?.[key] !== status)) throw new Error('Invalid staging evidence');
   }
+  if (folder) for (const [width, height] of [[390, 844], [1280, 800]]) {
+    const keyboard = JSON.parse(await readFile(join(dir, `staging-folder-keyboard-${width}.json`), 'utf8'));
+    const links = ['Child folder', 'Go to My Drive', 'Next page', 'First page'];
+    if (keyboard?.viewport?.[0] !== width || keyboard?.viewport?.[1] !== height || keyboard.visibleTabFocus !== true ||
+        JSON.stringify(keyboard.enterDocumentNavigation) !== JSON.stringify(links)) throw new Error(`Invalid folder keyboard evidence: ${width}`);
+    for (const state of ['listed', 'empty', 'denied', 'missing', 'continued', 'end']) {
+      const label = `staging-folder-${state}-${width}`;
+      const png = await readFile(join(dir, `${label}.png`));
+      const tree = await readFile(join(dir, `${label}-tree.txt`), 'utf8');
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      if (!png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
+          png.length < 45 || png.readUInt32BE(16) !== width || !tree.trim() ||
+          !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid folder evidence: ${label}`);
+    }
+  }
   for (const size of ['1280x800', '390x844']) {
     const png = await readFile(join(dir, `${size}.png`));
     if (!png.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
@@ -66,10 +81,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     throw new Error('Missing provenance context');
   }
   const root = process.env.ROOT_EVIDENCE === 'true';
-  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true');
+  const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
+  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true', folder);
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
     runUrl: `${server}/${repository}/actions/runs/${runId}`,
-    coverage: tested === requestedHead ? `synthetic fixture; ${generated}` : 'synthetic fixture only; not product behavior or sign-in' }, null, 2) + '\n');
+    coverage: tested === requestedHead ? `synthetic fixture; ${generated}${folder ? '; generated staging-origin SSR folder (opt-in, disposable D1)' : ''}` : 'synthetic fixture only; not product behavior or sign-in' }, null, 2) + '\n');
 }
