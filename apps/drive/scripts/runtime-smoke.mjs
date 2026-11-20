@@ -356,6 +356,7 @@ export default { fetch(request, env, ctx) {
     const closedFolder = await createFolder('Fixture disabled', null);
     assert.deepEqual([closedFolder.status, closedFolder.headers.get('cache-control'), await closedFolder.text()], [404, 'private, no-store', '']);
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
+    assert.match(await (await worker.fetch(`${origin}/f/${fileId}`, { headers: { cookie } })).text(), /<title>Folder unavailable · Drive<\/title>/);
     const unadmitted = await (await access({ headers: { cookie } })).text();
     assert.match(unadmitted, /Service unavailable\./);
     assert.doesNotMatch(unadmitted, /My Drive|Private fixture folder|type="file"|<script\b/);

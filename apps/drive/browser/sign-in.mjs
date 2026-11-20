@@ -152,9 +152,11 @@ try {
     assert.equal(response.status, 303);
     return page.goto(`${origin}${response.headers.get('location')}`, { waitUntil: 'networkidle' });
   };
-  await first.goto(`${origin}/f/fixture-parent`);
+  await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'fixture-owner', 'Receipts', 'folder')").run();
+  await signInFrom(first, '/f/fixture-parent');
   assert.equal(new URL(first.url()).searchParams.get('next'), '/f/fixture-parent');
   await captureSignedOut(first, 'folder');
+  await DB.prepare("DELETE FROM drive_entries WHERE id = 'fixture-parent'").run();
   await Promise.all([signInFrom(first, '/?tab=one'), signInFrom(second, '/shared?tab=two')]);
   await captureSignedOut(first);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);

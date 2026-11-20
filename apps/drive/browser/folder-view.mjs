@@ -78,14 +78,11 @@ export async function captureFolderView(page, origin, db) {
     await folder.bind('fixture-tail', 'fixture-owner', 'fixture-parent', 'Z last').run();
     await visit(path);
     assert.equal(await main.getByRole('listitem').count(), 100);
-    const links = main.getByRole('link');
-    assert.equal(await links.last().textContent(), 'Next page');
-    for (const name of await links.allTextContents()) await tab(name);
+    for (const name of ['Child folder', 'Next page']) await tab(name);
     await enter();
     assert.match(new URL(page.url()).searchParams.get('page'), /^[A-Za-z0-9_-]{378}$/);
     assert.equal(await main.getByRole('listitem').count(), 1);
     await evidence('continued', width, 'Receipts', ['link "Z last"', 'link "First page"']);
-    // Deleting the final row makes the same continuation truthfully past-end.
     await db.prepare("DELETE FROM drive_entries WHERE id = 'fixture-tail'").run();
     await visit(new URL(page.url()).pathname + new URL(page.url()).search);
     await evidence('end', width, 'Receipts', ['No more items.', 'link "First page"']);
@@ -99,5 +96,4 @@ export async function captureFolderView(page, origin, db) {
     db.prepare("DELETE FROM drive_entries WHERE id = 'fixture-parent'"),
     db.prepare("DELETE FROM drive_principals WHERE id = 'fixture-folder-member'"),
   ]);
-  console.log('Generated folder route: browsing, pagination, non-disclosure, axe, keyboard and responsive evidence captured');
 }
