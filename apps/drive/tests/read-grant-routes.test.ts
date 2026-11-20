@@ -33,6 +33,19 @@ test('bounds and decodes opaque path IDs and a single cursor without aliases', a
   assert.equal((await ask(path + '?cursor=%C3%A9%26%2B'))?.status, 401);
   assert.equal((await ask(path.replace('source', '%73ource')))?.status, 404);
   assert.equal((await ask(path.replace('source', 'a%20b')))?.status, 401);
+  for (const dot of ['.', '..', '%2E', '%2E%2E']) {
+    assert.equal(ask(path.replace('source', dot)), undefined);
+    assert.equal(ask(`${path}/${dot}`), undefined);
+  }
+  assert.equal((await ask(`${path}?cursor=..`))?.status, 401);
+});
+
+test('accepts bodyless mutation framing used by Workers', async () => {
+  for (const method of ['PUT', 'DELETE']) {
+    assert.equal((await ask(target, { method, headers: { origin, 'content-length': '0' }, body: '' }))?.status, 401);
+    assert.equal((await ask(target, { method, headers: { origin, 'content-length': '1' } }))?.status, 400);
+    assert.equal((await ask(target, { method, headers: { origin, 'content-length': '0', 'transfer-encoding': 'chunked' } }))?.status, 400);
+  }
 });
 
 test('rejects mutations with a missing Origin, wrong site, body or query before session use', async () => {

@@ -17,7 +17,7 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
       ('share-nested', 'share-owner', ?, 'Share nested', 'folder'),
       ('share-pages', 'share-owner', NULL, 'Share pages', 'folder')`).bind(folder, folder),
     DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
-      VALUES (?, 'share-owner', 'share-nested', 'Share file', 'private-object-key', 1)`).bind(file),
+      VALUES (?, 'share-owner', 'share-nested', 'Share file', 'file', 'private-object-key', 1)`).bind(file),
   ]);
   const ask = (path, cookie, method = 'GET', headers = {}, body) => worker.fetch(origin + path, {
     method, redirect: 'manual', headers: { ...(cookie ? { cookie } : {}), ...(method === 'GET' ? {} : { origin }), ...headers }, body,
@@ -43,6 +43,7 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   await status(ask(nested, recipient), 404);
 
   // A file grant does not expose its parent or create an inherited grant row.
+  await status(ask(item(file), owner, 'PUT', {}, '{}'), 400);
   await status(ask(item(file), owner, 'PUT'), 204);
   assert.deepEqual(await list(pathFor(file)), granted);
   assert.deepEqual((await list(shared, recipient)).entries, [{ id: file, name: 'Share file', kind: 'file' }]);

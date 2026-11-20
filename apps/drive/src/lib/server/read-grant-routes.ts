@@ -38,7 +38,8 @@ async function handle(request: Request, env: GrantEnv, url: URL, source: string,
   const recipientId = target === undefined ? null : decodeId(target);
   if (entryId === null || (!listing && recipientId === null)) return reply(404);
   const length = request.headers.get('content-length');
-  if (request.body !== null || (length !== null && length !== '0')) return reply(400);
+  // Workers can expose a stream for a request framed with Content-Length: 0.
+  if (request.headers.has('transfer-encoding') || (length === null ? request.body !== null : length !== '0')) return reply(400);
   const after = listing && url.search.startsWith('?cursor=') ? decodeId(url.search.slice(8)) : null;
   if (url.search && after === null) return reply(400);
 

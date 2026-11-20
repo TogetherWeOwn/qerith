@@ -13,8 +13,9 @@ The list returns up to 100 explicit active-member recipients in binary ID order.
 Send a non-null `nextCursor` as the sole query parameter `?cursor={nextCursor}`
 for the next page, even if that grant has since been removed. An empty list is
 successful. IDs and cursors are opaque, at most 512 UTF-8 bytes; encode each as
-`encodeURIComponent(value).replaceAll("'", "%27")`. No trailing slash, request
-body, or mutation query is accepted.
+`encodeURIComponent(value).replaceAll("'", "%27")`. `.` and `..` are not
+addressable as path IDs because URL parsers normalize those segments, even when
+percent-encoded. No trailing slash, request body, or mutation query is accepted.
 
 All requests use the real Drive session cookie. Mutations require the exact
 configured `Origin`; a supplied `Sec-Fetch-Site` must be `same-origin` for every
