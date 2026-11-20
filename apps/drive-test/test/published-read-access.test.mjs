@@ -62,9 +62,11 @@ it('resolves only own bound generations in own-file mode, even when a grant exis
   expect(await ownFile.resolveGeneration(reader, id)).toBeNull();
 
   await sql("UPDATE drive_principals SET role = 'owner' WHERE id = ?", owner).run();
-  expect(await ownerOnly.resolveGeneration(token, id)).toEqual(reference);
-  expect(await ownFile.resolveGeneration(token, id)).toEqual(reference);
-  expect(primary.mock.calls).toEqual(Array.from({ length: 4 }, () => ['first-primary']));
+  try {
+    expect(await ownerOnly.resolveGeneration(token, id)).toEqual(reference);
+    expect(await ownFile.resolveGeneration(token, id)).toEqual(reference);
+    expect(primary.mock.calls).toEqual(Array.from({ length: 4 }, () => ['first-primary']));
+  } finally { await sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", owner).run(); }
 });
 
 it('rechecks the live own-file session and principal on each resolution', async () => {
@@ -103,16 +105,18 @@ it('denies an own-file reference when the primary result uses up the remaining s
 });
 
 it.each([false, 'own-file'])('read mode %s excludes legacy rows, wrong configuration, mismatched size, tombstones and deletion', async (mode) => {
-  const { id, intent, token } = await seedBoundPublication('read-fence');
+  const label = mode === false ? 'grant-aware' : mode;
+  const { id, intent, token } = await seedBoundPublication(`read-fence-${label}`);
   const { resolveGeneration } = createPublishedReadAccess(env.DB, epoch, config, mode);
   expect(await resolveGeneration(token, id)).not.toBeNull();
   for (const [wrongEpoch, wrongConfig] of [[epoch, { ...config, bucket: 'other-bucket' }],
     [epoch, { ...config, endpoint: 'https://other.example' }], ['epoch-2', config]]) {
     expect(await createPublishedReadAccess(env.DB, wrongEpoch, wrongConfig, mode).resolveGeneration(token, id)).toBeNull();
   }
-  const legacy = await seed('read-legacy', { declaredSize: 7 });
+  const legacyLabel = `read-legacy-${label}`;
+  const legacy = await seed(legacyLabel, { declaredSize: 7 });
   const publication = new UploadPublication(env.DB, async () => ({ etag, size: 7 }), legacy.token);
-  const legacyFile = await publication.completeAndPublish('owner-read-legacy', legacy.intent, 2, null, 'old', parts);
+  const legacyFile = await publication.completeAndPublish(`owner-${legacyLabel}`, legacy.intent, 2, null, 'old', parts);
   expect(await sql('SELECT completion_operation_id, evidence_revision FROM drive_upload_publications WHERE entry_id = ?', legacyFile.id).first())
     .toEqual({ completion_operation_id: null, evidence_revision: null });
   expect(await resolveGeneration(legacy.token, legacyFile.id)).toBeNull();
@@ -122,7 +126,7 @@ it.each([false, 'own-file'])('read mode %s excludes legacy rows, wrong configura
   expect(await resolveGeneration(token, id)).not.toBeNull();
   await sql('INSERT INTO drive_upload_publication_tombstones VALUES (CAST(? AS TEXT))', intent).run();
   expect(await resolveGeneration(token, id)).toBeNull();
-  const gone = await seedBoundPublication('read-gone');
+  const gone = await seedBoundPublication(`read-gone-${label}`);
   expect(await resolveGeneration(gone.token, gone.id)).not.toBeNull();
   expect(await new PrivateDeletion(env.DB).delete(gone.token, gone.id)).toBe(true);
   expect(await resolveGeneration(gone.token, gone.id)).toBeNull();
