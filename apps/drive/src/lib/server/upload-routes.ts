@@ -2,6 +2,7 @@ import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from './identit
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
   occupiedUploadName } from './metadata/upload-completion-receipts';
+import { UploadPartByteEvidence } from './metadata/upload-part-byte-evidence';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
 import { decodeUploadIdentity, uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
@@ -118,8 +119,19 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
               if ([objectKey, uploadId].some((value) => !value || value.includes('\0'))) throw new TypeError('Invalid storage identity');
               const operation = { operationId, intentId, ownerId, objectKey, storageEpoch: epoch,
                 uploadId, intentVersion: intent.version, partNumber, sizeBytes };
-              return { objectKey, uploadId, record: (receipt) => ledger.recordObservation(operation,
-                receipt ? Uint8Array.from(receipt.etag, (char) => char.charCodeAt(0)) : null) };
+              return {
+                objectKey, uploadId,
+                byteEvidence: { scope: { ...operation, endpoint: settings.endpoint, bucket: settings.bucket },
+                  store: new UploadPartByteEvidence(db) },
+                async record(receipt) {
+                  const tag = receipt ? Uint8Array.from(receipt.etag, (char) => char.charCodeAt(0)) : null;
+                  try { await ledger.recordObservation(operation, tag); }
+                  catch (error) {
+                    // The evidence write may have committed both rows before losing its acknowledgment.
+                    if (!receipt || await ledger.reconcileObservationWrite(operation, tag) !== 'recorded') throw error;
+                  }
+                }
+              };
             } };
           }
         }).then(({ status }) => reply(status));

@@ -137,3 +137,29 @@ test('keeps lost acknowledgments and failed sends uncertain without retries', as
     assert.deepEqual(recorded, failure === 'claim' ? [] : [failure === 'send' ? null : receipt]);
   }
 });
+
+test('a failed evidence digest permits only the already-claimed send and preserves its receipt', async (t) => {
+  const digest = t.mock.method(crypto.subtle, 'digest', async () => { throw new Error('Digest unavailable'); });
+  const receipt = { partNumber: 1, size: 1, etag: '"provider-etag"' };
+  const scope = { operationId: 'op', intentId: id, ownerId: 'owner', objectKey: 'key', uploadId: 'upload',
+    intentVersion: 2, partNumber: 1, sizeBytes: 1, storageEpoch: 'epoch', endpoint: origin, bucket: 'bucket' };
+  const recorded: unknown[] = [];
+  let claimed = false;
+  const send = t.mock.fn(async () => receipt);
+  const recordAcknowledged = t.mock.fn(async () => { assert.fail('unexpected evidence write'); });
+  const deps: UploadPartDependencies = {
+    authorize: async () => ({ claim: async () => {
+      if (claimed) return null;
+      claimed = true;
+      return { objectKey: scope.objectKey, uploadId: scope.uploadId, byteEvidence: { scope, store: { recordAcknowledged } },
+        record: async (outcome) => { recorded.push(outcome); } };
+    } }),
+    send
+  };
+  assert.equal((await uploadPart(put(), id, '1', deps)).status, 204);
+  assert.equal((await uploadPart(put(), id, '1', deps)).status, 404);
+  assert.equal(digest.mock.callCount(), 1);
+  assert.equal(send.mock.callCount(), 1);
+  assert.equal(recordAcknowledged.mock.callCount(), 0);
+  assert.deepEqual(recorded, [receipt]);
+});
