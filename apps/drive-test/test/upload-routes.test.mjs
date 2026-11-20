@@ -405,7 +405,7 @@ it('reports a sibling appearing after sealing without dispatching completion', a
 
 it('reports a sibling appearing at publication and reuses the verified receipt once the name is free', async () => {
   let sibling;
-  const { send, calls, principal, generation } = await fixture({ beforeHead: async () => {
+  const { send, calls, principal, generation, headPins } = await fixture({ beforeHead: async () => {
     sibling ??= await occupy(principal, 'file');
   } });
   expect((await send(1)).status).toBe(204);
@@ -420,6 +420,7 @@ it('reports a sibling appearing at publication and reuses the verified receipt o
   const replay = await send();
   expect([replay.status, await replay.json()]).toEqual([200, receipt]);
   expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
+  expect(headPins).toEqual([etag, etag]);
 });
 
 it('replays the recorded receipt after the published file moves and the old folder is removed', async () => {
