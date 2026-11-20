@@ -2,7 +2,8 @@ import { isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-na
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { admitsStagingInvite, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
+import { admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadAdmissionRoute } from './upload-admission';
 
 interface PreviewAssets {
@@ -15,7 +16,7 @@ interface PreviewAssets {
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
   { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'root'; deadline?: number };
 
@@ -69,10 +70,11 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const url = new URL(request.url);
   const { pathname, search } = url;
   const invite = admitsStagingInvite(env);
-  const target: Target | null = invite && ownerLifecycleRoute(request, url)
+  const readGrant = admitsStagingReadGrants(env) && readGrantAdmissionRoute(request, url);
+  const target: Target | null = readGrant ? { kind: 'read-grant' } : invite && ownerLifecycleRoute(request, url)
     ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite);
   if (!target) return deny(404);
-  if (target.kind === 'owner-lifecycle' && !allowsStagingInviteSite(request)) return deny(403);
+  if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant') && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
     if (request.url !== stagingOrigin + pathname) return deny(404);
@@ -99,7 +101,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     if (session && performance.now() < deadline) {
       const memberRoute = target.kind === 'upload'
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
-        : invite && (target.kind === 'root' || target.kind === 'root-data' ||
+        : target.kind === 'read-grant' || invite && (target.kind === 'root' || target.kind === 'root-data' ||
           target.kind === 'private-asset' || target.kind === 'download' ||
           target.kind === 'folder' || target.kind === 'folder-asset');
       if (session.role === 'owner' || memberRoute) {
@@ -157,5 +159,11 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'people':
     case 'folder':
       return dispatch.adapter(request);
+    case 'read-grant': {
+      const url = new URL(request.url);
+      // The adapter can reject reserved query keys before Drive's hook runs.
+      if (readGrantCursor(request.method, url.search) === undefined) return deny(400);
+      return dispatch.adapter(readGrantAdapterRequest(request, url));
+    }
   }
 }
