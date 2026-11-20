@@ -20,7 +20,7 @@ const request = (path: string, method = 'GET', headers?: HeadersInit) =>
 
 function runtime(role: 'owner' | 'member' | 'revoked' | 'offline' = 'owner', remaining_ms = 60_000, delayMs = 0) {
   let reads = 0;
-  const DB = { prepare: () => {
+  const DB = { withSession: () => assert.fail('unexpected write session'), prepare: () => {
     reads++;
     if (role === 'offline') throw new Error('fixture unavailable');
     return { bind: () => ({ first: async () => {
@@ -254,6 +254,39 @@ test('invite mode admits live members to My Drive, its data and assets, the exac
   for (const [path, methods] of protectedRoutes) {
     for (const method of methods) denied(await admit(request(path, method), '1'), 401);
   }
+});
+
+test('metadata writes admit only canonical methods and URLs, then validate the live session before dispatch', async () => {
+  const { env, reads, revoke } = runtime('member');
+  const enabled = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+  for (const [path, method] of [['/api/folders', 'POST'], ['/api/entries/r%C3%A9sum%C3%A9', 'PATCH']]) {
+    for (const flag of [undefined, '0', 'true', '1 ']) {
+      denied(await admitStagingRequest(request(path, method), { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag }, true, assets), 404);
+    }
+    for (const alternative of ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'].filter(m => m !== method)) {
+      denied(await admitStagingRequest(request(path, alternative), enabled, true, assets), 404);
+    }
+    for (const alias of [path + '/', path + '?', path + '?x=1', path + '#x', path.replace('/api/', '/%61pi/')]) {
+      denied(await admitStagingRequest(request(alias, method), enabled, true, assets), 404);
+    }
+    const raw = request(path, method);
+    Object.defineProperty(raw, 'url', { value: `${stagingOrigin}/other/%2e%2e${path}` });
+    denied(await admitStagingRequest(raw, enabled, true, assets), 404);
+    denied(await admitStagingRequest(request(path, method, { cookie }), enabled, true, assets), 403);
+    denied(await admitStagingRequest(request(path, method, { cookie, origin: stagingOrigin, 'sec-fetch-site': 'none' }), enabled, true, assets), 403);
+    denied(await admitStagingRequest(request(path, method, { origin: stagingOrigin }), enabled, true, assets), 401);
+  }
+  for (const alias of ['/api/entries/%61', '/api/entries/%C3%a9', '/api/entries/%00', '/api/entries/%ZZ']) {
+    denied(await admitStagingRequest(request(alias, 'PATCH'), enabled, true, assets), 404);
+  }
+  assert.equal(reads(), 0);
+  const unexpected = async () => assert.fail('metadata write reached an unrelated handler');
+  const dispatch = { adapter: unexpected, asset: unexpected, ceremony: unexpected, invite: unexpected };
+  const writes = [request('/api/folders', 'POST'), request('/api/entries/r%C3%A9sum%C3%A9', 'PATCH')];
+  for (const input of writes) denied(await dispatchStagingRequest(input, enabled, true, assets, dispatch), 400);
+  revoke();
+  for (const input of writes) denied(await dispatchStagingRequest(input, enabled, true, assets, dispatch), 401);
+  assert.equal(reads(), 4);
 });
 
 test('staging owner lifecycle routes require the exact invite flag and a live owner', async () => {
