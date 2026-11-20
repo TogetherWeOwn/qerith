@@ -55,7 +55,7 @@ export function validateStagingTarget(root, accountId) {
 
 const storageKeys = ['ENDPOINT', 'BUCKET', 'REGION', 'STORAGE_EPOCH', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'];
 
-async function stagingStorage(env, receipt) {
+export async function stagingStorage(env, receipt) {
   const names = storageKeys.map(key => `QERITH_S3_${key}`);
   const missing = names.filter(name => !env[name]?.trim());
   if (missing.length) throw new Error(`missing staging storage settings: ${missing.join(', ')}`);
