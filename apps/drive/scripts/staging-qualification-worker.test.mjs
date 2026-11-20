@@ -174,20 +174,26 @@ test('probe and case deadlines abort and settle work before rollback', async t =
   }
 });
 
-test('rejects probe and case overruns even when the timer has not fired', async t => {
+test('aborts overdue probe and case settlements even when the timer has not fired', async t => {
   let now = 0;
   t.mock.method(performance, 'now', () => now);
   for (const [phase, timeout] of [['probe', 30_000], ['exercise', 20 * 60_000]]) {
-    const { run, options, calls } = fixture(t);
-    options[phase] = (identity, signal) => {
-      assert.ok(!signal.aborted);
-      now += timeout;
-      assert.ok(!signal.aborted);
-      return { ...identity, ready: true };
-    };
-    await assert.rejects(run(), { name: 'TimeoutError' });
-    assert.deepEqual(calls.slice(-3), ['current', 'restore', 'current']);
-    if (phase === 'probe') assert.ok(!calls.includes('cases'));
+    for (const reject of [false, true]) {
+      await t.test(`${phase} ${reject ? 'rejects' : 'fulfills'} at its deadline`, async t => {
+        const { run, options, calls } = fixture(t);
+        options[phase] = async (identity, signal) => {
+          signal.addEventListener('abort', () => calls.push('abort'), { once: true });
+          now += timeout;
+          assert.ok(!signal.aborted);
+          calls.push('settled');
+          if (reject) throw new Error('late phase failure');
+          return { ...identity, ready: true };
+        };
+        await assert.rejects(run(), { name: 'TimeoutError' });
+        assert.deepEqual(calls.slice(-5), ['settled', 'abort', 'current', 'restore', 'current']);
+        if (phase === 'probe') assert.ok(!calls.includes('cases'));
+      });
+    }
   }
 });
 

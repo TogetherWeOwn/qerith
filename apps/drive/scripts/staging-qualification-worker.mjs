@@ -75,13 +75,12 @@ async function runPhase(task, identity, parentSignal, timeout) {
   try {
     // The callback must stop and drain its work on abort. Racing the promise
     // would allow a still-running case to mutate staging during rollback.
-    const result = await task({ ...identity }, signal);
+    return await task({ ...identity }, signal);
+  } finally {
     // A blocked event loop can settle the callback before the timer gets a turn.
     if (performance.now() >= deadline) expire();
-    signal.throwIfAborted();
-    return result;
-  } finally {
     clearTimeout(timer);
+    signal.throwIfAborted();
   }
 }
 
