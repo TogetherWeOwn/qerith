@@ -82,17 +82,21 @@ it('records the exact acknowledged provider body for a fresh owner part', async 
     digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', body)),
       (byte) => byte.toString(16).padStart(2, '0')).join('');
   } });
-  expect((await send(1, { auth: foreign, bytes })).status).toBe(403);
-  expect(await partObservation(key)).toBeNull();
-  const result = await send(1, { bytes });
-  expect([result.status, await result.text()]).toEqual([204, '']);
-  expect(digest).toMatch(/^[0-9a-f]{64}$/);
-  expect(await partObservation(key)).toEqual({ intent_id: intent, owner_id: principal, object_key: key,
-    storage_epoch: epoch, upload_id: uploadId, intent_version: 2, part_number: 1, size_bytes: bytes.length,
-    kind: 'reported', etag: tag, digest });
-  expect((await send(1, { bytes: bytes.slice().reverse() })).status).toBe(404);
-  expect(await partObservation(key)).toMatchObject({ digest });
-  expect(calls).toEqual(['PUT']);
+  try {
+    expect((await send(1, { auth: foreign, bytes })).status).toBe(403);
+    expect(await partObservation(key)).toBeNull();
+    const result = await send(1, { bytes });
+    expect([result.status, await result.text()]).toEqual([204, '']);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(await partObservation(key)).toEqual({ intent_id: intent, owner_id: principal, object_key: key,
+      storage_epoch: epoch, upload_id: uploadId, intent_version: 2, part_number: 1, size_bytes: bytes.length,
+      kind: 'reported', etag: tag, digest });
+    expect((await send(1, { bytes: bytes.slice().reverse() })).status).toBe(404);
+    expect(await partObservation(key)).toMatchObject({ digest });
+    expect(calls).toEqual(['PUT']);
+  } finally {
+    await sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
+  }
 });
 
 it('does not record byte evidence for a cancelled provider attempt', async () => {
