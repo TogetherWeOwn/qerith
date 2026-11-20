@@ -40,7 +40,8 @@ function job(t, target = endpoint) {
 }
 
 function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket, postPendingPrefix = prefix,
-  initialUploadsXml = '', finalUploadsXml = '', finalObjectsXml = '', listedKey = key } = {}) {
+  initialUploadsXml = '', finalUploadsXml = '', finalObjectsXml = '', listedKey = key, namespaced = false } = {}) {
+  const namespace = namespaced ? ' xmlns="http://s3.amazonaws.com/doc/2006-03-01/"' : '';
   const trace = [];
   let pending = true, present = true;
   const send = async request => {
@@ -56,11 +57,11 @@ function signedFixture({ postPrefix = prefix, count = '1', proofBucket = bucket,
       if (url.searchParams.has('uploads')) {
         const record = pending && !initialUploadsXml ? `<Upload><Key>${encodeURIComponent(listedKey)}</Key><UploadId>${uploadId}</UploadId></Upload>` : '';
         const extra = pending ? initialUploadsXml : finalUploadsXml;
-        return new Response(`<ListMultipartUploadsResult><Bucket>${bucket}</Bucket>${envelope(pending ? prefix : postPendingPrefix)}${record}${extra}</ListMultipartUploadsResult>`);
+        return new Response(`<ListMultipartUploadsResult${namespace}><Bucket>${bucket}</Bucket>${envelope(pending ? prefix : postPendingPrefix)}${record}${extra}</ListMultipartUploadsResult>`);
       }
       assert.equal(url.searchParams.get('list-type'), '2');
       const record = present ? `<Contents><Key>${encodeURIComponent(listedKey)}</Key></Contents>` : '';
-      return new Response(`<ListBucketResult><Name>${proofBucket}</Name>${envelope(present ? prefix : postPrefix)}<KeyCount>${present ? count : 0}</KeyCount>${record}${present ? '' : finalObjectsXml}</ListBucketResult>`);
+      return new Response(`<ListBucketResult${namespace}><Name>${proofBucket}</Name>${envelope(present ? prefix : postPrefix)}<KeyCount>${present ? count : 0}</KeyCount>${record}${present ? '' : finalObjectsXml}</ListBucketResult>`);
     }
     assert.equal(request.method, 'DELETE');
     assert.equal(decodeURIComponent(url.pathname), `/${bucket}/${listedKey}`);
@@ -89,7 +90,7 @@ test('the protected R2 adapter signs and scopes every request with a reviewed bi
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {
   const { cwd, env, context } = job(t);
-  const { send, trace } = signedFixture({ listedKey: prefix,
+  const { send, trace } = signedFixture({ listedKey: prefix, namespaced: true,
     finalUploadsXml: '<KeyMarker/><UploadIdMarker/><NextKeyMarker/><NextUploadIdMarker/>' });
   const cleanup = await createQualificationR2Cleanup(env, cwd, { send });
   assert.equal(await cleanup(context), true);
@@ -112,6 +113,31 @@ test('signed R2 cleanup rejects a skipped start or contradictory multipart conti
     const cleanup = await createQualificationR2Cleanup(env, cwd, { send });
     await assert.rejects(cleanup(context), /cleanup is unverified/, xml);
     assert.deepEqual(trace, [...deleted, ...checks]);
+  }
+});
+
+test('signed R2 cleanup rejects wrong namespaces in listing prechecks and readbacks', async t => {
+  const { cwd, env, context } = job(t);
+  const wrongNamespace = 'xmlns="urn:fixture"';
+  const upload = `<Upload ${wrongNamespace}><Key>${encodeURIComponent(key)}</Key><UploadId>${uploadId}</UploadId></Upload>`;
+  const grouped = `<CommonPrefixes ${wrongNamespace}><Prefix>${encodeURIComponent(prefix)}</Prefix></CommonPrefixes>`;
+  const deleted = ['GET', 'GET', 'DELETE', 'DELETE'];
+  for (const [field, xml, expected] of [
+    ['initialUploadsXml', upload, ['GET']],
+    ['initialUploadsXml', grouped, ['GET']],
+    ['finalUploadsXml', upload, [...deleted, 'GET']],
+    ['finalUploadsXml', grouped, [...deleted, 'GET']],
+    ['finalUploadsXml', `<Bucket ${wrongNamespace}>${bucket}</Bucket>`, [...deleted, 'GET']],
+    ['finalUploadsXml', `<KeyMarker ${wrongNamespace}>later</KeyMarker>`, [...deleted, 'GET']],
+    ['finalObjectsXml', `<Contents ${wrongNamespace}><Key>${encodeURIComponent(key)}</Key></Contents>`, [...deleted, 'GET', 'GET']],
+    ['finalObjectsXml', '<NextContinuationToken xmlns="">later</NextContinuationToken>', [...deleted, 'GET', 'GET']],
+  ]) {
+    await t.test(`${field}: ${xml.slice(1, xml.indexOf(' '))}`, async () => {
+      const { send, trace } = signedFixture({ [field]: xml, namespaced: true });
+      const cleanup = await createQualificationR2Cleanup(env, cwd, { send });
+      await assert.rejects(cleanup(context), /cleanup is unverified/);
+      assert.deepEqual(trace, expected);
+    });
   }
 });
 

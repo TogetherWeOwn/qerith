@@ -1,6 +1,17 @@
 import { listingChildren, listingText, parseListingXml } from './listing-xml';
 import { createS3Transport } from './transport';
 
+function verifyListingNamespaces(root: ReturnType<typeof parseListingXml>, ...fields: string[]) {
+  const names = new Set(['Prefix', 'Delimiter', 'CommonPrefixes', 'EncodingType', 'IsTruncated', ...fields]);
+  // The ordinary selectors ignore foreign lookalikes; strict verification must not count them as absent.
+  for (let node = root.firstChild; node; node = node.nextSibling) {
+    if (node.nodeType === 1) {
+      const element = node as typeof root;
+      if (element.localName && names.has(element.localName) && element.namespaceURI !== root.namespaceURI) throw new Error();
+    }
+  }
+}
+
 /** List one bounded page; continuation tokens and object keys remain opaque. */
 export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
   const { bucket } = args[0];
@@ -29,6 +40,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
       const body = await page('', query, signal);
       try {
         const root = parseListingXml(body, 'ListBucketResult');
+        if (verifyScope) verifyListingNamespaces(root, 'Name', 'Contents', 'KeyCount', 'MaxKeys', 'StartAfter', 'ContinuationToken', 'NextContinuationToken');
         if (listingText(root, 'EncodingType') !== 'url') throw new Error();
         const truncated = listingText(root, 'IsTruncated');
         if (truncated !== 'true' && truncated !== 'false') throw new Error();
@@ -94,6 +106,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
       const body = await page('', query, signal);
       try {
         const root = parseListingXml(body, 'ListMultipartUploadsResult');
+        if (verifyScope) verifyListingNamespaces(root, 'Bucket', 'Upload', 'MaxUploads', 'KeyMarker', 'UploadIdMarker', 'NextKeyMarker', 'NextUploadIdMarker');
         if (listingText(root, 'EncodingType') !== 'url') throw new Error();
         const truncated = listingText(root, 'IsTruncated');
         if (truncated !== 'true' && truncated !== 'false') throw new Error();
