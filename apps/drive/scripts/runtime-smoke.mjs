@@ -174,14 +174,13 @@ export default { fetch(request, env, ctx) {
       const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
         headers: { [readinessHeaders.nonce]: nonce, ...headers } });
       const off = await readiness();
-      assert.deepEqual([off.status, off.headers.get(readinessHeaders.sha)], [404, null], 'preview has no readiness binding');
-      const on = await readiness({ 'x-test-qualification': '1' });
-      assert.equal(on.status, 204);
       const identity = response => Object.values(readinessHeaders).map(name => response.headers.get(name));
-      assert.deepEqual(identity(on), [nonce, release, qualificationVersion]);
+      assert.deepEqual([off.status, ...identity(off)], [404, null, null, null], 'staging without candidate identity');
+      const on = await readiness({ 'x-test-qualification': '1' });
+      assert.deepEqual([on.status, ...identity(on)], [204, nonce, release, qualificationVersion]);
       for (const binding of ['DB', 'ASSETS', 'DRIVE_S3_QUALIFICATION']) {
         const unready = await readiness({ 'x-test-qualification': '1', 'x-test-missing-binding': binding });
-        assert.deepEqual([unready.status, ...identity(unready)], [404, null, null, null], `candidate without ${binding}`);
+        assert.deepEqual([unready.status, ...identity(unready)], [503, null, null, null], `candidate without ${binding}`);
       }
       console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage');
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
