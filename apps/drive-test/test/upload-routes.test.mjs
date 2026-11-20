@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { createUploadCompletionReceipts } from '../../drive/src/lib/server/metadata/upload-completion-receipts.ts';
 import { createTrustedUploadPublication } from '../../drive/src/lib/server/metadata/upload-trusted-publication.ts';
-import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
+import { privateRequests, readSession, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
 import { postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
@@ -13,19 +13,20 @@ const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
 async function fixture({ fail, verify, beforeHead, isQualified = qualified, endpoint = config.endpoint,
-  size = 7, completionTimeoutMs = () => 15_000, staging = false } = {}) {
+  size = 7, completionTimeoutMs = () => 15_000, staging = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
   const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
   const other = `other-${intent}`, calls = [], parts = [];
   await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active'), (?, 'member', 'active')",
-    principal, staging ? 'owner' : 'member', other).run();
+    principal, role, other).run();
   await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
   const bindings = { DB: env.DB, DRIVE_ORIGIN: requestOrigin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
-    DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent), completionTimeoutMs,
+    DRIVE_STAGING_INVITE_ACCEPTANCE: inviteFlag,
+    DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent, token), completionTimeoutMs,
       verifyParts: (upload) => verify ? verify(upload, parts) : [...parts].sort((a, b) => a.partNumber - b.partNumber) } : undefined };
   const routes = uploadRoutes(bindings, { timeoutMs: 5000, async fetch(request) {
     calls.push(request.method);
@@ -36,23 +37,28 @@ async function fixture({ fail, verify, beforeHead, isQualified = qualified, endp
       parts.push({ partNumber: Number(url.searchParams.get('partNumber')), etag: tag, size: (await request.arrayBuffer()).byteLength });
       return new Response(null, { headers: { etag: fail === 'receipt' ? `"${'a'.repeat(8191)}"` : tag } });
     }
-    if (request.method === 'POST') return response(key);
+    if (request.method === 'POST') {
+      expect(request.headers.get('if-none-match')).toBe('*');
+      return response(key);
+    }
     expect(request.headers.get('if-match')).toBe(etag);
     await beforeHead?.(token);
     return new Response(null, { headers: { etag, 'content-length': String(size) } });
   } });
   const handle = privateRequests(bindings);
   function send(number, { auth = token, source = requestOrigin, host = requestOrigin, name = 'file', parentId = null,
-    intentId = intent, bytes = 7 } = {}) {
+    intentId = intent, bytes = 7, runtime = false } = {}) {
     const body = number ? new Uint8Array(bytes) : JSON.stringify({ parentId, name });
     const headers = { 'content-type': number ? 'application/octet-stream' : 'application/json', 'content-length': String(body.length) };
     if (auth) headers.cookie = `__Host-drive-session=${auth}`;
     if (source) headers.origin = source;
     const request = new Request(`${host}/api/uploads/${intentId}/${number ? `parts/${number}` : 'complete'}`,
       { method: number ? 'PUT' : 'POST', body, headers });
-    return handle({ event: { request, locals: {} }, resolve: ({ locals }) => number
-      ? routes.part(request, locals.driveSession, intentId, String(number))
-      : routes.complete(request, locals.driveSession, intentId) });
+    const execute = (session) => number ? routes.part(request, session, intentId, String(number))
+      : routes.complete(request, session, intentId);
+    // Test the closed execution path separately from the unchanged public hook.
+    return runtime ? readSession(request, env.DB).then((session) => execute(session ?? undefined))
+      : handle({ event: { request, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
   return { send, generation, calls, foreign, key, principal, other };
@@ -163,10 +169,65 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   } finally { await demote(); }
 });
 
-it.each(['owner', 'member'])('checks the staging role %s again before the next multipart page', async (role) => {
+it.each([undefined, 'true', '1'])('prepares only the live member’s own intent with the exact invite flag (%s)', async (inviteFlag) => {
+  let pausePublication = true;
+  const { send, calls, foreign, generation } = await fixture({ staging: true, inviteFlag, role: 'member', beforeHead() {
+    if (pausePublication) throw new Error('HEAD unavailable');
+  } });
+  const runtime = { runtime: true };
+  for (const number of [1, undefined]) expect((await send(number)).status).toBe(403);
+  for (const number of [1, undefined]) expect((await send(number, { ...runtime, auth: foreign })).status).toBe(404);
+  expect(calls).toEqual([]);
+  if (inviteFlag !== '1') {
+    for (const number of [1, undefined]) expect((await send(number, runtime)).status).toBe(404);
+    expect(calls).toEqual([]);
+  } else {
+    expect((await send(1, runtime)).status).toBe(204);
+    expect((await send(undefined, runtime)).status).toBe(409); // Verified receipt exists, but HEAD failed.
+    expect((await send(undefined, { ...runtime, auth: foreign })).status).toBe(404);
+    expect(await generation()).toBeNull();
+    expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+    pausePublication = false;
+    const published = await send(undefined, runtime);
+    expect(published.status).toBe(201);
+    expect(await generation()).toEqual({ entry_id: (await published.json()).id, size_bytes: 7, etag });
+    expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
+  }
+});
+
+it.each([
+  ['part', 'drive_upload_part_operations', []],
+  ['completion', 'drive_upload_completion_operations JOIN drive_upload_completion_dispatches USING (operation_id)', ['PUT']],
+  ['publication', 'drive_upload_completion_operations JOIN drive_upload_completion_receipts USING (operation_id)', ['PUT', 'POST']]
+])('rechecks a member session after the %s claim and before provider dispatch', async (stage, claim, expected) => {
+  let revoked = false;
+  const { send, calls, generation, principal } = await fixture({ staging: true, inviteFlag: '1', role: 'member',
+    async isQualified(id, intent, token) {
+      if (!revoked && await sql(`SELECT 1 FROM ${claim} WHERE intent_id = ?`, intent).first()) {
+        await sessions.revoke(token);
+        revoked = true;
+      }
+      return qualified(id);
+    } });
+  const runtime = { runtime: true };
+  expect((await send(1, runtime)).status).toBe(stage === 'part' ? 409 : 204);
+  if (stage !== 'part') expect((await send(undefined, runtime)).status).toBe(404);
+  expect(revoked).toBe(true);
+  expect(calls).toEqual(expected);
+  expect(await generation()).toBeNull();
+  if (stage === 'completion') {
+    const { token: auth } = await sessions.issue(principal);
+    expect((await send(undefined, { ...runtime, auth })).status).toBe(404);
+    expect(calls).toEqual(expected); // No receipt, HEAD or redispatch after an unresolved claim.
+  }
+});
+
+it.each([
+  ['owner', 'none'], ['owner', 'demote'], ['active', 'none'], ['active', 'revoke']
+])('rechecks %s mode at each multipart page (%s)', async (mode, change) => {
   await applyD1Migrations(env.DB, migrations);
   const operation = crypto.randomUUID(), owner = `owner-${operation}`;
-  const { token, key } = await seed(operation);
+  const { token, key, identity } = await seed(operation);
   const setRole = (value) => sql('UPDATE drive_principals SET role = ? WHERE id = ?', value, owner).run();
   const storageConfigId = JSON.stringify([config.endpoint, config.bucket, epoch]);
   const calls = [];
@@ -176,7 +237,8 @@ it.each(['owner', 'member'])('checks the staging role %s again before the next m
     calls.push([request.method, marker]);
     if (request.method === 'POST') return response(key);
     if (marker === '2') return new Response(`${open}<IsTruncated>false</IsTruncated></ListPartsResult>`);
-    if (role === 'member') await setRole(role);
+    if (change === 'demote') await setRole('member');
+    if (change === 'revoke') await sessions.revoke(token);
     return new Response(`${open}<IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>` +
       '<Part><PartNumber>2</PartNumber><Size>7</Size><ETag>"part-&amp;-ÿ"</ETag></Part></ListPartsResult>');
   };
@@ -186,15 +248,16 @@ it.each(['owner', 'member'])('checks the staging role %s again before the next m
     DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId, region: config.region,
       sourceSha: 'a'.repeat(40), runId: '123', runAttempt: 1, completionTimeoutMs: 5000 })
   }, fetch);
-  await setRole('owner');
+  if (mode === 'owner') await setRole('owner');
   try {
     let idleMs = 5000;
-    const streamBudget = role === 'owner' ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
-    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, true);
+    const streamBudget = change === 'none' ? Object.create({ get idleMs() { return idleMs; }, totalMs: 5000 }) : undefined;
+    const service = createUploadCompletionReceipts(env.DB, epoch, config, { fetch, timeoutMs: 5000, streamBudget }, verifier, mode);
     idleMs = 0;
-    const allowed = role === 'owner';
-    expect(await service.complete(token, operation)).toBe(allowed ? 'recorded' : 'not-admitted');
-    expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first()).toEqual({ role });
+    const allowed = change === 'none';
+    expect(await service.complete(token, identity)).toBe(allowed ? 'recorded' : 'not-admitted');
+    expect(await sql('SELECT role FROM drive_principals WHERE id = ?', owner).first())
+      .toEqual({ role: mode === 'owner' && allowed ? 'owner' : 'member' });
     expect(calls).toEqual(allowed ? [['GET', null], ['GET', '2'], ['POST', null]] : [['GET', null]]);
     expect(Boolean(await evidence('receipts', operation))).toBe(allowed);
     if (!allowed) expect(await evidence('dispatches', operation)).toBeNull();
@@ -205,8 +268,8 @@ it('validates owner-only upload transports at construction without I/O', () => {
   const fetch = vi.fn(), verifier = { isQualified: vi.fn(), verifyParts: vi.fn() };
   const streamBudget = Object.create({ idleMs: 0, totalMs: 5000 });
   for (const options of [{ fetch, timeoutMs: 0 }, { fetch, timeoutMs: 5000, streamBudget }]) {
-    expect(() => createUploadCompletionReceipts(env.DB, epoch, config, options, verifier, true)).toThrow('Invalid S3 timeout');
-    expect(() => createTrustedUploadPublication(env.DB, epoch, config, options, qualified, true)).toThrow('Invalid S3 timeout');
+    expect(() => createUploadCompletionReceipts(env.DB, epoch, config, options, verifier, 'owner')).toThrow('Invalid S3 timeout');
+    expect(() => createTrustedUploadPublication(env.DB, epoch, config, options, qualified, 'owner')).toThrow('Invalid S3 timeout');
   }
   for (const mock of [fetch, verifier.isQualified, verifier.verifyParts]) expect(mock).not.toHaveBeenCalled();
 });

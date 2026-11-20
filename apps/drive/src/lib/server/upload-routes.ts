@@ -1,11 +1,11 @@
-import { Sessions, tokenHash } from './identity/sessions';
+import { livePrincipalCheck, tokenHash } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
   occupiedUploadName } from './metadata/upload-completion-receipts';
 import { UploadPartOperationEvidence } from './metadata/upload-part-operation-evidence';
 import { decodeUploadIdentity, uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
-import { allowsOrigin, authOrigin, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartUpload } from './s3/multipart-upload';
@@ -56,7 +56,8 @@ async function destination(request: Request): Promise<{ name: string; parentId: 
 }
 
 export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThis.fetch, timeoutMs: 5000 }) {
-  const ownerOnly = env.DRIVE_ORIGIN === stagingOrigin;
+  const mode = admitsStagingInvite(env) ? 'active' : env.DRIVE_ORIGIN === stagingOrigin ? 'owner' : undefined;
+  const ownerOnly = mode === 'owner';
   const bound = `${storageBound} ${requireActiveOwner(ownerOnly, 'i.owner_id')}`;
   const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
   async function authorize(request: Request, session: Session | undefined, intentId: string) {
@@ -83,9 +84,10 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         if (access instanceof Response) return access;
         const { db, bindings, settings, epoch, ownerId, token, isQualified, storageConfigId } = access;
         const ledger = new UploadPartOperationEvidence(db);
+        const checkPrincipal = livePrincipalCheck(db, mode, token, ownerId);
         return await uploadPart(request, intentId, number, {
           send: createMultipartUpload(settings, { ...transport, beforeSend: async () => await isQualified(storageConfigId) === true &&
-            (!ownerOnly || await new Sessions(db.withSession('first-primary')).isLiveOwner(token, ownerId)) }),
+            (!checkPrincipal || await checkPrincipal()) }),
           async authorize() {
             const intent = await db.withSession('first-primary').prepare(`SELECT i.version ${allocated}`)
               .bind(...bindings).first<{ version: number }>();
@@ -152,10 +154,10 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
           checkName = true;
         } else {
           const result = row.recorded ? 'recorded' : await createUploadCompletionReceipts(db, epoch, settings,
-            { ...transport, timeoutMs }, verifier, ownerOnly).complete(token, row.operation_id, target);
+            { ...transport, timeoutMs }, verifier, mode).complete(token, { operationId: row.operation_id, intentId, ownerId }, target);
           checkName = result === 'dispatch-denied';
           if (result === 'recorded') {
-            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified, ownerOnly);
+            const publisher = createTrustedUploadPublication(db, epoch, settings, transport, isQualified, mode);
             const published = await publisher.publish(token, ownerId, intentId, row.claim_version, row.operation_id, parentId, name);
             if (published) return Response.json({ id: published.id }, { status: 201, headers });
           }
