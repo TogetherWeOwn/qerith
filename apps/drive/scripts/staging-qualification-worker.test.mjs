@@ -398,9 +398,9 @@ test('runs cleanup after cancellation and preserves an unverified cleanup even w
   }
 });
 
-test('probe and case deadlines abort and settle work before rollback', async t => {
+test('probe, case and cleanup deadlines abort and settle work before rollback', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 18 * 60_000]]) {
+  for (const [phase, timeout] of [['probe', 30_000], ['exercise', 18 * 60_000], ['cleanup', 60_000]]) {
     const { run, options, calls } = fixture(t);
     const started = Promise.withResolvers();
     let aborted = false;
@@ -410,7 +410,7 @@ test('probe and case deadlines abort and settle work before rollback', async t =
       started.resolve();
       await drained.promise;
       calls.push('settled');
-      return { ...identity, ready: true };
+      return phase === 'cleanup' ? true : { ...identity, ready: true };
     };
     const outcome = assert.rejects(run(), { name: 'TimeoutError' });
     await Promise.race([started.promise, outcome]);
