@@ -180,12 +180,27 @@ and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects
 other providers, incomplete listings and more than 100 objects plus uploads;
 it validates both listings before any deletion and rereads both after cleanup.
 The cases must stop all writes before cleanup and keep all fixture keys in that
-prefix. This is not evidence of D1 cleanup or native expiry after runner loss.
+prefix. This is not evidence of D1 cleanup.
+
+A separate, unwired [native R2 lifecycle readback](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/lifecycle/methods/get/)
+uses the same reviewed bucket and requires a scoped object deletion rule within
+three days and a multipart abort rule within seven days. Both must cover the
+entire attempt prefix; conflicting slower or date-based rules fail closed. The
+readback requires existing R2 lifecycle read access. It checks configured age
+thresholds, not actual deletion timing or rollback after runner loss. It never
+changes bucket policy and does not replace direct attempt cleanup.
+
+The unwired Worker inventory reads the deployed version and the native cron
+configuration for the pinned staging script. It requires no schedules, one
+unchanged non-candidate deployment, and no resource bindings beyond the pinned
+D1 database and assets. This does not see external invokers, unbound resources,
+D1 fixture rows, or billing. It cannot satisfy whole-estate zero-idle inventory
+or establish that a lost runner's candidate was stopped.
 
 Remaining source slices, in dependency order:
 
 1. Implement whole-estate zero-idle inventory, D1 fixture cleanup, and verified
-   native expiry or stop for cancellation or runner loss. Wire the protected
+   native stop or expiry for resources not covered by R2. Wire the protected
    caller only with those implementations, the durable recovery writer and
    reviewed full-v0 prerequisites. Keep artifact publication disabled.
 2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
