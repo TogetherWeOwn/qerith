@@ -93,10 +93,15 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
   }
   const workerGrant = stagingFetch(worker, origin, 'worker');
   const adapterGrant = stagingFetch(worker, origin, 'adapter');
-  for (const recipientId of ['__data.json', '__route.js', 'file.html__data.json', 'file.html__route.js']) {
+  for (const [recipientId, escapedId] of [
+    ['__data.json', '%5F_data.json'],
+    ['__route.js', '%5F_route.js'],
+    ['file.html__data.json', 'file.html%5F_data.json'],
+    ['file.html__route.js', 'file.html%5F_route.js'],
+  ]) {
     await session(recipientId, 'member');
     const canonical = `${path}/${recipientId}`;
-    const alias = `${path}/${recipientId.replace('_', '%5F')}`;
+    const alias = `${path}/${escapedId}`;
     for (const ask of [workerGrant, adapterGrant]) {
       await expectPrivateEmpty(ask('PUT', alias, owner, active), 404, 'escaped path is not a public alias');
     }

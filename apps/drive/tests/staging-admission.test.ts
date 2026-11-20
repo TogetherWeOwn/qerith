@@ -59,8 +59,13 @@ test('reserved grant recipient IDs reach the adapter without admitting encoded a
   const path = `/api/entries/${id}/read-grants`;
   const env = { ...runtime('member').env, DRIVE_STAGING_READ_GRANTS: '1' };
   const unexpected = async () => { throw new Error('Unexpected dispatch'); };
-  for (const suffix of ['__data.json', '__route.js', 'file.html__data.json', 'file.html__route.js']) {
-    const alias = `${path}/${suffix.replace('_', '%5F')}`;
+  for (const [suffix, escapedSuffix] of [
+    ['__data.json', '%5F_data.json'],
+    ['__route.js', '%5F_route.js'],
+    ['file.html__data.json', 'file.html%5F_data.json'],
+    ['file.html__route.js', 'file.html%5F_route.js'],
+  ]) {
+    const alias = `${path}/${escapedSuffix}`;
     const dispatch = { adapter: unexpected, ceremony: unexpected, invite: unexpected, asset: unexpected };
     denied(await dispatchStagingRequest(request(alias, 'PUT'), env, true, assets, dispatch), 404);
     const response = await dispatchStagingRequest(request(`${path}/${suffix}`, 'PUT'), env, true, assets, {
