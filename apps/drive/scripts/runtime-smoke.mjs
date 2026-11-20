@@ -336,6 +336,7 @@ export default { fetch(request, env, ctx) {
       const owner = await session('owner-fixture', 'owner');
       await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
+      await exerciseListingPages(DB, worker, origin, cookie);
       return;
     }
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
@@ -393,6 +394,29 @@ export default { fetch(request, env, ctx) {
     await exerciseDeletion({ worker, DB, origin, cookie: owner, revoked: cookie, other: await session('other-fixture', 'member') });
   } finally {
     await harness.close();
+  }
+}
+
+async function exerciseListingPages(DB, worker, origin, cookie) {
+  await DB.batch([
+    DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind)
+      VALUES ('listing-folder', 'other', 'Shared folder', 'folder')`),
+    DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes)
+      VALUES ('listing-file', 'other', 'listing-folder', 'Child.pdf', 'file', 'private-listing-key', 1)`),
+    DB.prepare("INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES ('listing-folder', 'fixture')"),
+  ]);
+  for (const [path, body] of [
+    ['/api/folder-listing?folderId=listing-folder', {
+      entries: [{ id: 'listing-file', name: 'Child.pdf', kind: 'file' }],
+      total: 1, order: 'binary-name', direction: 'asc', nextCursor: null,
+    }],
+    ['/api/shared-listing', {
+      entries: [{ id: 'listing-folder', name: 'Shared folder', kind: 'folder' }], nextCursor: null,
+    }],
+  ]) {
+    const response = await worker.fetch(`${origin}${path}`, { headers: { cookie }, redirect: 'manual' });
+    assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store'], path);
+    assert.deepEqual(await response.json(), body, path);
   }
 }
 

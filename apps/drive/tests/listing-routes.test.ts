@@ -44,3 +44,34 @@ test('listing rejects method, origin and malformed inputs and hides binding fail
     `${shared}?cursor=a&cursor=b`, `${shared}?cursor=${'%61'.repeat(2800)}`]) await denied(await list(path), 400);
   await denied(await list(shared, { headers: { origin, 'sec-fetch-site': 'same-origin' } }), 503);
 });
+
+test('folder session lookup and page read each start a fresh primary session', async () => {
+  const sessions: { constraint: string; reads: string[] }[] = [];
+  const DB = { ...db, withSession(constraint: string) {
+    const reads: string[] = [];
+    sessions.push({ constraint, reads });
+    return { prepare() {
+      return { bind() {
+        return {
+          async first<T>() {
+            reads.push('session');
+            return { id: 'reader', role: 'member' } as T;
+          },
+          async all<T>() {
+            reads.push('folder page');
+            return { results: [{ id: null, total: 0 } as T] };
+          },
+        };
+      } };
+    } };
+  } };
+  const request = new Request(`${origin}${folder}?folderId=root`, {
+    headers: { cookie: `__Host-drive-session=${'a'.repeat(43)}` },
+  });
+  const response = await listingRequest(request, { DB, DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' });
+  assert.equal(response?.status, 200);
+  assert.deepEqual(sessions, [
+    { constraint: 'first-primary', reads: ['session'] },
+    { constraint: 'first-primary', reads: ['folder page'] },
+  ]);
+});

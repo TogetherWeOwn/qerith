@@ -38,12 +38,11 @@ async function listPage(request: Request, url: URL, env: ListingEnv, folder: boo
   const db = env.DB;
   if (typeof db?.withSession !== 'function') return reply(503);
   try {
-    const primary = db.withSession('first-primary');
-    const session = await readSession(request, primary);
+    const session = await readSession(request, db.withSession('first-primary'));
     if (!session) return reply(401);
-    // Both queries check the session and live grants again in their own snapshot.
+    // first-primary pins only the first statement, so each page needs a fresh session.
     if (folder) {
-      const page = await new ReadAccess(primary).listPage(session.token, id, cursor, direction);
+      const page = await new ReadAccess(db.withSession('first-primary')).listPage(session.token, id, cursor, direction);
       if (!page) return reply(404);
       const body: FolderPage = { ...project(page), total: page.total, order: page.order, direction: page.direction };
       return Response.json(body, { headers });
