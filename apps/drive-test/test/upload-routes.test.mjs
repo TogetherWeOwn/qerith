@@ -169,11 +169,21 @@ it.each(['part claim', 'parts verification', 'completion claim', 'publication se
   } finally { await demote(); }
 });
 
+it.each([undefined, '1'])('keeps owner publication unchanged in staging (%s)', async (inviteFlag) => {
+  const { send, calls, generation, principal } = await fixture({ staging: true, inviteFlag });
+  try {
+    expect((await send(1)).status).toBe(204);
+    const published = await send();
+    expect(published.status).toBe(201);
+    expect(await generation()).toEqual({ entry_id: (await published.json()).id, size_bytes: 7, etag });
+    expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
+  } finally {
+    await sql("UPDATE drive_principals SET role = 'member' WHERE id = ?", principal).run();
+  }
+});
+
 it.each([undefined, 'true', '1'])('prepares only the live member’s own intent with the exact invite flag (%s)', async (inviteFlag) => {
-  let pausePublication = true;
-  const { send, calls, foreign, generation } = await fixture({ staging: true, inviteFlag, role: 'member', beforeHead() {
-    if (pausePublication) throw new Error('HEAD unavailable');
-  } });
+  const { send, calls, foreign, generation, principal } = await fixture({ staging: true, inviteFlag, role: 'member' });
   const runtime = { runtime: true };
   for (const number of [1, undefined]) expect((await send(number)).status).toBe(403);
   for (const number of [1, undefined]) expect((await send(number, { ...runtime, auth: foreign })).status).toBe(404);
@@ -183,15 +193,12 @@ it.each([undefined, 'true', '1'])('prepares only the live member’s own intent 
     expect(calls).toEqual([]);
   } else {
     expect((await send(1, runtime)).status).toBe(204);
-    expect((await send(undefined, runtime)).status).toBe(409); // Verified receipt exists, but HEAD failed.
+    expect((await send(undefined, runtime)).status).toBe(409); // Verified receipt, but no member publication.
+    expect(await sql(`SELECT r.etag FROM drive_upload_completion_receipts r
+      JOIN drive_upload_completion_operations o USING (operation_id) WHERE o.owner_id = ?`, principal).first()).toEqual({ etag });
     expect((await send(undefined, { ...runtime, auth: foreign })).status).toBe(404);
     expect(await generation()).toBeNull();
     expect(calls).toEqual(['PUT', 'POST', 'HEAD']);
-    pausePublication = false;
-    const published = await send(undefined, runtime);
-    expect(published.status).toBe(201);
-    expect(await generation()).toEqual({ entry_id: (await published.json()).id, size_bytes: 7, etag });
-    expect(calls).toEqual(['PUT', 'POST', 'HEAD', 'HEAD']);
   }
 });
 

@@ -26,6 +26,8 @@ const publishable = `FROM drive_upload_publishable_completions e
 export function createTrustedUploadPublication(db: Database, epoch: string, config: Parameters<typeof createS3Objects>[0],
   transport: Parameters<typeof createS3Objects>[1], isQualified?: (storageConfigId: string) => Promise<boolean>, mode?: LivePrincipalMode) {
   const candidate = `${publishable} ${requireActiveOwner(mode === 'owner', 'e.owner_id')}`;
+  // Invite mode prepares receipt verification, not member publication.
+  const writable = `${publishable} ${requireActiveOwner(mode !== undefined, 'e.owner_id')}`;
   const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
   const { endpoint, bucket } = settings;
   const { beforeSend, streamBudget, ...options } = transport;
@@ -66,7 +68,7 @@ export function createTrustedUploadPublication(db: Database, epoch: string, conf
           (intent_id, intent_version, entry_id, owner_id, object_key, parent_id, name, size_bytes, object_etag,
             completion_operation_id, evidence_revision)
           SELECT e.intent_id, e.claim_version, ?, e.owner_id, e.object_key, ?, ?, e.size_bytes, e.etag,
-            e.operation_id, e.evidence_revision ${candidate}
+            e.operation_id, e.evidence_revision ${writable}
             AND e.evidence_revision = ? AND e.etag = ? AND e.size_bytes = ?
           RETURNING entry_id AS id`)
           .bind(crypto.randomUUID(), parentId, name, ...binding, evidence_revision, etag, size_bytes).first<{ id: string }>();

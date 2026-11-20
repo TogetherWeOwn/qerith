@@ -15,7 +15,7 @@ export async function setup(operation, options = {}, schema = migrations) {
   const { token, key, intent, part, identity } = await seed(operation, { declaredSize: 7, ...options });
   const owner = identity.ownerId;
   const complete = producer(async () => response(key));
-  return { token, key, intent, owner, part, complete: () => complete.complete(token, identity),
+  return { token, key, intent, owner, part, identity, complete: () => complete.complete(token, identity),
     publish: (service, version = 3, auth = token) => service.publish(auth, owner, intent, version, operation, null, 'file') };
 }
 
