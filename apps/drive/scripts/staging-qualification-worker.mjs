@@ -1,10 +1,42 @@
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 import { validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const isUuid = value => typeof value === 'string' && uuid.test(value);
 const sameDeployment = (left, right) => left.id === right.id && left.version === right.version;
+
+export async function probeQualificationWorker({ sha, version }, signal, request = fetch) {
+  const nonce = randomBytes(16).toString('hex');
+  const timeout = 10_000;
+  const deadline = performance.now() + timeout;
+  const timeoutSignal = AbortSignal.timeout(timeout);
+  const bounded = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  try {
+    bounded.throwIfAborted();
+    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) || !isUuid(version)) throw new Error();
+    const response = await request(stagingOrigin + readinessPath, {
+      method: 'HEAD', redirect: 'error', cache: 'no-store', credentials: 'omit', signal: bounded,
+      headers: { [readinessHeaders.nonce]: nonce },
+    });
+    if (response.body !== null) {
+      await response.body.cancel();
+      throw new Error();
+    }
+    bounded.throwIfAborted();
+    const actualSha = response.headers.get(readinessHeaders.sha);
+    const actualVersion = response.headers.get(readinessHeaders.version);
+    if (response.status !== 204 || response.headers.get('cache-control') !== 'private, no-store' ||
+        response.headers.get(readinessHeaders.nonce) !== nonce || actualSha !== sha || actualVersion !== version) throw new Error();
+    // Fetch can settle after the deadline before the abort timer gets a turn.
+    if (performance.now() >= deadline) throw new Error();
+    return { ready: true, sha: actualSha, version: actualVersion };
+  } catch {
+    throw new Error('Staging Worker did not prove fresh exact-SHA runtime readiness.');
+  }
+}
 
 function workerApi(base, token, request) {
   async function call(path, signal, body) {

@@ -80,6 +80,7 @@ import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.t
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
+import { qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
@@ -111,6 +112,7 @@ export default {
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
+      if (url.pathname === readinessPath) return qualificationReadiness(request, env, ready);
       return dispatchStagingRequest(request, env, ready, assets, {
         adapter: request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx),
         ceremony: (request, step) => signIn(request, step, env),

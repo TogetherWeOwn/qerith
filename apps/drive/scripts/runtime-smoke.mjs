@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
@@ -96,6 +97,7 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
   const release = 'a'.repeat(40);
+  const qualificationVersion = '00000000-0000-4000-8000-000000000002';
   const enrollmentToken = staging ? randomBytes(32).toString('base64url') : undefined;
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
@@ -110,6 +112,12 @@ export default { fetch(request, env, ctx) {
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
+  if (request.headers.has('x-test-qualification')) {
+    env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
+      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };
+    const missing = request.headers.get('x-test-missing-binding');
+    if (missing) delete env[missing];
+  }
   if (request.headers.has('x-test-invite')) {
     const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
@@ -178,6 +186,19 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
+      const nonce = randomBytes(16).toString('hex');
+      const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
+        headers: { [readinessHeaders.nonce]: nonce, ...headers } });
+      const off = await readiness();
+      const identity = response => Object.values(readinessHeaders).map(name => response.headers.get(name));
+      assert.deepEqual([off.status, ...identity(off)], [404, null, null, null], 'staging without candidate identity');
+      const on = await readiness({ 'x-test-qualification': '1' });
+      assert.deepEqual([on.status, ...identity(on)], [204, nonce, release, qualificationVersion]);
+      for (const binding of ['DB', 'ASSETS', 'DRIVE_S3_QUALIFICATION']) {
+        const unready = await readiness({ 'x-test-qualification': '1', 'x-test-missing-binding': binding });
+        assert.deepEqual([unready.status, ...identity(unready)], [503, null, null, null], `candidate without ${binding}`);
+      }
+      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage');
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
       const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
