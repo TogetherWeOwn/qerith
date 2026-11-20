@@ -2,8 +2,9 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeAll, expect, it, vi } from 'vitest';
 import { tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
+import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 import { readUploadResumeEvidence } from '../../drive/src/lib/server/metadata/upload-resume-evidence.ts';
-import { config, epoch, migrations, sessions, sql } from './fixtures/upload-completion.mjs';
+import { config, epoch, intentRow, migrations, sessions, sql } from './fixtures/upload-completion.mjs';
 
 const storage = { endpoint: config.endpoint, bucket: config.bucket, storageEpoch: epoch };
 const partBytes = 16 * 1024 * 1024;
@@ -45,6 +46,14 @@ it('uses one primary statement and returns an empty prefix only for an unused al
   });
   expect(withSession).toHaveBeenCalledExactlyOnceWith('first-primary');
   expect(prepare).toHaveBeenCalledTimes(1);
+});
+
+it('returns unavailable rather than an empty prefix when the primary statement rejects', async () => {
+  const intent = await setup(3);
+  const all = vi.fn().mockRejectedValue(new Error('primary unavailable'));
+  const db = { withSession: () => ({ prepare: () => ({ bind: () => ({ all }) }) }) };
+  expect(await readUploadResumeEvidence(db, intent.id, intent.scope, storage)).toBeNull();
+  expect(all).toHaveBeenCalledTimes(1);
 });
 
 it('returns the exact ordered prefix, including a short final part only when acknowledged', async () => {
@@ -116,15 +125,35 @@ it.each([
   expect(await read(await setup(size, bound))).toBeNull();
 });
 
+const completion = (intent) => sql('INSERT INTO drive_upload_completion_operations VALUES (?, ?, ?, ?, ?, ?, 2)',
+  `seal-${intent.id}`, ...intent.identity).run();
+const cleanup = (id) => sql('INSERT INTO drive_upload_cleanup_claims VALUES (?)', id).run();
+const tombstone = (id) => sql('INSERT INTO drive_upload_publication_tombstones VALUES (?)', id).run();
+
 it.each(['seal', 'cleanup', 'tombstone', 'version advanced'])('rejects bytes after %s', async (state) => {
   const intent = await setup(3);
   await part(intent, 1, 3, abc);
   expect(await read(intent)).not.toBeNull();
   if (state === 'seal') {
-    await sql('INSERT INTO drive_upload_completion_operations VALUES (?, ?, ?, ?, ?, ?, 2)', `seal-${intent.id}`, ...intent.identity).run();
+    await completion(intent);
     await sql("INSERT INTO drive_upload_sealed_snapshots VALUES (?, '[1]', 3)", `seal-${intent.id}`).run();
-  } else if (state === 'cleanup') await sql('INSERT INTO drive_upload_cleanup_claims VALUES (?)', intent.id).run();
-  else if (state === 'tombstone') await sql('INSERT INTO drive_upload_publication_tombstones VALUES (?)', intent.id).run();
+  } else if (state === 'cleanup') await cleanup(intent.id);
+  else if (state === 'tombstone') await tombstone(intent.id);
   else await sql('UPDATE drive_upload_intents SET version = version + 1 WHERE id = ?', intent.id).run();
+  expect(await read(intent)).toBeNull();
+});
+
+it.each(['completion', 'cleanup', 'tombstone', 'publication attempt'])('rejects an unused allocation fenced by %s', async (fence) => {
+  const intent = await setup(3), [id, owner, key, , uploadId] = intent.identity;
+  expect(await read(intent)).toEqual({ declaredSize: 3, parts: [] });
+  if (fence === 'completion') await completion(intent);
+  else if (fence === 'cleanup') await cleanup(id);
+  else if (fence === 'tombstone') await tombstone(id);
+  else {
+    await sql('INSERT INTO drive_upload_publication_attempts VALUES (?, ?, ?, 2, 3)', id, key, uploadId).run();
+    // The retained attempt alone must fence the read once the journal is allocated again.
+    expect(await new UploadIntents(env.DB).recordNotDispatched(owner, id, 3, 'completion')).toBe(true);
+    expect(await intentRow(id)).toMatchObject({ state: 'allocated', version: 4 });
+  }
   expect(await read(intent)).toBeNull();
 });
