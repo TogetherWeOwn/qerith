@@ -13,7 +13,6 @@ export function uploadToRoot(file: File, partAccepted: () => void, fetcher: type
   return upload(file, () => partAccepted(), fetcher, partBytes);
 }
 
-// Internal preparation only. The shipped preview continues to use uploadToRoot.
 export function uploadMultipartToRoot(file: File, partAccepted: (acceptedBytes: number) => void,
   fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
   return upload(file, partAccepted, fetcher, multipartFileLimit);
