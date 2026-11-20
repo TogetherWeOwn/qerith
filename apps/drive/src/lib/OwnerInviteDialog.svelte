@@ -39,7 +39,8 @@
     if (!force) opener.focus();
   }
 
-  function trapTab(event: KeyboardEvent) {
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && phase === 'saving') event.preventDefault(); // Fallback for browsers without closedby.
     if (event.key !== 'Tab') return;
     const [from, to] = event.shiftKey ? [closeButton, lastButton] : [lastButton, closeButton];
     if (document.activeElement === from) {
@@ -113,7 +114,7 @@
 <button class="primary" type="button" bind:this={opener} onclick={() => { dialog.showModal(); nameField?.focus(); }}>
   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2m4-13v6m-3-3h6"/></svg>Invite someone
 </button>
-<dialog bind:this={dialog} aria-labelledby={`${id}-title`} onkeydown={trapTab}
+<dialog bind:this={dialog} aria-labelledby={`${id}-title`} onkeydown={handleKeydown} closedby={phase === 'saving' ? 'none' : 'closerequest'}
   oncancel={event => { event.preventDefault(); dismiss(); }}
   onpointerdown={event => { beganOnBackdrop = event.target === dialog; }}
   onclick={event => { if (beganOnBackdrop && event.target === dialog) dismiss(); }}>
@@ -181,7 +182,7 @@
   button.primary { min-height: var(--drive-size-control-md); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); }
   button:not(.primary):not([aria-disabled='true']):hover { background: var(--drive-color-bg-raised); }
   button.primary:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
-  button[aria-disabled='true'] { cursor: default; }
+  button[aria-disabled='true'] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-tertiary); cursor: default; }
   .close { padding: 0; min-width: var(--drive-size-control-sm); }
   svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
   :is(input, textarea, button):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }

@@ -84,11 +84,9 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       const saving = dialog.getByRole('button', { name: 'Making invite link…' });
       await focus(saving);
       assert.equal(await saving.getAttribute('aria-busy'), 'true');
-      assert.equal(await name.isEditable(), false);
-      assert.equal(await note.isEditable(), false);
+      for (const field of [name, note]) assert.equal(await field.isEditable(), false);
       for (const control of [cancel, close]) assert.equal(await control.getAttribute('aria-disabled'), 'true');
       await page.keyboard.press('Enter');
-      await page.keyboard.press('Escape');
       await page.mouse.click(2, 2);
       assert.equal(await issueCount(), 1);
       assert.equal(await dialog.isVisible(), true);
@@ -101,8 +99,9 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       await dialog.getByRole('alert').filter({ hasText: "That invite wasn't made. Try again." }).waitFor();
       await audit('not-issued');
 
-      await name.press('Enter');
-      await saving.waitFor();
+      await make.click();
+      await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+      assert.equal(await saving.isVisible(), true, 'two Escapes must not close the saving dialog');
       await finish('issued');
       await focus(copy);
       const link = dialog.getByRole('textbox', { name: 'Invite link for Pell' });
@@ -155,7 +154,7 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       assert.equal(await dialog.isVisible(), false);
       assert.deepEqual(unexpected, []);
       await writeFile(resolve(output, `keyboard-owner-invite-${size}.json`), JSON.stringify({
-        initialFocus: 'Name', wrapsBothWays: true, escapeRestoresFocus: true, savingStaysOpen: true,
+        initialFocus: 'Name', wrapsBothWays: true, escapeRestoresFocus: true, repeatedEscapePreservesResult: true,
         copyFocusedAndWritten: true, refusedSelectsFullLink: true, doneRestoresFocusAndClearsLink: true,
         unknownOutcomeDoesNotRetry: true
       }, null, 2));
