@@ -45,10 +45,10 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     let failPresent = false;
     // Hold requests in the context relay so only one handler owns each route.
     const held = new Map();
-    const holdNext = pathname => {
+    const holdNext = path => {
       const { promise, resolve } = Promise.withResolvers();
-      held.set(pathname, promise);
-      return resolve;
+      held.set(path, promise);
+      return () => { held.delete(path); resolve(); };
     };
     await context.route('**/*', async route => {
       const request = route.request();
@@ -73,8 +73,12 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
         failPresent = false;
         return route.fulfill({ status: 503 });
       }
-      const pending = held.get(url.pathname);
-      if (held.delete(url.pathname)) await pending;
+      for (const [path, pending] of held) {
+        if (typeof path === 'string' ? path !== url.pathname : !path.test(url.pathname)) continue;
+        held.delete(path);
+        await pending;
+        break;
+      }
       return relay(route);
     });
     const page = await context.newPage();
@@ -217,7 +221,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     let memberRoot;
     if (staging) {
       await captureState('member-root-empty');
-      memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, checkOwner: owner, ...stagingRoot }, captureState);
+      memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, checkOwner: owner, holdNext, ...stagingRoot }, captureState);
       assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
       for (const path of ownerNodes) await memberRoot.check(path, 'GET', 404);
     }

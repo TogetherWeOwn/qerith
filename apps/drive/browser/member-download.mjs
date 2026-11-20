@@ -7,7 +7,7 @@ const name = 'Member-only résumé.txt';
 const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' };
 
 export async function proveMemberDownload(page, { origin, worker, defaultWorker, DB, id, cookie, otherMemberCookie, check,
-  ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState }) {
+  ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState, holdNext }) {
   assert.notDeepEqual(bytes.subarray(1, 4), ownerFile.buffer.subarray(1, 4), 'the tested range distinguishes member and owner bytes');
   const noStorage = async action => {
     const before = await storageCalls();
@@ -96,7 +96,7 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
   assert.equal(await unpublishedName.and(page.locator('a')).count(), 0);
   assert.equal(await page.getByText(ownerFile.name, { exact: true }).count(), 0);
   await captureState('member-root-listed');
-  const multipartPicker = await proveMemberMultipartPicker(page);
+  const multipartPicker = await proveMemberMultipartPicker(page, { check, holdNext });
   const activate = async link => {
     const [download] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
     assert.equal(download.suggestedFilename(), name);
@@ -153,9 +153,10 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
   } };
 }
 
-async function proveMemberMultipartPicker(page) {
+async function proveMemberMultipartPicker(page, { check, holdNext }) {
   const cap = 16 * 1024 * 1024;
   const file = { name: 'Multipart picker.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(cap + 1, 91) };
+  file.buffer[cap] = 173; // Distinguish the short final part from the first.
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   const progress = page.getByRole('progressbar', { name: file.name, exact: true });
   const responses = [];
@@ -165,22 +166,24 @@ async function proveMemberMultipartPicker(page) {
     const request = response.request();
     responses.push([request.method(), path, response.status(), request.method() === 'PUT' ? request.postDataBuffer()?.length : null]);
   };
-  // Keep the final part in flight so the browser must render intermediate acknowledged bytes.
-  const secondPart = Promise.withResolvers();
-  await page.route('**/api/uploads/*/parts/2', async route => {
-    await secondPart.promise;
-    await route.fallback();
-  }, { times: 1 });
+  // Hold inside the context relay; expiring a page route during fallback can continue the same request.
+  const secondPart = /^\/api\/uploads\/[^/]+\/parts\/2$/;
+  const releaseSecondPart = holdNext(secondPart);
   page.on('response', track);
   try {
     await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
     const [chooser] = await Promise.all([page.waitForEvent('filechooser'), upload.press('Enter')]);
-    await chooser.setFiles(file);
+    await Promise.all([
+      page.waitForRequest(request => request.method() === 'PUT' && secondPart.test(new URL(request.url()).pathname)),
+      chooser.setFiles(file),
+    ]);
     await progress.and(page.locator(`progress[value="${cap}"][max="${cap + 1}"]`)).waitFor();
     assert.equal(await upload.getAttribute('aria-disabled'), 'true');
-    secondPart.resolve();
+    assert.equal(responses.length, 2, 'the second part has not been acknowledged');
+    releaseSecondPart();
     await page.getByRole('status').filter({ hasText: `${file.name}: Uploaded.` }).waitFor();
-    await page.getByRole('link', { name: file.name, exact: true }).waitFor();
+    const row = page.getByRole('link', { name: file.name, exact: true });
+    await row.waitFor();
     assert.equal(await progress.getAttribute('value'), String(cap + 1));
     assert.equal(await upload.evaluate(el => document.activeElement === el), true);
     assert.equal(responses.length, 4);
@@ -190,9 +193,13 @@ async function proveMemberMultipartPicker(page) {
       ['POST', '/api/uploads', 201, null], ['PUT', `${intent}/parts/1`, 204, cap],
       ['PUT', `${intent}/parts/2`, 204, 1], ['POST', `${intent}/complete`, 201, null],
     ]);
-    return { parts: [cap, 1], acknowledgedProgress: [cap, cap + 1], refreshedListing: true, retainedFocus: true };
+    const href = await row.getAttribute('href');
+    assert.match(href, /^\/api\/download\/[0-9a-f-]{36}$/);
+    const download = await check(href, 'GET', 200);
+    assert.ok(Buffer.from(await download.arrayBuffer()).equals(file.buffer), 'download matches both uploaded parts');
+    return { parts: [cap, 1], acknowledgedProgress: [cap, cap + 1], refreshedListing: true, retainedFocus: true, byteIdentical: true };
   } finally {
-    secondPart.resolve();
+    releaseSecondPart();
     page.off('response', track);
   }
 }
