@@ -2,6 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
+import { listingRequest } from '../../drive/src/lib/server/listing-routes.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { createSharedReadAccess, ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 
@@ -23,6 +24,70 @@ async function setup() {
     alice: (await sessions.issue('alice')).token, bob: (await sessions.issue('bob')).token,
     eve: (await sessions.issue('eve')).token };
 }
+
+async function httpListing(view, token, query = {}, status = 200) {
+  const origin = 'https://drive.example.test';
+  const request = new Request(`${origin}/api/${view}-listing?${new URLSearchParams(query)}`, {
+    headers: token ? { cookie: `__Host-drive-session=${token}` } : {},
+  });
+  const response = await listingRequest(request, { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' });
+  expect(response.status).toBe(status);
+  expect(response.headers.get('cache-control')).toBe('private, no-store');
+  if (status === 200) return response.json();
+  expect(await response.text()).toBe('');
+}
+
+it('serves only safe folder rows to owners and authorized members', async () => {
+  const { sessions, grants, alice, bob, eve } = await setup();
+  const owner = (await sessions.issue('owner')).token;
+  await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('empty', 'owner', 'empty', 'folder')").run();
+  const list = (token, folderId, status) => httpListing('folder', token, { folderId }, status);
+  const page = { entries: [], total: 0, order: 'binary-name', direction: 'asc', nextCursor: null };
+  expect(await list(owner, 'empty')).toEqual(page);
+  expect(await list(alice, 'elsewhere')).toEqual(page);
+  await list(alice, 'file', 404);
+  await list(owner, 'nested', 404);
+  await list(eve, 'nested', 404);
+  await list(null, 'nested', 401);
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  const expected = { ...page, entries: [{ id: 'file', name: 'file', kind: 'file' }], total: 1 };
+  expect(await list(alice, 'nested')).toEqual(expected);
+  expect(await list(bob, 'nested')).toEqual(expected);
+  expect(await httpListing('shared', bob)).toEqual({ entries: [{ id: 'root', name: 'root', kind: 'folder' }], nextCursor: null });
+  await httpListing('folder', bob, { folderId: 'nested', cursor: 'invalid' }, 400);
+  await env.DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'bob'").run();
+  await list(bob, 'nested', 401);
+  await httpListing('shared', bob, {}, 401);
+});
+
+it('bounds both HTTP pages and rechecks grants when a cursor is replayed', async () => {
+  const { grants, alice, bob } = await setup();
+  await seedListing(201, 'folder', { folderId: 'nested' });
+  expect(await grants.create(alice, 'root', 'bob')).toBe(true);
+  const folderId = 'nested';
+  const first = await httpListing('folder', bob, { folderId, direction: 'desc' });
+  expect(first.entries).toHaveLength(200);
+  expect(first).toMatchObject({ total: 202, direction: 'desc' });
+  const query = { folderId, direction: 'desc', cursor: first.nextCursor };
+  const second = await httpListing('folder', bob, query);
+  expect(second.entries).toHaveLength(2);
+  expect(second.nextCursor).toBeNull();
+  await httpListing('folder', bob, { ...query, folderId: 'root' }, 400);
+  expect(await grants.revoke(alice, 'root', 'bob')).toBe(true);
+  await httpListing('folder', bob, query, 404);
+
+  const ids = Array.from({ length: 101 }, (_, i) => `item-${i}`).sort();
+  await env.DB.batch(ids.map(id => env.DB.prepare("INSERT INTO drive_read_grants VALUES (?, 'bob')").bind(id)));
+  const shared = await httpListing('shared', bob);
+  expect(shared.entries.map(entry => entry.id)).toEqual(ids.slice(0, 100));
+  expect(shared.nextCursor).toBe(ids[99]);
+  const next = { cursor: shared.nextCursor };
+  expect(await httpListing('shared', bob, next)).toEqual({ entries: [
+    { id: ids[100], name: `item-${ids[100].slice(5).padStart(3, '0')}`, kind: 'folder' },
+  ], nextCursor: null });
+  expect(await grants.revoke(alice, ids[100], 'bob')).toBe(true);
+  expect(await httpListing('shared', bob, next)).toEqual({ entries: [], nextCursor: null });
+});
 
 it('authorizes direct and inherited reads and lists without disclosing parents or owners', async () => {
   const { grants, reads, alice, bob, eve } = await setup();

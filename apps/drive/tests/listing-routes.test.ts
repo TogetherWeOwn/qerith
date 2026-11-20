@@ -1,0 +1,46 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { listingRequest } from '../src/lib/server/listing-routes';
+import { stagingOrigin } from '../src/lib/server/request-auth';
+import { admitStagingRequest } from '../src/lib/server/staging-admission';
+
+const origin = 'https://drive.example.test';
+const folder = '/api/folder-listing';
+const shared = '/api/shared-listing';
+const db = { prepare() { assert.fail('listing must not read the raw binding'); } };
+const staging = { DB: db, DRIVE_ORIGIN: stagingOrigin, DRIVE_SIGN_IN_FIXTURE: '1', DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+
+async function denied(response: Response | undefined, status: number) {
+  assert.ok(response);
+  assert.equal(response.status, status);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(await response.text(), '');
+  if (status === 405) assert.equal(response.headers.get('allow'), 'GET');
+}
+
+test('both listing paths stay closed in staging and outside the disposable fixture', async () => {
+  const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>() };
+  for (const path of [folder, shared]) {
+    const request = new Request(stagingOrigin + path);
+    const admission = await admitStagingRequest(request, staging, true, assets);
+    assert.ok(admission instanceof Response);
+    await denied(admission, 404);
+    await denied(await listingRequest(request, staging), 404);
+    await denied(await listingRequest(new Request(origin + path), { DB: db, DRIVE_ORIGIN: origin }), 404);
+  }
+});
+
+test('listing rejects method, origin and malformed inputs and hides binding failures', async () => {
+  const env = { DB: { ...db, withSession() { throw new TypeError('internal binding details'); } },
+    DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' };
+  const list = (path: string, init?: RequestInit, base = origin) => listingRequest(new Request(base + path, init), env);
+  for (const method of ['HEAD', 'POST', 'OPTIONS']) await denied(await list(shared, { method }), 405);
+  await denied(await list(shared, { headers: { origin: 'https://other.example.test' } }), 403);
+  await denied(await list(shared, { headers: { 'sec-fetch-site': 'same-site' } }), 403);
+  await denied(await list(shared, undefined, 'https://other.example.test'), 403);
+  for (const path of [folder, `${folder}?folderId=`, `${folder}?folderId=${'x'.repeat(513)}`,
+    `${folder}?folderId=root&folderId=other`, `${folder}?folderId=root&direction=up`,
+    `${folder}?folderId=root&cursor=${'x'.repeat(2049)}`, `${shared}?cursor=`, `${shared}?ownerId=someone`,
+    `${shared}?cursor=a&cursor=b`, `${shared}?cursor=${'%61'.repeat(2800)}`]) await denied(await list(path), 400);
+  await denied(await list(shared, { headers: { origin, 'sec-fetch-site': 'same-origin' } }), 503);
+});
