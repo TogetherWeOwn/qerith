@@ -153,6 +153,17 @@ try {
   }, await row.getAttribute('href'));
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
 
+  // Without invite mode the owner picker still rejects files above the preview cap.
+  const size = 16 * 1024 * 1024 + 1;
+  const oversized = 'Above preview cap.bin';
+  const uploadRequests = [];
+  const recordUpload = request => { if (new URL(request.url()).pathname.startsWith('/api/uploads')) uploadRequests.push(request.method()); };
+  page.on('request', recordUpload);
+  await page.locator('input[type="file"]').setInputFiles({ ...file, name: oversized, buffer: Buffer.alloc(size) });
+  await page.getByRole('status').filter({ hasText: `${oversized}: Upload interrupted.` }).waitFor();
+  page.off('request', recordUpload);
+  assert.deepEqual(uploadRequests, [], 'preview rejects before allocation');
+
   // Another upload pushes the last row to page two after the user tabs to it.
   await DB.prepare(`WITH RECURSIVE pages(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM pages WHERE n < 99)
     INSERT INTO drive_entries (id, owner_id, name, kind)

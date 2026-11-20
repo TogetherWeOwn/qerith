@@ -95,9 +95,8 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
   await unpublishedName.filter({ visible: true }).waitFor();
   assert.equal(await unpublishedName.and(page.locator('a')).count(), 0);
   assert.equal(await page.getByText(ownerFile.name, { exact: true }).count(), 0);
-  assert.equal(await page.locator('input[type="file"]').count(), 0);
-  assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
   await captureState('member-root-listed');
+  const multipartPicker = await proveMemberMultipartPicker(page);
   const activate = async link => {
     const [download] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
     assert.equal(download.suggestedFilename(), name);
@@ -148,8 +147,52 @@ export async function proveMemberDownload(page, { origin, worker, defaultWorker,
       upload: { allocated: 201, part: 204, published: 201, ownFile: true, deniedWithoutStorage: {
         flagOff: 403, revoked: 401, otherMember: 404, grantedFolder: 404, noncanonical: 404, wrongMethod: 404, crossOrigin: 403,
       } },
-      unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
+      multipartPicker, unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
       retryDownloaded: true, unavailableNoticeOmitsNameAndRetry: true,
     }, null, 2));
   } };
+}
+
+async function proveMemberMultipartPicker(page) {
+  const cap = 16 * 1024 * 1024;
+  const file = { name: 'Multipart picker.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(cap + 1, 91) };
+  const upload = page.getByRole('button', { name: 'Upload', exact: true });
+  const progress = page.getByRole('progressbar', { name: file.name, exact: true });
+  const responses = [];
+  const track = response => {
+    const path = new URL(response.url()).pathname;
+    if (!path.startsWith('/api/uploads')) return;
+    const request = response.request();
+    responses.push([request.method(), path, response.status(), request.method() === 'PUT' ? request.postDataBuffer()?.length : null]);
+  };
+  // Keep the final part in flight so the browser must render intermediate acknowledged bytes.
+  const secondPart = Promise.withResolvers();
+  await page.route('**/api/uploads/*/parts/2', async route => {
+    await secondPart.promise;
+    await route.fallback();
+  }, { times: 1 });
+  page.on('response', track);
+  try {
+    await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), upload.press('Enter')]);
+    await chooser.setFiles(file);
+    await progress.and(page.locator(`progress[value="${cap}"][max="${cap + 1}"]`)).waitFor();
+    assert.equal(await upload.getAttribute('aria-disabled'), 'true');
+    secondPart.resolve();
+    await page.getByRole('status').filter({ hasText: `${file.name}: Uploaded.` }).waitFor();
+    await page.getByRole('link', { name: file.name, exact: true }).waitFor();
+    assert.equal(await progress.getAttribute('value'), String(cap + 1));
+    assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+    assert.equal(responses.length, 4);
+    const intent = responses[1][1].replace(/\/parts\/1$/, '');
+    assert.match(intent, /^\/api\/uploads\/[A-Za-z0-9_-]+$/);
+    assert.deepEqual(responses, [
+      ['POST', '/api/uploads', 201, null], ['PUT', `${intent}/parts/1`, 204, cap],
+      ['PUT', `${intent}/parts/2`, 204, 1], ['POST', `${intent}/complete`, 201, null],
+    ]);
+    return { parts: [cap, 1], acknowledgedProgress: [cap, cap + 1], refreshedListing: true, retainedFocus: true };
+  } finally {
+    secondPart.resolve();
+    page.off('response', track);
+  }
 }

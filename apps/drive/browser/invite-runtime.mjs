@@ -254,6 +254,8 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     await signIn(403);
     await page.getByRole('heading', { name: 'Your access is turned off', exact: true }).waitFor();
     if (staging) {
+      assert.equal(await page.getByRole('button', { name: 'Upload', exact: true }).count(), 0);
+      assert.equal(await page.locator('input[type="file"]').count(), 0);
       await page.getByText('The owner turned off your access to Drive. Your files are kept. Ask them if you think this is a mistake.', { exact: true }).waitFor();
       await captureState('member-revoked');
     }
