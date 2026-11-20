@@ -97,13 +97,13 @@ it('allocates only for the live staging member behind the exact flag and admits 
 
   const runtime = { ...bindings, ...enabled }, handle = privateRequests(runtime);
   const resolve = vi.fn(() => new Response(null, { status: 204 }));
-  const empty = new Set(), assets = { signIn: empty, root: empty, invite: empty };
+  const empty = new Set(), assets = { signIn: empty, root: empty, invite: empty, people: empty };
   for (const [path, routeId, method] of [
     ['', '', 'POST'], [`/${intent.id}/parts/1`, '/[intentId]/parts/[partNumber]', 'PUT'],
     [`/${intent.id}/complete`, '/[intentId]/complete', 'POST'],
   ]) {
     const req = new Request(`${stagingOrigin}/api/uploads${path}`, { method, headers: request().headers });
-    expect(await admitStagingRequest(req, runtime, true, assets)).toBeUndefined();
+    expect(await admitStagingRequest(req, runtime, true, assets)).toEqual({ kind: 'upload' });
     const locals = {};
     const admitted = await handle({ event: { request: req, route: { id: `/api/uploads${routeId}` }, locals }, resolve });
     expect(admitted.status).toBe(204);
