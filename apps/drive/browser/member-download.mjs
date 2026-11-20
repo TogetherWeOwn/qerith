@@ -1,30 +1,59 @@
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { tsImport } from 'tsx/esm/api';
 
-const { uploadToRoot } = await tsImport('../src/lib/root-upload.ts', import.meta.url);
-const fixtureOrigin = 'https://drive.example.test';
 const bytes = Buffer.from([11, 129, 0, 255, 33, 91]);
 const name = 'Member-only résumé.txt';
 const navigation = { 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' };
 
-export async function proveMemberDownload(page, { origin, defaultWorker, DB, id, cookie, check,
+export async function proveMemberDownload(page, { origin, worker, defaultWorker, DB, id, cookie, otherMemberCookie, check,
   ownerDownload, ownerFile, checkOwner, storageCalls, renderNotice, captureState }) {
   assert.notDeepEqual(bytes.subarray(1, 4), ownerFile.buffer.subarray(1, 4), 'the tested range distinguishes member and owner bytes');
-  // Only fixture setup uses a member upload. The staged member may not upload.
-  const setupStatuses = [];
-  const published = await uploadToRoot(new File([bytes], name), () => {}, async (path, init) => {
-    const headers = new Headers(init.headers);
-    const body = typeof init.body === 'string' ? Buffer.from(init.body) : Buffer.from(await init.body.arrayBuffer());
-    headers.set('origin', fixtureOrigin);
-    headers.set('cookie', cookie);
-    headers.set('content-length', String(body.length));
-    const response = await defaultWorker.fetch(fixtureOrigin + path, { method: init.method, headers, body, redirect: 'manual' });
-    setupStatuses.push(response.status);
+  const noStorage = async action => {
+    const before = await storageCalls();
+    const response = await action();
+    assert.equal(await storageCalls(), before, 'denial never dispatched to storage');
     return response;
-  });
-  assert.equal(published.status, 'published', `member publication setup: ${setupStatuses.join(', ')}`);
+  };
+  const send = async ([path, method, data], expected, target = worker, overrides = {}) => {
+    const json = data !== undefined && !Buffer.isBuffer(data);
+    const body = json ? Buffer.from(JSON.stringify(data)) : data;
+    const response = await target.fetch(origin + path, { method, body, redirect: 'manual', headers: {
+      cookie, origin, ...(json && { 'content-type': 'application/json' }),
+      ...(body && { 'content-length': String(body.length) }), ...overrides,
+    } });
+    assert.deepEqual([response.status, response.headers.get('cache-control')], [expected, 'private, no-store'], `${method} ${path}`);
+    return response;
+  };
+  const denyUpload = async (...args) => assert.equal(await (await noStorage(() => send(...args))).text(), '');
+  const allocate = ['/api/uploads', 'POST', { size: bytes.length }];
+  await denyUpload(allocate, 403, defaultWorker);
+  await denyUpload(allocate, 403, worker, { origin: 'https://other.example.test' });
+  await denyUpload(allocate, 403, worker, { 'sec-fetch-site': 'cross-site' });
+  await denyUpload(['/api/uploads/', 'POST', allocate[2]], 404);
+  const intent = `/api/uploads/${(await (await send(allocate, 201)).json()).id}`;
+  const part = [`${intent}/parts/1`, 'PUT', bytes];
+  const complete = [`${intent}/complete`, 'POST', { name, parentId: null }];
+  await denyUpload(part, 403, defaultWorker);
+  await denyUpload(part, 404, worker, { cookie: otherMemberCookie });
+  await denyUpload([`${intent}/parts/01`, 'PUT', bytes], 404);
+  await denyUpload([part[0], 'GET'], 404);
+  await send(part, 204);
+  await denyUpload(complete, 403, defaultWorker);
+  await denyUpload(complete, 404, worker, { cookie: otherMemberCookie });
+  await denyUpload([`${complete[0]}?preview=1`, 'POST', complete[2]], 404);
+
+  // Even a read grant for a valid folder does not authorize publication into it.
+  const folder = crypto.randomUUID();
+  const { owner_id: ownerId } = await DB.prepare('SELECT owner_id FROM drive_entries WHERE id = ?')
+    .bind(ownerDownload.split('/').at(-1)).first();
+  await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Owner folder', 'folder')").bind(folder, ownerId).run();
+  await DB.prepare('INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES (?, ?)').bind(folder, id).run();
+  await denyUpload([complete[0], 'POST', { name, parentId: folder }], 404);
+  const published = await (await send(complete, 201)).json();
+  assert.deepEqual(await DB.prepare('SELECT owner_id, name, size_bytes FROM drive_entries WHERE id = ?').bind(published.id).first(),
+    { owner_id: id, name, size_bytes: bytes.length });
+  const pending = `/api/uploads/${(await (await send(allocate, 201)).json()).id}`;
   const path = `/api/download/${published.id}`;
   const missing = `/api/download/${crypto.randomUUID()}`;
   const unpublished = crypto.randomUUID();
@@ -33,12 +62,6 @@ export async function proveMemberDownload(page, { origin, defaultWorker, DB, id,
   await DB.prepare('INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES (?, ?)')
     .bind(ownerDownload.split('/').at(-1), id).run();
 
-  const noStorage = async action => {
-    const before = await storageCalls();
-    const response = await action();
-    assert.equal(await storageCalls(), before, 'denial never dispatched to storage');
-    return response;
-  };
   const deny = async (download, status) => {
     const response = await noStorage(() => check(download, 'GET', status, { range: 'bytes=1-3' }));
     assert.equal(await response.text(), '');
@@ -115,10 +138,16 @@ export async function proveMemberDownload(page, { origin, defaultWorker, DB, id,
 
   return { name, async checkRevoked() {
     await deny(path, 401);
+    await denyUpload(allocate, 401);
+    await denyUpload([`${pending}/parts/1`, 'PUT', bytes], 401);
+    await denyUpload([`${pending}/complete`, 'POST', complete[2]], 401);
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-member-download.json'), JSON.stringify({
       full: { status: full.status, bytes: bytes.length, workerAndBrowserByteIdentical: true },
       range: { status: range.status, contentRange: partial[1], workerAndBrowserByteIdentical: true },
       deniedWithoutStorage: { grantedOtherOwner: 404, missing: 404, unpublished: 404, revoked: 401, flagOff: 403 },
+      upload: { allocated: 201, part: 204, published: 201, ownFile: true, deniedWithoutStorage: {
+        flagOff: 403, revoked: 401, otherMember: 404, grantedFolder: 404, noncanonical: 404, wrongMethod: 404, crossOrigin: 403,
+      } },
       unpublishedRowIsPlainText: true, ownerByteIdenticalInInviteMode: true,
       retryDownloaded: true, unavailableNoticeOmitsNameAndRetry: true,
     }, null, 2));

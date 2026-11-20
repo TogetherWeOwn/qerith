@@ -162,19 +162,22 @@ test('every protected request checks a live owner, including assets after revoca
   assert.equal(reads(), 2);
 });
 
-test('invite mode admits live members to My Drive, its data and assets, and the exact download GET', async () => {
+test('invite mode admits live members to My Drive, its data and assets, the exact download GET and canonical uploads', async () => {
   const { env, revoke } = runtime('member');
   const admit = (input: Request, flag?: string) =>
     admitStagingRequest(input, { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag }, true, assets);
   for (const [path, methods, target] of protectedRoutes) {
     for (const method of methods) {
       const input = request(path, method);
-      const ownerOnly = target.kind === 'upload';
       const disabledStatus = target.kind === 'root' && method === 'HEAD' ? 401 : 403;
       for (const flag of [undefined, '0', 'true', '1 ']) denied(await admit(input, flag), disabledStatus);
       const enabled = await admit(input, '1');
-      if (ownerOnly) denied(enabled, 403);
-      else assert.ok(!(enabled instanceof Response) && enabled.kind === target.kind);
+      assert.ok(!(enabled instanceof Response) && enabled.kind === target.kind);
+      if (target.kind === 'upload') {
+        denied(await admitStagingRequest(input, { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' }, false, assets), 503);
+        denied(await admit(request(path, method, { origin: stagingOrigin, cookie, 'sec-fetch-site': 'none' }), '1'), 403);
+        for (const suffix of ['?', '?batch=1']) denied(await admit(request(path + suffix, method), '1'), 404);
+      }
     }
   }
   for (const path of ['/people', '/api/owner/members', '/__data.json/', '/api/root-listing', `${root}.map`]) {
@@ -182,7 +185,9 @@ test('invite mode admits live members to My Drive, its data and assets, and the 
   }
   denied(await admit(request(data, 'GET', { cookie, 'sec-fetch-site': 'cross-site' }), '1'), 403);
   revoke();
-  for (const path of ['/', data, root, `/api/download/${id}`]) denied(await admit(request(path), '1'), 401);
+  for (const [path, methods] of protectedRoutes) {
+    for (const method of methods) denied(await admit(request(path, method), '1'), 401);
+  }
 });
 
 test('staging owner lifecycle routes require the exact invite flag and a live owner', async () => {
