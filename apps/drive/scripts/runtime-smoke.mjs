@@ -101,8 +101,12 @@ export default { fetch(request, env, ctx) {
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
-  if (request.headers.has('x-test-qualification')) env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
-    DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };` : ''}
+  if (request.headers.has('x-test-qualification')) {
+    env = { ...env, DRIVE_QUALIFICATION_SHA: ${JSON.stringify(release)},
+      DRIVE_QUALIFICATION_VERSION: { id: ${JSON.stringify(qualificationVersion)} } };
+    const missing = request.headers.get('x-test-missing-binding');
+    if (missing) delete env[missing];
+  }` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
   if (mode === null) return app.fetch(request, env, ctx);
   const input = new Request(request);
@@ -173,7 +177,13 @@ export default { fetch(request, env, ctx) {
       assert.deepEqual([off.status, off.headers.get(readinessHeaders.sha)], [404, null], 'preview has no readiness binding');
       const on = await readiness({ 'x-test-qualification': '1' });
       assert.equal(on.status, 204);
-      assert.deepEqual(Object.values(readinessHeaders).map(name => on.headers.get(name)), [nonce, release, qualificationVersion]);
+      const identity = response => Object.values(readinessHeaders).map(name => response.headers.get(name));
+      assert.deepEqual(identity(on), [nonce, release, qualificationVersion]);
+      for (const binding of ['DB', 'ASSETS', 'DRIVE_S3_QUALIFICATION']) {
+        const unready = await readiness({ 'x-test-qualification': '1', 'x-test-missing-binding': binding });
+        assert.deepEqual([unready.status, ...identity(unready)], [404, null, null, null], `candidate without ${binding}`);
+      }
+      console.log('Generated Worker fixture: readiness requires D1, assets and qualified storage');
       const get = (path, headers) => worker.fetch(`${origin}${path}`, { headers, redirect: 'manual' });
       const bootstrap = (headers = {}) => worker.fetch(`${origin}/api/deployer/owner-enrollment`, {
         method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers },
