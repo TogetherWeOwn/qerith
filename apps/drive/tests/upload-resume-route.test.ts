@@ -11,7 +11,7 @@ const { resume } = uploadRoutes({ DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '
 test('rejects body framing and any query before accessing D1', async () => {
   for (const request of [
     new Request(origin + path, { headers: { 'content-length': '1' } }),
-    new Request(origin + path, { headers: { 'transfer-encoding': 'chunked' } }),
+    new Request(origin + path, { headers: { 'content-length': '0', 'transfer-encoding': 'chunked' } }),
     new Request(`${origin}${path}?`),
   ]) {
     const response = await resume(request);
@@ -19,6 +19,17 @@ test('rejects body framing and any query before accessing D1', async () => {
     assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()],
       [400, 'private, no-store', '']);
   }
+});
+
+test('allows an empty stream with explicit zero-length framing', async () => {
+  const request = new Request(origin + path, { headers: { 'content-length': '0' } });
+  // Model Workers exposing a stream for a bodyless HTTP request.
+  Object.defineProperty(request, 'body', { value: new Response('').body });
+  const { resume } = uploadRoutes({ DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1',
+    DB: { ...DB, withSession: () => DB } });
+  assert.equal((await resume(request))?.status, 401);
+  request.headers.delete('content-length');
+  assert.equal((await resume(request))?.status, 400);
 });
 
 test('does not admit encoded IDs or enable resume outside the fixture', async () => {

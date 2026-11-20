@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
@@ -14,8 +15,9 @@ import { uploadRoutes } from ${JSON.stringify(resolve('src/lib/server/upload-rou
 import { wireUploadStorage } from ${JSON.stringify(resolve('src/lib/server/storage-runtime.ts'))};
 function resumeRequest(request, env) {
   const raw = request.headers.has('x-test-resume-no-storage') ? env : { ...env, ...${JSON.stringify(storage)} };
-  const bindings = wireUploadStorage(raw, () => { throw new Error('Resume must not access storage'); });
-  return uploadRoutes({ ...env, ...bindings }).resume(request);
+  const fetch = () => { throw new Error('Resume must not access storage'); };
+  const bindings = wireUploadStorage(raw, fetch);
+  return uploadRoutes({ ...env, ...bindings }, { fetch, timeoutMs: 5000 }).resume(request);
 }`;
 export const uploadResumePath = id => `/api/uploads/${id}/resume`;
 
@@ -55,7 +57,7 @@ export async function exerciseUploadResume({ worker, DB, origin, session }) {
     await sql('INSERT INTO drive_upload_part_operations VALUES (?, ?, ?, ?, ?, ?, 2, ?, ?)',
       op, id, principalId, key, epoch, uploadId, partNumber, sizeBytes);
     await sql('INSERT INTO drive_upload_part_byte_evidence VALUES (?, ?, ?)',
-      op, Uint8Array.fromHex(sha256).buffer, Uint8Array.from([34, 97, 34]).buffer);
+      op, Uint8Array.from(Buffer.from(sha256, 'hex')).buffer, Uint8Array.from([34, 97, 34]).buffer);
     parts.push({ partNumber, sizeBytes, sha256 });
   }
   for (const [intent, expected] of [[id, parts], [empty, []]]) {

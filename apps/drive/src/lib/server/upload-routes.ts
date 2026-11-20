@@ -86,8 +86,9 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } });
     if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || !allowsStagingInviteSite(request)) return reply(403);
     const length = request.headers.get('content-length');
-    if (request.url !== url.origin + url.pathname || request.body !== null ||
-      (length !== null && length !== '0') || request.headers.has('transfer-encoding')) return reply(400);
+    // Workers can expose a stream for a request framed with Content-Length: 0.
+    if (request.url !== url.origin + url.pathname || request.headers.has('transfer-encoding') ||
+      (length === null ? request.body !== null : length !== '0')) return reply(400);
 
     const db = env.DB;
     if (!db || typeof db.withSession !== 'function') return reply(503);
