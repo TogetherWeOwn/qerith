@@ -73,6 +73,24 @@ test('the readiness probe requires fresh exact-SHA evidence from the responding 
   }), /fresh exact-SHA/);
 });
 
+test('the readiness probe rejects exact evidence at or after its deadline before the abort timer fires', async t => {
+  let now = 1_000;
+  t.mock.method(performance, 'now', () => now);
+  let requestSignal;
+  const identity = { sha, version: candidate };
+  const probeAfter = elapsed => probeQualificationWorker(identity, undefined, async (url, init) => {
+    requestSignal = init.signal;
+    const response = qualificationReadiness(new Request(url, init), readinessEnv, true);
+    now += elapsed;
+    return response;
+  });
+  assert.deepEqual(await probeAfter(9_999), { ...identity, ready: true });
+  for (const elapsed of [10_000, 10_074]) {
+    await assert.rejects(probeAfter(elapsed), /fresh exact-SHA/);
+    assert.equal(requestSignal.aborted, false);
+  }
+});
+
 function fixture(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-worker-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));

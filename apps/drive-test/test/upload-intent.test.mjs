@@ -70,7 +70,7 @@ it.each([
   }
 });
 
-it('allocates only for the live staging member behind the exact flag, without admitting upload routes', async () => {
+it('allocates only for the live staging member behind the exact flag and admits canonical upload routes', async () => {
   const { bindings, db, owner, post, request, row, revoke, fetch } = await fixture(stagingOrigin);
   const body = '{"size":4}', enabled = { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
   for (const flag of [undefined, '0', 'true']) {
@@ -95,18 +95,21 @@ it('allocates only for the live staging member behind the exact flag, without ad
   expect(signed.url).toBe(`${config.endpoint}/${config.bucket}/${intent.object_key}?uploads=`);
   expect(signed.headers.get('authorization')).toMatch(/^AWS4-HMAC-SHA256 /);
 
-  const runtime = { ...bindings, ...enabled }, handle = privateRequests(runtime), resolve = vi.fn();
-  const empty = new Set(), assets = { signIn: empty, root: empty, invite: empty };
+  const runtime = { ...bindings, ...enabled }, handle = privateRequests(runtime);
+  const resolve = vi.fn(() => new Response(null, { status: 204 }));
+  const empty = new Set(), assets = { signIn: empty, root: empty, invite: empty, people: empty };
   for (const [path, routeId, method] of [
     ['', '', 'POST'], [`/${intent.id}/parts/1`, '/[intentId]/parts/[partNumber]', 'PUT'],
     [`/${intent.id}/complete`, '/[intentId]/complete', 'POST'],
   ]) {
     const req = new Request(`${stagingOrigin}/api/uploads${path}`, { method, headers: request().headers });
-    expect((await admitStagingRequest(req, runtime, true, assets)).status).toBe(403);
-    const denied = await handle({ event: { request: req, route: { id: `/api/uploads${routeId}` }, locals: {} }, resolve });
-    expect(denied.status).toBe(403);
+    expect(await admitStagingRequest(req, runtime, true, assets)).toEqual({ kind: 'upload' });
+    const locals = {};
+    const admitted = await handle({ event: { request: req, route: { id: `/api/uploads${routeId}` }, locals }, resolve });
+    expect(admitted.status).toBe(204);
+    expect(locals.driveSession?.principal).toEqual({ id: owner, role: 'member' });
   }
-  expect(resolve).not.toHaveBeenCalled();
+  expect(resolve).toHaveBeenCalledTimes(3);
   expect(await db.prepare('SELECT 1 FROM drive_published_generations WHERE intent_id = ?').bind(intent.id).first()).toBeNull();
   await revoke();
   expect((await post(body, { overrides: enabled })).status).toBe(401);

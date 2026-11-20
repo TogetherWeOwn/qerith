@@ -75,6 +75,7 @@ const buildAdapter = {
       // The adapter can answer before the hook. Gate preview dispatch here.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { postFolder } from '../../src/lib/server/folder-route.ts';
 import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
@@ -119,6 +120,7 @@ export default {
         asset: request => env.ASSETS.fetch(request)
       });
     }
+    if (url.pathname === '/api/folders') return postFolder(request, env);
     // Keep listing denials out of the adapter's query validation.
     const listing = listingRequest(request, env);
     if (listing) return listing;

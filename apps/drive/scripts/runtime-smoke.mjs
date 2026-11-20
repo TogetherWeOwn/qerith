@@ -289,6 +289,8 @@ export default { fetch(request, env, ctx) {
         method, headers: { cookie, origin, 'content-type': type, 'content-length': String(body.length) }, body, redirect: 'manual'
       });
       const json = 'application/json', data = 'drive', name = 'staging-fixture.txt';
+      const closedFolder = await send('/api/folders', 'POST', json, '{"name":"Closed","parentId":null}');
+      assert.deepEqual([closedFolder.status, closedFolder.headers.get('cache-control'), await closedFolder.text()], [404, 'private, no-store', '']);
       const intent = await send('/api/uploads', 'POST', json, JSON.stringify({ size: data.length }));
       assert.equal(intent.status, 201, 'owner can allocate');
       const upload = `/api/uploads/${(await intent.json()).id}`;
@@ -350,6 +352,10 @@ export default { fetch(request, env, ctx) {
     const listing = await worker.fetch(`${origin}/api/root-listing`, { headers: { cookie } });
     assert.equal(listing.status, preview ? 200 : 404);
     assert.equal(listing.headers.get('cache-control'), 'private, no-store');
+    const createFolder = (name, parentId) => worker.fetch(`${origin}/api/folders`, {
+      method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name, parentId }),
+    });
     const fileId = '00000000-0000-4000-8000-000000000002';
     if (preview) {
       assert.match(html, /Your drive is empty\./);
@@ -358,8 +364,17 @@ export default { fetch(request, env, ctx) {
       await exerciseOwnerRoutes({ worker, DB, origin, owner, session, preview });
       await exerciseDeletion({ worker, DB, origin, cookie: owner, preview });
       await exerciseListingPages(DB, worker, origin, cookie);
+      const root = await createFolder('Created at root', null);
+      assert.deepEqual([root.status, root.headers.get('cache-control')], [201, 'private, no-store']);
+      const { id } = await root.json();
+      const nested = await createFolder('Created inside', id);
+      assert.equal(nested.status, 201);
+      const body = await nested.json();
+      assert.deepEqual(body, { id: body.id, parentId: id, name: 'Created inside', kind: 'folder' });
       return;
     }
+    const closedFolder = await createFolder('Fixture disabled', null);
+    assert.deepEqual([closedFolder.status, closedFolder.headers.get('cache-control'), await closedFolder.text()], [404, 'private, no-store', '']);
     await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'fixture', 'Private fixture folder', 'folder')").bind(fileId).run();
     const unadmitted = await (await access({ headers: { cookie } })).text();
     assert.match(unadmitted, /Service unavailable\./);

@@ -278,12 +278,12 @@ async function proveMemberRoot(page, context, { worker, asset, ...options }, cap
   };
   assert.equal(await (await check('/', 'HEAD', 200)).text(), '');
   await check(asset, 'GET', 200);
-  const { name, checkRevoked } = await proveMemberDownload(page, { ...options, cookie, check, captureState });
+  const { name, checkRevoked } = await proveMemberDownload(page, { ...options, worker, cookie, check, captureState });
   const data = await (await check(dataPath, 'GET', 200)).text();
   assert.ok(data.includes(name) && !data.includes(ownerFile.name) && !data.includes('internal-member-fixture-key'));
   await check(dataPath, 'GET', 403, { 'sec-fetch-site': 'cross-site' });
   for (const [path, method, status] of [
-    ['/api/uploads', 'POST', 403], ['/api/owner/invitations', 'GET', 403], ['/people', 'GET', 404]]) {
+    ['/api/owner/invitations', 'GET', 403], ['/people', 'GET', 404]]) {
     await check(path, method, status);
   }
   return { check, dataPath, checkRevoked };
