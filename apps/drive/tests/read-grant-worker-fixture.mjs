@@ -65,14 +65,19 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
       await reject(send(method, path + suffix, driveOwner), 404, 'different principal, even a Drive owner');
     }
     for (const [method, url] of [['HEAD', path], ['POST', item], ['GET', item], ['PUT', path],
-      ['PUT', `${item}/`], ['PUT', item.replace('reader', '%72eader')], ['GET', path.replace('%2F', '%2f')]]) {
+      ['PUT', `${item}/`], ['PUT', item.replace('reader', '%72eader')], ['GET', path.replaceAll('%2F', '%2f')]]) {
       await reject(send(method, url), 404, `${method} ${url}`);
     }
-    if (boundary === 'worker') await reject(send('DELETE', `${item}/extra`), 404, 'extra path segment');
+    if (boundary === 'worker') {
+      await reject(send('DELETE', `${item}/extra`), 404, 'extra path segment');
+      await reject(send('GET', `${path}?x-sveltekit-probe=1`), 400, 'reserved query not forwarded');
+      await reject(send('PUT', item, owner, { origin: 'https://raw.example.test' }), 403, 'wrong Origin without content type');
+    }
     await reject(send('GET', `${path}?cursor=${'x'.repeat(513)}`), 400, 'oversized cursor');
     await reject(send('PUT', item, owner, {}, '{}'), 400, 'body not accepted');
     await reject(send('PUT', `${item}?cursor=x`), 400, 'mutation query not accepted');
-    await reject(send('PUT', item, owner, { origin: 'https://raw.example.test' }), 403, 'wrong Origin');
+    // With no Content-Type SvelteKit would reject this before Drive's hook runs.
+    await reject(send('PUT', item, owner, { origin: 'https://raw.example.test', 'content-type': 'application/json' }), 403, 'wrong Origin');
     await reject(send('PUT', item, owner, { 'sec-fetch-site': 'cross-site' }), 403, 'cross-site mutation');
     assert.deepEqual(await list(), empty, 'denied requests left no grant');
     await reject(send('PUT', item), 204, 'member owner grants read');

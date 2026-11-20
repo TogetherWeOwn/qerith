@@ -2,7 +2,7 @@ import { isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-na
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { readGrantAdmissionRoute } from './read-grant-admission';
+import { readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadAdmissionRoute } from './upload-admission';
 
@@ -158,7 +158,10 @@ export async function dispatchStagingRequest(request: Request, env: DriveAuthEnv
     case 'owner-lifecycle':
     case 'people':
     case 'folder':
+      return dispatch.adapter(request);
     case 'read-grant':
+      // The adapter can reject reserved query keys before Drive's hook runs.
+      if (readGrantCursor(request.method, new URL(request.url).search) === undefined) return deny(400);
       return dispatch.adapter(request);
   }
 }

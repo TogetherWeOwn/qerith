@@ -38,6 +38,23 @@ function denied(result: unknown, status: number): asserts result is Response {
   assert.equal(result.body, null);
 }
 
+test('invalid read-grant queries never reach the staging adapter', async () => {
+  const path = `/api/entries/${id}/read-grants`;
+  const env = { ...runtime('member').env, DRIVE_STAGING_READ_GRANTS: '1' };
+  const unexpected = async () => { throw new Error('Unexpected dispatch'); };
+  const dispatch = { adapter: unexpected, ceremony: unexpected, invite: unexpected, asset: unexpected };
+  for (const input of [request(`${path}?x-sveltekit-probe=1`), request(`${path}/recipient?cursor=x`, 'PUT')]) {
+    denied(await dispatchStagingRequest(input, env, true, assets, dispatch), 400);
+  }
+  const response = await dispatchStagingRequest(request(`${path}?cursor=a%26b`), env, true, assets, {
+    ...dispatch, adapter: async input => {
+      assert.equal(new URL(input.url).search, '?cursor=a%26b');
+      return new Response(null);
+    },
+  });
+  assert.equal(response.status, 200);
+});
+
 test('people document and its exclusive assets require the invite flag and live owner session', async () => {
   const enabled = (role?: 'owner' | 'member' | 'revoked') => ({ ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' });
   const check = (path: string, method: string, env = enabled(), headers?: HeadersInit) =>

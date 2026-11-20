@@ -1,5 +1,5 @@
 import { ReadGrants } from './metadata/read-grants';
-import { decodeReadGrantId, readGrantPath, validReadGrantId } from './read-grant-admission';
+import { decodeReadGrantId, readGrantCursor, readGrantPath, validReadGrantId } from './read-grant-admission';
 import { admitsSignInFixture, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, readSession, type DriveAuthEnv } from './request-auth';
 
 type GrantEnv = DriveAuthEnv & { DB?: ConstructorParameters<typeof ReadGrants>[0] };
@@ -35,8 +35,8 @@ async function handle(request: Request, env: GrantEnv, url: URL, [, source, targ
   const length = request.headers.get('content-length');
   // Workers can expose a stream for a request framed with Content-Length: 0.
   if (request.headers.has('transfer-encoding') || (length === null ? request.body !== null : length !== '0')) return reply(400);
-  const after = listing && url.search.startsWith('?cursor=') ? decodeReadGrantId(url.search.slice(8)) : null;
-  if (url.search && after === null) return reply(400);
+  const after = readGrantCursor(method, url.search);
+  if (after === undefined) return reply(400);
 
   const db = env.DB;
   if (!db || typeof db.withSession !== 'function') return reply(503);

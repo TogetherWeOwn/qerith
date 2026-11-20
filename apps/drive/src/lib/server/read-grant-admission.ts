@@ -13,6 +13,13 @@ export function decodeReadGrantId(wire: string): string | null {
   } catch { return null; }
 }
 
+// Null means no cursor; undefined means the request query is invalid.
+export function readGrantCursor(method: string, search: string): string | null | undefined {
+  if (search === '') return null;
+  if (method !== 'GET' || !search.startsWith('?cursor=')) return undefined;
+  return decodeReadGrantId(search.slice(8)) ?? undefined;
+}
+
 export function readGrantAdmissionRoute(request: Request, url: URL): string | null {
   if (request.url !== url.origin + url.pathname + url.search) return null;
   const match = readGrantPath.exec(url.pathname);
