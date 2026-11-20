@@ -16,6 +16,14 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
   try {
     const linkSource = 'https://message.example.test/';
     let followedLink = false;
+    let failPresent = false;
+    // Hold requests in the context relay so only one handler owns each route.
+    const held = new Map();
+    const holdNext = pathname => {
+      const { promise, resolve } = Promise.withResolvers();
+      held.set(pathname, promise);
+      return resolve;
+    };
     await context.route('**/*', async route => {
       const request = route.request();
       const url = new URL(request.url());
@@ -35,6 +43,12 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
           assert.equal(headers.referer, undefined);
         }
       }
+      if (url.pathname === '/api/invite/present' && failPresent) {
+        failPresent = false;
+        return route.fulfill({ status: 503 });
+      }
+      const pending = held.get(url.pathname);
+      if (held.delete(url.pathname)) await pending;
       return relay(route);
     });
     const page = await context.newPage();
@@ -95,8 +109,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       await page.keyboard.press('Shift+Tab');
       assert.equal(await field.evaluate(el => el === document.activeElement), true);
     }
-    const pending = Promise.withResolvers();
-    await page.route('**/api/invite/enroll', async route => { await pending.promise; await route.fallback(); }, { times: 1 });
+    const releaseEnrollment = holdNext('/api/invite/enroll');
     const enrollPath = message => new URL(message.url()).pathname === '/api/invite/enroll';
     const dispatched = page.waitForRequest(enrollPath);
     const enrolled = page.waitForResponse(enrollPath);
@@ -108,7 +121,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       await page.getByRole('button', { name: 'Saving your passkey…' }).waitFor();
       assert.equal(await field.inputValue(), 'Pell');
       if (staging) await captureState('saving');
-    } finally { pending.resolve(); }
+    } finally { releaseEnrollment(); }
     const result = await enrolled;
     assert.equal(result.status(), 204);
     assert.equal((await result.allHeaders())['set-cookie'], undefined);
@@ -116,8 +129,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     const replay = await worker.fetch(`${origin}/api/invite/enroll`, { method: 'POST',
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
-    const releasePresent = Promise.withResolvers();
-    await page.route('**/api/invite/present', async route => { await releasePresent.promise; await route.fallback(); }, { times: 1 });
+    const releasePresent = holdNext('/api/invite/present');
     const presented = page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present');
     const status = page.getByRole('status');
     let loading;
@@ -133,7 +145,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
     await loading.dispose();
     if (staging) await captureState('dead-link');
-    await page.route('**/api/invite/present', route => route.fulfill({ status: 503 }), { times: 1 });
+    failPresent = true;
     await page.evaluate(token => { location.hash = token; }, first.token);
     await page.getByRole('heading', { name: 'Drive unavailable' }).waitFor();
     await status.filter({ hasText: 'Drive unavailable' }).waitFor();
