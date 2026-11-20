@@ -123,7 +123,7 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       await page.keyboard.press('Enter');
       await focus(link);
       assert.equal(await link.evaluate(el => el.selectionStart === 0 && el.selectionEnd === el.value.length), true);
-      await dialog.getByRole('alert').filter({ hasText: 'Press Ctrl+C or ⌘C to copy.' }).waitFor();
+      await dialog.getByRole('alert').filter({ hasText: 'Press Ctrl+C or ⌘C to copy, or press and hold the link and choose Copy.' }).waitFor();
       await audit('clipboard-refused');
       const greyscale = await page.addStyleTag({ content: 'html, dialog:modal { filter: grayscale(1); } dialog:modal::backdrop { backdrop-filter: grayscale(1); filter: grayscale(1); }' });
       await snapshot('greyscale');
@@ -152,6 +152,12 @@ export async function exerciseOwnerInvite(browser, origin, axe, output) {
       await page.mouse.click(2, 2);
       await focus(open);
       assert.equal(await dialog.isVisible(), false);
+      await page.keyboard.press('Enter');
+      await focus(done);
+      assert.equal(await make.count(), 0);
+      assert.equal(await issueCount(), 3);
+      await page.keyboard.press('Escape');
+      await focus(open);
       assert.deepEqual(unexpected, []);
       await writeFile(resolve(output, `keyboard-owner-invite-${size}.json`), JSON.stringify({
         initialFocus: 'Name', wrapsBothWays: true, escapeRestoresFocus: true, repeatedEscapePreservesResult: true,

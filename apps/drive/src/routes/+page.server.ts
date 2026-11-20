@@ -34,5 +34,6 @@ export const load: PageServerLoad = async (event) => {
   const uploadConfigured = staging ? role === 'owner' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
     fixture && !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER);
   return { listing, uploadConfigured, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
+    ownerInvites: role === 'owner' && admitsStagingInvite(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
 };

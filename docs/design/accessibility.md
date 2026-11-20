@@ -74,7 +74,7 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 | Automated | axe-core with the WCAG 2.0–2.2 A and AA tags on each changed route at 390 and 1280, signed out and signed in | 0 violations |
 | Contrast | every colour pair used is in [tokens.md](tokens.md) §1.7 | no new pair, or a new pair measured and added |
 | Keyboard | Tab through the page at both widths: every control reachable, visible ring, nothing hidden under the header or the tray bar, dialogs and sheets trap and release | written in the PR |
-| Screen reader | One pass with NVDA or VoiceOver on the changed component, on the route that renders it: names, roles, the announcements in §6 | written in the PR, or "carried" (below) |
+| Screen reader | One pass on the route that renders the changed component: NVDA or VoiceOver, or a written review of Playwright `ariaSnapshot()` from the generated Worker. Check names, roles and the announcements in §6. | written in the PR, or "carried" (below) |
 | Reduced motion | Emulate `reduce`; nothing moves | screenshot or note |
 | Greyscale | Screenshot in greyscale; states still readable | screenshot |
 | Reflow | 320 px wide; no sideways page scroll | screenshot |

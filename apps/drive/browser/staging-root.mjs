@@ -72,7 +72,7 @@ try {
   assert.equal(redirect.status, 303);
   assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F');
 
-  browser = await chromium.launch();
+  browser = await chromium.launch({ ignoreDefaultArgs: ['--disable-back-forward-cache'] });
   const context = await browser.newContext();
   const page = await context.newPage();
   // Keep interception armed across documents and chooser events, as in the sign-in fixture.
@@ -129,6 +129,7 @@ try {
 
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
   await page.keyboard.press('Tab');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -244,12 +245,11 @@ try {
     headers.set('x-fixture-invite', '1');
     return worker.fetch(url, { ...init, headers });
   } };
-  const priorAssets = new Set(assets);
-  await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
+  const recipientNodes = await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
     worker: inviteWorker, DB, ownerToken: session.value,
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
-  const inviteNodes = [...assets].filter(path => path.startsWith('/_app/immutable/nodes/') && !priorAssets.has(path));
+  const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});
   assert.equal((await inviteWorker.fetch(`${origin}/invite`, { method: 'HEAD', headers: {
@@ -258,8 +258,14 @@ try {
   await deny('/', 403, { cookie: `${sessionName}=${memberToken}` });
   await deny('/', 401, { cookie: `${sessionName}=${memberToken}` }, 'HEAD');
 
+  await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
+  const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
+  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
+  await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });
+  await Promise.all([page.waitForURL(`${origin}/people`), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
+  const recovered = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'owner'").run();
-  for (const path of protectedPaths) await deny(path, 401, { cookie });
+  for (const path of protectedPaths) await deny(path, 401, { cookie: `${sessionName}=${recovered.value}` });
 
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'staging-root-round-trip.json'), JSON.stringify({
     mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations, focusRestored: true,
