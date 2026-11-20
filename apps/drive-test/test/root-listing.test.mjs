@@ -44,6 +44,15 @@ it('lists bounded pages of only the session owner’s root and projects client-s
   expect(JSON.stringify(first)).not.toContain(token);
   expect(JSON.stringify(first)).not.toContain('hidden');
 
+  for (const flag of [undefined, '0', 'true', '1 ', '1']) {
+    const staging = { ...auth, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: flag };
+    const load = session => loadRootListing(request(session, undefined, stagingOrigin), staging, []);
+    expect(await load(token)).toEqual(flag === '1' ? first : { status: 'unavailable' });
+    expect(await load(otherToken)).toEqual({ status: 'ok', folder: {
+      entries: [{ id: 'other-file', name: '界.txt', kind: 'file' }], nextPage: null
+    } });
+  }
+
   const page = first.folder.nextPage;
   expect(page).toBe(boundaryId); // The URL needs only the random ID, not the boundary name.
   expect(await loadRootListing(request(token), auth, [page])).toEqual({
@@ -84,7 +93,9 @@ it('denies absent, wrong-origin, and revoked sessions rather than returning an e
 it.each(['session revoked', 'session expired', 'membership revoked', 'owner demoted'])('denies a listing when %s after session lookup', async (change) => {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   const principalId = `listing-${change}`;
-  const demoted = change === 'owner demoted', DRIVE_ORIGIN = demoted ? stagingOrigin : origin;
+  const demoted = change === 'owner demoted';
+  const DRIVE_STAGING_INVITE_ACCEPTANCE = change === 'membership revoked' ? '1' : undefined;
+  const DRIVE_ORIGIN = demoted || DRIVE_STAGING_INVITE_ACCEPTANCE ? stagingOrigin : origin;
   await env.DB.batch([
     ...(demoted ? [env.DB.prepare("UPDATE drive_principals SET role = 'member' WHERE id = 'other'")] : []),
     env.DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active')").bind(principalId, demoted ? 'owner' : 'member'),
@@ -121,7 +132,8 @@ it.each(['session revoked', 'session expired', 'membership revoked', 'owner demo
       }
     };
   } }) };
-  expect(await loadRootListing(request(token, undefined, DRIVE_ORIGIN), { DB: db, DRIVE_ORIGIN }, [])).toEqual({ status: 'unavailable' });
+  expect(await loadRootListing(request(token, undefined, DRIVE_ORIGIN),
+    { DB: db, DRIVE_ORIGIN, DRIVE_STAGING_INVITE_ACCEPTANCE }, [])).toEqual({ status: 'unavailable' });
   expect(lookedUp).toBe(principalId);
   expect(listed).toBe(true);
 });

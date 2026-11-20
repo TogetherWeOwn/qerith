@@ -65,7 +65,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   if (env.DRIVE_ORIGIN !== stagingOrigin || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
   if (!allowsOrigin(request, stagingOrigin)) return deny(403);
   const { pathname, search } = new URL(request.url);
-  const target = route(request.method, pathname, assets, admitsStagingInvite(env));
+  const invite = admitsStagingInvite(env);
+  const target = route(request.method, pathname, assets, invite);
   if (!target) return deny(404);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
@@ -89,7 +90,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
-      if (session.role === 'owner') {
+      const memberRoot = invite && (target.kind === 'root' || target.kind === 'root-data' || target.kind === 'private-asset');
+      if (session.role === 'owner' || memberRoot) {
         return target.kind === 'private-asset' || (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
       }

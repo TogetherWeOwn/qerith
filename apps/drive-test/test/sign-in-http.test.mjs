@@ -2,34 +2,47 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { BoundChallenges } from '../../drive/src/lib/server/identity/challenges.ts';
-import { readSession } from '../../drive/src/lib/server/request-auth.ts';
+import { readSession, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { signIn } from '../../drive/src/lib/server/sign-in.ts';
-import { fixture, origin, rpID, userHandle } from '../../drive/tests/ceremony-fixture.ts';
+import { fixture, origin, userHandle } from '../../drive/tests/ceremony-fixture.ts';
 
 const otherHandle = 'A'.repeat(43);
 const authEnv = () => ({ DRIVE_ORIGIN: origin, DB: env.DB });
-const post = (step, headers = {}, body) => signIn(new Request(`${origin}/api/sign-in/${step}`, {
-  method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers }, body,
-}), step, authEnv());
+const post = (step, headers = {}, body, config = authEnv()) => signIn(new Request(`${config.DRIVE_ORIGIN}/api/sign-in/${step}`, {
+  method: 'POST', headers: { origin: config.DRIVE_ORIGIN, 'content-type': 'application/json', ...headers }, body,
+}), step, config);
 const cookiePair = response => response.headers.getSetCookie()[0].split(';')[0];
 
-async function begin(options = {}, status = 'active') {
+async function begin(options = {}, status = 'active', config = authEnv(), role = 'owner') {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
   await env.DB.exec('DELETE FROM drive_sessions; DELETE FROM drive_bound_ceremonies; DELETE FROM drive_credentials; DELETE FROM drive_principals;');
-  const response = await post('challenge');
+  const response = await post('challenge', {}, undefined, config);
   expect(response.status).toBe(200);
   const transaction = response.headers.get('set-cookie');
   expect(transaction).toMatch(/^__Host-drive-login=[\w.-]+; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=300$/);
   const { challenge, rpId, allowCredentials } = await response.json();
-  expect(rpId).toBe(rpID);
+  expect(rpId).toBe(new URL(config.DRIVE_ORIGIN).hostname);
   expect(allowCredentials).toBeUndefined();
-  const signed = await fixture('authentication', { challenge, ...options });
+  const signed = await fixture('authentication', { challenge, origin: config.DRIVE_ORIGIN, rpID: rpId, ...options });
   await env.DB.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
-    VALUES ('owner', 'owner', ?, ?)`).bind(status, userHandle).run();
+    VALUES ('owner', ?, ?, ?)`).bind(role, status, userHandle).run();
   await env.DB.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
     VALUES (?, 'owner', ?, 0, '[]', ?)`).bind(signed.credential.id, Array.from(signed.credential.publicKey), userHandle).run();
   return { cookie: transaction.split(';')[0], body: JSON.stringify(signed.authentication) };
 }
+
+it.each([undefined, '', '0', 'true', '1 ', '1'])('only exact staging invite mode lets members sign in (%j)', async flag => {
+  const config = { DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: flag };
+  for (const role of ['member', 'owner']) {
+    const { cookie, body } = await begin({}, 'active', config, role);
+    const response = await post('verify', { cookie }, body, config);
+    const allowed = role === 'owner' || flag === '1';
+    expect(response.status).toBe(allowed ? 204 : 401);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.has('set-cookie')).toBe(allowed);
+    expect(await config.DB.prepare('SELECT COUNT(*) AS count FROM drive_sessions').first('count')).toBe(allowed ? 1 : 0);
+  }
+});
 
 it('rejects missing, sibling and wrong destination origins before touching D1', async () => {
   for (const [url, source] of [[origin, null], [origin, 'https://sub.example.test'], ['https://sub.example.test', origin]]) {

@@ -16,7 +16,7 @@ export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
 
-// This mode is source-only until the complete invite-to-sign-in path is ready.
+// Default-off staging mode for invitation acceptance and member My Drive.
 export function admitsStagingInvite(env: DriveAuthEnv): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
@@ -127,7 +127,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
         headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
     }
     if (staging && session && session.principal.role !== 'owner') {
-      return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
+      const memberRoot = admitsStagingInvite(env) && routeId === '/' &&
+        ((pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) ||
+         (pathname === '/__data.json' && request.method === 'GET'));
+      if (!memberRoot) return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
     }
     if (!session && !signInPage && !invitePage) {
       if (event.route?.id === downloadRoute) {

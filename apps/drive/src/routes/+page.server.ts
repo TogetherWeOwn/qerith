@@ -29,7 +29,9 @@ export const load: PageServerLoad = async (event) => {
   if (staging) event.depends('drive:root-listing');
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
-  const uploadConfigured = staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
-    fixture && !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER);
-  return { listing, uploadConfigured, staging, page: rootPageCursor(pages) ?? null, downloadNotice: await readDownloadNotice(event) };
+  const bytesAllowed = !staging || event.locals.driveSession?.principal.role === 'owner';
+  const uploadConfigured = bytesAllowed && (staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
+    fixture && !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER));
+  return { listing, uploadConfigured, staging, bytesAllowed, page: rootPageCursor(pages) ?? null,
+    downloadNotice: bytesAllowed ? await readDownloadNotice(event) : undefined };
 };

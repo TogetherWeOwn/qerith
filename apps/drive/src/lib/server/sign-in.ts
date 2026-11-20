@@ -2,7 +2,7 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { decodeClientDataJSON, isoBase64URL } from '@simplewebauthn/server/helpers';
 import { CeremonyCapacityReached, ChallengeUnavailable } from './identity/challenges';
 import { PasskeyDenied, PasskeyLogin, RevokedPasskey } from './identity/login';
-import { allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, stagingOrigin } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, stagingOrigin, type DriveAuthEnv } from './request-auth';
 
 const transactionCookie = '__Host-drive-login';
 const transactionPattern = /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/;
@@ -72,7 +72,7 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
 export async function signIn(
   request: Request,
   step: 'challenge' | 'restart' | 'verify',
-  env: { DRIVE_ORIGIN?: string; DB?: ConstructorParameters<typeof PasskeyLogin>[0] },
+  env: DriveAuthEnv & { DB?: ConstructorParameters<typeof PasskeyLogin>[0] },
 ): Promise<Response> {
   const headers = new Headers({ 'cache-control': 'private, no-store' });
   const reply = (status: number, code: string) => Response.json({ code }, { status, headers });
@@ -85,7 +85,8 @@ export async function signIn(
   }
 
   try {
-    const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin, origin.origin === stagingOrigin);
+    const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
+    const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin, ownerOnly);
     // A serialized restart after a lost response must leave the previous context alone.
     const transaction = step === 'restart' ? null : readOpaqueCookie(request, transactionCookie, transactionPattern);
     const [context, challenge] = transaction?.split('.') ?? [];

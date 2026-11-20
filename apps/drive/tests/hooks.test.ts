@@ -7,7 +7,7 @@ const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
 function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable',
-  routeId?: string, fixture?: '1', stagingInvite?: '1') {
+  routeId?: string, fixture?: '1', stagingInvite?: string) {
   let lookups = 0;
   let resolved = false;
   const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DRIVE_STAGING_INVITE_ACCEPTANCE: stagingInvite, DB: fault === 'unbound' ? undefined : { prepare: () => {
@@ -157,6 +157,22 @@ test('same-origin authenticated requests resolve with a private, non-cacheable r
     }
     assert.equal(result.lookups, 1);
     assert.deepEqual(result.event.locals, { driveSession: { token, principal: { id: 'member', role: 'member' } } });
+  }
+});
+
+test('the staging hook admits members only to the exact root routes in invite mode', async () => {
+  for (const [path, method, routeId, allowed] of [
+    ['/', 'GET', '/', true], ['/', 'HEAD', '/', true], ['/__data.json?page=cursor', 'GET', '/', true],
+    ['/__data.json', 'HEAD', '/', false], ['/', 'POST', '/', false], ['/api/root-listing', 'GET', '/api/root-listing', false],
+    [downloadPath, 'GET', downloadRouteId, false], ['/api/uploads', 'POST', '/api/uploads', false],
+    ['/api/owner/invitations', 'GET', '/api/owner/invitations', false],
+  ] as const) {
+    for (const flag of [undefined, '1 ', '1']) {
+      const { response, resolved } = await request(stagingOrigin + path, { method, headers: { origin: stagingOrigin, cookie } },
+        stagingOrigin, undefined, routeId, undefined, flag);
+      assert.equal(resolved, flag === '1' && allowed, `${method} ${path}, flag=${flag}`);
+      assert.equal(response.headers.get('cache-control'), 'private, no-store');
+    }
   }
 });
 
