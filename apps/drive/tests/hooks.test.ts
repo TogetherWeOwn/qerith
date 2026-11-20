@@ -1,21 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
+import { driveUploadMode, privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
 
 const origin = 'https://example.test';
 const token = 'A'.repeat(43);
 const cookie = `__Host-drive-session=${token}`;
 
 function request(url: string, init?: RequestInit, configuredOrigin = origin, fault?: 'unbound' | 'unavailable',
-  routeId?: string, fixture?: '1', stagingInvite?: string, role = 'member') {
+  routeId?: string, fixture?: '1', stagingInvite?: string, role: 'owner' | 'member' | null = 'member') {
   let lookups = 0;
   let resolved = false;
   const env = { DRIVE_ORIGIN: configuredOrigin, DRIVE_SIGN_IN_FIXTURE: fixture, DRIVE_STAGING_INVITE_ACCEPTANCE: stagingInvite, DB: fault === 'unbound' ? undefined : { prepare: () => {
     lookups++;
     if (fault === 'unavailable') throw new Error('database unavailable');
-    return { bind: () => ({ first: async () => ({ id: role, role }) }) };
+    return { bind: () => ({ first: async () => role && ({ id: role, role }) }) };
   } } };
-  const event = { request: new Request(url, init), locals: {}, route: { id: routeId ?? null } };
+  const locals: App.Locals = {};
+  const event = { request: new Request(url, init), locals, route: { id: routeId ?? null } };
   const handle = privateRequests(env);
   return handle({ event, resolve: async () => {
     resolved = true;
@@ -25,7 +26,7 @@ function request(url: string, init?: RequestInit, configuredOrigin = origin, fau
       'cloudflare-cdn-cache-control': 'public, max-age=180',
       'surrogate-control': 'max-age=240'
     } });
-  } } as unknown as Parameters<typeof handle>[0]).then((response) => ({ response, lookups, resolved, event }));
+  } } as unknown as Parameters<typeof handle>[0]).then((response) => ({ response, lookups, resolved, event, env }));
 }
 
 for (const value of ['', 'http://example.test', `${origin}/`, 'invalid']) {
@@ -193,6 +194,28 @@ test('the staging hook admits members to My Drive and the exact download GET in 
       assert.equal(resolved, flag === '1' && allowed, `${method} ${path}, flag=${flag}`);
       assert.equal(response.headers.get('cache-control'), 'private, no-store');
     }
+  }
+});
+
+test('root upload policy uses the validated session without treating the GET as an upload', async () => {
+  for (const [path, destination, flag, fixture, role, headers, status, mode] of [
+    ['/', stagingOrigin, '1', undefined, 'member', { cookie, 'sec-fetch-site': 'none' }, 200, 'multipart'],
+    ['/__data.json?page=cursor', stagingOrigin, '1', undefined, 'member', { cookie }, 200, 'multipart'],
+    ['/', stagingOrigin, undefined, undefined, 'member', { cookie }, 403, 'disabled'],
+    ['/', stagingOrigin, '1 ', undefined, 'member', { cookie }, 403, 'disabled'],
+    ['/', stagingOrigin, '1', undefined, 'member', {}, 401, 'disabled'],
+    ['/', stagingOrigin, '1', undefined, null, { cookie }, 401, 'disabled'],
+    ['/', stagingOrigin, undefined, undefined, 'owner', { cookie }, 200, 'preview'],
+    ['/', stagingOrigin, '1', undefined, 'owner', { cookie }, 200, 'preview'],
+    ['/', origin, '1', '1', 'member', { cookie }, 200, 'disabled'],
+    ['/', origin, '1', '1', 'owner', { cookie }, 200, 'disabled'],
+    ['/', fixtureOrigin, '1', '1', 'member', { cookie }, 200, 'disabled'],
+    ['/', fixtureOrigin, undefined, '1', 'owner', { cookie }, 200, 'preview'],
+  ] as const) {
+    const result = await request(destination + path, { headers }, destination, undefined, '/', fixture, flag, role);
+    assert.equal(result.response.status, status);
+    assert.equal(result.lookups, 'cookie' in headers ? 1 : 0);
+    assert.equal(driveUploadMode(result.env, result.event.locals.driveSession?.principal.role), mode);
   }
 });
 

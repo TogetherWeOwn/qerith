@@ -2,7 +2,7 @@ import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { admitsSignInFixture, admitsStagingInvite, stagingOrigin } from '../lib/server/request-auth';
+import { admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import { wireUploadStorage } from '../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
@@ -31,9 +31,12 @@ export const load: PageServerLoad = async (event) => {
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   const role = event.locals.driveSession?.principal.role;
   const downloadAllowed = !staging || role === 'owner' || (role === 'member' && admitsStagingInvite(env));
-  const uploadConfigured = staging ? role === 'owner' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
-    fixture && !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER);
-  return { listing, uploadConfigured, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
+  const uploadPolicy = driveUploadMode(env, role);
+  const uploadStorageReady = uploadPolicy !== 'disabled' && (staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
+    !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER));
+  const uploadMode = uploadStorageReady ? uploadPolicy : 'disabled';
+  return { listing, uploadConfigured: uploadMode === 'preview', uploadMode, staging, downloadAllowed,
+    page: rootPageCursor(pages) ?? null,
     ownerInvites: role === 'owner' && admitsStagingInvite(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
 };
