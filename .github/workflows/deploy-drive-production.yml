@@ -1,0 +1,53 @@
+name: Drive production release (disabled)
+
+on:
+  workflow_dispatch:
+    inputs:
+      accepted_sha:
+        description: Exact staging-qualified SHA independently accepted for production
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  preflight:
+    if: github.repository == 'TogetherWeOwn/qerith'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Refuse dispatch outside main
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            printf '%s\n' 'Production preflight requires a dispatch from main.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify accepted SHA, production branch policy and staging receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTED_SHA: ${{ inputs.accepted_sha }}
+          PRODUCTION_ACCEPTED_SHA: ${{ vars.PRODUCTION_ACCEPTED_SHA }}
+        run: python3 -I scripts/drive-release/preflight.py
+
+  deploy:
+    needs: preflight
+    # Deliberately unreachable, even if preflight passes. Enabling this job
+    # requires a new reviewed change and independent production acceptance.
+    if: ${{ false }}
+    environment: production
+    concurrency:
+      group: drive-production-release
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: |
+          printf '%s\n' 'Drive production deployment is not implemented.' >&2
+          exit 1
