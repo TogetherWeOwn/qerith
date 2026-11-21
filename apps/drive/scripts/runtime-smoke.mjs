@@ -166,7 +166,8 @@ export default { fetch(request, env, ctx) {
     DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, region: 'test-1', completionTimeoutMs: 5000,
       storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: release, runId: '1', runAttempt: 1 })
   } : {}), ...(staging ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
-    DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}` } : {}) };
+    DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}`,
+    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}) };
   const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
@@ -211,6 +212,11 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
+      const deletion = await worker.fetch(`${origin}/api/entries/00000000-0000-4000-8000-000000000001/delete`, {
+        method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body: '{"confirm":"permanent-delete"}'
+      });
+      assert.deepEqual([deletion.status, deletion.headers.get('cache-control'), await deletion.text()], [404, 'private, no-store', ''],
+        'generated staging POST stays closed without server-held deletion qualification');
       const nonce = randomBytes(16).toString('hex');
       const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
         headers: { [readinessHeaders.nonce]: nonce, ...headers } });
