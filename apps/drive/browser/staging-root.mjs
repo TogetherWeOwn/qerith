@@ -7,6 +7,7 @@ import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { proveSharedListing } from './shared-listing.mjs';
 import { proveNewFolder } from './new-folder.mjs';
 import { proveRename } from './rename.mjs';
+import { proveMove } from './move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -156,6 +157,7 @@ try {
   page.off('request', countNavigation);
   assert.equal(navigations, 0, 'upload refreshed the row without navigation');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.getByRole('button', { name: `Actions for ${file.name}` }).count(), 0, 'Move is default-off');
   const [download] = await Promise.all([page.waitForEvent('download'), row.press('Enter')]);
   assert.equal(download.suggestedFilename(), file.name);
   assert.deepEqual(await readFile(await download.path()), file.buffer);
@@ -303,6 +305,10 @@ try {
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
   console.log('Staging-origin: checking owner rename');
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
+  // Paging evidence is complete; make the published file visible on the first page.
+  await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
+  page.setDefaultTimeout(10_000);
+  await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
 
   console.log('Staging-origin: checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();

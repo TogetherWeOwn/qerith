@@ -35,6 +35,7 @@
   }
   async function selectAction(source: HTMLElement, id: string, action: RowAction) {
     if (preview && action === 'Rename') { onRename?.(id); return; }
+    if (preview && action === 'Move') { onMove?.(id); return; }
     if (action !== 'Details' || (onAction && !inlineDetails)) { onAction?.(id, action); return; }
     const sourceTrigger = triggerFor(source, id);
     detailsId = id;
@@ -162,6 +163,7 @@
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${!preview && timeZone ? ` Times in ${timeZone}.` : ''}`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
   export let onRename: ((id: string) => void) | undefined = undefined;
+  export let onMove: ((id: string) => void) | undefined = undefined;
   export let inlineDetails = false;
   export let createdId: string | undefined = undefined;
   export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; renamable?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
@@ -199,7 +201,7 @@
         <td>{@render entryName(item)}</td>
         {#if !preview}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
         {#if !preview || onRename}
-          <td data-action-row={item.id}>{#if !preview || (item.renamable && !item.shared)}<RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} renameOnly={preview} />{/if}</td>
+          <td data-action-row={item.id}>{#if !preview || (item.renamable && !item.shared)}<RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} renameOnly={preview} allowPreviewMove={!!onMove} />{/if}</td>
         {/if}
       </tr>
       {#if !preview && detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
@@ -211,7 +213,7 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus after creation) -->
     <li class:with-actions={!preview || !!(onRename && item.renamable && !item.shared)} data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
       {#if !preview || (onRename && item.renamable && !item.shared)}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} renameOnly={preview} /></div>
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} renameOnly={preview} allowPreviewMove={!!onMove} /></div>
       {/if}
       {#if !preview && detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
