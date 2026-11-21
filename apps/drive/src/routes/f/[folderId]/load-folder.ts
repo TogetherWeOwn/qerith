@@ -7,17 +7,13 @@ import type { PageServerLoad } from './$types';
 type FolderEnv = DriveAuthEnv & StorageBindings & {
   DB?: { withSession(constraint: 'first-primary'): ConstructorParameters<typeof ReadAccess>[0] };
 };
+type FolderEvent = Pick<Parameters<PageServerLoad>[0], 'request' | 'params' | 'locals' | 'setHeaders'>;
 
-export const loadFolder = (env: FolderEnv) => async (
-  { request, params, locals, setHeaders }: Pick<Parameters<PageServerLoad>[0], 'request' | 'params' | 'locals' | 'setHeaders'>
-) => {
+export const loadFolder = (env: FolderEnv) => async ({ request, params, locals, setHeaders }: FolderEvent) => {
   setHeaders({ 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' });
-  const db = env.DB;
-  const inviteMode = admitsStagingInvite(env);
-  const session = locals.driveSession;
-  if (!(admitsSignInFixture(env) || inviteMode) || !session || typeof db?.withSession !== 'function') {
+  const db = env.DB, session = locals.driveSession, inviteMode = admitsStagingInvite(env);
+  if (!(admitsSignInFixture(env) || inviteMode) || !session || typeof db?.withSession !== 'function')
     return { result: { status: 'unavailable' as const } };
-  }
   // Each ReadAccess statement rechecks the session on the primary.
   const identity = storageIdentity(env);
   const primary = () => new ReadAccess(db.withSession('first-primary'),

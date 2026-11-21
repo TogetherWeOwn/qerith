@@ -3,7 +3,7 @@ import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
 import { stagingOrigin } from '../src/lib/server/request-auth';
 import { loadFolder } from '../src/routes/f/[folderId]/load-folder';
-import { moveNeighbor, openFolderMove, readMoveReceipt } from '../src/routes/f/[folderId]/move-action';
+import { moveNeighbor, readMoveReceipt } from '../src/routes/f/[folderId]/move-action';
 
 const savedMove = { source: 'B', target: null, rows: ['A', 'B', 'C', 'D'], until: 0 };
 test('Move focus prefers the next surviving original row and falls back to the heading', () => {
@@ -121,7 +121,7 @@ test('only projects a positive download hint on a canonical file ID', async () =
   ]);
 });
 
-test('nested loader and picker dispatch allow only owned, addressable rows in invite mode', async () => {
+test('nested loader marks only owned, addressable rows as movable in invite mode', async () => {
   const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' };
   const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' };
   const invalid = { ...file, id: '..' };
@@ -129,7 +129,7 @@ test('nested loader and picker dispatch allow only owned, addressable rows in in
     const statement = {
       bind: () => statement,
       first: async <T>() => await get('', 'private') as T,
-      all: async <T>() => ({ results: [{ id: null, owned }, { ...file, downloadable: 1, object_key: 'private-key' }, folder, { ...invalid, movable: true }] as T[] }),
+      all: async <T>() => ({ results: [{ id: null, kind: owned }, { ...file, downloadable: 1, object_key: 'private-key' }, folder, { ...invalid, movable: true }] as T[] }),
     };
     const withSession = test.mock.fn((_mode: 'first-primary') => ({ prepare: () => statement }));
     const origin = invite ? stagingOrigin : 'https://drive.example.test';
@@ -144,10 +144,6 @@ test('nested loader and picker dispatch allow only owned, addressable rows in in
     const flag = invite && owned ? { movable: true } : {};
     assert.equal(result.folder.canMove, flag.movable);
     assert.deepEqual(result.folder.entries, [{ ...file, downloadable: true, ...flag }, { ...folder, ...flag }, invalid]);
-    const open = test.mock.fn<Parameters<typeof openFolderMove>[2]>();
-    for (const { id } of [...result.folder.entries, { id: 'not-on-this-page' }]) openFolderMove(result, id, open);
-    openFolderMove({ status: 'unavailable' }, file.id, open);
-    assert.deepEqual(open.mock.calls.map(call => call.arguments), flag.movable ? [[file], [folder]] : []);
   }
 });
 

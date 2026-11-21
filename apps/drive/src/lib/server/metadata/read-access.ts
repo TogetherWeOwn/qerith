@@ -192,16 +192,16 @@ export class ReadAccess {
       SELECT e.id, e.name, e.kind FROM drive_entries e INDEXED BY drive_entries_sibling_name
         JOIN folder f ON e.owner_id = f.owner_id
       WHERE COALESCE(e.parent_id, '') = ? ${boundary} ORDER BY e.name, e.id LIMIT 101
-    ) SELECT id, name, kind, NULL AS owned${availability} FROM children UNION ALL
-      SELECT NULL, NULL, NULL, owned${sentinel} FROM folder ORDER BY name, id`)
+    ) SELECT id, name, kind${availability} FROM children UNION ALL
+      SELECT NULL, NULL, owned${sentinel} FROM folder ORDER BY name, id`)
       .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []), ...(this.downloadScope ?? []))
-      .all<(ListedReadEntry & { owned: null }) | { id: null; name: null; kind: null; owned: 0 | 1 }>()).results;
-    const folder = rows.find(row => row.id === null);
+      .all<ListedReadEntry | { id: null; name: null; kind: 0 | 1 }>()).results;
+    const folder = rows.find(row => row.id === null); // The sentinel's kind field carries ownership, not an entry kind.
     if (!folder) return null;
-    const items = rows.filter(row => row.id !== null);
-    const entries = items.slice(0, 100).map(({ owned: _, ...entry }) => entry);
+    const items = rows.filter((row): row is ListedReadEntry => row.id !== null);
+    const entries = items.slice(0, 100);
     const last = entries[entries.length - 1];
-    return { entries, ...(folder.owned === 1 ? { ownsFolder: true } : {}), nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
+    return { entries, ...(folder.kind === 1 ? { ownsFolder: true } : {}), nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
   async listPage(token: string, folderId: string, cursor: string | null = null, direction: ListingDirection = 'asc'): Promise<FolderPage | null> {

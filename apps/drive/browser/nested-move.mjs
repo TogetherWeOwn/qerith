@@ -20,18 +20,26 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const dialog = page.getByRole('dialog', { name: /^Move “/ });
     const button = name => dialog.getByRole('button', { name, exact: true });
     const focused = page.locator(':focus'), evidence = state => capture(page, state, width, true, 'nested-move');
+    const next = page.getByRole('link', { name: '02 Next' }).and(focused);
+    const status = text => page.getByRole('status').filter({ hasText: text });
     const open = async () => {
       await trigger.press('ArrowDown');
       await page.getByRole('menuitem', { name: 'Move' }).press('Enter');
-      await button(home).waitFor();
     };
     const patch = `/api/entries/${source}`, requests = [];
     const writes = r => r.method() === 'PATCH' && new URL(r.url()).pathname === patch;
     const track = r => { if (writes(r) || r.url().startsWith(`${origin}${path}/__data.json`)) requests.push(r.url()); };
     page.on('request', track);
     const submit = async label => (await Promise.all([page.waitForResponse(r => writes(r.request())), button(label).press('Enter')]))[0].status();
-    await open(); await page.keyboard.press('Escape');
-    await trigger.and(focused).waitFor(); await open();
+    if (nested) {
+      const reparent = id => db.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(id, source).run();
+      await reparent('nested-gone'); await open();
+      await dialog.getByRole('alert').filter({ hasText: 'Refresh this folder' }).and(focused).waitFor();
+      assert.equal(await button('Move to My Drive').getAttribute('aria-disabled'), 'true');
+      await page.keyboard.press('Escape'); await trigger.and(focused).waitFor();
+      await reparent(parent); // The PATCH trace also proves the stale picker never wrote.
+    }
+    await open();
     await button(home).press('Enter');
     await dialog.getByRole('heading', { name: `My Drive / ${home}` }).and(focused).waitFor();
     for (const label of [name, `Move to ${home}`]) assert.equal(await button(label).getAttribute('aria-disabled'), 'true');
@@ -72,18 +80,19 @@ export async function proveNestedMove(page, origin, db, intercept) {
     } finally { held.resolve(); }
     try {
       assert.equal(await pending, 200);
-      if (nested) await Promise.all([started, dialog.waitFor({ state: 'hidden' }),
+      if (nested) await Promise.all([started, dialog.waitFor({ state: 'hidden' }), next.waitFor(), status(/^Item moved\.$/).waitFor(),
         page.locator(`[data-row="${source}"]`).waitFor({ state: 'detached' })]);
     } finally { reloadGate.resolve(); }
     assert.equal((await reload).status(), 200);
     if (nested) {
-      await page.getByRole('heading', { name: "This folder isn't available." }).waitFor();
-      await page.getByRole('status').filter({ hasText: 'Item moved. Refresh this page' }).waitFor();
-      await evidence('unavailable');
+      await page.getByRole('heading', { name: "This folder isn't available." }).and(focused).waitFor();
+      await status('Item moved. Refresh this page').waitFor();
+      const lookup = Promise.withResolvers();
+      intercept('/api/move-destinations', () => lookup.resolve()); // Leave this read pending until the next document.
       await seedSourceFolder(); await page.reload();
+      await lookup.promise; await status(/^Item moved\.$/).waitFor(); await page.reload();
     }
-    await page.getByRole('link', { name: '02 Next' }).and(focused).waitFor();
-    await page.getByRole('status').filter({ hasText: `Moved to ${target}` }).waitFor();
+    await next.waitFor(); await status(`Moved to ${target}`).waitFor();
     assert.equal(await trigger.count(), 0);
     await evidence('success');
     await page.getByRole('link', { name: `Open ${target}` }).press('Enter');

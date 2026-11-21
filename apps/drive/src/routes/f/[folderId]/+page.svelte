@@ -6,7 +6,7 @@
   import KindGlyph from '../../../lib/KindGlyph.svelte';
   import MoveDialog from '../../../lib/MoveDialog.svelte';
   import RowActions from '../../../lib/RowActions.svelte';
-  import { moveNeighbor, openFolderMove, readMoveReceipt, type MoveReload } from './move-action';
+  import { moveNeighbor, readMoveReceipt, type MoveReload } from './move-action';
   import { isLinkableFolderId } from '../../../lib/drive-navigation';
   import type { FolderPage } from '../../../lib/server/folder-page';
 
@@ -28,17 +28,20 @@
   });
 
   async function restore(saved: MoveReload) {
-    const expired = saved.until <= Date.now();
-    if (!expired && data.result.status === 'unavailable') {
-      receipt = null; // Keep the saved IDs for the next document refresh.
-      return;
+    if (saved.until > Date.now()) {
+      if (data.result.status === 'unavailable') { receipt = null; heading.focus(); return; }
+      if (data.result.status === 'ok' && data.result.folder.canMove) {
+        receipt = null; // Retain the handoff if the browser reloads during verification.
+        const { entries } = data.result.folder;
+        await tick();
+        if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
+        else focusNeighbor(moveNeighbor(saved, entries));
+        const verified = await readMoveReceipt(saved);
+        if (movedId !== undefined) return; // A newer confirmed move owns the notice and history.
+        receipt = verified;
+      }
     }
     await goto(location.href, shallow).catch(() => {});
-    if (expired || data.result.status !== 'ok' || !data.result.folder.canMove) return;
-    const entries = data.result.folder.entries;
-    if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
-    else focusNeighbor(moveNeighbor(saved, entries));
-    receipt = await readMoveReceipt(saved);
   }
 
   async function moved(id: string, { id: target }: { id: string | null }, close: () => void) {
@@ -83,8 +86,7 @@
             {/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
             {#if mounted && entry.movable && movedId === undefined}
-              <RowActions name={entry.name} moveOnly onAction={() => openFolderMove(data.result, entry.id, source => picker?.open(source))}
-                onTab={() => false} />
+              <RowActions name={entry.name} moveOnly onAction={() => picker?.open({ ...entry, expectedParent: page.params.folderId })} onTab={() => false} />
             {/if}
           </li>
         {/each}
@@ -97,7 +99,8 @@
     {#if folder.paged}<a href="?">First page</a>{/if}
     {#if folder.nextPage}<a href={'?' + new URLSearchParams({ page: folder.nextPage })}>Next page</a>{/if}
   {:else}
-    <h1>This folder isn't available.</h1>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
+    <h1 bind:this={heading} tabindex="-1">This folder isn't available.</h1>
     <p>It may have been deleted or moved, or it isn't shared with you.</p>
     {#if receipt === null}<p role="status">Item moved. Refresh this page to reload the source folder.</p>{/if}
     <a class="ghost" href="/">Go to My Drive</a>
