@@ -136,6 +136,8 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
       };
       await upload.focus();
       await step('Tab', folders.first());
+      await step('Shift+Tab', upload);
+      await step('Tab', folders.first());
       for (let index = 1; index < folderCount - 1; index++) await page.keyboard.press('Tab');
       await step('Tab', folders.last());
       await step('Tab', link);
