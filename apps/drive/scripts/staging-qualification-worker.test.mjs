@@ -255,7 +255,8 @@ test('Worker inventory reads the tested configuration and only the pinned Worker
     await assert.rejects(inspect(override), /Cannot verify staging Worker cron and resource bindings/);
     assert.deepEqual(calls, []);
   }
-  assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'] });
+  assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'],
+    attemptRestore: false });
   assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules', 'deployments']);
 });
 
