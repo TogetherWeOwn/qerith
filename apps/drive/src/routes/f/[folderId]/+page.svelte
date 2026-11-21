@@ -20,6 +20,7 @@
   const shallow = { shallow: true, replace: true } as const;
   const row = (id: string) => main.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
   const restoreTrigger = (id: string) => row(id)?.querySelector('button')?.focus();
+  const focusNeighbor = (id?: string) => (id && row(id)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
 
   onMount(() => {
     mounted = true;
@@ -35,25 +36,21 @@
     await goto(location.href, shallow).catch(() => {});
     if (expired || data.result.status !== 'ok' || !data.result.folder.canMove) return;
     const entries = data.result.folder.entries;
-    const neighbor = moveNeighbor(saved, entries);
     if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
-    else (neighbor && row(neighbor)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
+    else focusNeighbor(moveNeighbor(saved, entries));
     receipt = await readMoveReceipt(saved);
   }
 
   async function moved(id: string, { id: target }: { id: string | null }, close: () => void) {
     if (data.result.status !== 'ok') return;
-    const saved = { source: id, target, rows: data.result.folder.entries.map(entry => entry.id), until: Date.now() + 60_000 };
+    const { entries } = data.result.folder;
+    const saved = { source: id, target, rows: entries.map(entry => entry.id), until: Date.now() + 60_000 };
+    close(); movedId = id; receipt = null;
+    await tick(); focusNeighbor(moveNeighbor(saved, entries));
     try {
       await goto(location.href, { ...shallow, persistState: true, state: { folderMove: saved } });
-      // The nested listing is admitted as a document, never as __data.json.
-      location.reload();
-    } catch {
-      close();
-      movedId = id; receipt = null;
-      await tick(); heading.focus();
-      receipt = await readMoveReceipt(saved);
-    }
+      location.reload(); // The nested listing is admitted as a document, never as __data.json.
+    } catch { receipt = await readMoveReceipt(saved); }
   }
 </script>
 

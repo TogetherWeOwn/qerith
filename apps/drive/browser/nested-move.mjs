@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 export async function proveNestedMove(page, origin, db, intercept) {
   for (const [width, height] of widths) {
+    console.log(`Nested Move (${width}×${height})`);
     const parent = `nested-parent-${width}`, source = `nested-source-${width}`, path = `/f/${parent}`;
     const name = '01 Résumé', destination = `! Nested destination ${width}`, removed = `! Nested removed ${width}`, home = `! Nested source ${width}`;
     const nested = width === 1280, target = nested ? destination : 'My Drive', primary = `Move to ${target}`;
@@ -47,6 +48,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     await dialog.getByRole('alert').and(focused).waitFor();
     assert.equal(await button(`Move to ${removed}`).getAttribute('aria-disabled'), 'true');
     await evidence('gone'); await button('Up to My Drive').press('Enter');
+    const held = Promise.withResolvers(), reloadGate = Promise.withResolvers();
     if (nested) {
       await button(target).press('Enter');
       intercept(patch, route => route.abort());
@@ -57,18 +59,22 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await evidence('unconfirmed');
       await page.reload(); await open(); await button(target).press('Enter');
       await db.prepare("DELETE FROM drive_entries WHERE id = 'nested-clash'").run();
-      intercept(path, (_, forward) => db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next')")
-        .bind(parent).run().then(() => forward()));
+      intercept(path, (_, forward) => reloadGate.promise.then(() => db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next')")
+        .bind(parent).run()).then(() => forward()));
     }
-    const reload = page.waitForResponse(r => r.url() === origin + path && r.request().isNavigationRequest());
-    const held = Promise.withResolvers();
+    const isReload = r => r.url() === origin + path && r.isNavigationRequest();
+    const started = page.waitForRequest(isReload), reload = page.waitForResponse(r => isReload(r.request()));
     intercept(patch, async (_, forward) => { await held.promise; return forward(); });
     const pending = submit(primary);
     try {
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
     } finally { held.resolve(); }
-    assert.equal(await pending, 200);
+    try {
+      assert.equal(await pending, 200);
+      if (nested) await Promise.all([started, dialog.waitFor({ state: 'hidden' }),
+        page.locator(`[data-row="${source}"]`).waitFor({ state: 'detached' })]);
+    } finally { reloadGate.resolve(); }
     assert.equal((await reload).status(), 200);
     if (nested) {
       await page.getByRole('heading', { name: "This folder isn't available." }).waitFor();
