@@ -1,8 +1,11 @@
+import { types } from 'node:util';
 import { recoveryAgeSeconds, recoveryNamespace, verifyRecoveryR2Expiry } from './staging-qualification-expiry.mjs';
 import { maxRecordBytes, qualificationRecoveryKey } from './staging-qualification-recovery-record.mjs';
 import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
 
 const unverified = () => new Error('Qualification R2 recovery storage is unverified.');
+const byteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get;
+const sizeOf = body => types.isUint8Array(body) ? byteLength.call(body) : 0;
 
 // Only the two exact keys are addressable. No list, replace, delete or retry.
 export function qualificationR2RecoveryStore(source, { request, verifyRetention, now = Date.now }) {
@@ -16,10 +19,13 @@ export function qualificationR2RecoveryStore(source, { request, verifyRetention,
       try {
         const target = objectKey(key);
         signal?.throwIfAborted();
-        if (typeof body !== 'string' || !body.isWellFormed() || !body || Buffer.byteLength(body) > maxRecordBytes ||
-            await verifyRetention(signal) !== true) throw unverified();
+        const size = sizeOf(body);
+        if (!size || size > maxRecordBytes) throw unverified();
+        const bytes = new Uint8Array(size);
+        bytes.set(body);
+        if (await verifyRetention(signal) !== true) throw unverified();
         signal?.throwIfAborted();
-        const response = await request({ method: 'PUT', key: target, body: Buffer.from(body), signal,
+        const response = await request({ method: 'PUT', key: target, body: bytes, signal,
           headers: { 'if-none-match': '*', 'content-type': 'application/json', 'cache-control': 'private, no-store' },
           maxResponseBytes: 0 });
         signal?.throwIfAborted();
@@ -40,12 +46,11 @@ export function qualificationR2RecoveryStore(source, { request, verifyRetention,
         const modified = headers.get('last-modified');
         const timestamp = Date.parse(modified ?? '');
         const age = now() - timestamp;
+        const size = sizeOf(body);
         if (status !== 200 || headers.has('content-range') || headers.has('content-encoding') ||
-            !(body instanceof Uint8Array) || !body.byteLength || body.byteLength > maxBytes ||
-            headers.get('content-length') !== String(body.byteLength) || !Number.isFinite(age) ||
+            !size || size > maxBytes || headers.get('content-length') !== String(size) || !Number.isFinite(age) ||
             new Date(timestamp).toUTCString() !== modified || age < 0 || age >= recoveryAgeSeconds * 1000) throw unverified();
-        // Preserve a BOM if present so the canonical byte comparison rejects it.
-        return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body);
+        return body;
       } catch {
         throw unverified();
       }

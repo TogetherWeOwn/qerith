@@ -4,6 +4,7 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { proveNewFolder } from './new-folder.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -88,7 +89,7 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker, navigationSite) => {
+  const relay = async (route, target = worker, navigationSite, wait = () => holdRefresh) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
@@ -113,7 +114,7 @@ try {
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
-    if (url.pathname === dataPath) await holdRefresh;
+    if (url.pathname === dataPath) await wait();
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   };
   await context.route('**/*', route => relay(route));
@@ -127,6 +128,7 @@ try {
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'New folder', exact: true }).count(), 0);
   await page.keyboard.press('Tab');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -269,12 +271,21 @@ try {
 
   await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'owner', 'Receipts', 'folder')").run();
   await deny('/f/fixture-parent', 404, { cookie });
-  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
+  const overrides = new Map(); // One owner for each Playwright route, including injected failures.
+  await context.unroute('**/*');
+  await context.route('**/*', route => {
+    const { pathname } = new URL(route.request().url());
+    const forward = (optIn = true, wait) => relay(route, optIn ? inviteWorker : worker, 'same-origin', wait);
+    const override = overrides.get(pathname);
+    overrides.delete(pathname);
+    return override ? override(route, forward) : forward();
+  });
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
+  await proveNewFolder(page, origin, DB, 'owner', (path, handler) => overrides.set(path, handler), index);
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });

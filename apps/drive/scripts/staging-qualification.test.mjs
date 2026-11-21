@@ -37,7 +37,7 @@ test('recovery writer requires fresh readback of a create-only record before ack
       assert.deepEqual(options, { maxBytes: 2048, signal });
       enteredRead.resolve();
       await readback.promise;
-      return stored.get(key);
+      return Uint8Array.from(stored.get(key));
     },
   };
   const write = qualificationRecoveryWriter(recoverySource, store);
@@ -55,16 +55,49 @@ test('recovery writer requires fresh readback of a create-only record before ack
   for (const record of [d1Record, workerRecord]) {
     const { prefix, ...payload } = record;
     const key = `drive-staging-recovery-${record.kind}-${sha}-run-${runId}-attempt-${attempt}`;
-    assert.equal(stored.get(key), JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: record.kind,
-      sha, runId, attempt, ...(record.kind === 'd1' ? { bookmark: record.bookmark } : {
+    assert.deepEqual(stored.get(key), new TextEncoder().encode(JSON.stringify({
+      schema: 'drive-staging-recovery.v1', kind: record.kind, sha, runId, attempt,
+      ...(record.kind === 'd1' ? { bookmark: record.bookmark } : {
         version: record.version, expiresAt: record.expiresAt, previousVersion: record.previousVersion,
         previousDeployment: record.previousDeployment,
-      }) }));
+      }),
+    })));
     assert.deepEqual(await readQualificationRecoveryRecord(recoverySource, record.kind, store, signal),
       { schema: 'drive-staging-recovery.v1', ...payload });
   }
   await assert.rejects(write(d1Record, signal), invalidRecord);
   assert.equal(stored.size, 2);
+});
+
+test('recovery writer never creates after cancellation during serialization', async () => {
+  const controller = new AbortController();
+  let creates = 0;
+  const write = qualificationRecoveryWriter(recoverySource, {
+    create() { creates++; return true; },
+    read() { return Buffer.from(canonicalD1); },
+  });
+  await assert.rejects(write({ ...d1Record, get bookmark() {
+    controller.abort();
+    return d1Record.bookmark;
+  } }, controller.signal), invalidRecord);
+  assert.equal(creates, 0);
+});
+
+test('recovery store methods retain their receiver and setup errors are sanitized', async () => {
+  const store = {
+    records: new Map(),
+    create(key, value) { this.records.set(key, Uint8Array.from(value)); return true; },
+    read(key) { return this.records.get(key); },
+  };
+  assert.equal(await qualificationRecoveryWriter(recoverySource, store)(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  for (const malformed of [undefined, null, { read: true }, { get read() { throw new Error('store setup failed'); } }]) {
+    assert.throws(() => qualificationRecoveryWriter(recoverySource, malformed), invalidRecord);
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', malformed), invalidRecord);
+  }
+  assert.throws(() => qualificationRecoveryWriter(recoverySource, {
+    ...store, get create() { throw new Error('store setup failed'); },
+  }), invalidRecord);
 });
 
 test('recovery writer refuses invalid scope, ambiguous creation, readback drift and cancellation', async () => {
@@ -73,15 +106,15 @@ test('recovery writer refuses invalid scope, ambiguous creation, readback drift 
   const controller = new AbortController();
   let outcome;
   const write = qualificationRecoveryWriter(recoverySource, {
-    create(key, body) {
+    create() {
       calls.push('create');
-      if (outcome === 'lost-ack') throw new Error(body);
+      if (outcome === 'lost-ack') throw new Error('Create result unknown');
       return true;
     },
     read() {
       calls.push('read');
       if (outcome === 'cancelled') controller.abort();
-      return canonicalD1 + (outcome === 'drift' ? '\n' : '');
+      return Buffer.from(canonicalD1 + (outcome === 'drift' ? '\n' : ''));
     },
   });
   for (const record of [{ ...d1Record, attempt: '2' }, { ...d1Record, prefix: 'another-prefix/' },
@@ -102,20 +135,60 @@ test('recovery writer refuses invalid scope, ambiguous creation, readback drift 
 const canonicalD1 = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: 'd1',
   ...recoverySource, bookmark: d1Record.bookmark });
 
+test('recovery writer validates and stores the same bookmark', async () => {
+  let reads = 0;
+  let body;
+  const store = {
+    create(_key, value) { body = value; return true; },
+    read() { return body; },
+  };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  assert.equal(await write({ ...d1Record, get bookmark() {
+    return ++reads === 1 ? d1Record.bookmark : 'not a bookmark';
+  } }), true);
+  assert.equal(reads, 1);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+});
+
+test('recovery writer and reader compare the actual byte view without conversion', async () => {
+  const canonical = Buffer.from(canonicalD1);
+  const backing = new Uint8Array(canonical.length + 2).fill(0xff);
+  backing.set(canonical, 1);
+  const view = backing.subarray(1, -1);
+  const unused = () => assert.fail('Byte validation must not call object hooks');
+  Object.defineProperties(view, { byteLength: { get: unused }, valueOf: { value: unused } });
+  const store = { create: () => true, read: () => view };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  assert.equal(await write(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  view[0] = 0xff;
+  await assert.rejects(write(d1Record), invalidRecord);
+  await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store), invalidRecord);
+});
+
+test('recovery writer and reader reject a BOM prefix and normalized text', async () => {
+  const prefixed = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(canonicalD1)]);
+  for (const read of [() => prefixed, () => new Response(prefixed).text()]) {
+    const store = { create: () => true, read };
+    await assert.rejects(qualificationRecoveryWriter(recoverySource, store)(d1Record), invalidRecord);
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store), invalidRecord);
+  }
+});
+
 test('recovery reader rejects copied, malformed, oversized and cancelled records', async () => {
-  for (const body of [undefined, '{', 'x'.repeat(2049), canonicalD1.replace('"3"', '"2"'),
+  const invalidBodies = ['{', 'x'.repeat(2049), canonicalD1.replace('"3"', '"2"'),
     canonicalD1.replace('"182"', '"183"'), canonicalD1.replace(recoverySource.sha, 'b'.repeat(40)),
-    canonicalD1.replace('recovery.v1', 'recovery.v2'),
-    canonicalD1.replace('"d1"', '"worker"'), canonicalD1.replace('{', '{"unexpected":true,'),
-    canonicalD1.replace('{', '{"kind":"d1",')]) {
+    canonicalD1.replace('recovery.v1', 'recovery.v2'), canonicalD1.replace('"d1"', '"worker"'),
+    `{"unexpected":true,${canonicalD1.slice(1)}`, `{"kind":"d1",${canonicalD1.slice(1)}`];
+  for (const body of [undefined, ...invalidBodies.map(text => Buffer.from(text))]) {
     await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', { read: () => body }), invalidRecord);
   }
   const controller = new AbortController();
-  const store = { read() { controller.abort(); return canonicalD1; } };
+  const store = { read() { controller.abort(); return Buffer.from(canonicalD1); } };
   await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store, controller.signal), invalidRecord);
   let reads = 0;
   await assert.rejects(readQualificationRecoveryRecord({ ...recoverySource, runId: '../182' }, 'd1', {
-    read() { reads++; return canonicalD1; },
+    read() { reads++; return Buffer.from(canonicalD1); },
   }), invalidRecord);
   assert.equal(reads, 0);
 });
@@ -160,20 +233,30 @@ test('R2 recovery creates both exact keys and a fresh store reads them without l
   assert.deepEqual(calls, []);
 });
 
+test('R2 recovery returns raw bytes without attempting UTF-8 decoding', async () => {
+  const bytes = Uint8Array.of(0xef, 0xbb, 0xbf, 0xff);
+  const store = qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    request: () => recoveryObject(bytes) });
+  const key = `drive-staging-recovery-d1-${recoverySource.sha}-run-182-attempt-3`;
+  assert.deepEqual(await store.read(key, { maxBytes: 2048 }), bytes);
+});
+
 test('R2 recovery fails closed on a lost PUT acknowledgement and invalid byte readback', async () => {
   const methods = [];
+  let sent;
   const run = result => {
     const store = qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
       verifyRetention: () => true, request({ method, body }) {
         methods.push(method);
         if (method === 'GET') return result;
-        assert.equal(body.toString(), canonicalD1);
+        sent = body;
         if (!result) throw new Error('response lost after commit');
         return { status: 200, headers: new Headers({ etag: '"created"' }) };
       } });
     return qualificationRecoveryWriter(recoverySource, store)(d1Record);
   };
   await assert.rejects(run(), invalidRecord);
+  assert.deepEqual(sent, Uint8Array.from(Buffer.from(canonicalD1)));
   assert.deepEqual(methods.splice(0), ['PUT']);
   for (const response of [recoveryObject(Buffer.from(String.fromCodePoint(0xfeff) + canonicalD1)), recoveryObject(Buffer.alloc(2049)),
     recoveryObject(Buffer.from([0xff])), recoveryObject(Buffer.from(canonicalD1 + '\n')),
@@ -307,7 +390,8 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
 });
 
-function lifecycle(t, failure, controller = new AbortController()) {
+function lifecycle(t, failure, driftKind) {
+  const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
@@ -318,7 +402,23 @@ function lifecycle(t, failure, controller = new AbortController()) {
     events.push(name);
     return !failures.includes(name);
   };
-  const candidate = { version: 'candidate' };
+  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const candidate = { version, expiresAt, previousVersion, previousDeployment };
+  const stored = new Map();
+  const writeRecovery = qualificationRecoveryWriter({ ...recoverySource, sha: env.TESTED_SHA }, {
+    create(key, body) {
+      step(`create-${JSON.parse(Buffer.from(body).toString('utf8')).kind}`);
+      if (stored.has(key)) return false;
+      stored.set(key, Buffer.from(body));
+      return true;
+    },
+    read(key) {
+      const body = stored.get(key);
+      const { kind } = JSON.parse(body.toString('utf8'));
+      step(`read-${kind}`);
+      return kind === driftKind ? Buffer.concat([body, Buffer.from('\n')]) : Buffer.from(body);
+    },
+  });
   const ops = {
     assertFullV0: () => step('full-v0'),
     inventory({ phase, sha }, signal) {
@@ -327,14 +427,11 @@ function lifecycle(t, failure, controller = new AbortController()) {
       if (failure === 'cancel-after-restore' && phase === 'after') controller.abort();
       return step(`inventory-${phase}`);
     },
-    async recordRecovery({ kind, ...data }) {
-      await Promise.resolve();
-      assert.equal(data.prefix, prefix);
-      assert.equal(kind === 'd1' ? data.bookmark : data.previousVersion, kind === 'd1' ? 'bookmark' : 'baseline');
-      return step(`record-${kind}`);
+    recordRecovery(record, signal) {
+      return step(`record-${record.kind}`) && writeRecovery(record, signal);
     },
-    async exercise({ version, prefix: keyPrefix }, signal) {
-      assert.equal(version, 'candidate');
+    async exercise({ version: activeVersion, prefix: keyPrefix }, signal) {
+      assert.equal(activeVersion, version);
       assert.equal(keyPrefix, prefix);
       step('exercise');
       if (failure === 'cancel') controller.abort();
@@ -344,9 +441,9 @@ function lifecycle(t, failure, controller = new AbortController()) {
       if (failure === 'exercise') throw new Error('Case failed');
       return { 'passkey-positive': 'pass' };
     },
-    cleanup({ prefix: keyPrefix, version }, signal) {
+    cleanup({ prefix: keyPrefix, version: activeVersion }, signal) {
       assert.equal(keyPrefix, prefix);
-      assert.equal(version, 'candidate');
+      assert.equal(activeVersion, version);
       assert.equal(signal.aborted, false);
       return step('cleanup');
     },
@@ -364,7 +461,7 @@ function lifecycle(t, failure, controller = new AbortController()) {
     probe: () => step('probe'),
     async worker({ upload, recordRecovery, probe, exercise, cleanup }, _env, _cwd, signal) {
       assert.equal(upload, candidate);
-      await recordRecovery({ previousVersion: 'baseline' });
+      await recordRecovery(candidate);
       step('activate');
       try {
         if (!probe()) throw new Error('Readiness failed');
@@ -380,17 +477,26 @@ function lifecycle(t, failure, controller = new AbortController()) {
       }
     },
   };
-  return { events, run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
+  return { events, stored, testedSha: env.TESTED_SHA,
+    run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
 }
 
-const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'migrate', 'record-worker',
-  'activate', 'probe', 'exercise', 'exercise-settled', 'cleanup', 'restore', 'inventory-after'];
+const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'create-d1', 'read-d1', 'migrate',
+  'record-worker', 'create-worker', 'read-worker', 'activate', 'probe', 'exercise', 'exercise-settled',
+  'cleanup', 'restore', 'inventory-after'];
 
 test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
-  const { run, events } = lifecycle(t);
+  const { run, events, stored, testedSha } = lifecycle(t);
   assert.deepEqual(await run(), { migrations: { bookmark: 'bookmark' },
     deployment: { cases: { 'passkey-positive': 'pass' }, restoredDeployment: 'restored' } });
   assert.deepEqual(events, successOrder);
+  const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
+  const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
+  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  assert.deepEqual(payloads, [
+    { ...scope, kind: 'd1', bookmark: 'bookmark' },
+    { ...scope, kind: 'worker', version, expiresAt, previousVersion, previousDeployment },
+  ]);
 });
 
 test('qualification lifecycle rejects missing admission, a stale baseline and unrecorded recovery', async t => {
@@ -408,6 +514,14 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
   }
 });
 
+test('qualification lifecycle blocks D1 apply and Worker activation on exact-record readback drift', async t => {
+  for (const kind of ['d1', 'worker']) {
+    const { run, events } = lifecycle(t, undefined, kind);
+    await assert.rejects(run(), invalidRecord);
+    assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(`read-${kind}`) + 1), 'inventory-after']);
+  }
+});
+
 test('qualification failures and cancellation suppress the result without skipping recovery', async t => {
   for (const [failure, error] of [
     ['exercise', /Case failed/], ['cancel', { name: 'AbortError' }], ['cleanup', /prefix cleanup is unverified/],
@@ -419,7 +533,7 @@ test('qualification failures and cancellation suppress the result without skippi
   }
   const { run, events } = lifecycle(t, 'probe');
   await assert.rejects(run(), /Readiness failed/);
-  assert.deepEqual(events, [...successOrder.slice(0, 8), 'restore', 'inventory-after']);
+  assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf('probe') + 1), 'restore', 'inventory-after']);
 });
 
 test('final inventory failure preserves Worker rollback reconciliation', async t => {

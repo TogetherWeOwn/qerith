@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 
 // The qualification minimum is also the current app upload maximum.
-const largeBytes = 5 * 1024 ** 3;
+export const largeBytes = 5 * 1024 ** 3;
 
-// The caller must obtain a fresh authenticated app download with the same
-// abort signal and hash the upload fixture independently before uploading it.
 export async function verifyQualificationLargeDownload(response, uploadSha256, signal) {
+  await verifyQualificationDownload(response, largeBytes, uploadSha256, signal);
+  return { 'large-transfer-hash': 'pass' };
+}
+
+// The caller supplies a fresh authenticated download and an independent source digest.
+export async function verifyQualificationDownload(response, expectedBytes, uploadSha256, signal) {
   if (!response?.body || response.bodyUsed || response.body.locked) {
     throw new Error('Large transfer requires an unused download body.');
   }
@@ -18,10 +22,11 @@ export async function verifyQualificationLargeDownload(response, uploadSha256, s
   signal?.addEventListener('abort', cancel, { once: true });
   try {
     signal?.throwIfAborted();
-    if (typeof uploadSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(uploadSha256) ||
+    if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0 || expectedBytes > largeBytes ||
+        typeof uploadSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(uploadSha256) ||
         response.status !== 200 || response.redirected ||
         response.headers.get('content-type') !== 'application/octet-stream' ||
-        response.headers.get('content-length') !== String(largeBytes) ||
+        response.headers.get('content-length') !== String(expectedBytes) ||
         response.headers.has('content-range') || response.headers.has('content-encoding')) {
       throw new Error('Invalid full large-transfer download or upload digest.');
     }
@@ -33,17 +38,17 @@ export async function verifyQualificationLargeDownload(response, uploadSha256, s
         throw new Error('Invalid large-transfer download chunk.');
       }
       bytes += next.value.byteLength;
-      if (bytes > largeBytes) throw new Error('Large-transfer download exceeded five GiB.');
+      if (bytes > expectedBytes) throw new Error(expectedBytes === largeBytes
+        ? 'Large-transfer download exceeded five GiB.' : 'Download exceeded the expected length.');
       hash.update(next.value);
     }
-    if (bytes !== largeBytes || hash.digest('hex') !== uploadSha256) {
+    if (bytes !== expectedBytes || hash.digest('hex') !== uploadSha256) {
       throw new Error('Large-transfer download did not match the upload length and SHA-256.');
     }
-    return { 'large-transfer-hash': 'pass' };
   } finally {
     signal?.removeEventListener('abort', cancel);
     if (!ended) cancel();
-    await cancellation;
+    // Cancellation closes pending reads without waiting for transport cleanup.
     reader.releaseLock();
   }
 }
