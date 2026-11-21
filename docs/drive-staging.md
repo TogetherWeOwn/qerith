@@ -263,9 +263,18 @@ against a live account. If the provider omits either count even when requested,
 qualification fails closed. This does not cover recordings, billing, or other
 accounts and does not replace the estate or app-fixture reader.
 
-The native R2 bucket and lifecycle, Durable Objects, Containers, and Stream
-inventory reads reject duplicate JSON fields, even when the last value would
-otherwise satisfy the check.
+Both passes also read the unfiltered native Workflows definition roster in the
+pinned Worker account. The first page must explicitly contain no definitions,
+report `total_count: 0`, and give no evidence of continuation, within five
+seconds and 64 KiB. Workflows and Durable Object page counts must be written
+as canonical JSON integers; rounded numeric values do not prove absence. Any
+Workflows definition fails, even with no active instances. This read does not
+prove instance absence, cover other accounts, or replace the estate or
+app-fixture reader. The response shape is verified only offline.
+
+The native R2 bucket and lifecycle, Durable Objects, Containers, Stream, and
+Workflows inventory reads reject duplicate JSON fields, even when the last
+value would otherwise satisfy the check.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation

@@ -33,7 +33,7 @@ function hasDuplicateMembers(text) {
   return false;
 }
 
-async function boundedProviderDocument(response) {
+async function boundedProviderDocument(response, reviver) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -47,7 +47,7 @@ async function boundedProviderDocument(response) {
   }
   const bytes = buffer.subarray(0, size);
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  const parsed = JSON.parse(text);
+  const parsed = JSON.parse(text, reviver);
   if (hasDuplicateMembers(text)) throw unverified();
   return { bytes, parsed };
 }
@@ -89,18 +89,26 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   }, null, signal, 15_000);
 }
 
-async function assertNoDurableObjectNamespaces(account, token, request, signal) {
+// Shared for native page-number lists with an explicitly empty terminal page.
+async function assertEmptyNativePage(account, path, token, request, signal) {
   if (!token?.trim()) throw unverified();
   const pageSize = 10;
   await runQualificationPhase(async (_, active) => {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/durable_objects/namespaces?page=1&per_page=${pageSize}`;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/${path}?page=1&per_page=${pageSize}`;
     const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
       headers: { authorization: `Bearer ${token}` } });
     if (response.headers.has('link')) {
       await response.body?.cancel();
       throw unverified();
     }
-    const { parsed } = await boundedProviderDocument(response);
+    const { parsed } = await boundedProviderDocument(response, (_key, value, context) => {
+      // Compare the original token so fractional or underflowed counts cannot
+      // round to an allowed pagination integer.
+      if (typeof value === 'number' && (!Number.isSafeInteger(value) || context?.source !== String(value))) {
+        throw unverified();
+      }
+      return value;
+    });
     const { success, errors, messages, result, result_info: page } = parsed;
     const validPage = { page: [1], per_page: [pageSize], count: [0], total_count: [0], total_pages: [0, 1] };
     if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
@@ -190,9 +198,10 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
-        await assertNoDurableObjectNamespaces(account, env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertEmptyNativePage(account, 'workers/durable_objects/namespaces', env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoContainerApplications(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoStreamInputs(account, env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertEmptyNativePage(account, 'workflows', env.CLOUDFLARE_API_TOKEN, request, active);
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
