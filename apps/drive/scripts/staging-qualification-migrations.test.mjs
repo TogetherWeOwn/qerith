@@ -51,7 +51,8 @@ case "$*" in
     [ "$PWD" != "$HOME/apps/drive" ] || exit 73
     grep -qx 'SELECT 1;' migrations/${second.name} || exit 74
     grep -q '"database_id":"87ac8041-ad2d-4650-b0d7-05bb78846f60"' wrangler.staging.json || exit 75
-    if [ -f "$HOME/fail-apply" ]; then printf '%s\\n' 'sensitive-provider-diagnostic' >&2; exit 2; fi ;;
+    if [ -f "$HOME/fail-apply" ]; then printf '%s\\n' 'sensitive-provider-diagnostic' >&2; exit 2; fi
+    if [ -f "$HOME/slow-apply" ]; then sleep 3; printf 'finished apply\\n' >> "$HOME/calls"; fi ;;
   *) exit 71 ;;
 esac
 `, { mode: 0o700 });
@@ -71,7 +72,7 @@ esac
     return applyQualificationMigrations({ recordRecovery, timeLeft }, { ...env, ...overrides }, relative(process.cwd(), root), signal);
   };
   return { app, sha, file, calls, run, failApply: () => writeFileSync(join(root, 'fail-apply'), ''),
-    localList: () => readFileSync(join(root, 'local-list'), 'utf8') };
+    slowApply: () => writeFileSync(join(root, 'slow-apply'), ''), localList: () => readFileSync(join(root, 'local-list'), 'utf8') };
 }
 
 const target = 'qerith-drive-staging';
@@ -114,6 +115,14 @@ test('stops D1 writes if the budget cannot cover the required ledger readback', 
   assert.deepEqual(calls(), [bookmarkCommand, list, ledger]);
   await run({ timeLeft: () => calls().length >= 3 ? 165_000 : 240_000 });
   assert.deepEqual(calls(), [bookmarkCommand, list, ledger, apply, ledger]);
+});
+
+test('aborts pending apply when a clock step consumes the ledger reserve', { timeout: 10_000 }, async t => {
+  const { calls, run, slowApply } = fixture(t);
+  slowApply();
+  const timeLeft = () => calls().includes(apply) ? 45_000 : 240_000;
+  await assert.rejects(run({ timeLeft }), /Bounded staging D1 command failed/);
+  assert.deepEqual(calls(), [bookmarkCommand, list, ledger, apply]);
 });
 
 test('uses the private SQL and config even if the checkout changes after validation', async t => {

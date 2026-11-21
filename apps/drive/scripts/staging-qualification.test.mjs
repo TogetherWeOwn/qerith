@@ -564,10 +564,12 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
 });
 
 test('qualification preserves the activation window before and after D1', async t => {
-  for (const [failure, lastStep] of [['short window', 'upload'], ['clock jump', 'migrate']]) {
+  for (const [failure, lastStep, error] of [
+    ['short window', 'upload', /insufficient time left/], ['clock jump', 'migrate', { name: 'TimeoutError' }],
+  ]) {
     await t.test(failure, async t => {
       const { run, events } = lifecycle(t, failure);
-      await assert.rejects(run(), /insufficient time left/);
+      await assert.rejects(run(), error);
       assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(lastStep) + 1), 'inventory-after']);
     });
   }

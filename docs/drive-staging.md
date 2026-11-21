@@ -224,9 +224,11 @@ previous deployment, or clean up D1. Neither existing staging workflow uses it.
 The offline lifecycle gives D1 only the time left after upload and after
 reserving 21 minutes for Worker checks, recovery recording, activation and
 cases. D1 apply starts only if its full two-minute command budget and a
-45-second post-apply ledger read fit. A timeout stops activation and drains
-the local subprocess; it does not prove that D1 rolled back. Reconcile any
-uncertain D1 mutation before retrying.
+45-second post-apply ledger read fit. The lifecycle rechecks the wall-clock
+budget while D1 work is pending and stops apply if a clock step consumes the
+ledger reserve. A timeout stops activation and drains the local subprocess;
+it does not prove that D1 rolled back. Reconcile any uncertain D1 mutation
+before retrying.
 
 The unwired Worker recovery adapter reads the pinned staging config from the
 lost attempt's main-ancestor SHA. It verifies the recorded candidate against

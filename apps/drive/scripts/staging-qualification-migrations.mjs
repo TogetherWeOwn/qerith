@@ -42,7 +42,7 @@ function verifiedInputs(cwd, sha, accountId) {
 
 const readBudget = 45_000;
 
-function wrangler(binary, cwd, env, args, { timeout, discard = false, signal }) {
+function wrangler(binary, cwd, env, args, { timeout, discard = false, signal, applyTimeLeft }) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const deadline = performance.now() + timeout;
@@ -56,6 +56,9 @@ function wrangler(binary, cwd, env, args, { timeout, discard = false, signal }) 
       if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
     };
     const timer = setTimeout(stop, timeout);
+    // A wall-clock step can consume the readback reserve during apply.
+    const reserveLost = () => applyTimeLeft && !(applyTimeLeft() > 0);
+    const reserveTimer = applyTimeLeft && setInterval(() => { if (reserveLost()) stop(); }, 1_000);
     signal?.addEventListener('abort', stop, { once: true });
     if (signal?.aborted) stop();
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) {
@@ -70,9 +73,11 @@ function wrangler(binary, cwd, env, args, { timeout, discard = false, signal }) 
     child.on('error', stop);
     child.on('close', code => {
       clearTimeout(timer);
+      clearInterval(reserveTimer);
       signal?.removeEventListener('abort', stop);
-      if (failed || code !== 0 || performance.now() >= deadline) reject(new Error('Bounded staging D1 command failed.'));
-      else resolve(Buffer.concat(output).toString('utf8'));
+      if (failed || code !== 0 || performance.now() >= deadline || reserveLost()) {
+        reject(new Error('Bounded staging D1 command failed.'));
+      } else resolve(Buffer.concat(output).toString('utf8'));
     });
   });
 }
@@ -120,14 +125,16 @@ export async function applyQualificationMigrations({ recordRecovery, timeLeft },
   const binary = realpathSync(join(app, 'node_modules/.bin/wrangler'));
   if (!binary.startsWith(`${app}${sep}`) || !lstatSync(binary).isFile()) throw new Error('Invalid staging Wrangler path.');
   const run = (args, { timeout = readBudget, reserve = 0, discard } = {}) => {
-    const available = Math.floor(timeLeft?.()) - reserve;
+    const remaining = () => Math.floor(timeLeft?.()) - reserve;
+    const available = remaining();
     if (!Number.isFinite(available) || available <= 0 || (reserve > 0 && available < timeout)) {
       throw new Error('Staging D1 migration time budget is exhausted.');
     }
     return wrangler(binary, snapshotDir.path, {
       PATH: env.PATH, HOME: env.HOME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
       CI: 'true', NO_COLOR: '1', WRANGLER_HIDE_BANNER: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false',
-    }, ['d1', ...args], { timeout: Math.min(timeout, available), discard, signal });
+    }, ['d1', ...args], { timeout: Math.min(timeout, available), discard, signal,
+      applyTimeLeft: reserve > 0 ? remaining : undefined });
   };
   const snapshot = async () => readLedger(await run(['execute', target, '--remote', '--json', '--command', sql]), expected);
   const bookmark = parseProviderJson(await run(['time-travel', 'info', target, '--json']))?.bookmark;

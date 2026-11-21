@@ -302,21 +302,28 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   return { version, expiresAt, previousDeployment: previous.id, previousVersion: previous.version };
 }
 
-export async function runQualificationPhase(task, identity, parentSignal, timeout) {
+export async function runQualificationPhase(task, identity, parentSignal, timeout, wallTimeLeft) {
   const controller = new AbortController();
   const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
   signal.throwIfAborted();
   const deadline = performance.now() + timeout;
   const expire = () => controller.abort(new DOMException('Qualification phase timed out.', 'TimeoutError'));
+  const checkWall = () => { if (wallTimeLeft && !(wallTimeLeft() > 0)) expire(); };
   const timer = setTimeout(expire, timeout);
+  // Relative timers do not see a forward wall-clock step during pending I/O.
+  const wallTimer = wallTimeLeft && setInterval(checkWall, 1_000);
   try {
+    checkWall();
+    signal.throwIfAborted();
     // The callback must stop and drain its work on abort. Racing the promise
     // would allow a still-running case to mutate staging during rollback.
     return await task({ ...identity }, signal);
   } finally {
+    clearTimeout(timer);
+    clearInterval(wallTimer);
     // A blocked event loop can settle the callback before the timer gets a turn.
     if (performance.now() >= deadline) expire();
-    clearTimeout(timer);
+    checkWall();
     signal.throwIfAborted();
   }
 }

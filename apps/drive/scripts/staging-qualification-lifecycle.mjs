@@ -89,7 +89,7 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
     const timeLeft = () => Math.min(remaining(), started + budget - performance.now());
     const migrations = await runQualificationPhase((_, active) => migrate({
       timeLeft, recordRecovery: record('d1', active),
-    }, env, cwd, active), null, signal, budget);
+    }, env, cwd, active), null, signal, budget, remaining);
     if (timeLeft() <= 0) throw insufficientWindow();
     signal?.throwIfAborted();
     const deployment = await worker({
