@@ -53,13 +53,19 @@ test('generated browser entrypoints have separate exact-head deadlines', async (
   assert.ok(job, 'drive-browser job is missing');
   const steps = job.split(/^      - /m).slice(1);
   const deadline = 'timeout --signal=TERM --kill-after=10s 90s node ';
-  const entrypoints = ['sign-in.mjs', 'staging-root.mjs'].map(entry => {
+  const exactHead = 'steps.browser-source.outputs.tested == env.REQUESTED_HEAD';
+  const entrypoints = [['sign-in.mjs', exactHead], ['staging-root-standalone.mjs',
+    `${exactHead} && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''`]];
+  const [signInStep, stagingStep] = entrypoints.map(([entry, condition]) => {
     const matches = steps.filter(step => step.includes(deadline + entry));
     assert.equal(matches.length, 1, `${entry} must have one bounded invocation`);
-    assert.match(matches[0], /^        if: steps\.browser-source\.outputs\.tested == env\.REQUESTED_HEAD$/m);
+    assert.ok(matches[0].split('\n').includes(`        if: ${condition}`), `${entry} has the wrong CI condition`);
     return matches[0];
   });
-  assert.notEqual(...entrypoints, 'the fixtures must run in separate steps');
+  assert.notEqual(signInStep, stagingStep, 'the fixtures must run in separate steps');
+  const browser = new URL('../apps/drive/browser/', import.meta.url);
+  assert.match(await readFile(new URL('staging-root-standalone.mjs', browser), 'utf8'), /^import '\.\/staging-root\.mjs';$/m);
+  assert.doesNotMatch(await readFile(new URL('sign-in.mjs', browser), 'utf8'), /staging-root.*\.mjs/);
 });
 
 test('evidence fails when missing, empty or bound to the wrong checkout', async () => {
