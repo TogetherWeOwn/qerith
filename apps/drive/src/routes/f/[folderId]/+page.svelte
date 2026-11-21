@@ -20,6 +20,7 @@
           <li>
             <KindGlyph kind={entry.kind} />
             {#if entry.kind === 'folder' && isLinkableFolderId(entry.id)}<a href={'/f/' + entry.id} dir="auto">{label(entry.name)}</a>
+            {:else if entry.downloadable}<a href={'/api/download/' + entry.id} dir="auto">{label(entry.name)}</a>
             {:else}<span dir="auto">{label(entry.name)}</span>{/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
           </li>

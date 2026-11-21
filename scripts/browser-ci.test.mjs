@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -47,6 +47,27 @@ test('wrong parent count, head, main ancestry and mutable refs fail closed', () 
   assert.throws(() => selectCheckout({ ...input, head: 'main' }, graph()), /immutable/);
   assert.throws(() => selectCheckout({ ...input, event: 'push' }, graph()), /must match/);
 });
+test('generated browser entrypoints have separate exact-head deadlines', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const job = workflow.split(/^  drive-browser:\n/m)[1]?.split(/^  \S/m)[0];
+  assert.ok(job, 'drive-browser job is missing');
+  const steps = job.split(/^      - /m).slice(1);
+  const deadline = 'timeout --signal=TERM --kill-after=10s 90s node ';
+  const exactHead = 'steps.browser-source.outputs.tested == env.REQUESTED_HEAD';
+  const entrypoints = [['sign-in.mjs', exactHead], ['staging-root-standalone.mjs',
+    `${exactHead} && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''`]];
+  const [signInStep, stagingStep] = entrypoints.map(([entry, condition]) => {
+    const matches = steps.filter(step => step.includes(deadline + entry));
+    assert.equal(matches.length, 1, `${entry} must have one bounded invocation`);
+    assert.ok(matches[0].split('\n').includes(`        if: ${condition}`), `${entry} has the wrong CI condition`);
+    return matches[0];
+  });
+  assert.notEqual(signInStep, stagingStep, 'the fixtures must run in separate steps');
+  const browser = new URL('../apps/drive/browser/', import.meta.url);
+  assert.match(await readFile(new URL('staging-root-standalone.mjs', browser), 'utf8'), /^import '\.\/staging-root\.mjs';$/m);
+  assert.doesNotMatch(await readFile(new URL('sign-in.mjs', browser), 'utf8'), /staging-root.*\.mjs/);
+});
+
 test('evidence fails when missing, empty or bound to the wrong checkout', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-evidence-test-'));
   try {
@@ -86,19 +107,61 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       png.writeUInt32BE(crc32(png.subarray(4, -4)), png.length - 4);
       return png;
     };
+    const verifyDeletion = () => verifyEvidence(dir, head, false, false, false, false, false, false, true);
+    await assert.rejects(verifyDeletion(), /delete-file-390-keyboard\.json/);
+    const deleteStages = ['open', 'saving', 'error', 'accepted'];
+    const writes = [[1, 400], [1, 401], [1, 403], [1, 404], [1, 200], [1, 0], [1, 503], [1, 202], [3, 202], [2, 202]]
+      .map(([id, status]) => ['POST', `/api/entries/00000000-0000-4000-8000-00000000000${id}/delete`,
+        'application/json', '{"confirm":"permanent-delete"}', status]);
     for (const [width, height] of [[390, 844], [1280, 800]]) {
       await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
       await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
       const header = Buffer.alloc(13);
-      header.writeUInt32BE(width);
-      header.writeUInt32BE(height, 4);
-      header[8] = 8; // 8-bit greyscale, filter 0 on each row.
-      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
-        chunk('IDAT', deflateSync(Buffer.alloc((width + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+      const pngAt = w => {
+        header.writeUInt32BE(w);
+        header.writeUInt32BE(height, 4);
+        header[8] = 8; // 8-bit greyscale, filter 0 on each row.
+        return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+          chunk('IDAT', deflateSync(Buffer.alloc((w + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+      };
+      const png = pngAt(width);
       for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
         await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
       }
+      const deletionPath = join(dir, `delete-file-${width}-keyboard.json`);
+      const error = 'We couldn’t confirm the deletion request. Check My Drive before trying again.';
+      const captures = {
+        open: { focus: 'Cancel', tree: '- dialog "Delete “Receipts.pdf”?":\n  - button "Cancel"' },
+        saving: { focus: 'Deleting…', tree: '- dialog "Delete “Receipts.pdf”?":\n  - status: Deleting…' },
+        error: { focus: error, tree: `- dialog "Delete “Receipts.pdf”?":\n  - alert: ${error}` },
+        accepted: { focus: 'Statement.pdf', tree: '- main:\n  - status: Deletion request accepted for “Receipts.pdf”.' },
+      };
+      const deletion = { width, height, writes, captures };
+      await writeFile(deletionPath, JSON.stringify(deletion));
+      for (const stage of deleteStages) {
+        await writeFile(join(dir, `delete-file-${width}-${stage}.png`), png);
+        await writeFile(join(dir, `axe-delete-file-${width}-${stage}.json`), '{"violations":[]}');
+      }
+      for (const mode of ['greyscale', 'forced-colours']) await writeFile(join(dir, `delete-file-${width}-${mode}.png`), png);
+      if (width === 390) await writeFile(join(dir, 'delete-file-320-reflow.png'), pngAt(320));
       if (width === 1280) {
+        await verifyDeletion();
+        const reflow = join(dir, 'delete-file-320-reflow.png');
+        const reflowImage = await readFile(reflow);
+        await writeFile(reflow, png);
+        await assert.rejects(verifyDeletion(), /Invalid deletion screenshot: delete-file-320-reflow/);
+        await writeFile(reflow, reflowImage);
+        await writeFile(deletionPath, JSON.stringify({ ...deletion, writes: writes.slice(1) }));
+        await assert.rejects(verifyDeletion(), /Invalid deletion trace: 1280/);
+        for (const accepted of [{ ...captures.accepted, focus: 'Cancel' }, { ...captures.accepted, tree: '- button' }]) {
+          await writeFile(deletionPath, JSON.stringify({ ...deletion, captures: { ...captures, accepted } }));
+          await assert.rejects(verifyDeletion(), /Invalid deletion evidence: delete-file-1280-accepted/);
+        }
+        await writeFile(deletionPath, JSON.stringify(deletion));
+        const axePath = join(dir, 'axe-delete-file-1280-saving.json');
+        await writeFile(axePath, '{"violations":[{}]}');
+        await assert.rejects(verifyDeletion(), /Invalid deletion evidence: delete-file-1280-saving/);
+        await writeFile(axePath, '{"violations":[]}');
         const screenshot = join(dir, 'root-continuation-uploaded-1280.png');
         const headerOnly = Buffer.concat([png.subarray(0, 33), png.subarray(-12)]);
         const wrongHeight = Buffer.from(png), overrun = Buffer.from(png);

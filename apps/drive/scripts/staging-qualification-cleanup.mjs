@@ -53,17 +53,29 @@ export async function cleanQualificationR2(context, signal, { listing, request }
   }
 }
 
-// No executable entry point. The protected lifecycle will supply this callback
-// only after checking native expiry and establishing exclusive fixture scope.
-export async function createQualificationR2Cleanup(env, cwd, { send = fetch } = {}) {
-  const identity = assertQualificationJob(env, cwd);
+async function boundCleanup(identity, env, cwd, send) {
   const { settings } = await readQualificationR2Binding(env, cwd, identity.sha).catch(() => { throw unverified(); });
   const { createS3Listing } = await import('../src/lib/server/s3/listing.ts');
   const { createS3Transport } = await import('../src/lib/server/s3/transport.ts');
   const options = { fetch: send, timeoutMs: 8000, drainBufferedAbort: true };
   const io = { listing: createS3Listing(settings, options), request: createS3Transport(settings, options) };
+  const prefix = qualificationPrefix(identity);
   return (context, signal) => {
-    if (context.sha !== identity.sha || context.prefix !== qualificationPrefix(identity)) throw unverified();
+    if (context.sha !== identity.sha || context.prefix !== prefix) throw unverified();
     return cleanQualificationR2(context, signal, io);
   };
+}
+
+// No executable entry point. The protected lifecycle supplies this callback
+// only after checking native expiry and establishing exclusive fixture scope.
+export async function createQualificationR2Cleanup(env, cwd, { send = fetch } = {}) {
+  return boundCleanup(assertQualificationJob(env, cwd), env, cwd, send);
+}
+
+// The recovery coordinator authenticates this historical attempt and holds its
+// writer fence. Never substitute current recovery-job identity or settings.
+export async function cleanHistoricalQualificationR2(context, env, cwd, signal, send) {
+  signal.throwIfAborted();
+  const clean = await boundCleanup(context, env, cwd, send);
+  return clean(context, signal);
 }

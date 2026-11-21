@@ -30,11 +30,15 @@ Local runs can include uncommitted changes and must not be treated as commit
 provenance. After a CI change merges, a substantive pull request body edit starts
 a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
-On the matching head, CI also builds the real generated Worker and runs
-`sign-in.mjs` in Chromium. The existing sign-in and root-upload fixture evidence
-is separate from `staging-root-round-trip.json`: the latter uses the exact staging
-origin, a disposable D1, and synthetic storage with no sign-in fixture flag or
-remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
+On the matching head, CI builds the generated Worker once and runs `sign-in.mjs`
+and then the staging-origin fixture in separate Chromium steps. Each entrypoint,
+including its cleanup, has a 90-second timeout and a 10-second kill grace within
+the same 15-minute job. Both steps use the same build and evidence directory.
+The second step uses `staging-root-standalone.mjs` to run `staging-root.mjs` only
+on heads with the split; earlier heads either lack staging coverage or run it
+from `sign-in.mjs`. The sign-in and root-upload evidence is separate from
+`staging-root-round-trip.json`: the latter uses the exact staging origin, a
+disposable D1, and synthetic storage with no sign-in fixture flag or remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
 without navigation, full and range byte equality, and admission denials. For
 notice recovery, the relay seeds one synthetic Worker document request at a time
 and checks the Worker's expiration header; Chromium checks the rendered notice
@@ -50,6 +54,16 @@ holds the suffix evidence response to verify zero credit before refusal. Raw
 API and listing data requests are blocked and fail the scenario. The CI artifact
 validator requires the trace, screenshots and axe report at both widths. The
 fixture does not enable continuation on any Worker route.
+
+The owned-file K7/K10 fixture (`?delete-file`) uses only synthetic rows. Playwright
+intercepts `POST /api/entries/:id/delete` and asserts the exact JSON bytes. It
+never forwards the mutation to a Worker; mocked `202` means request acceptance,
+not proof of physical removal. `delete-file-*-keyboard.json` records the request
+trace, keyboard focus and Playwright ARIA snapshots; `delete-file-*.png` and
+`axe-delete-file-*.json` cover open, saving, error and accepted states at 1280×800
+and 390×844, with extra captures for greyscale, forced colours and 320px reflow.
+Screen reader: carried (`DeleteFileFixture`); run the pass on the first route that
+renders it. No live listing, admission, folder deletes or storage are exercised.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended

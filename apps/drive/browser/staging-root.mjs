@@ -79,6 +79,8 @@ try {
 
   browser = await chromium.launch({ ignoreDefaultArgs: ['--disable-back-forward-cache'] });
   const context = await browser.newContext();
+  // Leave time for Playwright to report the failing operation before the fixture deadline.
+  context.setDefaultTimeout(15_000);
   const page = await context.newPage();
   // Keep interception armed across documents and chooser events, as in the sign-in fixture.
   page.on('filechooser', () => {});
@@ -271,6 +273,7 @@ try {
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       otherMemberCookie: `${sessionName}=${memberToken}`,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
+  console.log('Staging-origin: invite context closed; checking route denials');
   const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});
@@ -291,19 +294,23 @@ try {
     overrides.delete(pathname);
     return override ? override(route, forward) : forward();
   });
+  console.log('Staging-origin: checking folder documents and accessibility');
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
   const intercept = (path, handler) => overrides.set(path, handler);
+  console.log('Staging-origin: checking owner folder creation');
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
+  console.log('Staging-origin: checking owner rename');
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
   // Paging evidence is complete; make the published file visible on the first page.
   await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
   page.setDefaultTimeout(10_000);
   await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
 
+  console.log('Staging-origin: checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
   await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });

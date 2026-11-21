@@ -10,6 +10,7 @@ import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mj
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { createQualificationRecovery } from './staging-qualification-recovery.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
@@ -108,6 +109,133 @@ test('composed cases require exact attempt and fail closed on unobserved access'
   await assert.rejects(run(active, signal), /\(access\)/);
   await assert.rejects(run(active, signal), /\(scope\)/);
   assert.deepEqual(trace, [{ identity: active, aborted: false }]);
+});
+
+test('native recovery binds all provider I/O to the authenticated historical attempt and held fence', async t => {
+  const { cwd, git, env, context: { sha, runId, attempt } } = job(t);
+  const source = { sha, runId, attempt };
+  git('rm', 'apps/drive/wrangler.staging.json', 'apps/drive/scripts/staging-storage-qualification.json');
+  git('commit', '-qm', 'current checkout has neither staging binding');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  env.TESTED_SHA = env.GITHUB_SHA = env.GITHUB_WORKFLOW_SHA = git('rev-parse', 'HEAD');
+  const repository = { full_name: 'TogetherWeOwn/qerith' };
+  const run = { id: 182, run_attempt: 3, head_sha: source.sha, head_branch: 'main', repository,
+    head_repository: repository, path: '.github/workflows/drive-staging-qualification.yml',
+    event: 'workflow_dispatch', status: 'completed', conclusion: 'failure' };
+  const jobs = { total_count: 1, jobs: [{ name: 'source', status: 'completed', conclusion: 'success',
+    run_id: 182, run_attempt: 3, head_sha: source.sha, steps: [{ name: 'Verify exact dispatch source before staging approval',
+      status: 'completed', conclusion: 'success' }] }] };
+  const version = '11111111-1111-1111-1111-111111111111', expiresAt = '1780000000000';
+  const previousVersion = '22222222-2222-2222-2222-222222222222';
+  const previousDeployment = '33333333-3333-3333-3333-333333333333';
+  const restoreId = '44444444-4444-4444-4444-444444444444';
+  const config = JSON.parse(git('show', `${sha}:apps/drive/wrangler.staging.json`));
+  const { database_id: databaseId } = config.d1_databases[0];
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const cf = `https://api.cloudflare.com/client/v4/accounts/${accountId}`;
+  const worker = `${cf}/workers/scripts/${config.name}`;
+  const d1 = `${cf}/d1/database/${databaseId}`;
+  const ok = (result, init) => Response.json({ success: true, errors: [], result }, init);
+  const tag = `${sha}-${runId}-${attempt}`;
+  env.CLOUDFLARE_API_TOKEN = 'fixture-admin';
+  const partialD1 = { 'D1 partial status': { status: 206 }, 'D1 content range': { headers: { 'Content-Range': 'bytes 0-70/140' } } };
+  for (const outcome of ['superseded', 'copied record', 'unattributed D1', ...Object.keys(partialD1), 'fence loss', 'verified']) {
+    const calls = [], providerCalls = [];
+    const fence = new AbortController();
+    const storage = signedFixture();
+    let gitHubReads = 0, workerRestored = false, bookmark = 'post_apply', fixtureError;
+    const answer = async (request, init) => {
+      assert.equal(gitHubReads, 3);
+      if (typeof request !== 'string') {
+        if (new URL(request.url).pathname.includes('/drive-qualification/recovery/')) return readRecord(request);
+        const result = await storage.send(request);
+        if (outcome === 'fence loss' && storage.trace.length === 2) fence.abort();
+        return result;
+      }
+      assert.equal(init.signal.aborted, false);
+      assert.equal(init.headers.authorization, 'Bearer fixture-admin');
+      const path = request.replace(worker, 'Worker').replace(d1, 'D1');
+      providerCalls.push(`${init.method} ${path}`);
+      const bindings = [{ name: 'DB', type: 'd1', id: databaseId }, { name: 'ASSETS', type: 'assets' }];
+      if (path === 'Worker/deployments' && init.method === 'GET') {
+        return ok({ deployments: [{ id: workerRestored ? restoreId : version,
+          versions: [{ version_id: workerRestored ? previousVersion : version, percentage: 100 }],
+          annotations: { 'workers/message': workerRestored ? `restore-${tag}` : tag } }] });
+      }
+      if (path === `Worker/versions/${previousVersion}`) return ok({ id: previousVersion, resources: { bindings } });
+      if (path === `Worker/versions/${version}`) return ok({ id: version, annotations: { 'workers/tag': tag }, resources: {
+        bindings: [...bindings, { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text', text: sha },
+          { name: 'DRIVE_QUALIFICATION_EXPIRES_AT', type: 'plain_text', text: expiresAt },
+          { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }],
+      } });
+      if (path === 'Worker/deployments') {
+        assert.deepEqual(JSON.parse(init.body), { strategy: 'percentage', versions: [{ version_id: previousVersion, percentage: 100 }],
+          annotations: { 'workers/message': `restore-${tag}` } });
+        workerRestored = true;
+        return ok({ id: restoreId });
+      }
+      if (path === 'D1') return ok({ uuid: databaseId, name: config.d1_databases[0].database_name, version: 'production' });
+      if (path === 'D1/time_travel/bookmark') return ok({ bookmark });
+      if (path === 'D1/time_travel/restore?bookmark=before_apply') {
+        bookmark = 'restored';
+        return ok({ bookmark, previous_bookmark: 'post_apply' });
+      }
+      assert.equal(path, 'D1/query');
+      assert.match(JSON.parse(init.body).batch[0].sql, /sqlite_schema.*d1_migrations/);
+      return ok([{ success: true, results: [] }], partialD1[outcome]);
+    };
+    function readRecord(request) {
+      assert.equal(request.method, 'GET');
+      assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
+      const kind = calls.length ? 'worker' : 'd1';
+      assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${source.sha}-run-182-attempt-3`);
+      calls.push(kind);
+      const body = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind, ...source,
+        ...(kind === 'worker' ? { attempt: outcome === 'copied record' ? '2' : attempt,
+          version, expiresAt, previousVersion, previousDeployment } : { bookmark: 'before_apply' }) });
+      const date = new Date().toUTCString();
+      return new Response(body, { headers: { date, 'last-modified': date, 'content-length': String(Buffer.byteLength(body)) } });
+    }
+    const adapters = {
+      token: 'fixture', githubRequest: async () => Response.json([run, jobs,
+        { ...run, run_attempt: outcome === 'superseded' ? 4 : 3 }][gitHubReads++]),
+      send: (...args) => answer(...args).catch(error => { fixtureError ??= error; throw error; }),
+      readWriterFence(candidate) {
+        assert.deepEqual(candidate, { ...source, version, expiresAt });
+        calls.push('fence');
+        const at = Date.now(), settled = { state: 'settled', at }, fenced = { state: 'fenced', at };
+        return { signal: fence.signal, snapshot: {
+          fence: { coverage: 'exclusive', current: source, superseded: false, since: at, until: at + 60_000 },
+          observedAt: at, runner: settled, candidate: { ...fenced, version, expiresAt }, inFlight: settled,
+          storageUrls: fenced, storageInFlight: settled, providerOperations: settled,
+        } };
+      },
+      proveD1Quiescence(scope, signal) {
+        assert.deepEqual(scope, { ...source, accountId, databaseId, bookmark: 'before_apply' });
+        assert.equal(signal.aborted, false);
+        calls.push('D1 proof');
+        return { ...scope, currentBookmark: 'post_apply', ledgerBefore: null, writersQuiescent: outcome !== 'unattributed D1' };
+      },
+    };
+    assert.throws(() => createQualificationRecovery(env, cwd, { ...adapters, proveD1Quiescence: undefined }), /\(input\)/);
+    const recover = createQualificationRecovery(env, cwd, adapters);
+    const phase = partialD1[outcome] ? 'D1 recovery' :
+      { superseded: 'source', 'copied record': 'worker record', 'unattributed D1': 'D1 recovery', 'fence loss': 'R2 cleanup' }[outcome];
+    if (phase) await assert.rejects(recover(source), { message: `Staging qualification recovery is unverified (${phase}).` });
+    else assert.equal(await recover(source), undefined);
+    assert.ifError(fixtureError);
+    assert.equal(gitHubReads, 3);
+    const workerCalls = ['GET Worker/deployments', `GET Worker/versions/${previousVersion}`,
+      `GET Worker/versions/${version}`, 'GET Worker/deployments', 'POST Worker/deployments', 'GET Worker/deployments'];
+    const d1Calls = ['GET D1', 'GET D1/time_travel/bookmark', 'POST D1/time_travel/restore?bookmark=before_apply',
+      'GET D1/time_travel/bookmark', 'POST D1/query', 'GET D1/time_travel/bookmark'];
+    const admitted = !['superseded', 'copied record'].includes(outcome);
+    assert.deepEqual(calls, admitted ? ['d1', 'worker', 'fence', 'D1 proof'] : outcome === 'superseded' ? [] : ['d1', 'worker']);
+    const expectedD1 = outcome === 'unattributed D1' ? [] : partialD1[outcome] ? d1Calls.slice(0, -1) : d1Calls;
+    assert.deepEqual(providerCalls, admitted ? [...workerCalls, ...expectedD1] : []);
+    assert.deepEqual(storage.trace, outcome === 'verified' ? ['GET', 'GET', 'DELETE', 'DELETE', 'GET', 'GET'] :
+      outcome === 'fence loss' ? ['GET', 'GET'] : []);
+  }
 });
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];

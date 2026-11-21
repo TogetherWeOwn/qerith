@@ -8,12 +8,14 @@
   import { entryChangePath } from './metadata-id';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
+  import { isLinkableFolderId } from './drive-navigation';
   import type { DriveUploadMode } from './server/request-auth';
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed }: {
-    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; metadataWriteAllowed: boolean;
+  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed, folderLinks }: {
+    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean;
+    metadataWriteAllowed: boolean; folderLinks: boolean;
   } = $props();
   let status = $state('');
   let receipt = $state<{ id: string; name: string; loaded: boolean }>();
@@ -141,7 +143,8 @@
   // loadRootListing returns only this session's owned entries at parent_id IS NULL.
   const items = $derived(result.status === 'ok' ? result.folder.entries.filter(({ id }) => !movedButNotRefreshed.includes(id)).map(({ id, name, kind, downloadable }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
-    href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
+    href: kind === 'folder' ? (folderLinks && isLinkableFolderId(id) ? `/f/${id}` : undefined) :
+      downloadAllowed && downloadable !== false && entryId.test(id) ? `/api/download/${id}` : undefined,
     reload: true, size: '', bytes: null, modified: '', shared: false, renamable: metadataWriteAllowed && !!entryChangePath(id)
   })) : []);
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));

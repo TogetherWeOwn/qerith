@@ -22,15 +22,16 @@ async function setup() {
     alice: await sessions.issue('alice'), admin: await sessions.issue('admin'), bob: await sessions.issue('bob') };
 }
 
-it('returns only active member IDs to the entry owner in one primary statement', async () => {
+it('returns only active member IDs and names to the entry owner in one primary statement', async () => {
   const { read, alice, admin, bob } = await setup();
+  await env.DB.prepare("UPDATE drive_principals SET display_name = 'Bob' WHERE id = 'bob'").run();
   const all = vi.fn(statement => statement.all());
   const withSession = vi.fn(constraint => {
     const db = env.DB.withSession(constraint);
     return { prepare: sql => ({ bind: (...values) => ({ all: () => all(db.prepare(sql).bind(...values)) }) }) };
   });
   expect(await new EligibleRecipients({ withSession }).listPage(alice.token, 'folder')).toEqual({
-    recipients: [{ recipientId: 'bob' }], nextCursor: null,
+    recipients: [{ recipientId: 'bob', displayName: 'Bob' }], nextCursor: null,
   });
   expect(withSession.mock.calls).toEqual([['first-primary']]);
   expect(all).toHaveBeenCalledTimes(1);
@@ -47,7 +48,7 @@ it('pages by ID and rechecks membership and session on every request', async () 
   const ids = Array.from({ length: 101 }, (_, i) => `recipient-${String(i).padStart(3, '0')}`);
   await env.DB.prepare("INSERT INTO drive_principals (id, role, status) SELECT value, 'member', 'active' FROM json_each(?)")
     .bind(JSON.stringify(ids)).run();
-  const expected = ['bob', ...ids].map(recipientId => ({ recipientId }));
+  const expected = ['bob', ...ids].map(recipientId => ({ recipientId, displayName: null }));
   const first = await read.listPage(alice.token, 'folder');
   expect(first).toEqual({ recipients: expected.slice(0, 100), nextCursor: expected[99].recipientId });
   const last = { recipients: expected.slice(100), nextCursor: null };
