@@ -60,3 +60,30 @@ Release-age filtering applies during resolution, not as a retrospective audit
 of an existing lock. Missing registry timestamps and non-registry sources may
 limit the age guarantee. Age filtering can delay a fresh security fix; handle
 such a conflict through a narrowly reviewed exception, not a global relaxation.
+
+## Synthetic K2 seek benchmark
+
+In the prepared `apps/drive-test` project, run `npm test -- test/k2-listing-benchmark.test.mjs`.
+It traverses 5,001 and 10,001 rows by name and size in both directions, checking
+folder/file and known/unknown seams, ties spanning pages, and exhaustion.
+Only size reverses: folder rank, unknown flag (distinct from zero bytes),
+ascending name rank, and binary ID retain their order. Diagnostics capture
+query time, bytes, and available D1 rows read for first, first file, deep, and
+first unknown-size file pages. The Worker checks numeric order and NFC apart
+from fixture ranks. Precomputed keys do not validate deployed collation,
+metadata, counts, cursors, route rendering, CPU, or the three-second target.
+
+## K2 metadata backfill fixture
+
+In the prepared project, run `npm test -- test/k2-metadata-backfill.test.mjs`.
+This test installs only a candidate side table; the schema is not in the
+migration set. Backfill uses the primary-key order and visits at most 200
+entries per call. Checkpoint only after the D1 batch commits; repeating a page
+preserves existing rows. Legacy modified time stays null. Legacy display type
+is structural File/Folder, not MIME or a claim based on the filename. Logical
+size is known only if it matches a pinned publication; this is not a storage
+availability or download authorization check.
+
+This is not an online migration. Before activation, establish atomic writer
+maintenance and reconcile entries inserted behind a backfill checkpoint. Old
+readers use only `drive_entries`; the backfill does not rewrite that table.
