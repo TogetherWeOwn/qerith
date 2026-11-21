@@ -21,10 +21,11 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
   try {
     require(context.prefix === qualificationPrefix(context) && typeof context.sha === 'string' && /^[0-9a-f]{40}$/.test(context.sha));
     return await runQualificationPhase(async (identity, active) => {
-      let started = false, proved = false;
-      await withFixtures(identity, active, async ({ owner, member, signedOut, ownerFile, memberFile }) => {
-        require(!started && new Set([owner, member, signedOut]).size === 3 && isFile(ownerFile));
-        started = true;
+      let invocations = 0, proved = false;
+      await withFixtures(identity, active, async fixtures => {
+        require(++invocations === 1);
+        const { owner, member, signedOut, ownerFile, memberFile } = fixtures;
+        require(new Set([owner, member, signedOut]).size === 3 && isFile(ownerFile));
         const expect = (response, status) => {
           active.throwIfAborted();
           require(response.status === status && !response.redirected && !response.headers.has('location') &&
@@ -44,8 +45,11 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
           active.throwIfAborted();
           const { challenge, verify } = await client.signIn(active);
           expect(challenge, 200);
-          if (code) require((await expect(verify, status).json()).code === code && !verify.headers.has('set-cookie'));
-          else expect(verify, status);
+          expect(verify, status);
+          if (code) {
+            const denial = await verify.json();
+            require(denial?.code === code && Object.keys(denial).length === 1 && !verify.headers.has('set-cookie'));
+          } else require(verify.headers.has('set-cookie'));
           await session(client, code ? 401 : 200);
         };
         const read = async (client, file) => {
@@ -94,7 +98,7 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
         proved = true;
       });
       check = 'fixture-scope';
-      require(proved);
+      require(proved && invocations === 1);
       return { 'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
         'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass' };
     }, context, signal, 90_000);

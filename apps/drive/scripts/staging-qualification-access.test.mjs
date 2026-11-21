@@ -14,16 +14,17 @@ const reply = (status, body = null, headers = {}) => new Response(body, {
 const data = (status, body) => reply(status, JSON.stringify(body));
 const bytes = file => reply(200, file.bytes, { 'content-length': '2' });
 const login = verify => ({ challenge: reply(200), verify });
+const accepted = () => login(reply(204, null, { 'set-cookie': 'present' }));
 
 function fixture(change = () => {}) {
   const transcript = [
-    ['owner HEAD /', reply(401)], ['owner sign-in', login(reply(204))],
+    ['owner HEAD /', reply(401)], ['owner sign-in', accepted()],
     ['owner HEAD /', reply(200)], [`owner GET ${first}`, bytes(ownerFile)],
     ['signedOut HEAD /', reply(401)], ['signedOut sign-in', login(data(401, { code: 'denied' }))], ['signedOut HEAD /', reply(401)],
     ['member HEAD /', reply(401)], ['owner POST /api/owner/invitations', data(201, { token }), { displayName: 'Qualification member' }],
     ['member invite', { present: data(200, { displayName: 'Qualification member' }), challenge: reply(200), enroll: reply(204) }, token],
     ['member HEAD /', reply(401)], ['signedOut POST /api/invite/present', reply(404), { token }],
-    ['member sign-in', login(reply(204))], ['member HEAD /', reply(200)], ['member file setup', otherFile],
+    ['member sign-in', accepted()], ['member HEAD /', reply(200)], ['member file setup', otherFile],
     [`member GET ${second}`, bytes(otherFile)], [`member GET ${first}`, reply(404)], [`owner GET ${second}`, reply(404)],
     [`signedOut GET ${first}`, reply(401)], [`signedOut GET ${second}`, reply(401)],
     [`owner POST /api/owner/members/${uuid(3)}/revoke`, reply(204)], [`member GET ${second}`, reply(401)],
@@ -69,8 +70,10 @@ test('all six access cases require the exact isolated browser transcript', async
 });
 
 for (const [description, step, replacement, check] of [
+  ['missing verify cookie', 'owner sign-in', () => login(reply(204)), 'passkey-positive'],
   ['missing positive file route', `owner GET ${first}`, () => reply(404), 'passkey-positive'],
   ['wrong negative passkey code', 'signedOut sign-in', () => login(data(401, { code: 'unavailable' })), 'passkey-negative'],
+  ['extra denial fields', 'signedOut sign-in', () => login(data(401, { code: 'denied', extra: true })), 'passkey-negative'],
   ['missing verify route', 'signedOut sign-in', () => login(reply(404)), 'passkey-negative'],
   ['missing invite present route', 'member invite', result => ({ ...result, present: reply(404) }), 'invite-acceptance'],
   ['reusable invite', 'signedOut POST /api/invite/present', () => reply(200), 'invite-acceptance'],
@@ -79,12 +82,26 @@ for (const [description, step, replacement, check] of [
   ['cross-user denial leaks bytes', `member GET ${first}`, () => reply(404, Buffer.from([0xef, 0xbb, 0xbf])), 'cross-user-denial'],
   ['signed-out request redirects', `signedOut GET ${second}`, () => reply(303, null, { location: '/sign-in' }), 'unauthenticated-file-denial'],
   ['revocation leaves existing session active', `member GET ${second}`, result => result.status === 401 ? bytes(otherFile) : result, 'member-revocation'],
-  ['revoked passkey still signs in', 'member sign-in', result => result.verify.status === 403 ? login(reply(204)) : result, 'member-revocation'],
+  ['revoked passkey still signs in', 'member sign-in', result => result.verify.status === 403 ? accepted() : result, 'member-revocation'],
 ]) test(description, async () => {
   const scope = fixture((command, result) => command === step ? replacement(result) : result);
   await assert.rejects(exerciseQualificationAccess(context, undefined, scope), {
     message: `Qualification access is unverified (${check}).`,
   });
+  assert.equal(scope.closed(), true);
+});
+
+test('a settled duplicate callback invalidates a complete transcript', async () => {
+  const scope = fixture();
+  let duplicate;
+  await assert.rejects(exerciseQualificationAccess(context, undefined, {
+    withFixtures: (identity, active, run) => scope.withFixtures(identity, active, async fixtures => {
+      await run(fixtures);
+      [duplicate] = await Promise.allSettled([run()]);
+    }),
+  }), { message: 'Qualification access is unverified (fixture-scope).' });
+  assert.equal(duplicate.status, 'rejected');
+  assert.equal(scope.transcript.length, 0);
   assert.equal(scope.closed(), true);
 });
 
