@@ -6,22 +6,41 @@ const endpoint = 'https://storage.example.test', bucket = 'drive-test', epoch = 
 const owner = 'owner-fixture';
 const confirmation = '{"confirm":"permanent-delete"}';
 
-// Imported only by the temporary smoke wrapper, not the generated Worker.
+const deletionStorageBindings = {
+  DRIVE_S3_ENDPOINT: `${endpoint.toUpperCase()}:443/`, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: 'auto',
+  DRIVE_S3_ACCESS_KEY_ID: 'fixture', DRIVE_S3_SECRET_ACCESS_KEY: 'fixture', DRIVE_S3_STORAGE_EPOCH: epoch,
+  DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, storageConfigId: JSON.stringify([endpoint, bucket, epoch]),
+    region: 'auto', sourceSha: 'a'.repeat(40), runId: '1', runAttempt: 1, completionTimeoutMs: 5000 })
+};
+
+// Only the disposable wrapper supplies a synthetic qualification and intercepts outbound fetch.
 export const deletionWorker = `
-import { privateDeletionFixtures } from ${JSON.stringify(resolve('src/lib/server/private-deletion-route.ts'))};
-function admitDeletion(request, DB) {
-  if (request.headers.get('x-test-deletion') !== '1') return;
-  privateDeletionFixtures.set(request, {
-    config: { endpoint: '${endpoint}', bucket: '${bucket}', region: 'auto', accessKeyId: 'fixture', secretAccessKey: 'fixture' },
-    epoch: '${epoch}',
-    provider: {
-      async fetch(input) {
-        const key = new URL(input.url).pathname;
-        await DB.prepare('INSERT INTO smoke_deletion_calls VALUES (?, ?, ?)').bind(key, input.method, input.headers.get('if-match')).run();
-        return new Response(null, { status: 204, headers: key.endsWith('/ambiguous') ? {} : { 'x-fixture-removal': 'permanent' } });
-      },
-      confirmsRemoval: ({ headers }) => headers.get('x-fixture-removal') === 'permanent',
-    }
+import { env as deletionEnv } from 'cloudflare:workers';
+import { deletePrivateEntry } from ${JSON.stringify(resolve('src/lib/server/private-deletion-route.ts'))};
+globalThis.fetch = async (input) => {
+  const { origin, pathname, search } = new URL(input.url);
+  const etag = input.headers.get('if-match');
+  await deletionEnv.DB.prepare('INSERT INTO smoke_deletion_calls VALUES (?, ?, ?)').bind(pathname, input.method, etag).run();
+  const signed = input.headers.get('authorization')?.match(/SignedHeaders=([^,]+)/)?.[1].split(';');
+  if (origin !== '${endpoint}' || search || input.method !== 'DELETE' || !etag || !signed?.includes('if-match')) {
+    throw new Error('Unexpected deletion dispatch');
+  }
+  return new Response(null, { status: 204, headers: pathname.endsWith('/ambiguous') ? {} : { 'x-fixture-removal': 'permanent' } });
+};
+function runtimeDeletion(request, env, generated) {
+  const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete$/.exec(new URL(request.url).pathname)?.[1];
+  if (!entryId) return;
+  const bindings = { ...env, ...${JSON.stringify(deletionStorageBindings)} };
+  const mode = request.headers.get('x-test-deletion');
+  if (mode === null) return generated(bindings);
+  const epoch = mode === 'stale-epoch' ? 'new-epoch' : '${epoch}';
+  return deletePrivateEntry(request, entryId, {
+    ...bindings,
+    DRIVE_S3_STORAGE_EPOCH: mode === 'missing-epoch' ? undefined : mode === 'mismatch' ? 'wrong-epoch' : epoch,
+  }, {
+    storageConfigId: JSON.stringify(['${endpoint}', '${bucket}', epoch]),
+    region: 'auto',
+    confirmsRemoval: mode === 'missing-rule' ? undefined : ({ headers }) => headers.get('x-fixture-removal') === 'permanent',
   });
 }`;
 
@@ -68,6 +87,8 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   }
   for (const [headers, status, body] of [
     [{ 'x-test-deletion': null }, 404], [{ cookie: null }, 401], [{ cookie: revoked }, 401], [{ cookie: other }, 404],
+    [{ 'x-test-deletion': 'missing-rule' }, 503], [{ 'x-test-deletion': 'missing-epoch' }, 503],
+    [{ 'x-test-deletion': 'mismatch' }, 503], [{ 'x-test-deletion': 'stale-epoch' }, 404],
     [{ origin: null }, 403], [{ origin: 'https://other.example.test' }, 403],
     [{}, 400, '{}'], [{}, 400, '{"confirm":"permanent-DELETE"}'],
     [{}, 400, '{"confirm":"permanent-delete","extra":true}'], [{}, 400, ' '.repeat(129)],
@@ -78,19 +99,28 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   assert.equal(wrongMethod.headers.get('allow'), 'POST');
   assert.deepEqual(await snapshot(), before);
 
-  for (const [limit, chain] of [[128, false], [33, true]]) {
-    const ids = Array.from({ length: limit + 1 }, () => randomUUID());
+  // The selected child and its file contribute two more entries to each tree.
+  for (const [folders, chain] of [[129 - 2, false], [34, true]]) {
+    const ids = Array.from({ length: folders }, () => randomUUID());
     for (let offset = 0; offset < ids.length; offset += 32) {
       await DB.batch(ids.slice(offset, offset + 32).map((id, i) => {
         const index = offset + i;
         return folder(id, index === 0 ? null : ids[chain ? index - 1 : 0]);
       }));
     }
+    const move = 'UPDATE drive_entries SET parent_id = ? WHERE id = ?';
+    await sql(move, ids[0], selected.child).run();
     const overLimit = await snapshot();
     await remove(ids[0], 404);
     assert.deepEqual(await snapshot(), overLimit);
+    await sql(move, selected.root, selected.child).run();
   }
   const unrelated = await tree('unrelated');
+  await sql("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind, object_key, size_bytes) VALUES (?, ?, ?, 'legacy', 'file', 'legacy-key', 7)",
+    randomUUID(), owner, unrelated.child).run();
+  const unpinned = await snapshot();
+  await remove(unrelated.root, 404);
+  assert.deepEqual(await snapshot(), unpinned);
   await DB.batch([
     sql('INSERT INTO drive_deleted_entries VALUES (?, ?, ?, ?)', unrelated.file, randomUUID(), owner, 'unrelated'),
     sql('DELETE FROM drive_entries WHERE id = ?', unrelated.file),

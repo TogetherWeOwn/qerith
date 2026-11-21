@@ -4,6 +4,14 @@ The drain is a fixture-only callback, not a deployed scheduler. The default
 Worker and generated preview do not register a scheduled handler. No request,
 cron configuration, binding or environment setting admits the drain.
 
+The confirmed request handler requires a server-supplied deletion qualification
+for the normalized endpoint, bucket, storage epoch, and signing region. Storage
+settings and upload qualification alone cannot admit deletion. No generated
+Worker supplies this capability. After a committed journal, the handler can
+attempt one bounded pass scoped to that journal; HTTP 202 reports the commit,
+not provider removal. Unconfirmed and unattempted jobs remain in D1 for a
+separately admitted drain.
+
 ## Proposed cadence and capacity
 
 After separate qualification and release approval, propose one invocation every
