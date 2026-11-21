@@ -355,6 +355,38 @@ class IsolationTests(unittest.TestCase):
                 loopback_upstream(url)
 
 
+class RelayBudgetTests(unittest.TestCase):
+    def test_budget_violation_is_reported_when_socket_cleanup_triggers_stop(self):
+        for stream_limit, total_limit in ((4, 100), (100, 4)):
+            with self.subTest(stream_limit=stream_limit, total_limit=total_limit), \
+                    tempfile.TemporaryDirectory() as directory, \
+                    mock.patch("relay.ssl.SSLContext") as tls, \
+                    mock.patch("relay.socket.create_connection") as connect, \
+                    mock.patch("relay.select.select") as select, \
+                    mock.patch("relay.MAX_STREAM_BYTES", stream_limit), \
+                    mock.patch("relay.MAX_TOTAL_BYTES", total_limit):
+                client = tls.return_value.wrap_socket.return_value.__enter__.return_value
+                client.recv.return_value = b"oversize"
+                server = connect.return_value.__enter__.return_value
+                select.return_value = ([client], [], [])
+
+                with Relay("http://127.0.0.1:1", None, None, directory) as relay:
+                    # Upstream EOF can trigger shutdown during socket unwinding,
+                    # before forward's generic exception handler runs.
+                    connect.return_value.__exit__.side_effect = lambda *_: relay.stop.set()
+                    self.assertTrue(relay.slots.acquire(blocking=False))
+                    relay.forward(mock.Mock(), 1)
+                    self.assertTrue(relay.stop.is_set())
+
+                server.sendall.assert_not_called()
+                root = Path(directory)
+                self.assertEqual((root / "connection-0001.request.bin").read_bytes(), b"")
+                trace = json.loads((root / "connection-0001.json").read_text())
+                self.assertIn("relay byte budget exceeded", trace["error"])
+                summary = json.loads((root / "relay.json").read_text())
+                self.assertEqual(summary["errors"], [trace["error"]])
+
+
 class RelayTests(unittest.TestCase):
     def setUp(self):
         self.assertEqual(os.environ.get("GITHUB_ACTIONS"), "true", "tests run only in Actions")
