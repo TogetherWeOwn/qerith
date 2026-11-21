@@ -31,7 +31,9 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const writes = r => r.method() === 'PATCH' && [patch, secondPatch].includes(new URL(r.url()).pathname);
     const track = r => { if (writes(r) || r.url().startsWith(`${origin}${path}/__data.json`)) requests.push(r.url()); };
     page.on('request', track);
-    const submit = async label => (await Promise.all([page.waitForResponse(r => writes(r.request())), button(label).and(page.locator('[aria-disabled="false"]')).press('Enter', { noWaitAfter: true })]))[0].status();
+    const press = label => button(label).and(page.locator('[aria-disabled="false"]')).press('Enter', { noWaitAfter: true });
+    const response = matches => page.waitForResponse(r => matches(r.request()));
+    const submit = async label => (await Promise.all([response(writes), press(label)]))[0].status();
     if (nested) {
       const reparent = id => db.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(id, source).run();
       await reparent('nested-gone'); await open();
@@ -62,30 +64,28 @@ export async function proveNestedMove(page, origin, db, intercept) {
     if (nested) {
       await button(target).press('Enter');
       intercept(patch, route => route.abort());
-      await button(primary).press('Enter');
+      await press(primary);
       assert.match(await dialog.getByRole('alert').and(focused).textContent(), /Refresh the source folder and check the selected destination/);
       assert.equal(await button(primary).getAttribute('aria-disabled'), 'true');
       await button(primary).press('Enter'); await evidence('unconfirmed');
       await page.reload(); await open(); // Move A goes to My Drive, B to the nested destination.
-      intercept(path, (_, forward) => reloadGate.promise.then(() => db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next', ?1 || '-other')")
-        .bind(parent).run()).then(() => forward()));
     }
     const isReload = r => r.url() === origin + path && r.isNavigationRequest();
-    const started = page.waitForRequest(isReload), reload = page.waitForResponse(r => isReload(r.request()));
-    intercept(patch, async (_, forward) => { await held.promise; return forward(); });
-    const pending = submit('Move to My Drive');
+    intercept(path, (_, forward) => reloadGate.promise.then(() => nested && db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next', ?1 || '-other')")
+      .bind(parent).run()).then(() => forward()));
+    intercept(patch, (_, forward) => held.promise.then(() => forward()));
     try {
+      await press('Move to My Drive');
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
-    } finally { held.resolve(); }
-    try {
-      assert.equal(await pending, 200);
-      if (nested) await Promise.all([started, dialog.waitFor({ state: 'hidden' }), next.waitFor(), generic.waitFor(),
+      // Arm each response deadline only when its gate is about to open.
+      const [saved] = await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]);
+      assert.equal(saved.status(), 200);
+      if (nested) await Promise.all([dialog.waitFor({ state: 'hidden' }), next.waitFor(), generic.waitFor(),
         page.locator(`[data-row="${source}"]`).waitFor({ state: 'detached' })]);
-    } finally { reloadGate.resolve(); }
-    assert.equal((await reload).status(), 200);
+      assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
+    } finally { held.resolve(); reloadGate.resolve(); }
     if (nested) {
-      console.log('Nested Move: checking unavailable-document and receipt recovery');
       await page.getByRole('heading', { name: "This folder isn't available." }).and(focused).waitFor();
       await status('Item moved. Refresh this page').waitFor();
       const api = '/api/move-destinations', lookup = (id, query = '') => r => r.url() === `${origin}${api}?entry=${id}${query}`;
