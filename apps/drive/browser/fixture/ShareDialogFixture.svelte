@@ -35,8 +35,8 @@
   <ShareDialog bind:this={dialog} name={mode === 'file' ? 'Budget.pdf' : 'Taxes 2025'} kind={mode === 'file' ? 'File' : 'Folder'}
     owner={{ recipientId: owner.recipientId, driveOwner: mode !== 'member' }} nobodyElse={alone} onInvite={() => invited = true}
     access={{ state: accessState, rows: alone || mode === 'failed' || mode === 'partial' ? [] : grants, complete: mode !== 'partial',
-      ...(mode === 'partial' ? { next: () => accessState = 'loading' } : { retry: () => accessState = 'ready' }) }}
-    candidates={{ state: 'ready', rows: alone ? [] : second ? [unnamed] : [lee, sam, owner],
+      ...(mode === 'partial' ? { pageNumber: 1, next: () => accessState = 'loading' } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
+    candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : second ? [unnamed] : [lee, sam, owner],
       ...(!alone && (second ? { previous: () => second = false } : { next: () => second = true })) }} onShare={share} onRemove={remove} />
 </main>
 
