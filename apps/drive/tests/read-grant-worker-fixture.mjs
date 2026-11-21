@@ -89,7 +89,7 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
       await reject(send('GET', eligible, owner, { 'sec-fetch-site': site }), 403, `roster ${site} fetch`);
     }
     for (const [method, url] of [['HEAD', eligible], ['POST', eligible], ['GET', `${eligible}?`],
-      ['GET', eligible.replace('%2F', '%2f')], ['GET', eligible.replace('/eligible-', '/%65ligible-')]]) {
+      ['GET', eligible.replaceAll('%2F', '%2f')], ['GET', eligible.replace('/eligible-', '/%65ligible-')]]) {
       await reject(send(method, url), 404, `${method} ${url}`);
     }
     await reject(send('GET', `${eligible}?cursor=a&cursor=b`), 400, 'ambiguous roster cursor');
