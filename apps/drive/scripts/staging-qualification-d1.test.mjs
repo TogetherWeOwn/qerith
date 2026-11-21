@@ -65,11 +65,10 @@ function fixture(t, { emptyBaseline = false } = {}) {
     if (path === '' && method === 'GET') return ok({ uuid: databaseId, name: 'qerith-drive-staging', version: 'production' });
     if (path === '/time_travel/bookmark' && method === 'GET') return ok({ bookmark: current });
     if (path === restore && method === 'POST') {
-      const previous_bookmark = current;
       db.close();
       db = baseline();
       current = postRestore;
-      return ok({ bookmark: current, previous_bookmark });
+      return ok({ bookmark: before, previous_bookmark: '02-undo-point' });
     }
     assert.equal(path, '/query');
     assert.equal(method, 'POST');
@@ -175,6 +174,17 @@ test('recovery restores the recorded pre-mutation schema and ledger, including a
   }
 });
 
+test('recovery requires an absent ledger to stay absent regardless of table name casing', async t => {
+  const f = fixture(t, { emptyBaseline: true });
+  f.intercept((path, _, run) => {
+    const result = run();
+    if (path === restore) f.sql('CREATE TABLE D1_MIGRATIONS (id INTEGER)');
+    return result;
+  });
+  await assert.rejects(f.recover(), recoveryError);
+  assert.equal(f.calls.at(-1), '/query');
+});
+
 test('recovery refuses a bookmark advanced during final ledger readback, even if the ledger matches', async t => {
   for (const emptyBaseline of [false, true]) {
     const f = fixture(t, { emptyBaseline });
@@ -210,22 +220,22 @@ test('recovery will not restore without exact source, authenticated proof, and u
 });
 
 test('recovery does not retry a lost response or certify a wrong bookmark or rewritten history', async t => {
-  for (const fault of ['lost', 'wrong-prior', 'unchanged', 'superseded', 'rewritten']) {
+  for (const fault of ['lost', 'wrong-target', 'bad-undo', 'unchanged', 'bad-head', 'rewritten']) {
     const f = fixture(t);
     f.intercept((path, _, run) => {
-      if (path === '/time_travel/bookmark' && f.calls.includes(restore) && fault === 'superseded') {
-        return ok({ bookmark: '04-superseding' });
-      }
+      if (path === '/time_travel/bookmark' && f.calls.includes(restore) && fault === 'bad-head') return ok({ bookmark: '' });
       if (path !== restore) return run();
-      if (fault === 'unchanged') return ok({ bookmark: f.proof.currentBookmark, previous_bookmark: f.proof.currentBookmark });
+      if (fault === 'unchanged') return ok({ bookmark: f.proof.bookmark, previous_bookmark: '02-undo-point' });
       const result = run();
       if (fault === 'lost') throw new Error('synthetic lost response');
-      if (fault === 'wrong-prior') return ok({ bookmark: '03-restored', previous_bookmark: '02-foreign' });
+      if (fault === 'wrong-target') return ok({ bookmark: '01-other', previous_bookmark: '02-undo-point' });
+      if (fault === 'bad-undo') return ok({ bookmark: f.proof.bookmark, previous_bookmark: '' });
       if (fault === 'rewritten') f.sql("UPDATE d1_migrations SET applied_at = '2026-11-20 22:00:00' WHERE id = 1");
       return result;
     });
-    await assert.rejects(f.recover(), recoveryError);
-    assert.deepEqual(f.calls.slice(0, 3), ['', '/time_travel/bookmark', restore]);
-    assert.equal(f.calls.filter(call => call.startsWith('/time_travel/restore')).length, 1);
+    await assert.rejects(f.recover(), recoveryError, fault);
+    assert.deepEqual(f.calls, ['', '/time_travel/bookmark', restore,
+      ...(['unchanged', 'bad-head', 'rewritten'].includes(fault) ? ['/time_travel/bookmark'] : []),
+      ...(fault === 'rewritten' ? ['/query', '/query'] : [])], fault);
   }
 });

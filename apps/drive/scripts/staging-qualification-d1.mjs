@@ -129,11 +129,12 @@ export async function recoverQualificationD1(source, record, { proveQuiescence }
       if (await current() !== currentBookmark) throw new Error();
       // At most one native restore. Never infer success from an ambiguous POST.
       const restored = await db.call(`/time_travel/restore?bookmark=${bookmark}`, 'POST');
-      if (!bookmarkToken(restored.bookmark) || restored.previous_bookmark !== currentBookmark) throw new Error();
-      // Compare against the native restored-state bookmark, not the historical
-      // input bookmark. Any mismatch (including maintenance drift) is unverified.
-      if (restored.bookmark === currentBookmark || await current() !== restored.bookmark) throw new Error();
-      const [tables] = await db.query([{ sql: "SELECT type FROM sqlite_schema WHERE name = 'd1_migrations'" }]);
+      // The POST identifies the restore target and undo point, not the live head.
+      if (restored.bookmark !== bookmark || !bookmarkToken(restored.previous_bookmark)) throw new Error();
+      // Bind both live reads under the caller's fence, independently of the POST.
+      const restoredHead = await current();
+      if (!bookmarkToken(restoredHead) || restoredHead === currentBookmark) throw new Error();
+      const [tables] = await db.query([{ sql: "SELECT type FROM sqlite_schema WHERE name = 'd1_migrations' COLLATE NOCASE" }]);
       if (expected === null) {
         if (tables.length) throw new Error();
       } else {
@@ -141,7 +142,7 @@ export async function recoverQualificationD1(source, record, { proveQuiescence }
         const [rows] = await db.query([{ sql: 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id LIMIT 257' }]);
         if (JSON.stringify(ledger(rows)) !== JSON.stringify(expected)) throw new Error();
       }
-      if (await current() !== restored.bookmark) throw new Error();
+      if (await current() !== restoredHead) throw new Error();
       return { status: 'restored' };
     }, identity, signal, 45_000);
   } catch {
