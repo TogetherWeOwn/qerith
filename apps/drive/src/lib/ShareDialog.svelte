@@ -173,7 +173,8 @@
   li { min-height: var(--drive-size-control-md); border-block-end: var(--drive-size-line) solid var(--drive-color-line-hairline); }
   li.added, .tag, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
   .avatar, .tag, button { border-radius: var(--drive-radius-pill); }
-  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm); }
+  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm);
+    color: var(--drive-color-avatar-text); }
   .person { flex: 1 0 10ch; min-width: 0; }
   small { display: block; font-size: var(--drive-font-size-meta); }
   .confirmation { flex-basis: 100%; }
