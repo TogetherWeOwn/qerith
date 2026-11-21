@@ -12,6 +12,7 @@ import { qualificationRecoveryWriter } from './staging-qualification-recovery-re
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
+import { createQualificationExercise } from './staging-qualification-exercise.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -75,6 +76,30 @@ test('protected settings must match the committed staging target and reviewed R2
   assert.deepEqual(run({ QERITH_S3_BUCKET: 'other-bucket' }), {
     status: 1, stdout: '', stderr: 'Protected staging target or reviewed storage binding is unverified.\n'
   });
+});
+
+test('composed cases require exact attempt and fail closed on unobserved access', async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const trace = [];
+  const adapters = Object.fromEntries(['readFileFixtures', 'openTransferClient', 'openDeletion', 'send']
+    .map(name => [name, () => trace.push(name)]));
+  adapters.withAccessFixtures = (identity, signal) => {
+    trace.push({ identity, aborted: signal.aborted });
+    return { 'passkey-positive': 'pass' }; // Not observed through the access checker.
+  };
+  await assert.rejects(createQualificationExercise(env, cwd, { ...adapters, openDeletion: undefined }), /adapters/);
+  await assert.rejects(createQualificationExercise({ ...env, QERITH_S3_BUCKET: 'other' }, cwd, adapters), /S3 cases are unverified/);
+  const run = await createQualificationExercise(env, cwd, adapters);
+  const { signal } = new AbortController();
+  for (const override of [{ sha: 'a'.repeat(40) }, { runId: '184' }, { attempt: '4' }, { prefix: 'drive-qualification/' }, { version: '' }]) {
+    await assert.rejects(run({ ...active, ...override }, signal), /\(scope\)/);
+  }
+  await assert.rejects(run(active, AbortSignal.abort()), /\(scope\)/);
+  assert.deepEqual(trace, []);
+  await assert.rejects(run(active, signal), /\(access\)/);
+  await assert.rejects(run(active, signal), /\(scope\)/);
+  assert.deepEqual(trace, [{ identity: active, aborted: false }]);
 });
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];

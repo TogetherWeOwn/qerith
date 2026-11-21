@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { assertDispatch, assertQualificationJob, qualificationReceiptName } from './staging-qualification.mjs';
+import { assertDispatch, assertQualificationJob, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
+import { qualificationExerciseCases } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
@@ -420,7 +421,9 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
 });
 
-function lifecycle(t, failure, driftKind) {
+const exerciseResults = Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass']));
+
+function lifecycle(t, failure, driftKind, results = exerciseResults) {
   const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
@@ -470,7 +473,7 @@ function lifecycle(t, failure, driftKind) {
       step('exercise-settled');
       signal.throwIfAborted();
       if (failure === 'exercise') throw new Error('Case failed');
-      return { 'passkey-positive': 'pass' };
+      return results;
     },
     cleanup({ prefix: keyPrefix, version: activeVersion }, signal) {
       assert.equal(keyPrefix, prefix);
@@ -519,7 +522,7 @@ const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'cre
 test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
   const { run, events, stored, testedSha } = lifecycle(t);
   assert.deepEqual(await run(), { migrations: { bookmark: 'bookmark' },
-    deployment: { cases: { 'passkey-positive': 'pass' }, restoredDeployment: 'restored' } });
+    deployment: { cases: exerciseResults, restoredDeployment: 'restored' } });
   assert.deepEqual(events, successOrder);
   const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
   const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
@@ -528,6 +531,25 @@ test('qualification lifecycle keeps cleanup inside the candidate and inventories
     { ...scope, kind: 'd1', bookmark: 'bookmark' },
     { ...scope, kind: 'worker', version, expiresAt, previousVersion, previousDeployment },
   ]);
+});
+
+test('exercise covers exactly the full-v0 cases not proved by the lifecycle', () => {
+  const lifecycleCases = ['sha-bound-readiness', 'migration-ledger', 'time-travel-bookmark',
+    'rollback-or-disablement', 'zero-idle-inventory', 'prefix-cleanup-verified'];
+  assert.deepEqual([...qualificationExerciseCases, ...lifecycleCases].sort(), [...requiredCases].sort());
+});
+
+test('incomplete or invalid case evidence does not skip cleanup and rollback', async t => {
+  const { 'delete-provider-proof': removed, ...incomplete } = exerciseResults;
+  const accessor = Object.defineProperty({ ...incomplete }, 'delete-provider-proof', {
+    get() { assert.fail('evidence getters must not be invoked'); },
+  });
+  for (const results of [incomplete, { ...exerciseResults, 'delete-provider-proof': 'skip' },
+    { ...exerciseResults, 'fixture-only': 'pass' }, Object.create(exerciseResults), accessor]) {
+    const { run, events } = lifecycle(t, undefined, undefined, results);
+    await assert.rejects(run(), /case evidence/);
+    assert.deepEqual(events, successOrder);
+  }
 });
 
 test('qualification lifecycle rejects missing admission, a stale baseline and unrecorded recovery', async t => {
