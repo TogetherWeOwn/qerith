@@ -135,10 +135,11 @@ test('native recovery binds all provider I/O to the authenticated historical att
   const cf = `https://api.cloudflare.com/client/v4/accounts/${accountId}`;
   const worker = `${cf}/workers/scripts/${config.name}`;
   const d1 = `${cf}/d1/database/${databaseId}`;
-  const ok = result => Response.json({ success: true, errors: [], result });
+  const ok = (result, init) => Response.json({ success: true, errors: [], result }, init);
   const tag = `${sha}-${runId}-${attempt}`;
   env.CLOUDFLARE_API_TOKEN = 'fixture-admin';
-  for (const outcome of ['superseded', 'copied record', 'unattributed D1', 'fence loss', 'verified']) {
+  const partialD1 = { 'D1 partial status': { status: 206 }, 'D1 content range': { headers: { 'Content-Range': 'bytes 0-70/140' } } };
+  for (const outcome of ['superseded', 'copied record', 'unattributed D1', ...Object.keys(partialD1), 'fence loss', 'verified']) {
     const calls = [], providerCalls = [];
     const fence = new AbortController();
     const storage = signedFixture();
@@ -181,7 +182,7 @@ test('native recovery binds all provider I/O to the authenticated historical att
       }
       assert.equal(path, 'D1/query');
       assert.match(JSON.parse(init.body).batch[0].sql, /sqlite_schema.*d1_migrations/);
-      return ok([{ success: true, results: [] }]);
+      return ok([{ success: true, results: [] }], partialD1[outcome]);
     };
     function readRecord(request) {
       assert.equal(request.method, 'GET');
@@ -218,7 +219,8 @@ test('native recovery binds all provider I/O to the authenticated historical att
     };
     assert.throws(() => createQualificationRecovery(env, cwd, { ...adapters, proveD1Quiescence: undefined }), /\(input\)/);
     const recover = createQualificationRecovery(env, cwd, adapters);
-    const phase = { superseded: 'source', 'copied record': 'worker record', 'unattributed D1': 'D1 recovery', 'fence loss': 'R2 cleanup' }[outcome];
+    const phase = partialD1[outcome] ? 'D1 recovery' :
+      { superseded: 'source', 'copied record': 'worker record', 'unattributed D1': 'D1 recovery', 'fence loss': 'R2 cleanup' }[outcome];
     if (phase) await assert.rejects(recover(source), { message: `Staging qualification recovery is unverified (${phase}).` });
     else assert.equal(await recover(source), undefined);
     assert.ifError(fixtureError);
@@ -229,7 +231,8 @@ test('native recovery binds all provider I/O to the authenticated historical att
       'GET D1/time_travel/bookmark', 'POST D1/query', 'GET D1/time_travel/bookmark'];
     const admitted = !['superseded', 'copied record'].includes(outcome);
     assert.deepEqual(calls, admitted ? ['d1', 'worker', 'fence', 'D1 proof'] : outcome === 'superseded' ? [] : ['d1', 'worker']);
-    assert.deepEqual(providerCalls, admitted ? [...workerCalls, ...(outcome === 'unattributed D1' ? [] : d1Calls)] : []);
+    const expectedD1 = outcome === 'unattributed D1' ? [] : partialD1[outcome] ? d1Calls.slice(0, -1) : d1Calls;
+    assert.deepEqual(providerCalls, admitted ? [...workerCalls, ...expectedD1] : []);
     assert.deepEqual(storage.trace, outcome === 'verified' ? ['GET', 'GET', 'DELETE', 'DELETE', 'GET', 'GET'] :
       outcome === 'fence loss' ? ['GET', 'GET'] : []);
   }
