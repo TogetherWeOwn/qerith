@@ -115,10 +115,10 @@
         {:else if !owner.driveOwner}<p>Ask the owner to invite them.</p>{/if}
       </div>
     {:else}
-      {@render pager(candidates, 'candidates', 'people to add')}
+      {#snippet candidatePages()}{@render pager(candidates, 'candidates', 'people to add')}{/snippet}
       {#key session}
         <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
-          onSelectionChange={select} {onPageFeedback} locked={!!pending || candidates.state !== 'ready'} />
+          onSelectionChange={select} {onPageFeedback} afterField={candidatePages} locked={!!pending || candidates.state !== 'ready'} />
       {/key}
     {/if}
     <p class:sr={!status} role="status">{status || live}</p>

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { flushSync, tick } from 'svelte';
+  type Choice = { recipientId: string; displayName: string | null };
   // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
-  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, locked = false, onPageFeedback }: {
+  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, locked = false, onPageFeedback, afterField }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
-    selectedChoices?: readonly Choice[];
+    selectedChoices?: readonly Choice[]; afterField?: import('svelte').Snippet;
     locked?: boolean; onPageFeedback?: (message: string, clear?: string) => void;
     onSelectionChange: (ids: string[]) => void;
   } = $props();
@@ -78,8 +79,7 @@
 </script>
 
 <script module lang="ts">
-  type Choice = { recipientId: string; displayName: string | null };
-  export function avatar(choice: Choice) {
+  export function avatar(choice: import('./share-client').ShareRecipient) {
     let hash = 0;
     for (const char of choice.recipientId) hash = (Math.imul(31, hash) + char.codePointAt(0)!) >>> 0;
     const initials = choice.displayName?.trim().split(/\s+/u).slice(0, 2)
@@ -107,6 +107,7 @@
       placeholder="Find someone by name" onfocus={() => open = true} onclick={() => { active = null; open = true; }}
       oninput={() => { announcement = ''; active = null; open = true; }} onblur={dismiss} onkeydown={keydown} />
   </div>
+  {@render afterField?.()}
   {#if expanded}
     <ul id={`${id}-choices`} role="listbox" aria-label="Available people" class="popover">
       {#each matches as choice, index (choice.recipientId)}
