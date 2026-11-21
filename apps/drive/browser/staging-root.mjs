@@ -4,6 +4,7 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { proveSharedListing } from './shared-listing.mjs';
 import { proveNewFolder } from './new-folder.mjs';
 import { proveRename } from './rename.mjs';
 import { captureFolderView } from './folder-view.mjs';
@@ -39,6 +40,10 @@ export default { fetch(request, env, ctx) {
   if (input.headers.get('x-fixture-invite') === '1') {
     configured.DRIVE_STAGING_INVITE_ACCEPTANCE = '1';
     input.headers.delete('x-fixture-invite');
+  }
+  if (input.headers.get('x-fixture-shared') === '1') {
+    configured.DRIVE_STAGING_SHARED_LISTING = '1';
+    input.headers.delete('x-fixture-shared');
   }
   return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
@@ -157,6 +162,8 @@ try {
     return [response.status, response.headers.get('content-range'), Array.from(new Uint8Array(await response.arrayBuffer()))];
   }, await row.getAttribute('href'));
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
+  await proveSharedListing(browser, { origin, DB, worker, relay, ownerCookie: cookie, memberToken,
+    file, downloadPath: await row.getAttribute('href') });
 
   // Without invite mode the owner picker still rejects files above the preview cap.
   const size = 16 * 1024 * 1024 + 1;
