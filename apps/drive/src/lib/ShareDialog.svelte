@@ -10,7 +10,7 @@
 </script>
 <script lang="ts">
   import { tick } from 'svelte';
-  import ShareRecipientPicker, { shareAvatar } from './ShareRecipientPicker.svelte';
+  import ShareRecipientPicker, { avatar } from './ShareRecipientPicker.svelte';
   import './dialog.css';
 
   let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove }: {
@@ -32,47 +32,50 @@
   let session = $state(0), picked = $state<ShareRecipient[]>([]);
   let confirm = $state<string | null>(null);
   let pending = $state<'share' | 'remove' | null>(null);
-  let error = $state(''), status = $state('');
+  let error = $state(''), status = $state(''), pickerFeedback = $state('');
+  let paging = $state<'access' | 'candidates' | null>(null);
+  const pageText = (page: SharePage<ShareRecipient>, subject: string) => page.state === 'loading' ? `Loading ${subject}…` :
+    page.state === 'ready' && page.pageNumber !== null ? `Showing page ${page.pageNumber} of ${subject}.` : '';
   let added = $state<string[]>([]);
   const allowed = $derived(candidates.rows.filter(person => person.recipientId !== owner.recipientId &&
     !access.rows.some(row => row.recipientId === person.recipientId)));
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
+  const pageStatus = $derived({ access: pageText(access, 'people with access'), candidates: pageText(candidates, 'people to add') });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from: HTMLElement) {
     if (dialog.open) return;
     opener = from;
-    session++; picked = []; confirm = null; error = status = ''; added = [];
+    session++; picked = []; confirm = paging = null; error = status = pickerFeedback = ''; added = [];
     dialog.showModal();
     await tick();
     if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
   }
-  function close() {
-    if (pending) return;
-    dialog.close(); opener?.focus();
-  }
+  function close() { if (!pending) { dialog.close(); opener?.focus(); } }
   function keys(event: KeyboardEvent) {
     if (event.key !== 'Tab') return;
     const [from, to] = event.shiftKey ? [first, last] : [last, first];
     if (document.activeElement === from) { event.preventDefault(); to.focus(); }
   }
-  function load(event: MouseEvent, action: () => void) {
+  function load(event: MouseEvent, key: keyof typeof pageStatus, action: () => void) {
     if (pending) return;
-    const button = event.currentTarget as HTMLButtonElement;
-    button.parentElement?.focus();
-    confirm = null;
+    (event.currentTarget as HTMLButtonElement).parentElement?.focus();
+    confirm = null; paging = key; status = pickerFeedback = '';
     action();
+  }
+  function onPageFeedback(message: string) {
+    pickerFeedback = message;
+    if (message) { status = ''; paging = null; }
   }
   function select(ids: string[]) {
     if (pending) return;
-    status = '';
     picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
   }
   async function apply(person?: ShareAccess) {
     if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
     const submitted = picked;
-    pending = person ? 'remove' : 'share'; error = status = '';
+    pending = person ? 'remove' : 'share'; paging = null; error = status = pickerFeedback = '';
     try {
       if (person) {
         await onRemove(person.recipientId);
@@ -96,14 +99,14 @@
   }
 </script>
 
-{#snippet pager(page: SharePage<ShareRecipient>, subject: string)}
+{#snippet pager(page: SharePage<ShareRecipient>, key: keyof typeof pageStatus, subject: string)}
   <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
-    <p role="status">{#if page.state === 'loading'}Loading {subject}…{:else if page.state === 'ready' && page.pageNumber !== null}Showing page {page.pageNumber} of {subject}.{/if}</p>
+    <p>{pageStatus[key]}</p>
     {#if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
-      {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.retry!)}>Retry</button>{/if}
+      {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, key, page.retry!)}>Retry</button>{/if}
     {:else if page.state === 'ready'}
-      {#if page.previous}<button type="button" aria-label={`Previous page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.previous!)}>Previous</button>{/if}
-      {#if page.next}<button type="button" aria-label={`Next page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.next!)}>Next</button>{/if}
+      {#if page.previous}<button type="button" aria-label={`Previous page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, key, page.previous!)}>Previous</button>{/if}
+      {#if page.next}<button type="button" aria-label={`Next page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, key, page.next!)}>Next</button>{/if}
     {/if}
   </div>
 {/snippet}
@@ -116,6 +119,7 @@
       <button type="button" class="close" aria-label="Close" aria-disabled={!!pending} bind:this={first} onclick={close}>×</button>
     </header>
     <p id={`${id}-rules`}>People you add can view and download. They can’t change, delete or re-share it.{kind === 'Folder' ? ' They also see anything you add to it later.' : ''}</p>
+    <div class="sr" role="status" aria-live="polite">{paging ? pageStatus[paging] : status || pickerFeedback}</div>
     {#if error}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{error}</p>{/if}
     {#if nobody}
       <div class="empty"><strong>There’s nobody else on this drive yet.</strong>
@@ -125,16 +129,17 @@
     {:else}
       {#key session}
         <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
-          onSelectionChange={select} {status} pageOnly locked={!!pending || candidates.state !== 'ready'} />
+          onSelectionChange={select} {onPageFeedback} locked={!!pending || candidates.state !== 'ready'} />
       {/key}
-      {@render pager(candidates, 'people to add')}
+      {#if status}<p class="feedback">{status}</p>{/if}
+      {@render pager(candidates, 'candidates', 'people to add')}
     {/if}
     <section aria-labelledby={`${id}-access`}>
       <h3 id={`${id}-access`} tabindex="-1" bind:this={accessTitle}>People with access</h3>
       <ul role="list">
         <li><strong>You · owner</strong></li>
         {#each access.rows.filter(row => row.recipientId !== owner.recipientId && (row.direct || row.inheritedFrom !== null)) as person (person.recipientId)}
-          {@const badge = shareAvatar(person)}
+          {@const badge = avatar(person)}
           <li class:added={added.includes(person.recipientId)}>
             <span class="avatar" style:background-color={badge.colour} aria-hidden="true">{badge.initials}</span>
             <div class="person"><strong><bdi>{label(person)}</bdi></strong>
@@ -158,7 +163,7 @@
         {/each}
       </ul>
       {#if access.state === 'ready' && access.complete && !access.next && !access.previous && !access.rows.length}<p>Only you can see this.</p>{/if}
-      {@render pager(access, 'people with access')}
+      {@render pager(access, 'access', 'people with access')}
     </section>
     {#if !picked.length}<p id={`${id}-pick`}>Pick someone to share with</p>{/if}
     <footer>
@@ -174,6 +179,8 @@
   footer { justify-content: flex-end; }
   h2, h3, p, li { overflow-wrap: anywhere; }
   h3, p, ul { margin: 0; }
+  .feedback { padding: var(--drive-space-3); }
+  .sr { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
   h3 { font-size: var(--drive-font-size-ui); }
   p, small, button { color: var(--drive-color-text-secondary); }
   p { font-size: var(--drive-font-size-small); }

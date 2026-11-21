@@ -21,7 +21,10 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
       const text = value => dialog.getByText(value, { exact: true });
       const key = name => page.keyboard.press(name);
       const writes = async (...ids) => assert.deepEqual(JSON.parse(await page.getByRole('main', { includeHidden: true }).getAttribute('data-writes')), ids);
-      const open = async mode => { await page.goto(`${origin}/?share-dialog=${mode}`); await opener.press('Enter'); await dialog.waitFor(); };
+      const open = async mode => {
+        await page.goto(`${origin}/?share-dialog=${mode}`); await opener.press('Enter'); await dialog.waitFor();
+        assert.equal(await page.locator('[role="status"], [aria-live="polite"]').count(), 1);
+      };
       const settle = () => page.evaluate(() => window.dispatchEvent(new Event('fixture-settle')));
       await open(width === 1280 ? 'actions' : 'file');
       assert.equal(await dialog.getByText(/anything you add/).count(), width === 1280 ? 1 : 0);
@@ -87,8 +90,15 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
           else await text('Ask the owner to invite them.').waitFor();
         } else {
           assert.equal(await text('Only you can see this.').count(), 0);
-          if (mode === 'failed') { await text('Couldn’t load people with access.').waitFor(); await button('Retry loading people with access').click(); await text('Only you can see this.').waitFor(); }
-          else { await button('Next page of people with access').click(); await announced('Loading people with access…'); }
+          if (mode === 'failed') {
+            await text('Couldn’t load people with access.').waitFor(); await button('Retry loading people with access').click();
+            for (const name of ['Pell Quinn', 'Sam Mora', 'Zoë Chen']) await dialog.getByRole('listitem').filter({ hasText: name }).waitFor();
+          } else {
+            await dialog.getByRole('option', { name: 'Lee Ray', exact: true }).waitFor();
+            assert.equal(await dialog.getByRole('option').count(), 1, 'Sam and the owner are not offered on an incomplete access page');
+            await button('Next page of people with access').click(); await announced('Loading people with access…');
+          }
+          assert.equal(await text('Only you can see this.').count(), 0);
           await writes();
         }
       }

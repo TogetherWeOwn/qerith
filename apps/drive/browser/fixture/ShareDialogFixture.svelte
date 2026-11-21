@@ -13,6 +13,8 @@
   let attempts = 0;
   let writes = $state<string[]>([]);
   const alone = $derived(mode === 'owner' || mode === 'member');
+  const eligible = $derived([lee, sam, owner, unnamed].filter(({ recipientId }) =>
+    recipientId !== owner.recipientId && !grants.some(row => row.recipientId === recipientId)));
   function settle() {
     return new Promise<void>((resolve, reject) => window.addEventListener('fixture-settle', () => [1, 3].includes(++attempts) ? reject() : resolve(), { once: true }));
   }
@@ -27,19 +29,17 @@
     grants = grants.flatMap(row => row.recipientId !== id ? [row] : row.inheritedFrom === null ? [] : [{ ...row, direct: false }]);
   }
 </script>
-
 <main data-writes={JSON.stringify(writes)}>
   <h1>My Drive</h1>
   <button type="button" onclick={event => { accessState = mode === 'failed' ? 'failed' : 'ready'; dialog.open(event.currentTarget); }}>Open Share</button>
   {#if invited}<p>Users and invites</p>{/if}
   <ShareDialog bind:this={dialog} name={mode === 'file' ? 'Budget.pdf' : 'Taxes 2025'} kind={mode === 'file' ? 'File' : 'Folder'}
     owner={{ recipientId: owner.recipientId, driveOwner: mode !== 'member' }} nobodyElse={alone} onInvite={() => invited = true}
-    access={{ state: accessState, rows: alone || mode === 'failed' || mode === 'partial' ? [] : grants, complete: mode !== 'partial',
+    access={{ state: accessState, rows: alone || accessState !== 'ready' || mode === 'partial' ? [] : grants, complete: mode !== 'partial',
       ...(mode === 'partial' ? { pageNumber: 1, next: () => accessState = 'loading' } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
-    candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : second ? [unnamed] : [lee, sam, owner],
-      ...(!alone && (second ? { previous: () => second = false } : { next: () => second = true })) }} onShare={share} onRemove={remove} />
+    candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : eligible.slice(second ? 1 : 0, second ? 2 : 1),
+      ...(!alone && (second ? { previous: () => second = false } : eligible.length > 1 ? { next: () => second = true } : {})) }} onShare={share} onRemove={remove} />
 </main>
-
 <style>
   :global(body) { background: var(--drive-color-bg-canvas); color: var(--drive-color-text-primary); font-family: var(--drive-font-ui); }
 </style>
