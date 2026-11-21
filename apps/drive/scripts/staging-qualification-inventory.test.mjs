@@ -24,14 +24,14 @@ const endpoint = `https://${storageAccount}.r2.cloudflarestorage.com`;
 const pinnedBucket = { name: bucket, jurisdiction: 'default' };
 const bucketPage = { total_count: 1, per_page: 10 };
 const namespacePage = { page: 1, per_page: 10, count: 0, total_count: 0, total_pages: 0 };
-const namespaceRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [], result: [],
+const emptyPagedRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [], result: [],
   result_info: namespacePage, ...overrides }, init);
 const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
 const streamEmpty = { liveInputs: [], range: 0, total: 0 };
 const streamRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: streamEmpty, ...overrides }, init);
-const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream'];
+const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows'];
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
 const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
@@ -129,7 +129,7 @@ function fixture(t) {
         trace.push('namespaces');
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
         state.onNamespaceList?.(init.signal);
-        return state.namespaceList ?? namespaceRoster();
+        return state.namespaceList ?? emptyPagedRoster();
       }
       if (url === `${root}${account}/containers/applications`) {
         trace.push('containers');
@@ -142,6 +142,11 @@ function fixture(t) {
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
         state.onStreamList?.(init.signal);
         return state.streamList ?? streamRoster();
+      }
+      if (url === `${root}${account}/workflows?page=1&per_page=10`) {
+        trace.push('workflows');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        return state.workflowList ?? emptyPagedRoster();
       }
       const scripts = `${root}${account}/workers/scripts`;
       if (url === scripts) {
@@ -453,7 +458,7 @@ test('inventory rejects a native Durable Object namespace before and after the a
     const run = f.create();
     if (phase === 'after') assert.equal(await run('before'), true);
     f.trace.length = 0;
-    f.state.namespaceList = namespaceRoster({ result: [{ name: 'unbound' }],
+    f.state.namespaceList = emptyPagedRoster({ result: [{ name: 'unbound' }],
       result_info: { ...namespacePage, count: 1, total_count: 1, total_pages: 1 } });
     await assert.rejects(run(phase), error);
     assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces']);
@@ -462,20 +467,20 @@ test('inventory rejects a native Durable Object namespace before and after the a
 
 test('inventory requires a complete, bounded native Durable Object namespace roster', async t => {
   const f = fixture(t);
-  for (const reply of [namespaceRoster({ result_info: { total_count: 0 } }),
-    namespaceRoster({ result_info: { ...namespacePage, total_pages: 1 } })]) {
+  for (const reply of [emptyPagedRoster({ result_info: { total_count: 0 } }),
+    emptyPagedRoster({ result_info: { ...namespacePage, total_pages: 1 } })]) {
     const run = f.create();
     f.state.namespaceList = reply;
     assert.equal(await run('before'), true);
   }
-  for (const reply of [namespaceRoster({ result: {} }), namespaceRoster({ result_info: undefined }),
-    namespaceRoster({ result_info: { page: 1 } }), namespaceRoster({ messages: ['unexpected'] }),
+  for (const reply of [emptyPagedRoster({ result: {} }), emptyPagedRoster({ result_info: undefined }),
+    emptyPagedRoster({ result_info: { page: 1 } }), emptyPagedRoster({ messages: ['unexpected'] }),
     ...[{ page: 2 }, { per_page: 1 }, { count: 1 }, { total_count: 1 }, { total_pages: 2 }, { cursor: 'next' }]
-      .map(page => namespaceRoster({ result_info: { ...namespacePage, ...page } })),
-    namespaceRoster({ success: false }), namespaceRoster({}, { status: 403 }),
-    namespaceRoster({}, { headers: { Link: '</next>; rel="next"' } }),
-    namespaceRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
-    new Response((await namespaceRoster().text()).padEnd(65_537, ' ')), new Response('not JSON')]) {
+      .map(page => emptyPagedRoster({ result_info: { ...namespacePage, ...page } })),
+    emptyPagedRoster({ success: false }), emptyPagedRoster({}, { status: 403 }),
+    emptyPagedRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    emptyPagedRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    new Response((await emptyPagedRoster().text()).padEnd(65_537, ' ')), new Response('not JSON')]) {
     const run = f.create();
     f.trace.length = 0;
     f.state.namespaceList = reply;
@@ -608,6 +613,38 @@ test('inventory rejects a native Stream roster returned after its deadline', asy
   await assert.rejects(run('before'), error);
   assert.deepEqual(aborted, [false, true]);
   assert.equal(f.trace.at(-1), 'stream');
+});
+
+test('inventory rejects any native Workflow definition before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const inspect = f.create();
+    if (phase === 'after') await inspect('before');
+    f.state.workflowList = emptyPagedRoster({ result: [{ name: 'synthetic' }],
+      result_info: { ...namespacePage, count: 1, total_count: 1, total_pages: 1 } });
+    await assert.rejects(inspect(phase), error);
+    assert.equal(f.trace.at(-1), 'workflows');
+  }
+});
+
+test('inventory requires a complete, bounded native Workflows roster', async t => {
+  const f = fixture(t);
+  const bad = [
+    emptyPagedRoster({}, { status: 403 }), emptyPagedRoster({}, { status: 206 }),
+    emptyPagedRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    emptyPagedRoster({ result_info: undefined }), emptyPagedRoster({ result_info: { total_count: 1 } }),
+    emptyPagedRoster({ result_info: { total_count: 0, total_pages: 2 } }),
+    emptyPagedRoster({ result_info: { total_count: 0, cursor: 'next' } }),
+    emptyPagedRoster({ success: false }), emptyPagedRoster({ result: null }),
+    new Response((await emptyPagedRoster().text()).replace('"result":[]', '"result":[{}],"result":[]')),
+    new Response((await emptyPagedRoster().text()).padEnd(65_537, ' ')),
+  ];
+  for (const reply of bad) {
+    const inspect = f.create();
+    f.state.workflowList = reply;
+    await assert.rejects(inspect('before'), error);
+    assert.equal(f.trace.at(-1), 'workflows');
+  }
 });
 
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
