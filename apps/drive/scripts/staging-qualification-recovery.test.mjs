@@ -27,7 +27,8 @@ function fixture() {
     assert.equal(signal.aborted, false);
     calls.push(name);
   };
-  return { calls, adapters: {
+  const fence = new AbortController();
+  return { calls, fence, adapters: {
     async readSource(identity, signal) {
       assert.deepEqual(identity, source);
       step('source', signal);
@@ -38,11 +39,18 @@ function fixture() {
       step(`read:${kind}`, signal);
       return records[kind];
     },
-    async proveWriters(context, evidence, signal) {
-      assert.deepEqual(context, { ...source, prefix });
-      assert.deepEqual(evidence, records);
+    async readWriterFence(candidate, signal) {
+      const { version, expiresAt } = records.worker;
+      const at = Date.now();
+      const settled = { state: 'settled', at };
+      const fenced = { state: 'fenced', at };
+      assert.deepEqual(candidate, { ...source, version, expiresAt });
       step('guard', signal);
-      return true;
+      return { signal: fence.signal, snapshot: {
+        fence: { coverage: 'exclusive', current: source, superseded: false, since: at, until: at + 60_000 },
+        observedAt: at, runner: settled, candidate: { ...fenced, version, expiresAt }, inFlight: settled,
+        storageUrls: fenced, storageInFlight: settled, providerOperations: settled,
+      } };
     },
     async recoverWorker(identity, record, signal) {
       assert.deepEqual(identity, source);
@@ -116,9 +124,15 @@ test('refuses absent, copied, wrong-kind and incomplete records before writer pr
 });
 
 test('baseline cannot substitute for proof against late activation or superseding writers', async () => {
-  for (const blocked of ['pending activation', 'superseding writer', 'ambiguous proof']) {
+  for (const [blocked, invalidate] of [
+    ['pending activation', proof => { proof.snapshot.providerOperations.state = 'pending'; }],
+    ['superseding writer', proof => { proof.snapshot.fence.superseded = true; }],
+    ['missing holding signal', proof => { delete proof.signal; }],
+    ['short-lived phase signal', (proof, signal) => { proof.signal = signal; }],
+    ['wrong candidate', proof => { proof.snapshot.candidate.version = uuid(2); }],
+  ]) {
     const { adapters, calls } = fixture();
-    override(adapters, 'proveWriters', () => blocked === 'ambiguous proof' ? { allowed: true } : false);
+    override(adapters, 'readWriterFence', (proof, _, signal) => { invalidate(proof, signal); return proof; });
     override(adapters, 'recoverWorker', () => original);
     await assert.rejects(recoverQualification(source, adapters), /\(writer quiescence\)/, blocked);
     assert.deepEqual(calls, trace.slice(0, 4));
@@ -146,7 +160,7 @@ test('halts without retry on an ambiguous restore, D1 recovery or unverified R2 
 });
 
 test('cancellation never starts the next phase and is not certified even after cleanup', async () => {
-  for (const [index, name] of ['readSource', 'readRecord', 'readRecord', 'proveWriters',
+  for (const [index, name] of ['readSource', 'readRecord', 'readRecord', 'readWriterFence',
     'recoverWorker', 'recoverD1', 'cleanupR2'].entries()) {
     const { adapters, calls } = fixture();
     const controller = new AbortController();
@@ -162,13 +176,45 @@ test('cancellation never starts the next phase and is not certified even after c
   assert.deepEqual(calls, []);
 });
 
+test('the holder can revoke every mutation phase, including final readback', async () => {
+  for (const [name, phase, count] of [['recoverWorker', 'Worker restore', 5],
+    ['recoverD1', 'D1 recovery', 6], ['cleanupR2', 'R2 cleanup', 7]]) {
+    const { adapters, calls, fence } = fixture();
+    override(adapters, name, (result, ...args) => {
+      const [signal, assertHeld] = args.slice(-2);
+      assertHeld();
+      fence.abort(new Error('private fence loss diagnostic'));
+      assert.equal(signal.aborted, true);
+      assert.throws(assertHeld);
+      return result;
+    });
+    await assert.rejects(recoverQualification(source, adapters), { message: `Staging qualification recovery is unverified (${phase}).` });
+    assert.deepEqual(calls, trace.slice(0, count));
+  }
+});
+
+test('rejects at fence expiry even when the timeout callback has not run', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_780_000_000_000 });
+  const { adapters, calls } = fixture();
+  let until;
+  override(adapters, 'readWriterFence', proof => { until = proof.snapshot.fence.until; return proof; });
+  override(adapters, 'cleanupR2', (result, _context, signal, assertHeld) => {
+    t.mock.timers.setTime(until);
+    assert.equal(signal.aborted, false);
+    assert.throws(assertHeld, /R2 cleanup/);
+    return result;
+  });
+  await assert.rejects(recoverQualification(source, adapters), /\(R2 cleanup\)/);
+  assert.deepEqual(calls, trace);
+});
+
 test('phase deadline aborts in-flight work, waits for it to drain and never starts recovery', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { adapters, calls } = fixture();
   const started = Promise.withResolvers();
   const aborted = Promise.withResolvers();
   const drained = Promise.withResolvers();
-  override(adapters, 'proveWriters', async (_, context, evidence, signal) => {
+  override(adapters, 'readWriterFence', async (_, _candidate, signal) => {
     signal.addEventListener('abort', aborted.resolve, { once: true });
     started.resolve();
     await drained.promise;

@@ -76,7 +76,7 @@ export async function createQualificationR2RecoveryStore({ sha, runId, attempt }
     const binding = await readQualificationR2Binding(env, cwd, sha);
     const { createS3Transport } = await import('../src/lib/server/s3/transport.ts');
     return qualificationR2RecoveryStore(source, {
-      request: createS3Transport(binding.settings, { fetch: send, timeoutMs: 5000 }),
+      request: createS3Transport(binding.settings, { fetch: send, timeoutMs: 5000, drainBufferedAbort: true }),
       verifyRetention: signal => verifyRecoveryR2Expiry(binding, env.CLOUDFLARE_API_TOKEN, signal, send),
     });
   } catch {

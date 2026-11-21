@@ -10,6 +10,7 @@ import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mj
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { createQualificationRecovery } from './staging-qualification-recovery.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
@@ -108,6 +109,50 @@ test('composed cases require exact attempt and fail closed on unobserved access'
   await assert.rejects(run(active, signal), /\(access\)/);
   await assert.rejects(run(active, signal), /\(scope\)/);
   assert.deepEqual(trace, [{ identity: active, aborted: false }]);
+});
+
+test('recovery only reads signed historical records after authenticating the exact attempt', async t => {
+  const { cwd, git, env, context: { sha, runId, attempt } } = job(t);
+  const source = { sha, runId, attempt };
+  git('rm', 'apps/drive/scripts/staging-storage-qualification.json');
+  git('commit', '-qm', 'current checkout has no receipt');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  env.TESTED_SHA = env.GITHUB_SHA = env.GITHUB_WORKFLOW_SHA = git('rev-parse', 'HEAD');
+  const repository = { full_name: 'TogetherWeOwn/qerith' };
+  const run = { id: 182, run_attempt: 3, head_sha: source.sha, head_branch: 'main', repository,
+    head_repository: repository, path: '.github/workflows/drive-staging-qualification.yml',
+    event: 'workflow_dispatch', status: 'completed', conclusion: 'failure' };
+  const jobs = { total_count: 1, jobs: [{ name: 'source', status: 'completed', conclusion: 'success',
+    run_id: 182, run_attempt: 3, head_sha: source.sha, steps: [{ name: 'Verify exact dispatch source before staging approval',
+      status: 'completed', conclusion: 'success' }] }] };
+  for (const superseded of [true, false]) {
+    const calls = [];
+    let gitHubReads = 0;
+    const recover = createQualificationRecovery(env, cwd, {
+      token: 'fixture', githubRequest: async () => Response.json([run, jobs,
+        { ...run, run_attempt: superseded ? 4 : 3 }][gitHubReads++]),
+      async send(request) {
+        assert.equal(gitHubReads, 3);
+        assert.equal(request.method, 'GET');
+        assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
+        const kind = calls.length ? 'worker' : 'd1';
+        assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${source.sha}-run-182-attempt-3`);
+        calls.push(kind);
+        // A Worker record copied from a different attempt must stop recovery.
+        const body = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind, ...source,
+          ...(kind === 'worker' ? { attempt: '2', version: '11111111-1111-1111-1111-111111111111',
+            expiresAt: '1780000000000', previousVersion: '22222222-2222-2222-2222-222222222222',
+            previousDeployment: '33333333-3333-3333-3333-333333333333' } : { bookmark: 'pre_apply' }) });
+        const date = new Date().toUTCString();
+        return new Response(body, { headers: { date, 'last-modified': date, 'content-length': String(Buffer.byteLength(body)) } });
+      },
+      readWriterFence() { calls.push('fence'); }, recoverWorker() { calls.push('Worker'); },
+      recoverD1() { calls.push('D1'); }, cleanupR2() { calls.push('R2 cleanup'); },
+    });
+    await assert.rejects(recover(source), superseded ? /\(source\)/ : /\(worker record\)/);
+    assert.equal(gitHubReads, 3);
+    assert.deepEqual(calls, superseded ? [] : ['d1', 'worker']);
+  }
 });
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];
