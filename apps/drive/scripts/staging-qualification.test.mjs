@@ -11,6 +11,7 @@ import { exerciseQualificationStorage } from './staging-qualification-storage-ca
 import { qualificationRecoveryWriter, readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
 import { qualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { verifyRecoveryR2Expiry } from './staging-qualification-expiry.mjs';
+import { uploadQualificationReceipt } from './staging-qualification-receipt.mjs';
 
 const recoverySource = Object.freeze({ sha: 'a'.repeat(40), runId: '182', attempt: '3' });
 const recoveryContext = { ...recoverySource, prefix: 'drive-qualification/full-v0/182/3/' };
@@ -388,26 +389,33 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
     'prefix-cleanup-verified': 'pass',
   };
   const evidence = { mode: 'full-v0', sha: env.GITHUB_SHA, runId: '182', attempt: '3', results };
-  const name = (proof = evidence, status = 'success', context = env) => qualificationReceiptName(context, proof, status, cwd);
-  assert.equal(name(), `drive-staging-qualification-${env.GITHUB_SHA}-attempt-3`);
+  assert.equal(qualificationReceiptName(env, evidence, 'success', cwd),
+    `drive-staging-qualification-${env.GITHUB_SHA}-attempt-3`);
+
+  const upload = () => assert.fail('Uploader must not be invoked for rejected evidence.');
+  const publish = overrides => uploadQualificationReceipt({ env, evidence, status: 'success', cwd, upload, ...overrides });
   for (const override of [{ mode: 'preview' }, { mode: 'fixture' }, { sha: ancestor }, { runId: '181' }, { attempt: '2' }]) {
-    assert.throws(() => name({ ...evidence, ...override }), /full-v0 evidence/);
+    assert.throws(() => publish({ evidence: { ...evidence, ...override } }), /full-v0 evidence/);
   }
+  assert.throws(() => publish({ evidence: undefined }), /full-v0 evidence/);
   for (const status of ['failure', 'cancelled', 'skipped', 'neutral', null]) {
-    assert.throws(() => name(evidence, status), /successful full-v0/);
+    assert.throws(() => publish({ status }), /successful full-v0/);
   }
+  assert.throws(() => publish({ signal: AbortSignal.abort() }), { name: 'AbortError' });
   for (const attempt of ['0', '03', '3\n', 3]) {
-    assert.throws(() => name({ ...evidence, attempt }, 'success', { ...env, GITHUB_RUN_ATTEMPT: attempt }), /attempt/);
+    assert.throws(() => publish({ evidence: { ...evidence, attempt }, env: { ...env, GITHUB_RUN_ATTEMPT: attempt } }), /attempt/);
   }
   for (const caseName of Object.keys(results)) {
     const { [caseName]: _, ...incomplete } = results;
-    assert.throws(() => name({ ...evidence, results: incomplete }), /must pass/, `missing ${caseName}`);
+    assert.throws(() => publish({ evidence: { ...evidence, results: incomplete } }), /must pass/, `missing ${caseName}`);
   }
-  for (const outcome of ['fail', 'skip', 'cancelled', 'unverified', true]) {
-    assert.throws(() => name({ ...evidence, results: { ...results, 'prefix-cleanup-verified': outcome } }), /must pass/);
+  for (const [caseName, outcome] of [
+    ...['fail', 'skip', 'cancelled', 'unverified', true].map(value => ['prefix-cleanup-verified', value]),
+    ['passkey-positive', 'skip'],
+    ['fixture-only', 'pass'],
+  ]) {
+    assert.throws(() => publish({ evidence: { ...evidence, results: { ...results, [caseName]: outcome } } }), /must pass/);
   }
-  assert.throws(() => name({ ...evidence, results: { ...results, 'passkey-positive': 'skip' } }), /must pass/);
-  assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
 });
 
 function lifecycle(t, failure, driftKind) {
