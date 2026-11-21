@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { stagingOrigin } from '../src/lib/server/qualification-readiness';
-import { dispatchStagingDeletion } from '../src/lib/server/staging-deletion';
+import { deletionDrainCron, dispatchStagingDeletion, runStagingDeletionDrain } from '../src/lib/server/staging-deletion';
 
 const url = `${stagingOrigin}/api/entries/00000000-0000-4000-8000-000000000000/delete`;
 const enabled = { DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_DELETE_REQUESTS: '1' };
@@ -31,4 +31,14 @@ test('only qualified staging deletion advertises the POST method', async () => {
   const admitted = await dispatchStagingDeletion(request(url, 'GET'), enabled, qualification);
   assert.equal(admitted?.status, 405);
   assert.equal(admitted?.headers.get('allow'), 'POST');
+});
+
+test('scheduled admission is separate from HTTP admission and scoped to one trigger', async () => {
+  const tick = { cron: deletionDrainCron };
+  const scheduled = { DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_DELETE_DRAIN: '1',
+    get DB(): never { throw new Error('Denied ticks must not access D1'); } };
+  assert.equal(await runStagingDeletionDrain(tick, enabled, qualification), 0);
+  assert.equal(await runStagingDeletionDrain(tick, scheduled), 0);
+  assert.equal(await runStagingDeletionDrain({ cron: '* * * * *' }, scheduled, qualification), 0);
+  assert.equal((await dispatchStagingDeletion(request(), scheduled, qualification))?.status, 404);
 });
