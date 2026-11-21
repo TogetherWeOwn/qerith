@@ -156,15 +156,69 @@ function checkedBindings(version, config, vars) {
   return bindings;
 }
 
+function stagingConfigAt(cwd, sha, account) {
+  const config = JSON.parse(execFileSync('git', ['show', `${sha}:apps/drive/wrangler.staging.json`],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 65_536, timeout: 5_000 }));
+  validateStagingConfig(config, account);
+  return config;
+}
+
+// Unwired: the protected caller must authenticate the completed source attempt
+// and its pre-activation record, exclude pending writes, and hold the lifecycle lock.
+export async function recoverQualificationWorker(source, record, env, cwd, signal, request = fetch) {
+  const { sha, runId, attempt } = source ?? {};
+  const { kind, version, expiresAt, previousVersion, previousDeployment } = record ?? {};
+  const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
+  try {
+    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) ||
+        ![runId, attempt].every(value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)) ||
+        kind !== 'worker' || record.sha !== sha || record.runId !== runId || record.attempt !== attempt ||
+        ![version, previousVersion, previousDeployment].every(isUuid) || version === previousVersion ||
+        typeof expiresAt !== 'string' || !/^[1-9][0-9]{12}$/.test(expiresAt) ||
+        typeof token !== 'string' || !token.trim()) throw new Error();
+    signal?.throwIfAborted();
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main'],
+      { cwd, stdio: 'ignore', timeout: 5_000 });
+    const config = stagingConfigAt(cwd, sha, account);
+    const api = workerApi(account, config.name, token, request);
+    const tag = `${sha}-${runId}-${attempt}`;
+    const restoreTag = `restore-${tag}`;
+    const before = await api.current(signal);
+    const original = sameDeployment(before, { id: previousDeployment, version: previousVersion });
+    const alreadyRestored = before.version === previousVersion && before.message === restoreTag;
+    if (!original && !alreadyRestored && (before.version !== version || before.message !== tag)) throw new Error();
+
+    const baseline = await api.version(previousVersion, signal);
+    if (baseline.id !== previousVersion || hasCandidateBinding(checkedBindings(baseline, config, {}))) throw new Error();
+    if (!original && !alreadyRestored) {
+      const bindings = checkedBindings(await api.assertUploaded(version, tag, signal), config, {
+        DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt,
+      });
+      if (bindings.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata') throw new Error();
+    }
+    const confirmed = await api.current(signal);
+    if (!sameDeployment(before, confirmed) || before.message !== confirmed.message) throw new Error();
+    if (original || alreadyRestored) {
+      signal?.throwIfAborted();
+      return { status: original ? 'baseline-observed' : 'restored', deployment: before.id, version: previousVersion };
+    }
+    const restored = await api.deploy(previousVersion, restoreTag, signal);
+    const after = await api.current(signal);
+    if (!sameDeployment(restored, after) || after.message !== restoreTag) throw new Error();
+    signal?.throwIfAborted();
+    return { status: 'restored', deployment: after.id, version: previousVersion };
+  } catch {
+    throw new Error('Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.');
+  }
+}
+
 // Only Worker cron/binding evidence, not a whole-estate inventory or an atomic fence.
 export async function inspectQualificationWorker(env, cwd, signal, request = fetch) {
   try {
     const { sha } = assertQualificationJob(env, cwd);
     const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
     if (typeof token !== 'string' || !token.trim()) throw new Error();
-    const config = JSON.parse(execFileSync('git', ['show', `${sha}:apps/drive/wrangler.staging.json`],
-      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 65_536, timeout: 5_000 }));
-    validateStagingConfig(config, account);
+    const config = stagingConfigAt(cwd, sha, account);
     const api = workerApi(account, config.name, token, request);
     const timeout = 15_000;
     const deadline = performance.now() + timeout;
