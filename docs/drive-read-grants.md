@@ -48,15 +48,4 @@ file they own or can read via a direct or inherited grant. With that flag off,
 staging download remains owner-only. Delivery rechecks access and the bound
 published generation before storage dispatch and before returning the response.
 Full and single-range downloads use the stored ETag for the storage request.
-Delivery does not grant folder navigation, public or signed links, or write access.
-
-## Shared with me
-
-`GET` and `HEAD /shared` render for staging members only when both `DRIVE_STAGING_INVITE_ACCEPTANCE=1`
-and `DRIVE_STAGING_SHARED_LISTING=1`. The new flag is unset in deployed configuration.
-Each private, non-cacheable page rechecks the session and grants on primary D1 and lists at most
-100 explicit grant roots in binary ID order. The opaque cursor is a seek boundary, not authorization.
-
-Design: [Drive v0 §8 and K2/K5 at `91a6ce10453e78b17c8c57838de4fe1b94961f6b`](https://github.com/TogetherWeOwn/qerith/tree/91a6ce10453e78b17c8c57838de4fe1b94961f6b/docs/design).
-Only names and kinds are shown; files with a published generation link to the existing authorized download.
-Other rows are labels. Details, shared-folder navigation and owner grant controls are out of scope.
+No listing, folder navigation, public or signed link, or write access is added.

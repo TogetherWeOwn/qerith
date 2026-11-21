@@ -13,13 +13,16 @@ export const load: PageServerLoad = async ({ locals, url, setHeaders }) => {
   if (session?.principal.role !== 'member') error(404, 'Not found');
   const cursor = sharedPageCursor(url.search);
   if (cursor === undefined) error(400, 'Invalid page request');
+  const unavailable = (retryCursor: string | null) => ({ status: 'unavailable' as const, retryCursor });
   const db = env.DB;
-  if (typeof db?.withSession !== 'function') error(503, 'Shared items are unavailable.');
+  if (typeof db?.withSession !== 'function') return unavailable(cursor);
   const identity = storageIdentity(env);
   const access = createSharedReadAccess(db, identity ? [identity.settings.endpoint, identity.settings.bucket, identity.epoch] : undefined);
-  const page = await access.listShared(session.token, cursor).catch(() => error(503, 'Shared items are unavailable.'));
-  if (page.nextCursor !== null && !validSharedCursor(page.nextCursor)) error(503, 'Shared items are unavailable.');
+  const page = await access.listShared(session.token, cursor).catch(() => null);
+  if (!page) return unavailable(cursor);
+  if (page.nextCursor !== null && !validSharedCursor(page.nextCursor)) return unavailable(null);
   return {
+    status: 'ok' as const,
     entries: page.entries.map(({ id, name, kind, downloadable }) => ({ id, name, kind, downloadable: downloadable === 1 })),
     nextCursor: page.nextCursor,
     continued: cursor !== null,

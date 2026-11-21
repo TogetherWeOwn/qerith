@@ -24,7 +24,6 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
     await deny('/shared', flags, 401);
     for (const path of ['/%73hared', '/shared/f/x', '/api/shared-listing', downloadPath]) await deny(path, enabled, 404);
     await deny('/shared?x-sveltekit-invalidated=01', enabled, 400);
-
     await context.addCookies([{ name: '__Host-drive-session', value: memberToken, url: origin, secure: true, httpOnly: true }]);
     let shared = false;
     await context.route('**/*', route => relay(route, { fetch: (url, init) => worker.fetch(url, {
@@ -90,7 +89,6 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
       assert.equal(await listed.count(), 0);
       await deny(downloadPath, enabled, 404);
     }
-
     // IDs in the existing page contract are opaque and do not need to be UUIDs.
     await DB.batch([grant(id), grant(firstFolder), DB.prepare(`WITH RECURSIVE n(v) AS
       (VALUES (2) UNION ALL SELECT v + 1 FROM n WHERE v < 100)
@@ -101,9 +99,17 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
     assert.equal(await main.getByText('100 items on this page').count(), 1);
     const next = main.getByRole('link', { name: 'Next page' });
     assert.ok(new URL(await next.getAttribute('href'), origin).searchParams.get('cursor').endsWith(':+'));
-    await next.focus();
+    // Break only the listing query in disposable D1; session lookups still work.
+    await DB.prepare('DROP INDEX drive_read_grants_recipient').run();
+    await next.click();
+    assert.equal(await link.getAttribute('aria-current'), 'page');
+    await main.getByRole('heading', { name: 'Shared with me', exact: true }).waitFor();
+    assert.equal(await main.getByRole('alert').innerText(), "Shared items didn't load. Check your connection, then try again.");
+    assert.equal(await main.getByRole('link').count(), 1);
+    await DB.prepare('CREATE INDEX drive_read_grants_recipient ON drive_read_grants(recipient_id)').run();
+    await main.getByRole('link', { name: 'Try again' }).focus();
     await enter();
-    assert.equal(await main.getByText('1 item on this page').count(), 1);
+    await main.getByText('1 item on this page').waitFor();
     await revoke();
     await page.reload();
     await main.getByText('No more items.').waitFor();
