@@ -563,6 +563,7 @@ jobs:
           UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
           CONTINUATION_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/root-upload-continuation.mjs') != '' }}
           DELETE_FILE_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/delete-file.mjs') != '' }}
+          SHARE_RECIPIENT_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/share-recipient.mjs') != '' }}
           STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
           STAGING_FOLDER_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/tests/staging-folder-worker-fixture.mjs') != '' }}
           STAGING_SHARED_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/shared-listing.mjs') != '' }}

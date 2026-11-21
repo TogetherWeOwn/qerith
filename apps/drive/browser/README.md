@@ -65,6 +65,10 @@ and 390×844, with extra captures for greyscale, forced colours and 320px reflow
 Screen reader: carried (`DeleteFileFixture`); run the pass on the first route that
 renders it. No live listing, admission, folder deletes or storage are exercised.
 
+The isolated K13 picker (`?share-recipient`) uses synthetic choices, not a provider.
+`*share-recipient-*` evidence covers keyboard, axe and reflow at 1280×800, 390×844
+and 320×844. Screen reader: carried to the first route rendering `ShareRecipientPicker`.
+
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended
 fixture state before capture, assert real keyboard focus and activation behavior,

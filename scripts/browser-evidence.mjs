@@ -58,8 +58,23 @@ async function verifyDeletionEvidence(dir) {
   }
 }
 
+async function verifyShareRecipientEvidence(dir) {
+  const states = ['empty', 'options', 'picked', 'already-selected', 'no-match'];
+  for (const [width, height] of [[390, 844], [1280, 800], [320, 844]]) {
+    const trace = JSON.parse(await readFile(join(dir, `share-recipient-${width}-keyboard.json`), 'utf8'));
+    for (const state of [...states, 'greyscale', 'forced-colours']) {
+      const label = `share-recipient-${width}-${state}`;
+      if (!hasViewportImageData(await readFile(join(dir, `${label}.png`)), width, height)) throw new Error(`Invalid picker screenshot: ${label}`);
+      if (!states.includes(state)) continue;
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      if (!Array.isArray(axe?.violations) || axe.violations.length || typeof trace?.[state] !== 'string' || !trace[state].trim())
+        throw new Error(`Invalid picker evidence: ${label}`);
+    }
+  }
+}
+
 export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false,
-  continuation = false, shared = false, deletion = false) {
+  continuation = false, shared = false, deletion = false, shareRecipient = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -139,6 +154,7 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
     }
   }
   if (deletion) await verifyDeletionEvidence(dir);
+  if (shareRecipient) await verifyShareRecipientEvidence(dir);
   if (shared) for (const [width, height] of [[390, 844], [1280, 800]]) {
     const keyboard = JSON.parse(await readFile(join(dir, `staging-shared-keyboard-${width}.json`), 'utf8'));
     if (!isDeepStrictEqual(keyboard, { viewport: [width, height], visibleFocus: true, skipToMain: true, keyboardDownload: true }))
@@ -177,7 +193,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
   await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
     folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true',
-    process.env.DELETE_FILE_EVIDENCE === 'true');
+    process.env.DELETE_FILE_EVIDENCE === 'true', process.env.SHARE_RECIPIENT_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
