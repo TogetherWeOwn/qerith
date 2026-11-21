@@ -13,8 +13,9 @@ const rejected = new Map([
 
 // Unwired. Adapters must seed exclusively owned fixtures without overwriting
 // and drain on abort. Inspect must independently project primary metadata (live
-// entries in seed order), authoritative storage and the complete scoped call trace.
-// Fault injection and retry must target only the selected fixture, never drain globally.
+// entries in seed order), authoritative storage, journal fault hits and the complete
+// scoped provider call/outcome trace (from provider replies, not job state).
+// advanceRetryClock advances only the offline clock, not job rows or a live clock.
 export async function exerciseQualificationDeletion(context, signal, io) {
   let phase = 'scope';
   try {
@@ -36,16 +37,19 @@ export async function exerciseQualificationDeletion(context, signal, io) {
         assert.ok(typeof etag === 'string' && strongTag.test(etag) && (pinned ? token(revision) : revision === null));
         return { entries, pinned, generation: { ...scope, key, etag, revision, entryId: file } };
       };
-      const inspect = async (tree, removed = [], attempts = 0, settled = false) => {
+      const inspect = async (tree, removed = [], outcomes = [], faults = []) => {
         active.throwIfAborted();
-        const { live, journal, job, publicationTombstoned, calls, object } = await io.inspect(structuredClone(tree), active);
+        const { live, journal, job, publicationTombstoned, calls, object, journalFaults, now } =
+          structuredClone(await io.inspect(structuredClone(tree), active));
         const { generation } = tree;
+        const settled = outcomes.at(-1) === 'deleted';
+        assert.deepEqual(journalFaults, faults);
         assert.deepEqual(live, tree.entries.filter(({ id }) => !removed.includes(id)));
         assert.deepEqual(journal.map(row => row.entryId).sort(), removed.toSorted());
         const deletionId = journal[0]?.deletionId;
         if (removed.length) assert.ok(token(deletionId) && journal.every(row => row.deletionId === deletionId));
-        assert.deepEqual(calls, Array.from({ length: attempts }, () => ({ method: 'DELETE', key: generation.key,
-          ifMatch: generation.etag, scope })));
+        assert.deepEqual(calls, outcomes.map(outcome => ({ method: 'DELETE', key: generation.key,
+          ifMatch: generation.etag, scope, outcome })));
         assert.equal(publicationTombstoned, removed.includes(generation.entryId));
         assert.deepEqual(object, settled ? { status: 404, code: 'NoSuchKey', key: generation.key, scope }
           : { status: 200, key: generation.key, etag: generation.etag, scope });
@@ -56,7 +60,7 @@ export async function exerciseQualificationDeletion(context, signal, io) {
           if (settled) assert.ok(Number.isSafeInteger(job.completedAt) && job.completedAt > 0 && token(job.completionToken));
           else assert.deepEqual([job.completedAt, job.completionToken], [null, null]);
         }
-        return deletionId;
+        return { deletionId, job, journal, now };
       };
       const remove = async (entryId, scenario, status) => {
         active.throwIfAborted();
@@ -80,7 +84,7 @@ export async function exerciseQualificationDeletion(context, signal, io) {
         await inspect(tree);
       }
       await remove(tree.entries[0].id, 'owner', 202);
-      await inspect(tree, idsOf(tree), 1, true);
+      await inspect(tree, idsOf(tree), ['deleted']);
 
       phase = 'delete-boundary-and-safe-fallback';
       for (const [axis, limit, chain] of [['count', 128, false], ['depth', 33, true]]) {
@@ -93,7 +97,7 @@ export async function exerciseQualificationDeletion(context, signal, io) {
             // The owner can explicitly select a bounded leaf; never truncate the rejected root operation.
             await remove(edge.generation.entryId, 'owner', 202);
           }
-          await inspect(edge, over ? [edge.generation.entryId] : idsOf(edge), 1, true);
+          await inspect(edge, over ? [edge.generation.entryId] : idsOf(edge), ['deleted']);
         }
       }
       const unpinned = await seed('unpinned', 2, true, false);
@@ -103,14 +107,36 @@ export async function exerciseQualificationDeletion(context, signal, io) {
 
       phase = 'delete-rollback-and-retry';
       const recovery = await seed('recovery', 3, true);
+      const root = recovery.entries[0].id;
+      const faults = [{ operation: 'journal-insert', entryId: root }];
       await inspect(recovery);
-      await remove(recovery.entries[0].id, 'journal-failure', 503);
-      await inspect(recovery);
-      await remove(recovery.entries[0].id, 'provider-unconfirmed', 202);
-      const journalId = await inspect(recovery, idsOf(recovery), 1);
+      await remove(root, 'journal-failure', 503);
+      await inspect(recovery, [], [], faults);
+
+      const competing = await seed('competing', 1, false);
+      await inspect(competing);
+      const pending = (tree, hits) => inspect(tree, idsOf(tree), ['unconfirmed'], hits);
+      await remove(competing.generation.entryId, 'provider-unconfirmed', 202);
+      const other = await pending(competing);
+      await remove(root, 'provider-unconfirmed', 202);
+      const selected = await pending(recovery, faults);
+      assert.notEqual(selected.deletionId, other.deletionId);
+      for (const { job, now } of [selected, other]) {
+        assert.ok(Number.isSafeInteger(now) && Number.isSafeInteger(job.availableAt) && job.availableAt > now);
+      }
+      const retryAt = Math.max(selected.job.availableAt, other.job.availableAt);
+      const verifyEligible = async (tree, before, hits) => {
+        assert.deepEqual(await pending(tree, hits), { ...before, now: retryAt });
+      };
       active.throwIfAborted();
-      await io.retry({ deletionId: journalId, generation: { ...recovery.generation } }, active);
-      assert.equal(await inspect(recovery, idsOf(recovery), 2, true), journalId);
+      await io.advanceRetryClock(retryAt, active);
+      await verifyEligible(recovery, selected, faults);
+      await verifyEligible(competing, other);
+      active.throwIfAborted();
+      await io.retry({ deletionId: selected.deletionId, generation: { ...recovery.generation } }, active);
+      const settled = await inspect(recovery, idsOf(recovery), ['unconfirmed', 'deleted'], faults);
+      assert.deepEqual(settled.journal, selected.journal);
+      await verifyEligible(competing, other);
 
       phase = 'delete-provider-proof';
       active.throwIfAborted();

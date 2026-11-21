@@ -20,12 +20,14 @@ const response = status => new Response(null, { status, headers: { 'cache-contro
 // In-memory doubles only; no app admission, network, credential or provider prerequisite.
 function fixture() {
   const trees = new Map(), actions = [], probeCalls = [];
-  let probePresent = false;
+  let probePresent = false, now = 42;
   const settle = (state, confirmed) => {
     const { key, job } = state;
-    state.calls.push({ method: 'DELETE', key, ifMatch: job.generation.etag, scope });
+    state.calls.push({ method: 'DELETE', key, ifMatch: job.generation.etag, scope,
+      outcome: confirmed ? 'deleted' : 'unconfirmed' });
+    job.availableAt = now + 300;
     if (confirmed) {
-      job.completedAt = 42;
+      job.completedAt = now;
       job.completionToken = randomUUID();
       state.object = { status: 404, code: 'NoSuchKey', key, scope };
     }
@@ -38,16 +40,17 @@ function fixture() {
       const revision = pinned ? randomUUID() : null;
       const generation = { ...scope, key, etag, revision, entryId: entries.at(-1).id };
       trees.set(key, { entries, live: entries, key, pinned, generation, journal: [], calls: [],
-        job: null, publicationTombstoned: false, object: { status: 200, key, etag, scope } });
+        journalFaults: [], job: null, publicationTombstoned: false,
+        object: { status: 200, key, etag, scope } });
       return { etag, revision };
     },
-    inspect({ generation }) { return structuredClone(trees.get(generation.key)); },
+    inspect({ generation }) { return { ...structuredClone(trees.get(generation.key)), now }; },
+    advanceRetryClock(retryAt) { assert.ok(retryAt > now); now = retryAt; },
     remove(id, scenario) {
       actions.push(scenario);
       if (statusFor.has(scenario)) return response(statusFor.get(scenario));
       const state = [...trees.values()].find(tree => tree.live.some(entry => entry.id === id));
       assert.ok(state, 'only owned live IDs may reach the delete client');
-      if (scenario === 'journal-failure') return response(503);
       const depth = new Map();
       for (const entry of state.live) {
         if (entry.id === id) depth.set(id, 0);
@@ -55,8 +58,14 @@ function fixture() {
       }
       if (depth.size > 128 || [...depth.values()].some(value => value > 32) || !state.pinned) return response(404);
       const deletionId = randomUUID();
-      state.journal.push(...[...depth.keys()].map(entryId => ({ entryId, deletionId })));
-      state.live = state.live.filter(entry => !depth.has(entry.id));
+      const live = state.live.filter(entry => !depth.has(entry.id));
+      const journal = [...depth.keys()].map(entryId => ({ entryId, deletionId }));
+      if (scenario === 'journal-failure') {
+        state.journalFaults.push({ operation: 'journal-insert', entryId: journal[0].entryId });
+        return response(503);
+      }
+      state.journal.push(...journal);
+      state.live = live;
       state.publicationTombstoned = true;
       state.job = { generation: state.generation, leaseToken: null, completedAt: null, completionToken: null };
       settle(state, scenario !== 'provider-unconfirmed');
@@ -67,7 +76,13 @@ function fixture() {
       assert.deepEqual(state.job.generation, generation);
       assert.equal(state.journal[0].deletionId, deletionId);
       assert.equal(state.job.completedAt, null);
+      assert.ok(state.job.availableAt <= now);
       settle(state, true);
+    },
+    drainEligible() {
+      for (const state of trees.values()) {
+        if (state.job?.completedAt === null && state.job.availableAt <= now) settle(state, true);
+      }
     },
     seedProbe({ key, scope: targetScope }) {
       assert.deepEqual(targetScope, scope);
@@ -131,6 +146,29 @@ for (const [name, phase, corrupt] of [
       if (actions.at(-1) === 'journal-failure') state.journal.push({ entryId: state.entries[0].id });
       return state;
     };
+  }],
+  ['an early 503 never reaches the journal fault', 'rollback-and-retry', ({ io }) => {
+    const remove = io.remove;
+    io.remove = (id, scenario) => scenario === 'journal-failure' ? response(503) : remove(id, scenario);
+  }],
+  ['retry drains another eligible attempt-owned job', 'rollback-and-retry', ({ io }) => {
+    const retry = io.retry;
+    io.retry = input => { retry(input); io.drainEligible(); };
+  }],
+  ['retry runs before the selected job is eligible', 'rollback-and-retry', ({ io }) => {
+    io.advanceRetryClock = () => {};
+  }],
+  ['first delete attempt has no observed provider outcome', 'rollback-and-retry', ({ io }) => {
+    const inspect = io.inspect;
+    io.inspect = tree => {
+      const state = inspect(tree);
+      if (state.calls[0]?.outcome === 'unconfirmed') delete state.calls[0].outcome;
+      return state;
+    };
+  }],
+  ['retry completes the job despite an unconfirmed provider reply and later absence', 'rollback-and-retry', ({ io, trees }) => {
+    const retry = io.retry;
+    io.retry = input => { retry(input); trees.get(input.generation.key).calls[1].outcome = 'unconfirmed'; };
   }],
   ['retry settles another generation', 'rollback-and-retry', ({ io, trees }) => {
     const retry = io.retry;
