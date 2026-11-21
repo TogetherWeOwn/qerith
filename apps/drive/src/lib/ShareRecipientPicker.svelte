@@ -5,7 +5,7 @@
     choices: readonly Choice[];
     selectedIds: readonly string[];
     selectedChoices?: readonly Choice[];
-    locked?: boolean; onPageFeedback?: (message: string) => void;
+    locked?: boolean; onPageFeedback?: (message: string, clear?: string) => void;
     onSelectionChange: (ids: string[]) => void;
   } = $props();
 
@@ -26,14 +26,17 @@
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
   const noMatchMessage = $derived(matchingNames.length ? 'Matching people are already selected.' : 'No matching people available on this page.');
-  $effect(() => { onPageFeedback?.(noMatch ? noMatchMessage : announcement); });
-
+  $effect(() => {
+    const message = noMatch && noMatchMessage, report = onPageFeedback;
+    if (message && report) { report(message); return () => report('', message); }
+  });
+  function announce(message: string) { if (onPageFeedback) onPageFeedback(message); else announcement = message; }
   function dismiss() { open = false; active = null; }
 
   function select(choice: Choice) {
     if (!expanded || !matches.includes(choice)) return;
     const next = [...selectedIds, choice.recipientId];
-    announcement = `${label(choice)} selected. ${next.length} selected.`;
+    announce(`${label(choice)} selected. ${next.length} selected.`);
     onSelectionChange(next);
     query = '';
     dismiss();
@@ -44,7 +47,7 @@
     input.focus();
     dismiss();
     const next = selectedIds.filter(id => id !== choice.recipientId);
-    announcement = `${label(choice)} removed. ${next.length} selected.`;
+    announce(`${label(choice)} removed. ${next.length} selected.`);
     onSelectionChange(next);
   }
 

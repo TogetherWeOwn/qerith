@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-
 export async function exerciseShareDialog(browser, origin, axe, output) {
   for (const [width, height] of [[1280, 800], [390, 844]]) {
     const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce', serviceWorkers: 'block' });
@@ -95,8 +94,14 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
             for (const name of ['Pell Quinn', 'Sam Mora', 'Zoë Chen']) await dialog.getByRole('listitem').filter({ hasText: name }).waitFor();
           } else {
             await dialog.getByRole('option', { name: 'Lee Ray', exact: true }).waitFor();
-            assert.equal(await dialog.getByRole('option').count(), 1, 'Sam and the owner are not offered on an incomplete access page');
+            await button('Next page of people to add').click(); await announced('Showing page 2 of people to add.');
+            await input.focus(); await dialog.getByRole('option', { name: 'Name unavailable', exact: true }).waitFor();
+            assert.equal(await button('Next page of people to add').count(), 0, 'No pages offer Sam or the owner');
             await button('Next page of people with access').click(); await announced('Loading people with access…');
+            await input.focus(); await key('ArrowDown'); await key('Enter'); await announced('Name unavailable selected. 1 selected.');
+            await settle(); await announced('Showing page 2 of people with access.');
+            await input.fill('not on this page'); await button('Remove Name unavailable').click(); await announced('Name unavailable removed. 0 selected.');
+            await input.click(); await announced('No matching people available on this page.'); await key('Escape'); assert.equal(await dialog.getByRole('status').textContent(), '');
           }
           assert.equal(await text('Only you can see this.').count(), 0);
           await writes();
