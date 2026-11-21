@@ -15,7 +15,7 @@ interface PrimaryDatabase {
   };
 }
 function hasPrimary(db: DriveAuthEnv['DB']): db is NonNullable<DriveAuthEnv['DB']> & PrimaryDatabase {
-  return !!db && 'withSession' in db && typeof db.withSession === 'function';
+  return typeof (db as Partial<PrimaryDatabase> | undefined)?.withSession === 'function';
 }
 type Row = { folderName: string; currentParentId: string | null; id: string | null; name: string | null };
 export type MoveDestinations = {
@@ -50,11 +50,11 @@ const sql = `WITH RECURSIVE source AS (
   SELECT e.name FROM browsable b JOIN drive_entries e ON e.id = ?4
     AND e.owner_id = b.owner_id AND e.parent_id IS ?3 AND e.kind = 'folder'
 ), children AS (
-  SELECT id, name FROM drive_entries INDEXED BY drive_entries_sibling_name
-  WHERE owner_id = (SELECT owner_id FROM browsable) AND COALESCE(parent_id, '') = COALESCE(?3, '') AND kind = 'folder'
-    AND name > COALESCE((SELECT name FROM boundary), '')
+  SELECT id, name FROM drive_entries INDEXED BY drive_entries_listing_asc
+  WHERE owner_id = (SELECT owner_id FROM browsable) AND parent_id IS ?3 AND kind = 'folder'
+    AND name COLLATE BINARY > COALESCE((SELECT name FROM boundary), '')
     AND length(id) <= 128 AND id NOT GLOB '*[^A-Za-z0-9_-]*'
-  ORDER BY name LIMIT ${pageSize + 1}
+  ORDER BY name COLLATE BINARY LIMIT ${pageSize + 1}
 )
 SELECT d.folderName, d.currentParentId, c.id, c.name FROM destination d LEFT JOIN children c ON TRUE
 WHERE ?4 IS NULL OR EXISTS (SELECT 1 FROM boundary)

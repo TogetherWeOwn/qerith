@@ -31,6 +31,25 @@ test('move destinations fail closed before any D1 read', async () => {
   }
 });
 
+test('an unavailable destination on a primary binding returns an empty, non-cacheable 404', async () => {
+  let usedPrimary = false;
+  const DB = new Proxy({ prepare() { assert.fail('must not use the raw DB'); } }, {
+    get(target, key, receiver) {
+      if (key !== 'withSession') return Reflect.get(target, key, receiver);
+      return (constraint: string) => {
+        assert.equal(constraint, 'first-primary');
+        usedPrimary = true;
+        return { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) };
+      };
+    },
+  });
+  const response = await getMoveDestinations(request('?entry=source&folder=missing'), { DB, ...env });
+  assert.equal(response.status, 404);
+  assert.equal(usedPrimary, true);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
+  assert.equal(await response.text(), '');
+});
+
 test('move destination read uses one primary statement and projects at most 50 folder IDs and names', async () => {
   let sessions = 0;
   const rows = Array.from({ length: 51 }, (_, i) => ({ folderName: 'Taxes', currentParentId: 'current',

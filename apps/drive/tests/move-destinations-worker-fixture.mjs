@@ -21,10 +21,10 @@ export async function exerciseMoveDestinations({ worker, DB, origin, session }) 
   const get = (query, headers = {}, target = path, method = 'GET') => worker.fetch(origin + target + query, {
     method, redirect: 'manual', headers: { cookie, 'x-test-invite': '1', ...headers },
   });
-  async function row(response, status) {
+  async function row(response, status, label) {
     const received = await response;
     assert.deepEqual([received.status, received.headers.get('cache-control'), received.headers.get('location')],
-      [status, 'private, no-store', null]);
+      [status, 'private, no-store', null], label);
     if (status === 200) return received.json();
     assert.equal(await received.text(), '');
   }
@@ -38,7 +38,7 @@ export async function exerciseMoveDestinations({ worker, DB, origin, session }) 
   await row(get(source, { origin: 'https://elsewhere.example.test' }), 403);
   await row(get(`${source}&entry=move-dest`), 400);
   for (const folder of ['move-picker-foreign', 'move-source', 'move-descendant', 'move-file', 'not-found']) {
-    await row(get(`${source}&folder=${folder}`), 404);
+    await row(get(`${source}&folder=${folder}`), 404, `unavailable destination: ${folder}`);
   }
   await row(get('?entry=move-picker-foreign'), 404);
   assert.deepEqual(await row(get(source), 200), { folderName: 'My Drive', currentParentId: null,
@@ -58,6 +58,9 @@ export async function exerciseMoveDestinations({ worker, DB, origin, session }) 
 
   await DB.prepare("UPDATE drive_entries SET parent_id = 'move-cursor-other' WHERE id = 'move-file'").run();
   assert.equal((await row(get('?entry=move-file'), 200)).currentParentId, 'move-cursor-other');
+  assert.deepEqual(await row(get(`${source}&folder=move-cursor-other`), 200), {
+    folderName: 'Cursor elsewhere', currentParentId: null, folders: [], next: null,
+  }, 'a folder containing only a file has no child destinations');
 
   // The deepest browsable folder remains a target, but doesn't advertise an unreachable child.
   await DB.prepare(`WITH RECURSIVE levels(n) AS (VALUES (2) UNION ALL SELECT n + 1 FROM levels WHERE n < 65)
