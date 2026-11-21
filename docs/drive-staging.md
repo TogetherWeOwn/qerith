@@ -47,9 +47,12 @@ does not replace exact-SHA qualification.
 Use only synthetic fixtures tagged with the originating run ID in D1 and R2.
 Enforce the staging-only absolute deadline, clean up on success and failure and
 via a trusted main-only completion workflow, and sweep older tags before new
-writes. Record leftover rows as cleanup defects, not admission gates. Reported
-R2 expiry covers only `drive-qualification/` (three days); the seven-day
-multipart-abort rule remains. Neither proves that qualification cleanup ran.
+writes. Record leftover rows as cleanup defects, not app-admission gates. The
+full-v0 inventory below still requires its reserved migration keys to be absent;
+reconcile older residue separately before retrying, since exact-attempt cleanup
+will not remove it. Reported R2 expiry covers only `drive-qualification/` (three
+days); the seven-day multipart-abort rule remains. Neither proves that
+qualification cleanup ran.
 
 The manual staging storage proof does not deploy a Worker. Before dispatch,
 review provider evidence that the staging signer is scoped to the Drive
@@ -177,14 +180,24 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
-The offline composer requires every case to pass and binds evidence to the exact invocation.
+The offline entry point rechecks the committed staging target and reviewed R2
+binding, then binds the case runner, estate checks, and signed recovery writer
+to a single SHA/run/attempt. It verifies recovery record retention before the
+candidate upload and again before each record write. It requires explicit
+admission, app fixture, estate and writer-fence adapters; it has no passing
+admission default. The case runner requires every case to pass and binds
+its evidence to the exact invocation.
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. It checks exact-attempt writer quiescence and a held, abortable fence
 before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
 before restore. D1 fixture cleanup does not roll back migrations or clean app
-fixtures. The estate, fixture and writer-fence inputs are injected; offline
-passing tests are not provider evidence. The protected job still stops and
-cannot issue a receipt.
+fixtures. Before and after the lifecycle, inventory also queries the pinned D1
+for migration fixture keys across all full-v0 attempts. This read-only check
+returns presence only, including for redeemed or expired fixture rows; missing
+tables or an incomplete result fail closed. It does not replace the injected
+all-app-fixture reader, estate reader, or writer fence. Offline passing tests
+are not provider evidence. The protected job still stops and cannot issue a
+receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects
@@ -201,12 +214,45 @@ readback requires existing R2 lifecycle read access. It checks configured age
 thresholds, not actual deletion timing or rollback after runner loss. It never
 changes bucket policy and does not replace direct attempt cleanup.
 
-The unwired Worker inventory reads the deployed version and the native cron
-configuration for the pinned staging script. It requires no schedules, one
-unchanged non-candidate deployment, and no resource bindings beyond the pinned
-D1 database and assets. This does not see external invokers, unbound resources,
-D1 fixture rows, or billing. It cannot satisfy whole-estate zero-idle inventory
-or establish that a lost runner's deployment was restored.
+The unwired Worker inventory uses Cloudflare's unfiltered account script list
+and requires a complete response containing only the Worker named in the tested
+configuration. It also requires no schedules, one unchanged non-candidate
+deployment, and no resource bindings beyond the pinned D1 database and assets.
+The script list does not cover other compute surfaces, external invokers, D1
+fixture rows or billing. It cannot satisfy whole-estate zero-idle inventory or
+establish that a lost runner's deployment was restored.
+
+Both offline inventory passes also require the unfiltered Cloudflare D1 account
+list to contain only the database UUID and name pinned in the tested commit.
+The check uses a bounded first page and rejects conflicting pagination or partial
+responses. This checks the roster visible to the existing credential, not D1
+compute mode, writer exclusion or historical restore attribution. It does not
+replace the separate estate and app-fixture readers.
+
+Both passes also check the native R2 bucket roster in the account from the
+reviewed storage binding. The headerless list and the explicit `default` list
+must each contain only the bound bucket; the `eu`, `us`, `fedramp`, and
+`fedramp-high` lists must be empty. The six sequential reads are unfiltered by
+name and share a 15-second deadline. Each must return one page of at most 64 KiB
+with an exact total count and no continuation. Denied reads, including on
+restricted jurisdictions, make inventory unverified; they do not count as empty.
+This checks what the existing credential can list in the documented R2
+jurisdictions. It does not replace the estate reader, lifecycle policy readback,
+or direct object and multipart listings.
+
+Both passes require an empty, unfiltered native Durable Objects namespace list
+in the pinned Worker account. The first page must explicitly report zero total
+namespaces, with no conflicting pagination, within five seconds and 64 KiB.
+Denied or partial reads are not evidence of absence. This check covers only
+namespaces visible to the existing credential in that account; it does not
+replace the estate or app-fixture reader or independently prove alarm absence.
+
+Both passes also read the unfiltered native Containers application list in the
+pinned Worker account. The result must be an explicit empty array with no
+continuation within five seconds and 64 KiB. An existing application fails even
+if it has zero instances. Denied, partial, and nonterminal responses fail.
+This covers only applications visible to the existing credential in that
+account; it does not replace the separate estate or app-fixture readers.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
@@ -215,9 +261,14 @@ The generated Worker rejects new requests at or after the deadline before app,
 asset or readiness routing. This bounds candidate request admission without a
 runner, but does not stop in-flight work, revoke issued storage URLs, restore the
 previous deployment, or clean up D1. Neither existing staging workflow uses it.
-Before wiring the protected caller, reconcile its pre-activation budget with
-this window: D1 command timeouts alone can consume the five-minute margin,
-before accounting for upload, readback and recovery recording.
+The offline lifecycle gives D1 only the time left after upload and after
+reserving 21 minutes for Worker checks, recovery recording, activation and
+cases. D1 apply starts only if its full two-minute command budget and a
+45-second post-apply ledger read fit. The lifecycle rechecks the wall-clock
+budget while D1 work is pending and stops apply if a clock step consumes the
+ledger reserve. A timeout stops activation and drains the local subprocess;
+it does not prove that D1 rolled back. Reconcile any uncertain D1 mutation
+before retrying.
 
 The unwired Worker recovery adapter reads the pinned staging config from the
 lost attempt's main-ancestor SHA. It verifies the recorded candidate against
@@ -232,10 +283,25 @@ or R2 cleanup or authorization to issue a receipt.
 The offline recovery coordinator can authenticate a historical source through
 bounded GitHub Actions reads: the exact attempt, its successful source job and
 exact-dispatch check, and the latest run metadata. It rejects superseded or
-ambiguous sources before record access. This is not a fence against a later rerun.
-The protected workflow does not invoke recovery.
+ambiguous sources before making signed reads of the two records at the source
+SHA's reviewed binding. A later rerun is excluded by the authoritative writer
+fence, not by the GitHub read. The coordinator verifies that fence against the
+recorded candidate and enforces its loss signal and the earlier of wall-clock
+expiry and the original monotonic deadline through the final readback. It checks
+the deadline at I/O boundaries, samples wall time every second during pending
+I/O, and waits for the adapter to drain after abort. The v1 bookmark and a
+post-list ledger are not independent D1 restore attribution.
+The offline factory binds the native Worker restore, D1 Time Travel and
+exact-prefix R2 cleanup adapters to the historical source SHA. These adapters
+issue requests only under the held fence; source and record reads precede it.
+The factory requires a separate D1 proof provider: unverified attribution stops
+before D1 restoration or R2 cleanup, even if Worker rollback has already
+completed. An interruption after D1 restore requires reconciliation; rerunning
+is not an R2-only resume. The protected workflow supplies neither proof provider
+and does not invoke recovery.
 
-The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+The offline lifecycle and recovery entry points use the recovery store at the
+source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
 attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
 A signed `If-None-Match: *` PUT must be acknowledged before a fresh signed GET.

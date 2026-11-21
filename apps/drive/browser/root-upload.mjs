@@ -122,15 +122,28 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   try {
     await Promise.all([page.waitForRequest(request => new URL(request.url()).pathname === listingPath),
       choose({ ...file, name: 'A.bin' })]);
+    const folders = page.getByRole('link', { name: /^Folder \d{3}$/ });
+    const folderCount = await folders.count();
+    assert.equal(folderCount, 99);
     const next = page.getByRole('link', { name: 'Next page', exact: true });
     await atWidths(async width => {
-      for (const [key, control] of [['Tab', link], ['Tab', next], ['Shift+Tab', link], ['Shift+Tab', upload]]) {
+      const step = async (key, control) => {
         await page.keyboard.press(key);
         assert.equal(await control.evaluate(el => {
           const { x, y, width, height } = el.getBoundingClientRect();
           return el.matches(':focus-visible') && getComputedStyle(el).outlineStyle === 'solid' && el.contains(document.elementFromPoint(x + width / 2, y + height / 2));
         }), true, `${key} reaches ${await control.textContent()} with a visible ring at ${width}px`);
-      }
+      };
+      await upload.focus();
+      await step('Tab', folders.first());
+      await step('Shift+Tab', upload);
+      await step('Tab', folders.first());
+      for (let index = 1; index < folderCount - 1; index++) await page.keyboard.press('Tab');
+      await step('Tab', folders.last());
+      await step('Tab', link);
+      await step('Tab', next);
+      await step('Shift+Tab', link);
+      await step('Shift+Tab', folders.last());
     });
     await page.keyboard.press('Tab');
     assert.equal(await link.evaluate(el => document.activeElement === el), true);
@@ -138,5 +151,15 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   await page.getByRole('link', { name: 'A.bin', exact: true }).waitFor();
   assert.equal(await link.count(), 0, 'the old download link moved to page two');
   assert.equal(await inspect(`document.activeElement === ${button}`), true, 'focus returns to Upload when the focused row leaves the page');
-  await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({ ...proof, focusRestored: true }, null, 2));
+  await page.goto(origin);
+  const [folderDocument] = await Promise.all([
+    page.waitForNavigation({ timeout: 5_000 }),
+    page.getByRole('link', { name: 'Folder 001', exact: true }).click(),
+  ]);
+  assert.equal(folderDocument?.url(), `${origin}/f/00000000-0000-4000-8000-000000000001`);
+  assert.deepEqual([folderDocument.status(), folderDocument.headers()['cache-control']], [200, 'private, no-store']);
+  await page.getByRole('heading', { name: 'Folder 001', exact: true }).waitFor();
+  await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({
+    ...proof, focusRestored: true, rootFolderDocumentNavigation: true,
+  }, null, 2));
 }

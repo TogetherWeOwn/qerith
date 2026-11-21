@@ -25,6 +25,7 @@ async function readDownloadNotice({ cookies, isDataRequest, locals, request, url
 export const load: PageServerLoad = async (event) => {
   const fixture = admitsSignInFixture(env);
   const staging = env.DRIVE_ORIGIN === stagingOrigin;
+  const inviteMode = admitsStagingInvite(env);
   const preview = fixture || staging;
   if (staging) {
     event.depends('drive:root-listing');
@@ -34,14 +35,15 @@ export const load: PageServerLoad = async (event) => {
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   const role = event.locals.driveSession?.principal.role;
-  const downloadAllowed = !staging || role === 'owner' || (role === 'member' && admitsStagingInvite(env));
+  const downloadAllowed = !staging || role === 'owner' || (role === 'member' && inviteMode);
   const uploadPolicy = driveUploadMode(env, role);
   const uploadStorageReady = uploadPolicy !== 'disabled' && (staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
     !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER));
   const uploadMode: DriveUploadMode = uploadStorageReady ? uploadPolicy : 'disabled';
   return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
-    metadataWriteAllowed: admitsStagingInvite(env) && (role === 'owner' || role === 'member'),
-    ownerInvites: role === 'owner' && admitsStagingInvite(env),
+    folderLinks: fixture || inviteMode,
+    metadataWriteAllowed: inviteMode && (role === 'owner' || role === 'member'),
+    ownerInvites: role === 'owner' && inviteMode,
     sharedListing: role === 'member' && admitsSharedListing(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
 };

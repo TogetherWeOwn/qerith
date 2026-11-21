@@ -57,14 +57,14 @@ function generatedAssets(builder) {
   const people = [...assets];
   assets.clear();
   visited.clear();
-  // SSR-only: ship styles and their font, not the generated client entry.
+  // Staging may hydrate; the read-only sign-in fixture still needs only styles.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
   const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
-  const folder = styles();
+  const folder = [...assets], folderStyles = styles();
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/shared/+page.svelte'));
-  return { signIn, root, invite, people, folder, shared: styles() };
+  return { signIn, root, invite, people, folder, folderStyles, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -85,6 +85,7 @@ const buildAdapter = {
       // The adapter can answer before the hook. Gate preview dispatch here.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { dispatchEligibleRecipients } from '../../src/lib/server/eligible-recipient-route.ts';
 import { postFolder } from '../../src/lib/server/folder-route.ts';
 import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
@@ -95,12 +96,12 @@ import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
-import { dispatchStagingDeletion, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
+import { dispatchStagingDeletion, resolveWorkerDeletionQualification, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
-const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folder]);
+const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folderStyles]);
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),
@@ -117,19 +118,18 @@ const unavailable = () => new Response('Service unavailable', {
 });
 const unavailableAssets = { fetch: unavailable };
 
-export default {
-  async scheduled(event, env) {
-    // There is no configured trigger or server-held deletion qualification.
-    await runStagingDeletionDrain(event, env);
+const handlers = {
+  async scheduled(event, env, capability) {
+    await runStagingDeletionDrain(event, env, resolveWorkerDeletionQualification(env, capability));
   },
-  async fetch(request, env, ctx) {
+  async fetch(request, env, ctx, capability) {
     if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
-      // No qualified rule is installed. Upload readiness does not admit deletion.
-      const deletion = dispatchStagingDeletion(request, env);
+      // Upload readiness does not admit deletion.
+      const deletion = dispatchStagingDeletion(request, env, resolveWorkerDeletionQualification(env, capability));
       if (deletion) return deletion;
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
@@ -141,6 +141,9 @@ export default {
         asset: request => env.ASSETS.fetch(request)
       });
     }
+    const forward = request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    const recipients = dispatchEligibleRecipients(request, env, forward);
+    if (recipients) return recipients;
     if (url.pathname === '/api/folders') return postFolder(request, env);
     // Keep listing denials out of the adapter's query validation.
     const listing = listingRequest(request, env);
@@ -171,9 +174,20 @@ export default {
       }
     }
     if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
-    return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    return forward(request);
   }
 };
+
+/** @param {import('../../src/lib/server/staging-deletion.ts').WorkerDeletionCapability} [deletionCapability] */
+export function createDriveWorker(deletionCapability) {
+  const capability = deletionCapability && Object.freeze({ ...deletionCapability });
+  return {
+    fetch: (request, env, ctx) => handlers.fetch(request, env, ctx, capability),
+    scheduled: (event, env) => handlers.scheduled(event, env, capability)
+  };
+}
+
+export default createDriveWorker();
 `);
     } finally {
       rmSync(configPath, { force: true });

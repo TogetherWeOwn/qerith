@@ -14,7 +14,8 @@ interface Database { prepare(sql: string): Statement }
 
 export interface ReadEntry { id: string; name: string; kind: 'file' | 'folder' }
 export interface ReadCursor { name: string; id: string }
-export interface ReadPage { entries: ReadEntry[]; nextCursor: ReadCursor | null }
+type ListedReadEntry = ReadEntry & { downloadable?: 0 | 1 };
+export interface ReadPage { entries: ListedReadEntry[]; nextCursor: ReadCursor | null; ownsFolder?: true }
 export interface FolderPage {
   entries: ReadEntry[];
   total: number;
@@ -44,7 +45,7 @@ const entryAccess = (includeLifetime: boolean) => `WITH RECURSIVE ancestors(id, 
   SELECT e.id, e.parent_id, e.owner_id FROM drive_entries e
     JOIN ancestors a ON e.id = a.parent_id AND e.owner_id = a.owner_id
 ), permitted AS (
-  SELECT target.id${includeLifetime ? `, ${sessionRemainingMs} AS remainingMs` : ''} FROM drive_entries target
+  SELECT target.id, target.owner_id = reader.id AS owned${includeLifetime ? `, ${sessionRemainingMs} AS remainingMs` : ''} FROM drive_entries target
   JOIN drive_principals owner ON owner.id = target.owner_id AND owner.status = 'active'
   JOIN drive_sessions s ON s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
   JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active'
@@ -162,7 +163,8 @@ export function createSharedReadAccess(db: { withSession(constraint: 'first-prim
 
 // Listing and entry lookup never expose a storage reference.
 export class ReadAccess {
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database,
+    private readonly downloadScope?: readonly [endpoint: string, bucket: string, epoch: string]) {}
 
   async get(token: string, id: string): Promise<ReadEntry | null> {
     const hash = await sessionHash(token);
@@ -180,21 +182,26 @@ export class ReadAccess {
     // A sentinel distinguishes an accessible empty folder from an inaccessible ID
     // without an authorization query separate from the listing.
     const boundary = cursor ? 'AND (e.name, e.id) > (?, ?)' : '';
+    // Compute a hint on the same authorized, bounded page. The download route reauthorizes.
+    const availability = this.downloadScope ? `, EXISTS (SELECT 1 FROM drive_entries e ${publishedGenerationJoins}
+      WHERE e.id = children.id AND ${publishedGenerationFilter}) AS downloadable` : '';
+    const sentinel = this.downloadScope ? ', 0' : '';
     const rows = (await this.db.prepare(`${access}, folder AS (
-      SELECT e.id, e.owner_id FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
+      SELECT e.owner_id, p.owned FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
       SELECT e.id, e.name, e.kind FROM drive_entries e INDEXED BY drive_entries_sibling_name
         JOIN folder f ON e.owner_id = f.owner_id
       WHERE COALESCE(e.parent_id, '') = ? ${boundary} ORDER BY e.name, e.id LIMIT 101
-    ) SELECT id, name, kind FROM children UNION ALL
-      SELECT NULL, NULL, NULL FROM folder ORDER BY name, id`)
-      .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []))
-      .all<ReadEntry | { id: null; name: null; kind: null }>()).results;
-    if (!rows.some((row) => row.id === null)) return null;
-    const items = rows.filter((row): row is ReadEntry => row.id !== null);
+    ) SELECT id, name, kind${availability} FROM children UNION ALL
+      SELECT NULL, NULL, owned${sentinel} FROM folder ORDER BY name, id`)
+      .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []), ...(this.downloadScope ?? []))
+      .all<ListedReadEntry | { id: null; name: null; kind: 0 | 1 }>()).results;
+    const folder = rows.find(row => row.id === null); // The sentinel's kind field carries ownership, not an entry kind.
+    if (!folder) return null;
+    const items = rows.filter((row): row is ListedReadEntry => row.id !== null);
     const entries = items.slice(0, 100);
     const last = entries[entries.length - 1];
-    return { entries, nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
+    return { entries, ...(folder.kind === 1 ? { ownsFolder: true } : {}), nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
   async listPage(token: string, folderId: string, cursor: string | null = null, direction: ListingDirection = 'asc'): Promise<FolderPage | null> {

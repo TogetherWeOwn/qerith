@@ -8,14 +8,28 @@ import { test } from 'node:test';
 import { qualificationPrefix } from './staging-qualification.mjs';
 import { createQualificationInventory } from './staging-qualification-inventory.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
-import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
+import { qualificationReadiness, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
+
+const json = result => Response.json({ success: true, errors: [], result });
+const dbBinding = { name: 'DB', type: 'd1', id: '87ac8041-ad2d-4650-b0d7-05bb78846f60' };
+const resourceBindings = [dbBinding, { name: 'ASSETS', type: 'assets' }];
 
 const account = '209cf7dd678adfb683947dd7874d05af';
-const database = '87ac8041-ad2d-4650-b0d7-05bb78846f60';
+const database = dbBinding.id;
 const storageAccount = 'a'.repeat(32), bucket = 'fixture-bucket';
 const worker = 'qerith-drive-staging', namespace = 'drive-qualification/full-v0/';
 const endpoint = `https://${storageAccount}.r2.cloudflarestorage.com`;
+const pinnedBucket = { name: bucket, jurisdiction: 'default' };
+const bucketPage = { total_count: 1, per_page: 10 };
+const namespacePage = { page: 1, per_page: 10, count: 0, total_count: 0, total_pages: 0 };
+const namespaceRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [], result: [],
+  result_info: namespacePage, ...overrides }, init);
+const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
+  result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
+const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
+const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
 const scan = (items = []) => ({ complete: true, items });
 const error = { message: 'Qualification estate inventory is unverified.' };
@@ -63,39 +77,88 @@ function fixture(t) {
       return state.fixtures;
     },
     async request(url, init) {
-      assert.equal(init.method, 'GET'); assert.equal(init.redirect, 'error'); init.signal.throwIfAborted();
+      assert.equal(init.redirect, 'error'); init.signal.throwIfAborted();
       const root = 'https://api.cloudflare.com/client/v4/accounts/';
       const json = (result, paginated) => Response.json({ success: true, errors: [], result,
         ...(paginated && { result_info: { cursor: 'more' } }) });
+      const d1 = `${root}${account}/d1/database/${database}`;
+      if (url === `${d1}/query`) {
+        assert.equal(init.method, 'POST');
+        assert.match(JSON.parse(init.body).batch[0].sql, /^SELECT EXISTS/);
+        trace.push('d1-fixtures');
+        return json([{ success: true, results: [{ invite_present: state.migrationResidue ? 1 : 0, ceremony_present: 0 }] }]);
+      }
+      assert.equal(init.method, 'GET');
+      if (url === `${root}${account}/d1/database?page=1&per_page=10`) {
+        trace.push('d1-roster');
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        assert.equal(init.headers['x-jurisdiction'], undefined);
+        return state.databaseList ?? json([{ uuid: database, name: worker }]);
+      }
+      if (url === d1) return json({ uuid: database, name: worker, version: 'production' });
+      if (url === `${root}${storageAccount}/r2/buckets?per_page=10`) {
+        const jurisdiction = init.headers['cf-r2-jurisdiction'];
+        const kind = jurisdiction ? `r2-roster-${jurisdiction}` : 'r2-roster';
+        assert.ok(r2RosterOrder.includes(kind));
+        trace.push(kind);
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token',
+          ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) });
+        state.onBucketList?.(jurisdiction, init.signal);
+        const empty = jurisdiction && jurisdiction !== 'default';
+        return (jurisdiction ? state.scopedBucketLists?.[jurisdiction] : state.bucketList) ??
+          bucketRoster(empty ? { result: { buckets: [] }, result_info: { total_count: 0 } } : {},
+            state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined);
+      }
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
         const age = seconds => ({ condition: { type: 'Age', maxAge: seconds } });
         const response = json({ rules: !state.expiry ? [] : [{ enabled: true, conditions: { prefix: namespace },
-          deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) }] }, state.expiryPage);
+          deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) },
+        ...(state.recordRetention ? [{ enabled: true, conditions: { prefix: 'drive-qualification/recovery/' },
+          deleteObjectsTransition: age(3 * 86400) }] : [])] }, state.expiryPage);
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
+        if (state.expiryLink) response.headers.set('Link', '</schema>; rel="describedby"');
         return response;
       }
-      const pinned = `${root}${account}/workers/scripts/${worker}/`;
+      if (url === `${root}${account}/workers/durable_objects/namespaces?page=1&per_page=10`) {
+        trace.push('namespaces');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onNamespaceList?.(init.signal);
+        return state.namespaceList ?? namespaceRoster();
+      }
+      if (url === `${root}${account}/containers/applications`) {
+        trace.push('containers');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onContainerList?.(init.signal);
+        return state.containerList ?? json([]);
+      }
+      const scripts = `${root}${account}/workers/scripts`;
+      if (url === scripts) {
+        trace.push('scripts');
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        return state.scriptList ?? json([{ id: worker }]);
+      }
+      const pinned = `${scripts}/${worker}/`;
       assert.ok(url.startsWith(pinned));
       const path = url.slice(pinned.length); trace.push(path.split('/')[0]);
       if (path === 'schedules') return json({ schedules: [] }, state.cronPage);
       if (path === 'deployments') return json({ deployments: [{ id: state.deployment,
         annotations: { 'workers/message': state.message }, versions: [{ version_id: state.version, percentage: 100 }] }] });
       assert.equal(path, `versions/${state.version}`);
-      return json({ id: state.version, resources: { bindings: [{ name: 'DB', type: 'd1', id: database },
-        { name: 'ASSETS', type: 'assets' }] } });
+      return json({ id: state.version, resources: { bindings: resourceBindings } });
     },
     async send(request) {
       const url = new URL(request.url);
       assert.equal(request.method, 'GET'); assert.equal(url.origin + url.pathname, `${endpoint}/${bucket}/`);
-      assert.equal(url.searchParams.get('prefix'), namespace);
+      const prefix = url.searchParams.get('prefix');
+      assert.ok(prefix === namespace || (state.cleanup && prefix === context.prefix));
       assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
       const stale = `<Key>${namespace}11/2/stale</Key>`;
       const uploads = url.searchParams.has('uploads'), kind = uploads ? 'uploads' : 'objects';
-      trace.push(kind);
+      trace.push(prefix === context.prefix ? 'r2-cleanup' : kind);
       const init = state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined;
       const paginated = uploads ? state.uploadPage : state.objectPage;
-      const envelope = `<Prefix>${namespace}</Prefix><EncodingType>url</EncodingType><IsTruncated>${!!paginated}</IsTruncated>`;
+      const envelope = `<Prefix>${prefix}</Prefix><EncodingType>url</EncodingType><IsTruncated>${!!paginated}</IsTruncated>`;
       if (uploads) return new Response(`<ListMultipartUploadsResult><Bucket>${bucket}</Bucket>${envelope}${state.upload ?
         `<Upload>${stale}<UploadId>pending</UploadId></Upload>` : ''}${paginated ?
         '<NextKeyMarker>next</NextKeyMarker><NextUploadIdMarker>next</NextUploadIdMarker>' : ''}</ListMultipartUploadsResult>`, init);
@@ -110,6 +173,152 @@ function fixture(t) {
   };
   return { context, create, trace, env, cwd, reads, get state() { return state; } };
 }
+
+test('composed lifecycle has no default admission or transport', async t => {
+  const { env, cwd } = fixture(t);
+  const unused = () => assert.fail('Preparation must not call adapters');
+  await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { assertFullV0: unused }), /requires.*explicit transport/);
+});
+
+function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
+  const app = join(cwd, 'apps/drive');
+  for (const dir of ['.svelte-kit/cloudflare', 'node_modules/.bin']) mkdirSync(join(app, dir), { recursive: true });
+  writeFileSync(join(app, '.svelte-kit/cloudflare/_worker.js'), 'unused');
+  writeFileSync(join(app, 'node_modules/.bin/wrangler'), 'unused');
+  const { sha, runId, attempt } = context;
+  const tag = `${sha}-${runId}-${attempt}`;
+  const { version, previousVersion, expiresAt } = candidate;
+  const script = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${worker}`;
+  const d1 = `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${database}`;
+  return async (url, init) => {
+    init.signal.throwIfAborted();
+    if (url.startsWith(stagingOrigin)) {
+      assert.equal(state.version, version);
+      trace.push('probe');
+      return qualificationReadiness(new Request(url, init), { DRIVE_ORIGIN: stagingOrigin,
+        DRIVE_QUALIFICATION_SHA: sha, DRIVE_QUALIFICATION_VERSION: { id: version } }, true);
+    }
+    if (url === `${script}/versions/${version}`) {
+      return json({ id: version, annotations: { 'workers/tag': tag }, resources: { bindings: [...resourceBindings,
+        { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text', text: sha },
+        { name: 'DRIVE_QUALIFICATION_EXPIRES_AT', type: 'plain_text', text: expiresAt },
+        { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }] } });
+    }
+    if (url === `${script}/deployments` && init.method === 'POST') {
+      const activation = state.version === previousVersion;
+      const target = activation ? version : previousVersion;
+      const message = activation ? tag : `restore-${tag}`;
+      assert.deepEqual(JSON.parse(init.body), { strategy: 'percentage', versions: [{ version_id: target, percentage: 100 }],
+        annotations: { 'workers/message': message } });
+      Object.assign(state, { version: target, message, deployment: uuid(activation ? '4' : '5'), restorePending: !activation });
+      trace.push(activation ? 'activate' : 'restore');
+      return json({ id: state.deployment });
+    }
+    if (url === `${script}/deployments` && state.restorePending) {
+      trace.push('restore-readback');
+      state.restorePending = false;
+    }
+    if ((url === d1 || url === `${d1}/query`) && state.cleanup && state.version === version) {
+      assert.equal(state.version, version);
+      trace.push('d1-cleanup');
+      return json(url === d1 ? { uuid: database, name: worker, version: 'production' } :
+        [{ success: true, results: [] }, { success: true, results: [] }]);
+    }
+    return reads.request(url, init);
+  };
+}
+
+for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
+  const { context, trace, env, cwd, reads, state } = fixture(t);
+  const noRetention = ['retention', 'default retention'].includes(fault);
+  state.recordRetention = !noRetention;
+  const stored = new Map();
+  const candidate = { version: uuid('3'), previousVersion: state.version, previousDeployment: state.deployment,
+    expiresAt: String(Date.now() + 25 * 60_000) };
+  const unused = () => assert.fail('Unexpected app adapter');
+  const unexpectedNetwork = t.mock.method(globalThis, 'fetch', () => assert.fail('Unexpected network request'));
+  const reachesWorker = ['retention after D1', 'worker', null].includes(fault);
+  const nativeRequest = reachesWorker ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
+  const identity = { sha: context.sha, runId: context.runId, attempt: context.attempt };
+  const { expiresAt, version } = candidate;
+  const inputs = { ...reads, readFileFixtures: unused, openTransferClient: unused, openDeletion: unused,
+    async withAccessFixtures(scope, signal) {
+      signal.throwIfAborted();
+      assert.deepEqual(scope, { ...context, version });
+      assert.equal(state.version, version);
+      trace.push('cases');
+      throw new Error('Synthetic case failure');
+    },
+    readWriterFence(source, signal) {
+      signal.throwIfAborted();
+      assert.deepEqual(source, { ...identity, version, expiresAt });
+      assert.equal(state.version, version);
+      trace.push('fence');
+      state.cleanup = true;
+      const at = Date.now(), fenced = { state: 'fenced', at };
+      return { signal: new AbortController().signal, snapshot: { observedAt: at,
+        fence: { since: at, until: at + 60_000, coverage: 'exclusive', superseded: false, current: identity },
+        runner: fenced, candidate: { ...fenced, version, expiresAt }, inFlight: fenced, storageUrls: fenced,
+        storageInFlight: fenced, providerOperations: fenced } };
+    },
+    assertFullV0(scope, signal) {
+      signal.throwIfAborted(); assert.deepEqual(scope, context); trace.push('admission');
+      return fault !== 'admission';
+    },
+    async send(request, init) {
+      if (typeof request === 'string') return nativeRequest(request, init);
+      const path = new URL(request.url).pathname;
+      if (!path.includes('/recovery/')) return reads.send(request);
+      const kind = path.includes('-d1-') ? 'd1' : 'worker';
+      const { sha, runId, attempt } = context;
+      assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${sha}-run-${runId}-attempt-${attempt}`);
+      assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
+      trace.push(`${kind} ${request.method}`);
+      if (request.method === 'PUT') {
+        assert.equal(request.headers.get('if-none-match'), '*');
+        const bytes = Buffer.from(await request.arrayBuffer());
+        assert.deepEqual(JSON.parse(bytes), { schema: 'drive-staging-recovery.v1', kind, sha, runId, attempt,
+          ...(kind === 'd1' ? { bookmark: 'offline_bookmark' } : candidate) });
+        stored.set(kind, bytes);
+        return new Response(null, { headers: { etag: '"created"' } });
+      }
+      const bytes = fault === kind ? Buffer.from('{}') : stored.get(kind);
+      const date = new Date().toUTCString();
+      return new Response(bytes, { headers: { date, 'last-modified': date, 'content-length': bytes.length } });
+    },
+  };
+  const run = await createQualificationLifecycle(env, cwd, inputs, fault === 'default retention' ? undefined : {
+    upload() {
+      trace.push('upload');
+      if (fault === 'retention after upload') state.recordRetention = false;
+      return candidate;
+    },
+    async migrate({ recordRecovery }) {
+      await recordRecovery({ bookmark: 'offline_bookmark' });
+      if (fault === 'retention after D1') state.recordRetention = false;
+      trace.push('migrate');
+    },
+  });
+  assert.deepEqual(trace, []);
+  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : noRetention ? /recovery retention is unverified/ :
+    fault ? /recovery record is unverified/ : /access.*unverified|unverified.*access/);
+  await assert.rejects(run(), /already started/);
+  const milestones = ['admission', 'estate', 'upload', 'd1 PUT', 'd1 GET', 'migrate', 'worker PUT', 'worker GET',
+    'activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'];
+  assert.deepEqual(trace.filter(step => milestones.includes(step)), ['admission',
+    ...(fault === 'admission' ? [] : ['estate']),
+    ...(fault === 'admission' || noRetention ? [] : ['upload']),
+    ...(fault === 'admission' || noRetention || fault === 'retention after upload' ? [] : ['d1 PUT', 'd1 GET']),
+    ...(reachesWorker ? ['migrate'] : []),
+    ...(reachesWorker && fault !== 'retention after D1' ? ['worker PUT', 'worker GET'] : []),
+    ...(!fault ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
+    ...(fault === 'admission' ? [] : ['estate'])]);
+  const cleanup = fault ? trace : trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
+  assert.deepEqual(cleanup.filter(step => step.endsWith('-cleanup')).sort(),
+    fault ? [] : ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')]);
+  assert.equal(unexpectedNetwork.mock.callCount(), 0);
+});
 
 for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body read', 'held with R2 failure']) test(
   `lifecycle estate cleanup under a ${mode} fence`, { timeout: 30_000 }, async t => {
@@ -131,7 +340,9 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
           storageInFlight: fenced, providerOperations: fenced } };
       },
       async request(url, init) {
-        if (!url.includes('/d1/database/')) return reads.request(url, init);
+        if (!url.includes('/d1/database/') || !trace.includes('fence') || trace.includes('restore')) {
+          return reads.request(url, init);
+        }
         assert.equal(url.split('/database/')[1], `${database}${init.method === 'GET' ? '' : '/query'}`);
         trace.push('d1-cleanup');
         if (r2Fails && init.method === 'POST') {
@@ -216,10 +427,268 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   assert.equal(await run('before'), true);
   f.state.deployment = uuid('3');
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
+  f.state.bucketList = bucketRoster({ result_info: { total_count: 1, cursor: '' }, messages: ['ok'] });
+  f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'fixtures', 'expiry', 'uploads', 'objects', 'deployments', 'versions', 'schedules', 'deployments'];
+  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
+    'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
+});
+
+test('inventory rejects a native Durable Object namespace before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.namespaceList = namespaceRoster({ result: [{ name: 'unbound' }],
+      result_info: { ...namespacePage, count: 1, total_count: 1, total_pages: 1 } });
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces']);
+  }
+});
+
+test('inventory requires a complete, bounded native Durable Object namespace roster', async t => {
+  const f = fixture(t);
+  for (const reply of [namespaceRoster({ result_info: { total_count: 0 } }),
+    namespaceRoster({ result_info: { ...namespacePage, total_pages: 1 } })]) {
+    const run = f.create();
+    f.state.namespaceList = reply;
+    assert.equal(await run('before'), true);
+  }
+  for (const reply of [namespaceRoster({ result: {} }), namespaceRoster({ result_info: undefined }),
+    namespaceRoster({ result_info: { page: 1 } }), namespaceRoster({ messages: ['unexpected'] }),
+    ...[{ page: 2 }, { per_page: 1 }, { count: 1 }, { total_count: 1 }, { total_pages: 2 }, { cursor: 'next' }]
+      .map(page => namespaceRoster({ result_info: { ...namespacePage, ...page } })),
+    namespaceRoster({ success: false }), namespaceRoster({}, { status: 403 }),
+    namespaceRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    namespaceRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    new Response((await namespaceRoster().text()).padEnd(65_537, ' ')), new Response('not JSON')]) {
+    const run = f.create();
+    f.trace.length = 0;
+    f.state.namespaceList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'namespaces');
+  }
+});
+
+test('inventory rejects a native Durable Object namespace result after its deadline', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onNamespaceList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'namespaces');
+});
+
+test('inventory rejects any native container application before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.state.containerList = json([{ name: 'unbound', instances: 0 }]);
+    await assert.rejects(run(phase), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory requires a complete, bounded native container roster', async t => {
+  const f = fixture(t);
+  const roster = { success: true, errors: [], messages: [], result: [] };
+  const empty = f.create();
+  f.state.containerList = Response.json({ ...roster, result_info: {} });
+  assert.equal(await empty('before'), true);
+  f.state.containerList = Response.json({ ...roster, result_info: { next_page_token: '' } });
+  assert.equal(await empty('after'), true);
+  for (const reply of [
+    Response.json({ ...roster, success: false }), Response.json({ ...roster, result: undefined }),
+    Response.json({ ...roster, errors: [{ code: 10000 }] }), Response.json({ ...roster, messages: ['partial'] }),
+    ...[null, [], '', { next_page_token: 'more' }, { next_page_token: ' ' }, { next_page_token: null }, { cursor: 'more' }]
+      .map(result_info => Response.json({ ...roster, result_info })),
+    Response.json({ ...roster, result: { applications: [] } }), Response.json(roster, { status: 403 }),
+    Response.json(roster, { headers: { Link: '</next>; rel="next"' } }), Response.json(roster, { status: 206 }),
+    Response.json(roster, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    new Response(JSON.stringify(roster).padEnd(65_537, ' ')), new Response('not JSON'),
+  ]) {
+    const run = f.create();
+    f.state.containerList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory rejects duplicate native container roster members', async t => {
+  const f = fixture(t);
+  for (const fields of [
+    '"result":[{}],"result":[]',
+    '"result":[{}],"res\\u0075lt":[]',
+    '"result":[],"result_info":{"next_page_token":"more","next_page_token":""}',
+  ]) {
+    const run = f.create();
+    f.state.containerList = new Response(`{"success":true,"errors":[],${fields}}`);
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory rejects a native container roster returned after its deadline', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onContainerList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'containers');
+});
+
+test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const [index, jurisdiction] of r2Jurisdictions.entries()) {
+    for (const phase of ['before', 'after']) {
+      const run = f.create();
+      if (phase === 'after') assert.equal(await run('before'), true);
+      f.trace.length = 0;
+      const buckets = [...(jurisdiction === 'default' ? [pinnedBucket] : []), { name: 'extra', jurisdiction }];
+      f.state.scopedBucketLists = { [jurisdiction]: bucketRoster({ result: { buckets },
+        result_info: { total_count: buckets.length } }) };
+      await assert.rejects(run(phase), error);
+      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, index + 2)]);
+    }
+  }
+});
+
+test('inventory requires a complete bounded native R2 bucket roster', async t => {
+  const f = fixture(t);
+  const invalid = [bucketRoster({ result: { buckets: [] } }),
+    bucketRoster({ result: { buckets: [{ ...pinnedBucket, jurisdiction: 'eu' }] } }),
+    bucketRoster({ result: { buckets: [{ ...pinnedBucket, name: 'wrong' }] } }),
+    bucketRoster({ result_info: undefined }), bucketRoster({ result_info: { per_page: 10 } }),
+    bucketRoster({ result_info: { ...bucketPage, per_page: 1 } }),
+    bucketRoster({ result_info: { ...bucketPage, total_count: 2 } }),
+    bucketRoster({ messages: [42] }),
+    bucketRoster({ result_info: { ...bucketPage, is_truncated: true } }),
+    bucketRoster({ result_info: { ...bucketPage, cursor: 'next' } }),
+    bucketRoster({ result: { buckets: [pinnedBucket], cursor: 'next' } }),
+    bucketRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    bucketRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    bucketRoster({}, { status: 403 }), bucketRoster({ success: false }),
+    new Response('invalid JSON')];
+  for (const response of invalid) {
+    const run = f.create();
+    f.trace.length = 0;
+    f.state.bucketList = response;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'r2-roster');
+  }
+  const run = f.create();
+  f.state.scopedBucketLists = { fedramp: new Response(null, { status: 403 }) };
+  await assert.rejects(run('before'), error);
+  assert.equal(f.trace.at(-1), 'r2-roster-fedramp');
+});
+
+test('inventory caps schema-valid native R2 roster bodies at 64 KiB', async t => {
+  const f = fixture(t);
+  const body = await bucketRoster().text();
+  const capped = body.padEnd(65_536, ' '); // Trailing JSON whitespace keeps the payload valid.
+  const atLimit = f.create();
+  f.state.bucketList = new Response(capped);
+  assert.equal(await atLimit('before'), true);
+
+  const overLimit = f.create();
+  f.trace.length = 0;
+  f.state.bucketList = new Response(`${capped} `);
+  await assert.rejects(overLimit('before'), error);
+  assert.equal(f.trace.at(-1), 'r2-roster');
+});
+
+test('inventory shares one 15-second deadline across native R2 roster reads', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const signals = [], beforeDeadline = [];
+  f.state.onBucketList = (jurisdiction, signal) => {
+    signals.push(signal);
+    if (jurisdiction === undefined) t.mock.timers.tick(10_000);
+    if (jurisdiction === 'default') t.mock.timers.tick(4_999);
+    beforeDeadline.push(signal.aborted);
+    if (jurisdiction === 'default') t.mock.timers.tick(1);
+    signal.throwIfAborted();
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, 2)]);
+  assert.deepEqual(beforeDeadline, [false, false]);
+  assert.equal(signals[0], signals[1]);
+  assert.equal(signals[0].aborted, true);
+});
+
+test('inventory rejects an extra native Worker before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.scriptList = json([{ id: worker }, { id: 'unexpected-worker' }]);
+    await assert.rejects(run(phase), error);
+    assert.equal(f.trace.at(-1), 'scripts');
+  }
+});
+
+test('inventory rejects an extra native D1 database before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.databaseList = json([{ uuid: database, name: worker }, { uuid: uuid('4'), name: 'unexpected' }]);
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster']);
+  }
+});
+
+test('inventory accepts only a complete bounded native D1 roster', async t => {
+  const f = fixture(t);
+  const pinned = [{ uuid: database, name: worker }];
+  const complete = { page: 1, per_page: 10, count: 1, total_count: 1 };
+  const reply = (overrides, init) => Response.json({ success: true, errors: [], result: pinned,
+    result_info: complete, ...overrides }, init);
+  const run = f.create();
+  f.state.databaseList = reply();
+  assert.equal(await run('before'), true);
+  for (const response of [reply({ result: [] }), reply({ result: [{ ...pinned[0], name: 'wrong' }] }),
+    reply({ result: [{ ...pinned[0], uuid: uuid('4') }] }), reply({ result: pinned[0] }),
+    reply({ result_info: { ...complete, total_count: 2 } }), reply({ result_info: { ...complete, page: 2 } }),
+    reply({ result_info: { cursor: 'next' } }), reply({ success: false }), reply({}, { status: 403 }),
+    reply({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }), reply({}, { headers: { Link: '</next>; rel="next"' } }),
+    reply({ result: [{ ...pinned[0], oversized: 'x'.repeat(65_536) }] }), new Response('not JSON')]) {
+    const inspect = f.create();
+    f.trace.length = 0;
+    f.state.databaseList = response;
+    await assert.rejects(inspect('before'), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster']);
+  }
+});
+
+test('inventory requires native D1 migration fixture absence before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.migrationResidue = true;
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures']);
+  }
 });
 
 test('inventory rejects incomplete reads, extra resources, fixtures and unverified native idle controls', async t => {
@@ -241,13 +710,13 @@ test('inventory rejects incomplete reads, extra resources, fixtures and unverifi
   }
 });
 
-const r2ReadOrder = ['expiry', 'uploads', 'objects'];
+const r2ReadOrder = [...r2RosterOrder, 'expiry', 'uploads', 'objects'];
 for (const [index, kind] of r2ReadOrder.entries()) {
   test(`inventory rejects HTTP 200 with Content-Range on R2 ${kind}`, async t => {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'fixtures', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 

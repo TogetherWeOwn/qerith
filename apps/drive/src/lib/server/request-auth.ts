@@ -114,6 +114,8 @@ function pageDenial(request: Request, status: 403 | 503): Response {
   });
 }
 
+export const eligibleRecipientsRoute = '/api/entries/[entryId]/eligible-recipients';
+
 export function privateRequests(env: DriveAuthEnv): Handle {
   return async ({ event, resolve }) => {
     const request = readGrantOriginalRequest(event.request);
@@ -123,6 +125,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const routeId = event.route?.id;
     const readGrant = routeId === readGrantCollectionRoute || routeId === readGrantRecipientRoute;
     const uploadResume = routeId === uploadResumeRoute;
+    if (routeId === eligibleRecipientsRoute && !admitsSignInFixture(env)) return deny(404);
     const refuse = (status: 403 | 503) => navigation && !uploadResume ? pageDenial(request, status) : deny(status);
     const origin = authOrigin(env.DRIVE_ORIGIN);
     if (!origin || !env.DB) {

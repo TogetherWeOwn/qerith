@@ -1,5 +1,11 @@
 import { qualificationPrefix } from './staging-qualification.mjs';
-import { runQualificationPhase } from './staging-qualification-worker.mjs';
+import { verifyQualificationQuiescence } from './staging-qualification-quiescence.mjs';
+import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
+import { createQualificationRecoverySource } from './staging-qualification-recovery-source.mjs';
+import { recoverQualificationWorker, runQualificationPhase } from './staging-qualification-worker.mjs';
+import { recoverQualificationD1 } from './staging-qualification-d1.mjs';
+import { cleanHistoricalQualificationR2 } from './staging-qualification-cleanup.mjs';
 
 const repo = 'TogetherWeOwn/qerith';
 const workflow = '.github/workflows/drive-staging-qualification.yml';
@@ -9,30 +15,53 @@ const matches = (value, pattern) => typeof value === 'string' && pattern.test(va
 const sameAttempt = (value, { sha, runId, attempt }) =>
   value?.sha === sha && value.runId === runId && value.attempt === attempt;
 const refused = phase => new Error(`Staging qualification recovery is unverified (${phase}).`);
+const fenceRemaining = ({ validUntil, deadline }) => Math.min(validUntil - Date.now(), deadline - performance.now());
 
 // Unwired. The protected caller holds the shared lifecycle lock throughout.
 // readSource authenticates the exact workflow attempt and its source job from
 // GitHub, and reads the current attempt separately. A successful source job
 // proves tested SHA = dispatch SHA = checkout and main ancestry for that attempt.
 // readRecord returns authenticated, validated records, not bare store objects.
-// proveWriters must exclude superseding state, new writers, in-flight writes,
-// issued upload URLs and pending provider operations (including late Worker
-// activation). Its proof must remain valid under the lock through all phases.
-// recoverWorker binds recoverQualificationWorker's env/cwd; do not normalize
-// an exception to a result. The guard, D1 and R2 return true only after verification.
-// Every adapter must bound its I/O and stop and drain before settling on abort.
-export async function recoverQualification(request, { readSource, readRecord, proveWriters, recoverWorker,
+// readWriterFence returns authoritative observations and the holder's loss
+// signal, not the signal of the phase that reads the observations. Keep the
+// fence held through final readback. Mutation adapters must check assertHeld
+// at I/O boundaries and drain on abort. D1 and R2 return true only after verification.
+export async function recoverQualification(request, { readSource, readRecord, readWriterFence, recoverWorker,
   recoverD1, cleanupR2 } = {}, signal) {
   const { sha, runId, attempt } = request ?? {};
   if (!matches(sha, /^[0-9a-f]{40}$/) || !matches(runId, id) || !matches(attempt, id) ||
-      [readSource, readRecord, proveWriters, recoverWorker, recoverD1, cleanupR2].some(fn => typeof fn !== 'function')) {
+      [readSource, readRecord, readWriterFence, recoverWorker, recoverD1, cleanupR2].some(fn => typeof fn !== 'function')) {
     throw refused('input');
   }
   const source = Object.freeze({ sha, runId, attempt });
   const prefix = qualificationPrefix(source);
-  const phase = async (name, timeout, task) => {
+  const phase = async (name, timeout, task, fence) => {
     try {
-      return await runQualificationPhase((_, active) => task(active), null, signal, timeout);
+      const parent = fence ? AbortSignal.any([signal, fence.signal].filter(Boolean)) : signal;
+      const budget = fence ? Math.min(timeout, fenceRemaining(fence)) : timeout;
+      if (budget <= 0) throw refused(name);
+      return await runQualificationPhase(async (_, timed) => {
+        const expiry = fence && new AbortController();
+        const active = expiry ? AbortSignal.any([timed, expiry.signal]) : timed;
+        const expire = () => expiry.abort(refused(name));
+        const assertHeld = () => {
+          if (fence && fenceRemaining(fence) <= 0) expire();
+          active.throwIfAborted();
+        };
+        assertHeld();
+        // The phase timer is relative. Sample wall time while I/O is pending
+        // so a forward clock step can abort it before that timer fires.
+        const wallTimer = fence && setInterval(() => {
+          if (Date.now() >= fence.validUntil) expire();
+        }, 1_000);
+        try {
+          const value = await task(active, assertHeld);
+          assertHeld();
+          return value;
+        } finally {
+          if (wallTimer) clearInterval(wallTimer);
+        }
+      }, null, parent, budget);
     } catch {
       // Never propagate provider diagnostics, record contents or abort reasons.
       throw refused(name);
@@ -56,18 +85,63 @@ export async function recoverQualification(request, { readSource, readRecord, pr
     [version, previousVersion, previousDeployment].every(value => matches(value, uuid)) &&
     version !== previousVersion && matches(expiresAt, /^[1-9][0-9]{12}$/));
   const context = Object.freeze({ ...source, prefix });
+  const fence = await phase('writer quiescence', 30_000, async active => {
+    const { version, expiresAt } = worker;
+    const candidate = Object.freeze({ ...source, version, expiresAt });
+    const { snapshot, signal: held } = await readWriterFence(candidate, active) ?? {};
+    if (!(held instanceof AbortSignal) || held === active) throw refused('writer quiescence');
+    // A wall-clock rollback cannot extend the lease across recovery phases.
+    const sampledAt = performance.now();
+    const { verifiedAt, validUntil } = verifyQualificationQuiescence(candidate, snapshot, { now: Date.now, signal: held });
+    return { signal: held, validUntil, deadline: sampledAt + (validUntil - verifiedAt) };
+  });
   const requireProof = async (name, timeout, task) => {
-    if (await phase(name, timeout, task) !== true) throw refused(name);
+    if (await phase(name, timeout, task, fence) !== true) throw refused(name);
   };
 
-  await requireProof('writer quiescence', 30_000, active => proveWriters(context, { d1, worker }, active));
-  const restored = await phase('Worker restore', 45_000, active => recoverWorker(source, worker, active));
+  const restored = await phase('Worker restore', 45_000,
+    (active, assertHeld) => recoverWorker(source, worker, active, assertHeld), fence);
   // Baseline observation is acceptable only AFTER independent writer proof.
   if (restored?.version !== worker.previousVersion ||
       !(restored.status === 'baseline-observed' && restored.deployment === worker.previousDeployment ||
         restored.status === 'restored' && matches(restored.deployment, uuid) &&
           restored.deployment !== worker.previousDeployment)) throw refused('Worker restore');
-  await requireProof('D1 recovery', 120_000, active => recoverD1(source, d1, active));
-  await requireProof('R2 cleanup', 60_000, active => cleanupR2(context, active));
-  if (signal?.aborted) throw refused('R2 cleanup');
+  await requireProof('D1 recovery', 120_000, (active, assertHeld) => recoverD1(source, d1, active, assertHeld));
+  await requireProof('R2 cleanup', 60_000, (active, assertHeld) => cleanupR2(context, active, assertHeld));
+  if (signal?.aborted || fence.signal.aborted || fenceRemaining(fence) <= 0) throw refused('R2 cleanup');
+}
+
+// Offline composition only. The protected caller must supply an authoritative
+// held fence and independently attribute the D1 bookmark and pre-write ledger
+// to the failed attempt. No transport or proof defaults.
+export function createQualificationRecovery(env, cwd, { token, githubRequest, send,
+  readWriterFence, proveD1Quiescence } = {}) {
+  if ([send, readWriterFence, proveD1Quiescence].some(fn => typeof fn !== 'function')) throw refused('input');
+  env = { ...env };
+  const guarded = assertHeld => (...args) => {
+    assertHeld();
+    return send(...args);
+  };
+  const readSource = createQualificationRecoverySource({ token, request: githubRequest });
+  return (request, signal) => recoverQualification(request, {
+    readSource, readWriterFence,
+    recoverWorker(source, record, active, assertHeld) {
+      return recoverQualificationWorker(source, record, env, cwd, active, guarded(assertHeld));
+    },
+    async recoverD1(source, record, active, assertHeld) {
+      const proveQuiescence = (scope, signal) => {
+        assertHeld();
+        return proveD1Quiescence(scope, signal);
+      };
+      const result = await recoverQualificationD1(source, record, { proveQuiescence }, env, cwd, active, guarded(assertHeld));
+      return result.status === 'restored';
+    },
+    cleanupR2(context, active, assertHeld) {
+      return cleanHistoricalQualificationR2(context, env, cwd, active, guarded(assertHeld));
+    },
+    async readRecord(source, kind, active) {
+      const store = await createQualificationR2RecoveryStore(source, env, cwd, { send });
+      return readQualificationRecoveryRecord(source, kind, store, active);
+    },
+  }, signal);
 }

@@ -73,11 +73,13 @@ export function createS3Signer(options: S3SignerOptions) {
     if (body instanceof URLSearchParams) body = new URLSearchParams(body);
     else if (body instanceof ArrayBuffer) body = body.slice(0);
     else if (ArrayBuffer.isView(body)) body = new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
-    const request = new Request(parsed, { ...init, headers, redirect: 'manual', duplex: 'half' } as RequestInit);
+    const requestInit = { ...init, headers, redirect: 'manual', duplex: 'half' } as RequestInit;
+    const request = new Request(parsed, requestInit);
     if (request.method !== request.method.toUpperCase()) throw new Error('Unsupported S3 method');
     const datetime = (options.now?.() ?? new Date()).toISOString().replace(/[:-]|\.\d{3}/g, '');
+    // Keep cancellation linked directly to the caller, not a temporary Request's signal.
     return client.sign(parsed, {
-      method: request.method, headers: request.headers, body, signal: request.signal,
+      method: request.method, headers: request.headers, body, signal: requestInit.signal,
       cache: request.cache, credentials: request.credentials, integrity: request.integrity,
       keepalive: request.keepalive, mode: request.mode, referrer: request.referrer,
       referrerPolicy: request.referrerPolicy, redirect: 'manual', aws: { datetime, allHeaders: true }

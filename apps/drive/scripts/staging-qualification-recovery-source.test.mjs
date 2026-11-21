@@ -32,7 +32,7 @@ function fixture(responses = [run, listing, run]) {
 async function recover(readSource, records) {
   return recoverQualification(source, { readSource, async readRecord(identity, kind) {
     records.push([identity, kind]);
-  }, proveWriters() {}, recoverWorker() {}, recoverD1() {}, cleanupR2() {} });
+  }, readWriterFence() {}, recoverWorker() {}, recoverD1() {}, cleanupR2() {} });
 }
 
 test('authenticates the exact failed attempt and its source step before recovery records are read', async () => {

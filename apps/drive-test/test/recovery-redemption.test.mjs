@@ -28,7 +28,8 @@ async function prepared() {
   return { issued, challenge, signed };
 }
 
-it('replaces credentials and sessions, fences login, and consumes competing tokens atomically', async () => {
+it('replaces credentials and sessions atomically without overwriting the member name', async () => {
+  await env.DB.prepare("UPDATE drive_principals SET display_name = 'Chosen name' WHERE id = 'member'").run();
   const oldSession = (await sessions.issue('member')).token;
   await env.DB.prepare("INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports) VALUES ('old', 'member', x'01', 0, '[]')").run();
   const login = new PasskeyLogin(env.DB, rpID, origin);
@@ -40,6 +41,8 @@ it('replaces credentials and sessions, fences login, and consumes competing toke
   const successes = attempts.filter(result => result.status === 'fulfilled');
   expect(successes, attempts.filter(result => result.status === 'rejected').map(result => String(result.reason)).join('\n')).toHaveLength(1);
   expect(await sessions.lookup(successes[0].value.token)).toEqual({ id: 'member', role: 'member' });
+  expect(await env.DB.prepare("SELECT display_name FROM drive_principals WHERE id = 'member'").first())
+    .toEqual({ display_name: 'Chosen name' });
   expect(await sessions.lookup(oldSession)).toBeNull();
   const credentials = await env.DB.prepare("SELECT id, principal_id FROM drive_credentials WHERE principal_id = 'member'").all();
   expect(credentials.results).toEqual([{ id: signed.registration.id, principal_id: 'member' }]);
@@ -85,6 +88,8 @@ it('returns the session expiry from the transaction without a later read', async
   const session = await new RecoveryRedemption(db, rpID, origin).redeem(issued.token, challenge, signed.registration);
   expect(session.expiresAt).toBeGreaterThan(Date.now());
   expect(await sessions.lookup(session.token)).toEqual({ id: 'member', role: 'member' });
+  expect(await env.DB.prepare("SELECT display_name FROM drive_principals WHERE id = 'member'").first())
+    .toEqual({ display_name: null });
 });
 
 it('fails closed if the token or challenge changes before commit', async () => {

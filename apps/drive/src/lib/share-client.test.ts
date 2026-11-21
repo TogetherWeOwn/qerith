@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { entryShare } from './share-client';
+
+function transport(...responses: Response[]) {
+  const calls: { path: string; init?: RequestInit }[] = [];
+  const fetcher: typeof fetch = async (path, init) => {
+    assert.equal(typeof path, 'string');
+    calls.push({ path: String(path), init });
+    const response = responses.shift();
+    assert.ok(response, 'unexpected request');
+    return response;
+  };
+  return { calls, fetcher };
+}
+
+test('reads one owned-entry page with a canonical opaque cursor and nullable names', async () => {
+  const cursor = "é +&'";
+  const name = 'Sam < & Co.';
+  const { calls, fetcher } = transport(
+    Response.json({ recipients: [{ recipientId: cursor, displayName: name }], nextCursor: cursor }),
+    Response.json({ recipients: [{ recipientId: 'other', displayName: null }], nextCursor: null }),
+    Response.json({ recipients: [{ recipientId: cursor }], nextCursor: null }),
+  );
+  const share = entryShare('a?#/b', fetcher);
+  const signal = new AbortController().signal;
+  const first = await share.listEligible({ signal });
+  assert.deepEqual(first, { recipients: [{ recipientId: cursor, displayName: name }], nextCursor: cursor });
+  assert.equal(calls[0].path, '/api/entries/a%3F%23%2Fb/eligible-recipients');
+  assert.equal(calls[0].init?.signal, signal);
+  assert.deepEqual(await share.listEligible({ cursor: first.nextCursor! }), {
+    recipients: [{ recipientId: 'other', displayName: null }], nextCursor: null,
+  });
+  assert.equal(calls[1].path, '/api/entries/a%3F%23%2Fb/eligible-recipients?cursor=%C3%A9%20%2B%26%27');
+  assert.deepEqual(await share.listDirectGrants(), { recipients: [{ recipientId: cursor }], nextCursor: null });
+  assert.equal(calls[2].path, '/api/entries/a%3F%23%2Fb/read-grants');
+});
+
+test('creates and revokes by opaque ID with one bodyless request per action', async () => {
+  const { calls, fetcher } = transport(new Response(null, { status: 204 }), new Response(null, { status: 204 }));
+  const share = entryShare('file', fetcher);
+  await share.grant("user/'");
+  await share.revoke("user/'");
+  assert.deepEqual(calls.map(({ path, init }) => [path, init]), ['PUT', 'DELETE'].map((method) => [
+    '/api/entries/file/read-grants/user%2F%27',
+    { mode: 'same-origin', credentials: 'same-origin', redirect: 'error', cache: 'no-store', method },
+  ]));
+  await assert.rejects(share.grant('..'), TypeError);
+  assert.throws(() => entryShare('.', fetcher), TypeError);
+  assert.equal(calls.length, 2);
+});
+
+test('rejects denied or malformed pages and does not retry unconfirmed mutations', async () => {
+  const { calls, fetcher } = transport(
+    new Response(null, { status: 404 }),
+    Response.json({ recipients: [], nextCursor: 'same' }),
+    Response.json({ recipients: [{ recipientId: 'person' }], nextCursor: null }),
+    new Response(null, { status: 503 }),
+  );
+  const share = entryShare('file', fetcher);
+  await assert.rejects(share.listEligible(), /unavailable/);
+  await assert.rejects(share.listDirectGrants({ cursor: 'same' }), /Invalid Share page/);
+  await assert.rejects(share.listEligible(), /Invalid Share name/);
+  await assert.rejects(share.revoke('person'), /not confirmed/);
+  assert.equal(calls.length, 4);
+});

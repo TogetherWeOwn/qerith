@@ -70,11 +70,13 @@ export function assertQualificationJob(env, cwd) {
   return { sha: testedSha, runId, attempt };
 }
 
+export const qualificationFixtureNamespace = 'drive-qualification/full-v0/';
+
 export function qualificationPrefix({ runId, attempt }) {
   if (!requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
     throw new Error('Invalid qualification run or attempt.');
   }
-  return `drive-qualification/full-v0/${runId}/${attempt}/`;
+  return `${qualificationFixtureNamespace}${runId}/${attempt}/`;
 }
 
 // This is a policy predicate, not a live-evidence source or an artifact writer.

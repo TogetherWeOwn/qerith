@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
+import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
 import { validateStagingConfig } from './staging-publish.mjs';
 
@@ -7,8 +7,10 @@ const matches = (value, pattern) => typeof value === 'string' && pattern.test(va
 const bookmarkToken = value => matches(value, /^[A-Za-z0-9_-]{1,1024}$/);
 const sameAttempt = ({ sha, runId, attempt }, other) =>
   other?.sha === sha && other.runId === runId && other.attempt === attempt;
+const migrationInvite = 'd1/migration-invite';
+const migrationCeremony = 'd1/migration-ceremony';
 
-function d1(source, env, cwd, send, active) {
+function d1(source, env, cwd, send, active, { census = false } = {}) {
   const { sha, runId, attempt } = source;
   const { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token } = env;
   if (!matches(sha, /^[0-9a-f]{40}$/) || ![runId, attempt].every(id => matches(id, /^[1-9][0-9]{0,19}$/)) ||
@@ -19,13 +21,15 @@ function d1(source, env, cwd, send, active) {
   const config = JSON.parse(git('show', `${sha}:apps/drive/wrangler.staging.json`));
   validateStagingConfig(config, accountId);
   const { database_id: databaseId, database_name: name } = config.d1_databases[0];
-  const base = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}`;
-  const call = async (path, method = 'GET', body) => {
+  const collection = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`;
+  const read = async (url, method = 'GET', body, list = false) => {
     const signal = AbortSignal.any([active, AbortSignal.timeout(8000)]);
     signal.throwIfAborted();
-    const response = await send(`${base}${path}`, { method, signal, redirect: 'error',
+    const response = await send(url, { method, signal, redirect: 'error',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body });
-    if (!response.ok || !response.body) {
+    // Readback also uses POST /query; its envelope must still be complete.
+    if (signal.aborted || response.status !== 200 || response.headers.has('content-range') || !response.body ||
+        (list && response.headers.has('link'))) {
       await response.body?.cancel();
       throw new Error();
     }
@@ -37,12 +41,32 @@ function d1(source, env, cwd, send, active) {
       text += decoder.decode(chunk, { stream: true });
     }
     signal.throwIfAborted();
-    const { success, errors, result } = JSON.parse(text + decoder.decode());
+    const payload = JSON.parse(text + decoder.decode());
+    const { success, errors, result } = payload;
     if (success !== true || !Array.isArray(errors) || errors.length || !result) throw new Error();
-    return result;
+    return payload;
+  };
+  const call = async (path, method, body) => {
+    const payload = await read(`${collection}/${databaseId}${path}`, method, body);
+    if (census && Object.hasOwn(payload, 'result_info')) throw new Error();
+    return payload.result;
   };
   return {
     accountId, databaseId, call,
+    async verifyRoster() {
+      // The pinned Wrangler client ends the unfiltered listing on a short page.
+      const perPage = 10;
+      const payload = await read(`${collection}?page=1&per_page=${perPage}`, 'GET', undefined, true);
+      const { result, result_info: page } = payload;
+      if (Object.keys(payload).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+          (Object.hasOwn(payload, 'messages') && (!Array.isArray(payload.messages) || payload.messages.length)) ||
+          !Array.isArray(result) || result.length !== 1 || result[0]?.uuid !== databaseId || result[0]?.name !== name) throw new Error();
+      if (Object.hasOwn(payload, 'result_info')) {
+        const complete = { page: 1, per_page: perPage, count: 1, total_count: 1, total_pages: 1 };
+        if (!page || typeof page !== 'object' || Array.isArray(page) ||
+            Object.entries(page).some(([key, value]) => !Object.hasOwn(complete, key) || complete[key] !== value)) throw new Error();
+      }
+    },
     async verifyTarget() {
       const actual = await call('');
       if (actual.uuid !== databaseId || actual.name !== name || actual.version !== 'production') throw new Error();
@@ -56,6 +80,53 @@ function d1(source, env, cwd, send, active) {
   };
 }
 
+// This independently cross-checks the account-visible roster, not compute mode.
+export async function assertQualificationD1Roster(env, cwd, signal, send) {
+  try {
+    signal?.throwIfAborted();
+    const identity = assertQualificationJob(env, cwd);
+    await runQualificationPhase((_, active) => d1(identity, env, cwd, send, active).verifyRoster(), identity, signal, 20_000);
+  } catch {
+    throw new Error('Staging D1 database roster is unverified.');
+  }
+}
+
+// GLOB narrows the index range but '*' can cross slashes. Validate the
+// remaining run/attempt pair against the D1 client's bounded ID grammar.
+function migrationFixtureExists(table, key, suffix) {
+  const start = qualificationFixtureNamespace.length + 1;
+  return `EXISTS(SELECT 1 FROM (
+    SELECT substr(${key}, ${start}, length(${key}) - ${start + suffix.length}) AS ids
+    FROM ${table} WHERE ${key} GLOB ? AND instr(${key}, char(0)) = 0
+  ) WHERE trim(ids, '0123456789') = '/' AND instr(ids, '/') <= 21
+    AND length(ids) - instr(ids, '/') <= 20)`;
+}
+
+// A point-in-time read of both migration fixture keys across every full-v0
+// attempt. This neither discovers other app fixtures nor excludes writers.
+export async function assertNoQualificationD1MigrationFixtures(env, cwd, signal, send) {
+  try {
+    signal?.throwIfAborted();
+    const identity = assertQualificationJob(env, cwd);
+    return await runQualificationPhase(async (_, active) => {
+      const db = d1(identity, env, cwd, send, active, { census: true });
+      await db.verifyTarget();
+      const pattern = suffix => `${qualificationFixtureNamespace}[1-9]*/[1-9]*/${suffix}`;
+      const [rows] = await db.query([{
+        sql: `SELECT ${migrationFixtureExists('drive_invitations', 'id', migrationInvite)} AS invite_present,
+                     ${migrationFixtureExists('drive_bound_ceremonies', 'context', migrationCeremony)} AS ceremony_present`,
+        params: [pattern(migrationInvite), pattern(migrationCeremony)],
+      }]);
+      const [row] = rows;
+      if (rows.length !== 1 || row?.invite_present !== 0 || row.ceremony_present !== 0 ||
+          Object.keys(row).length !== 2) throw new Error();
+      return true;
+    }, identity, signal, 20_000);
+  } catch {
+    throw new Error('Staging D1 migration fixture absence is unverified.');
+  }
+}
+
 // Only the synthetic migration fixtures below, not app-created identities or
 // upload evidence. The protected caller must reserve these keys and drain their
 // writers before cleanup. This function never invokes Time Travel.
@@ -67,8 +138,8 @@ export async function cleanQualificationD1(context, env, cwd, signal, send = fet
     return await runQualificationPhase(async (_, active) => {
       const db = d1(identity, env, cwd, send, active);
       await db.verifyTarget();
-      const invite = `${prefix}d1/migration-invite`;
-      const ceremony = `${prefix}d1/migration-ceremony`;
+      const invite = `${prefix}${migrationInvite}`;
+      const ceremony = `${prefix}${migrationCeremony}`;
       const conditions = ['drive_invitations WHERE id = ?', 'drive_bound_ceremonies WHERE context = ?'];
       const fields = ['id, redeemed_at', 'context, purpose'];
       const params = [[invite], [ceremony]];

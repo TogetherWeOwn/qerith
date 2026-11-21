@@ -7,6 +7,8 @@ import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { proveSharedListing } from './shared-listing.mjs';
 import { proveNewFolder } from './new-folder.mjs';
 import { proveRename } from './rename.mjs';
+import { proveMove } from './move.mjs';
+import { proveNestedMove } from './nested-move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -97,7 +99,7 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker, navigationSite, wait = () => holdRefresh) => {
+  const relay = async (route, target = worker, navigationSite, wait) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
@@ -122,8 +124,9 @@ try {
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
-    if (url.pathname === dataPath) await wait();
-    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
+    const payload = Buffer.from(await response.arrayBuffer()); // Drain the Worker stream before holding browser delivery.
+    await (wait ? wait() : url.pathname === dataPath ? holdRefresh : undefined);
+    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: payload });
   };
   await context.route('**/*', route => relay(route));
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
@@ -156,6 +159,7 @@ try {
   page.off('request', countNavigation);
   assert.equal(navigations, 0, 'upload refreshed the row without navigation');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.getByRole('button', { name: `Actions for ${file.name}` }).count(), 0, 'Move is default-off');
   const [download] = await Promise.all([page.waitForEvent('download'), row.press('Enter')]);
   assert.equal(download.suggestedFilename(), file.name);
   assert.deepEqual(await readFile(await download.path()), file.buffer);
@@ -271,6 +275,7 @@ try {
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       otherMemberCookie: `${sessionName}=${memberToken}`,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
+  await page.bringToFront(); // Resume the owner tab before frame-dependent checks.
   console.log('Staging-origin: invite context closed; checking route denials');
   const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
@@ -303,6 +308,12 @@ try {
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
   console.log('Staging-origin: checking owner rename');
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
+  // Paging evidence is complete; make the published file visible on the first page.
+  await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
+  page.setDefaultTimeout(10_000);
+  await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
+  page.setDefaultTimeout(5_000); // Report a stalled nested step before the fixture deadline.
+  await proveNestedMove(page, origin, DB, intercept);
 
   console.log('Staging-origin: checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
