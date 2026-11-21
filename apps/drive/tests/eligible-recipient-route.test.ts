@@ -83,19 +83,24 @@ test('recipient lookup fails closed on storage errors', async () => {
   assert.equal(calls, 1);
 });
 
-test('recipient lookup is closed at Worker and adapter boundaries even with staging Share flags on', async () => {
+test('recipient lookup requires the exact staging opt-in at every boundary', async () => {
   const request = new Request(stagingOrigin + path, { headers: { cookie: `__Host-drive-session=${'a'.repeat(43)}` } });
-  const staging = { ...env, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_READ_GRANTS: '1',
-    DRIVE_STAGING_SHARED_LISTING: '1' };
-  const handle = privateRequests(staging);
-  const adapter = await handle({
-    event: { request, route: { id: eligibleRecipientsRoute }, locals: {} },
-    resolve: () => assert.fail('The adapter must not resolve the route'),
-  } as unknown as Parameters<typeof handle>[0]);
+  const staging = { ...env, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_SHARED_LISTING: '1' };
   const assets = { signIn: new Set<string>(), root: new Set<string>(), invite: new Set<string>(), people: new Set<string>(), folder: new Set<string>() };
-  const worker = await admitStagingRequest(request, staging, true, assets);
-  assert.ok(worker instanceof Response);
-  for (const response of [worker, adapter, await getEligibleRecipients(request, staging, 'a'.repeat(43))]) {
-    await expectDenial(response, 404);
+  for (const flag of [undefined, '0', 'true', '1 ']) {
+    const bindings = { ...staging, DRIVE_STAGING_READ_GRANTS: flag };
+    const handle = privateRequests(bindings);
+    const adapter = await handle({
+      event: { request, route: { id: eligibleRecipientsRoute }, locals: {} },
+      resolve: () => assert.fail('The adapter must not resolve the route'),
+    } as unknown as Parameters<typeof handle>[0]);
+    const worker = await admitStagingRequest(request, bindings, true, assets);
+    assert.ok(worker instanceof Response);
+    for (const response of [worker, adapter, await getEligibleRecipients(request, bindings, 'a'.repeat(43))]) {
+      await expectDenial(response, 404);
+    }
   }
+  const enabled = { ...staging, DRIVE_STAGING_READ_GRANTS: '1' };
+  await expectDenial(await getEligibleRecipients(new Request(stagingOrigin + path), enabled, null), 401);
+  await expectDenial(await getEligibleRecipients(request, { ...enabled, DRIVE_ORIGIN: `${stagingOrigin}/` }, 'a'.repeat(43)), 404);
 });

@@ -1,6 +1,7 @@
 export const readGrantCollectionRoute = '/api/entries/[entryId]/read-grants';
 export const readGrantRecipientRoute = `${readGrantCollectionRoute}/[recipientId]`;
 export const readGrantPath = /^\/api\/entries\/([^/]{1,1536})\/read-grants(?:\/([^/]{1,1536}))?$/;
+export const eligibleRecipientsPath = /^\/api\/entries\/([^/]+)\/eligible-recipients(?=\/|$)/;
 const encoder = new TextEncoder();
 const originalGrantRequest = Symbol.for('qerith.drive.originalGrantRequest');
 
@@ -25,6 +26,12 @@ export function decodeReadGrantId(wire: string): string | null {
     const id = decodeURIComponent(wire);
     return validReadGrantId(id) && encodeURIComponent(id).replaceAll("'", '%27') === wire ? id : null;
   } catch { return null; }
+}
+
+export function eligibleRecipientEntry(request: Request, url: URL): string | null {
+  if (request.url !== url.origin + url.pathname + url.search) return null;
+  const match = eligibleRecipientsPath.exec(url.pathname);
+  return match && match[0] === url.pathname ? decodeReadGrantId(match[1]) : null;
 }
 
 // Null means no cursor; undefined means the request query is invalid.

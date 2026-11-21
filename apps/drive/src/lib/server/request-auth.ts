@@ -4,7 +4,7 @@ import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavi
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { stagingOrigin } from './qualification-readiness';
-import { readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
+import { eligibleRecipientEntry, readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor, sharedRoute } from './shared-page';
 import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
 
@@ -30,6 +30,10 @@ export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DR
 
 export function admitsStagingReadGrants(env: DriveAuthEnv): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_READ_GRANTS === '1';
+}
+
+export function admitsEligibleRecipients(env: DriveAuthEnv): boolean {
+  return admitsSignInFixture(env) || admitsStagingReadGrants(env);
 }
 
 export function admitsSharedListing(env: DriveAuthEnv): boolean {
@@ -124,12 +128,13 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const navigation = isDrivePageNavigation(request);
     const routeId = event.route?.id;
     const readGrant = routeId === readGrantCollectionRoute || routeId === readGrantRecipientRoute;
+    const eligibleRecipients = routeId === eligibleRecipientsRoute;
     const uploadResume = routeId === uploadResumeRoute;
-    if (routeId === eligibleRecipientsRoute && !admitsSignInFixture(env)) return deny(404);
+    if (eligibleRecipients && !admitsEligibleRecipients(env)) return deny(404);
     const refuse = (status: 403 | 503) => navigation && !uploadResume ? pageDenial(request, status) : deny(status);
     const origin = authOrigin(env.DRIVE_ORIGIN);
     if (!origin || !env.DB) {
-      if (readGrant || uploadResume) return deny(503);
+      if (readGrant || eligibleRecipients || uploadResume) return deny(503);
       if (navigation) return pageDenial(request, 503);
       return new Response('Service unavailable', { status: 503, headers: { 'cache-control': 'no-store' } });
     }
@@ -146,6 +151,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
 
     const fixture = admitsSignInFixture(env);
     const staging = origin.origin === stagingOrigin;
+    if (staging && eligibleRecipients) {
+      if (request.method !== 'GET' || eligibleRecipientEntry(request, url) === null) return deny(404);
+      if (!allowsStagingInviteSite(request)) return deny(403);
+    }
     const peoplePage = routeId === '/people';
     const folderPage = routeId === folderDocumentRoute;
     const sharedPage = routeId === sharedRoute;
@@ -191,7 +200,8 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const uploadRoute = uploadAdmissionRoute(request, url);
       const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request) &&
         driveUploadMode(env, session.principal.role) === 'multipart';
-      if (!(readGrant || memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage || sharedPage)))) {
+      if (!(readGrant || eligibleRecipients || memberUpload ||
+          (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage || sharedPage)))) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }

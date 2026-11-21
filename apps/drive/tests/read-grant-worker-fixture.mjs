@@ -6,6 +6,7 @@ export const readGrantWorker = `import { readGrantRequest } from ${JSON.stringif
 const folder = 'share-folder';
 const file = 'share file';
 const pathFor = id => `/api/entries/${encodeURIComponent(id)}/read-grants`;
+const eligibleFor = id => `/api/entries/${encodeURIComponent(id)}/eligible-recipients`;
 export const readGrantPath = pathFor(folder);
 
 const operations = [['GET', ''], ['PUT', '/reader'], ['DELETE', '/reader']];
@@ -18,8 +19,8 @@ const stagingFetch = (worker, origin, boundary) => (method, path, cookie, header
 
 async function expectPrivateEmpty(response, status, label) {
   const result = await response;
-  assert.deepEqual([result.status, result.headers.get('cache-control'), result.headers.get('location'), await result.text()],
-    [status, 'private, no-store', null, ''], label);
+  assert.deepEqual([result.status, result.headers.get('cache-control'), result.headers.get('location'),
+    result.headers.get('access-control-allow-origin'), await result.text()], [status, 'private, no-store', null, null, ''], label);
 }
 
 export async function refusePreviewReadGrants({ worker, origin, cookie }) {
@@ -30,6 +31,8 @@ export async function refusePreviewReadGrants({ worker, origin, cookie }) {
         'x-test-sign-in-fixture': '1', 'x-test-read-grants': '1', 'x-test-invite': '1',
       }), 404, `${boundary}: non-staging configured origin cannot admit ${method}`);
     }
+    await expectPrivateEmpty(ask('GET', eligibleFor(folder), cookie, { 'x-test-read-grants': '1', 'x-test-invite': '1' }),
+      404, `${boundary}: read-grant opt-in cannot enable a non-staging roster`);
   }
 }
 
@@ -37,9 +40,13 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
   const source = 'share / read';
   const path = pathFor(source);
   const item = `${path}/reader`;
+  const eligible = eligibleFor(source);
+  const childRoster = eligibleFor('grant-child');
+  const fileId = download.split('/').at(-1);
   const owner = await session('grant-owner', 'member');
   const reader = await session('reader', 'member');
   await DB.batch([
+    DB.prepare("UPDATE drive_principals SET display_name = 'Émie Reader' WHERE id = 'reader'"),
     DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'grant-owner', 'Shared folder', 'folder')").bind(source),
     DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('grant-child', 'grant-owner', ?, 'Child', 'folder')").bind(source),
   ]);
@@ -55,6 +62,43 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
       assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store'], boundary);
       return response.json();
     };
+    const roster = async (url, cookie = owner) => {
+      const response = await send('GET', url, cookie);
+      assert.deepEqual([response.status, response.headers.get('cache-control'), response.headers.get('content-type'),
+        response.headers.get('location'), response.headers.get('access-control-allow-origin')],
+        [200, 'private, no-store', 'application/json', null, null], `${boundary}: ${url}`);
+      const page = await response.json();
+      assert.deepEqual(Object.keys(page).sort(), ['nextCursor', 'recipients']);
+      assert.equal(page.nextCursor, null);
+      for (const row of page.recipients) {
+        assert.deepEqual(Object.keys(row).sort(), ['direct', 'displayName', 'inheritedFrom', 'recipientId']);
+      }
+      return page.recipients;
+    };
+    for (const flag of [undefined, '0', 'true']) {
+      await reject(ask('GET', eligible, owner, {
+        ...(flag === undefined ? {} : { 'x-test-read-grants': flag }), 'x-test-invite': '1', 'x-test-sign-in-fixture': '1',
+      }), 404, 'roster opt-in is exact');
+    }
+    await reject(send('GET', eligible, null), 401, 'roster needs a session');
+    await reject(send('GET', eligible, driveOwner), 404, 'Drive owner cannot read another principal’s roster');
+    await reject(send('GET', eligibleFor('missing')), 404, 'missing entry');
+    await reject(send('GET', eligible, owner, {}, undefined, 'https://raw.example.test'), 403, 'roster wrong host');
+    await reject(send('GET', eligible, owner, { origin: 'https://raw.example.test' }), 403, 'roster wrong Origin');
+    for (const site of ['cross-site', 'same-site', 'none']) {
+      await reject(send('GET', eligible, owner, { 'sec-fetch-site': site }), 403, `roster ${site} fetch`);
+    }
+    for (const [method, url] of [['HEAD', eligible], ['POST', eligible], ['GET', `${eligible}?`],
+      ['GET', eligible.replaceAll('%2F', '%2f')], ['GET', eligible.replace('/eligible-', '/%65ligible-')]]) {
+      await reject(send(method, url), 404, `${method} ${url}`);
+    }
+    await reject(send('GET', `${eligible}?cursor=a&cursor=b`), 400, 'ambiguous roster cursor');
+    if (boundary === 'worker') {
+      for (const suffix of ['/', '/__data.json', '/%5F_route.js']) {
+        await reject(send('GET', eligible + suffix), 404, 'roster descendants stay outside the adapter');
+      }
+      await reject(send('GET', `${eligible}?x-sveltekit-probe=1`), 400, 'reserved roster query not forwarded');
+    }
     for (const [method, suffix] of operations) {
       for (const flag of [undefined, '0', 'true']) {
         await reject(ask(method, path + suffix, owner, {
@@ -81,8 +125,27 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
     await reject(send('PUT', item, owner, { origin: 'https://raw.example.test', 'content-type': 'application/json' }), 403, 'wrong Origin');
     await reject(send('PUT', item, owner, { 'sec-fetch-site': 'cross-site' }), 403, 'cross-site mutation');
     assert.deepEqual(await list(), empty, 'denied requests left no grant');
+    const person = { recipientId: 'reader', displayName: 'Émie Reader' };
+    const ungranted = { ...person, direct: false, inheritedFrom: null };
+    assert.deepEqual((await roster(eligibleFor(fileId), driveOwner)).find(row => row.recipientId === 'reader'), ungranted);
+    const rootRoster = await roster(eligible);
+    assert.deepEqual(rootRoster.find(row => row.recipientId === 'reader'), ungranted);
+    assert.deepEqual(rootRoster.find(row => row.recipientId === 'other'),
+      { recipientId: 'other', displayName: null, direct: false, inheritedFrom: null });
+    assert.ok(!rootRoster.some(row => ['fixture', 'grant-owner'].includes(row.recipientId)));
     await reject(send('PUT', item), 204, 'member owner grants read');
     assert.deepEqual(await list(), granted);
+    assert.deepEqual((await roster(eligible)).find(row => row.recipientId === 'reader'), { ...ungranted, direct: true });
+    const inherited = { ...ungranted, inheritedFrom: 'Shared folder' };
+    const afterOther = await roster(`${childRoster}?cursor=other`);
+    assert.deepEqual(afterOther.find(row => row.recipientId === 'reader'), inherited);
+    assert.ok(!afterOther.some(row => row.recipientId === 'other'));
+    await reject(send('GET', childRoster, reader), 404, 'inherited reader cannot inspect roster');
+    const childGrant = `${pathFor('grant-child')}/reader`;
+    await reject(send('PUT', childGrant), 204, 'nested direct grant');
+    assert.deepEqual((await roster(childRoster)).find(row => row.recipientId === 'reader'), { ...inherited, direct: true });
+    await reject(send('DELETE', childGrant), 204, 'remove nested direct grant');
+    assert.deepEqual((await roster(childRoster)).find(row => row.recipientId === 'reader'), inherited);
     for (const [method, url] of [['GET', path], ['DELETE', item], ['PUT', `${path}/other`],
       ['PUT', `${pathFor('grant-child')}/other`]]) {
       await reject(send(method, url, reader), 404, 'reader cannot manage direct or inherited grants');
@@ -91,6 +154,7 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
     assert.deepEqual(await list(), granted, 'denied requests neither removed nor amplified the grant');
     await reject(send('DELETE', item), 204, 'member owner revokes read');
     assert.deepEqual(await list(`${path}?cursor=reader`), empty);
+    assert.deepEqual((await roster(childRoster)).find(row => row.recipientId === 'reader'), ungranted);
   }
   const workerGrant = stagingFetch(worker, origin, 'worker');
   const adapterGrant = stagingFetch(worker, origin, 'adapter');
@@ -118,13 +182,23 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
     await expectPrivateEmpty(workerGrant('DELETE', canonical, owner, active), 204, `revoke ${recipientId}`);
     assert.deepEqual(await read(), empty);
   }
-  await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'grant-owner'").run();
+  await DB.prepare("UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = 'grant-owner'").run();
+  for (const boundary of boundaries) {
+    await expectPrivateEmpty(stagingFetch(worker, origin, boundary)('GET', eligible, owner, active), 401, 'expired roster session');
+  }
+  await DB.batch([
+    DB.prepare("UPDATE drive_sessions SET expires_at = ? WHERE principal_id = 'grant-owner'").bind(Date.now() + 60_000),
+    DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'grant-owner'"),
+  ]);
   for (const boundary of boundaries) for (const [method, suffix] of operations) {
     await expectPrivateEmpty(stagingFetch(worker, origin, boundary)(method, path + suffix, owner, active), 401, 'revoked session');
   }
+  for (const boundary of boundaries) {
+    await expectPrivateEmpty(stagingFetch(worker, origin, boundary)('GET', eligible, owner, active), 401, 'revoked roster principal');
+  }
   assert.equal(await DB.prepare("SELECT COUNT(*) AS count FROM drive_read_grants WHERE entry_id IN (?, 'grant-child')").bind(source).first('count'), 0);
   const ask = stagingFetch(worker, origin, 'worker');
-  const fileGrant = `${pathFor(download.split('/').at(-1))}/reader`;
+  const fileGrant = `${pathFor(fileId)}/reader`;
   await expectPrivateEmpty(ask('PUT', fileGrant, driveOwner, active), 204, 'Drive owner grants read on its own file');
   const both = { ...active, 'x-test-invite': '1' };
   await expectPrivateEmpty(ask('GET', download, reader, active), 403, 'grant management alone does not admit downloads');
@@ -136,7 +210,7 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
   }
   await expectPrivateEmpty(ask('DELETE', fileGrant, driveOwner, active), 204, 'remove file grant');
   await expectPrivateEmpty(ask('GET', download, reader, both), 404, 'revocation closes file delivery');
-  console.log('Generated Worker and direct adapter: default-off read-grant admission and D1 ownership checks passed');
+  console.log('Generated Worker and direct adapter: default-off read grants and eligible rosters, D1 ownership and effective access passed');
 }
 
 export async function exerciseReadGrants({ worker, DB, origin, session }) {
