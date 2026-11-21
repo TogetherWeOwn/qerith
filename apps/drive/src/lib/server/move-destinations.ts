@@ -39,16 +39,19 @@ const sql = `WITH RECURSIVE source AS (
     JOIN source ON f.owner_id = source.owner_id
   WHERE a.depth < ${maxDepth} AND f.kind = 'folder'
 ), destination AS (
-  SELECT source.owner_id, source.parent_id AS currentParentId, COALESCE(f.name, 'My Drive') AS folderName
+  SELECT source.owner_id, source.parent_id AS currentParentId, COALESCE(f.name, 'My Drive') AS folderName,
+    COALESCE(root.depth, 0) AS depth
   FROM source LEFT JOIN drive_entries f ON f.id = ?3
-  WHERE ?3 IS NULL OR (EXISTS (SELECT 1 FROM ancestors WHERE parent_id IS NULL)
-    AND NOT EXISTS (SELECT 1 FROM ancestors WHERE id = ?2))
+    LEFT JOIN ancestors root ON root.parent_id IS NULL
+  WHERE ?3 IS NULL OR (root.depth IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ancestors WHERE id = ?2))
+), browsable AS (
+  SELECT owner_id FROM destination WHERE depth < ${maxDepth}
 ), boundary AS (
-  SELECT e.name FROM destination d JOIN drive_entries e ON e.id = ?4
-    AND e.owner_id = d.owner_id AND e.parent_id IS ?3 AND e.kind = 'folder'
+  SELECT e.name FROM browsable b JOIN drive_entries e ON e.id = ?4
+    AND e.owner_id = b.owner_id AND e.parent_id IS ?3 AND e.kind = 'folder'
 ), children AS (
-  SELECT id, name FROM drive_entries
-  WHERE owner_id = (SELECT owner_id FROM destination) AND parent_id IS ?3 AND kind = 'folder'
+  SELECT id, name FROM drive_entries INDEXED BY drive_entries_sibling_name
+  WHERE owner_id = (SELECT owner_id FROM browsable) AND COALESCE(parent_id, '') = COALESCE(?3, '') AND kind = 'folder'
     AND name > COALESCE((SELECT name FROM boundary), '')
     AND length(id) <= 128 AND id NOT GLOB '*[^A-Za-z0-9_-]*'
   ORDER BY name LIMIT ${pageSize + 1}

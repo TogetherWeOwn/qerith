@@ -14,9 +14,11 @@ const request = (query: string, headers?: HeadersInit) => new Request(url + quer
 test('move destinations fail closed before any D1 read', async () => {
   const DB = { prepare() { assert.fail('must not use the raw DB'); }, withSession() { assert.fail('must not query'); } };
   const cases = [
+    [request('?entry=source'), { DB, DRIVE_ORIGIN: stagingOrigin }, 404],
     [request('?entry=source'), { DB, ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: '0' }, 404],
     [new Request(`${url}?entry=source`, { method: 'HEAD' }), { DB, ...env }, 404],
     [request('?entry=source', { 'sec-fetch-site': 'same-site' }), { DB, ...env }, 403],
+    [request('?entry=source', { origin: 'https://elsewhere.example.test' }), { DB, ...env }, 403],
     [request('?entry=source', { cookie: '' }), { DB, ...env }, 401],
     ...['', '?entry=', '?entry=..', '?entry=%C3%28', '?entry=a&entry=b', '?entry=a&owner=b', '?entry=a&after=',
       '?entry=a&folder=%2Fetc', `?entry=${'a'.repeat(4096)}`].map(query => [request(query), { DB, ...env }, 400] as const),
