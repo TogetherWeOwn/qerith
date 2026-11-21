@@ -39,7 +39,9 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         intercept('/__data.json', (route, relay) => relay(true, () => { captured.resolve(route.request()); return releaseUpload.promise; }));
         await uploadFile(upload);
         await status(`${upload}: Uploaded.`).waitFor();
-        await captured.promise; // The Worker read the page before the folder exists.
+        await Promise.race([captured.promise, new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Upload refresh never reached the delivery gate')), 8_000).unref();
+        })]); // The Worker read the page before the folder exists.
       }
       await open();
       if (owner) {
@@ -83,7 +85,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         releaseUpload.resolve();
         const stale = await (await captured.promise).response();
         assert.equal(await stale.finished(), null);
-        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        await page.waitForFunction(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))), null, { timeout: 5_000 });
         assert.deepEqual([await row.count(), await recovery.count()], [1, 0]);
       }
       assert.ok((await row.ariaSnapshot()).includes(name));

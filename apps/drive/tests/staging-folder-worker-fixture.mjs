@@ -47,23 +47,23 @@ export async function exerciseStagingFolder({ worker, DB, origin, owner, member,
   } });
   assert.match(first, /Folder proof title/);
   assert.equal((first.match(/<li\b/g) ?? []).length, 100);
-  assert.doesNotMatch(first, /Row 100|Row 101|folder-key-|<script\b/);
+  assert.doesNotMatch(first, /Row 100|Row 101|folder-key-/);
   const downloadLink = first.match(/href="(\/api\/download\/[a-f0-9-]{36})"/)?.[1];
   assert.equal(downloadLink, download, 'only the published file links to the existing download endpoint');
   assert.match(first, /Row 001/);
   assert.ok(!first.includes(`href="/api/download/${unpublished}"`));
   assert.equal(await body(downloadLink, owner, 200), downloadBytes);
   assert.equal(await body(downloadLink, member, 404), '');
-  const styles = [...first.matchAll(/href="([^"\s]+\.css)"/g)].map(([, href]) => new URL(href, origin + folder).pathname);
-  assert.ok(styles.length, 'SSR references its generated stylesheet');
+  const assets = [...first.matchAll(/href="([^"\s]+\.(?:css|js))"/g)].map(([, href]) => new URL(href, origin + folder).pathname);
   const folderOnly = [];
-  for (const path of styles) {
+  for (const path of assets) {
     const status = (await read(path, owner, { on: false })).status;
     if (status === 404) folderOnly.push(path);
     await body(path, member, 200);
   }
-  assert.ok(folderOnly.length, 'folder references a stylesheet not admitted by the default surface');
+  assert.ok(folderOnly.some(path => path.endsWith('.js')), 'folder references a generated module not admitted by default');
   for (const path of folderOnly) assert.equal(await body(path, null, 401), '');
+  assert.equal(await body(`${folderOnly.find(path => path.endsWith('.js'))}?`, owner, 404), '');
 
   const page = first.match(/href="(\?page=[A-Za-z0-9_-]{378})"/)?.[1];
   assert.ok(page);
@@ -82,7 +82,9 @@ export async function exerciseStagingFolder({ worker, DB, origin, owner, member,
     assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [204, 'private, no-store', '']);
   };
   await changeGrant('PUT');
-  assert.ok((await body(folder, member, 200)).includes(`href="${download}"`), 'the existing folder grant permits the link');
+  const granted = await body(folder, member, 200);
+  assert.ok(granted.includes(`href="${download}"`), 'the existing folder grant permits the link');
+  assert.doesNotMatch(granted, /\b(?:canMove|movable):true\b/, 'the grant enables reads, not Move');
   assert.equal(await body(downloadLink, member, 200), downloadBytes);
   await unavailable(folder + page, member);
   const memberPage = (await body(folder, member, 200)).match(/href="(\?page=[A-Za-z0-9_-]{378})"/)?.[1];

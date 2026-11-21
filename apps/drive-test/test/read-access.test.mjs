@@ -98,6 +98,7 @@ it('authorizes direct and inherited reads and lists without disclosing parents o
   expect(await reads.get(eve, 'file')).toBeNull();
   expect(await grants.create(alice, 'root', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).toEqual({ id: 'file', name: 'file', kind: 'file' });
+  expect((await reads.list(alice, 'nested')).ownsFolder).toBe(true);
   expect(await reads.list(bob, 'nested')).toEqual({ entries: [{ id: 'file', name: 'file', kind: 'file' }], nextCursor: null });
   expect(await reads.listPage(bob, 'nested')).toEqual({
     entries: [{ id: 'file', name: 'file', kind: 'file' }], total: 1, order: 'binary-name', direction: 'asc', nextCursor: null,

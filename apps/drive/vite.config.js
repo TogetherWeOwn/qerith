@@ -57,14 +57,14 @@ function generatedAssets(builder) {
   const people = [...assets];
   assets.clear();
   visited.clear();
-  // SSR-only: ship styles and their font, not the generated client entry.
+  // Staging may hydrate; the read-only sign-in fixture still needs only styles.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
   const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
-  const folder = styles();
+  const folder = [...assets], folderStyles = styles();
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/shared/+page.svelte'));
-  return { signIn, root, invite, people, folder, shared: styles() };
+  return { signIn, root, invite, people, folder, folderStyles, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -100,7 +100,7 @@ import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
-const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folder]);
+const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folderStyles]);
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),

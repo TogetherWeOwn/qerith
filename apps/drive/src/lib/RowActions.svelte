@@ -12,6 +12,7 @@
   export let detailsOnly = false;
   export let renameOnly = false;
   export let allowPreviewMove = false;
+  export let moveOnly = false;
   // A responsive listing checks layout on open and owns dismissal of hidden triggers.
   export let checkLayoutOnOpen: ((when: 'now' | 'next-frame') => void) | undefined = undefined;
   export let onAction: (action: RowAction) => void;
@@ -76,7 +77,7 @@
   let menuLeft = 0;
   let menuTop = 0;
   $: displayName = name.trim() ? name : `${name} (Whitespace-only name)`;
-  $: actions = (renameOnly ? (allowPreviewMove ? ['Rename', 'Move'] : ['Rename']) : detailsOnly ? ['Details'] : owned
+  $: actions = (moveOnly ? ['Move'] : renameOnly ? (allowPreviewMove ? ['Rename', 'Move'] : ['Rename']) : detailsOnly ? ['Details'] : owned
     ? [...(file ? ['Download'] : []), 'Share', 'Rename', 'Move', 'Details', 'Delete']
     : [...(file ? ['Download'] : []), 'Details']) as RowAction[];
 

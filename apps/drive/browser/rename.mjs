@@ -5,6 +5,7 @@ import { capture, widths } from './root-listing.mjs';
 
 export async function proveRename(page, { origin, DB, principal, intercept, cursor }) {
   const role = intercept ? 'owner' : 'member';
+  if (intercept) await page.clock.install();
   const file = crypto.randomUUID(), folder = `rename/${role}'folder`;
   const starting = 'Taxes 2025.pdf', stored = 'Taxes \n2025.pdf', taken = 'Taken.pdf';
   const location = `${origin}/${cursor ? `?page=${cursor}` : ''}`;
@@ -107,7 +108,8 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
         intercept('/__data.json', async route => { await read.promise; await route.abort(); });
         const recovery = page.getByRole('link', { name: 'Refresh My Drive', exact: true });
         try {
-          await submit('Refresh needed.pdf', file, 200);
+          await Promise.all([page.waitForRequest(r => new URL(r.url()).pathname === '/__data.json'), submit('Refresh needed.pdf', file, 200)]);
+          await page.clock.fastForward(5_000); // The real app timeout fires while the read is still held.
           await recovery.and(active).waitFor({ timeout: 8_000 });
         } finally { read.resolve(); }
         await page.getByRole('status').filter({ hasText: 'Renamed to “Refresh needed.pdf”. Refresh My Drive to see it.' }).waitFor();

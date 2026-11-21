@@ -80,7 +80,7 @@ it('folder listing checks the current storage identity without hiding metadata',
   ];
   for (const [scope, downloadable] of cases) {
     const reads = new ReadAccess(env.DB.withSession('first-primary'), scope);
-    expect(await reads.list(token, folder)).toEqual({ entries: [{ id, name: 'File', kind: 'file', downloadable }], nextCursor: null });
+    expect(await reads.list(token, folder)).toEqual({ entries: [{ id, name: 'File', kind: 'file', downloadable }], nextCursor: null, ownsFolder: true });
   }
 });
 
