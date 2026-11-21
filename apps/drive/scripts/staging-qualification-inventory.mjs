@@ -89,11 +89,12 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   }, null, signal, 15_000);
 }
 
-async function assertNoDurableObjectNamespaces(account, token, request, signal) {
+// Shared for native page-number lists with an explicitly empty terminal page.
+async function assertEmptyNativePage(account, path, token, request, signal) {
   if (!token?.trim()) throw unverified();
   const pageSize = 10;
   await runQualificationPhase(async (_, active) => {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/durable_objects/namespaces?page=1&per_page=${pageSize}`;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/${path}?page=1&per_page=${pageSize}`;
     const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
       headers: { authorization: `Bearer ${token}` } });
     if (response.headers.has('link')) {
@@ -190,9 +191,10 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
-        await assertNoDurableObjectNamespaces(account, env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertEmptyNativePage(account, 'workers/durable_objects/namespaces', env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoContainerApplications(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoStreamInputs(account, env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertEmptyNativePage(account, 'workflows', env.CLOUDFLARE_API_TOKEN, request, active);
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
