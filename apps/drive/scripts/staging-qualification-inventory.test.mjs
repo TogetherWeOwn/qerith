@@ -100,6 +100,7 @@ function fixture(t) {
         trace.push(kind);
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token',
           ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) });
+        state.onBucketList?.(jurisdiction, init.signal);
         const empty = jurisdiction && jurisdiction !== 'default';
         return (jurisdiction ? state.scopedBucketLists?.[jurisdiction] : state.bucketList) ??
           bucketRoster(empty ? { result: { buckets: [] }, result_info: { total_count: 0 } } : {},
@@ -451,7 +452,7 @@ test('inventory requires a complete bounded native R2 bucket roster', async t =>
     bucketRoster({}, { headers: { Link: '</next>; rel="next"' } }),
     bucketRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
     bucketRoster({}, { status: 403 }), bucketRoster({ success: false }),
-    new Response('invalid JSON'), new Response('x'.repeat(65_537))];
+    new Response('invalid JSON')];
   for (const response of invalid) {
     const run = f.create();
     f.trace.length = 0;
@@ -463,6 +464,40 @@ test('inventory requires a complete bounded native R2 bucket roster', async t =>
   f.state.scopedBucketLists = { fedramp: new Response(null, { status: 403 }) };
   await assert.rejects(run('before'), error);
   assert.equal(f.trace.at(-1), 'r2-roster-fedramp');
+});
+
+test('inventory caps schema-valid native R2 roster bodies at 64 KiB', async t => {
+  const f = fixture(t);
+  const body = await bucketRoster().text();
+  const capped = body.padEnd(65_536, ' '); // Trailing JSON whitespace keeps the payload valid.
+  const atLimit = f.create();
+  f.state.bucketList = new Response(capped);
+  assert.equal(await atLimit('before'), true);
+
+  const overLimit = f.create();
+  f.trace.length = 0;
+  f.state.bucketList = new Response(`${capped} `);
+  await assert.rejects(overLimit('before'), error);
+  assert.equal(f.trace.at(-1), 'r2-roster');
+});
+
+test('inventory shares one 15-second deadline across native R2 roster reads', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const signals = [], beforeDeadline = [];
+  f.state.onBucketList = (jurisdiction, signal) => {
+    signals.push(signal);
+    if (jurisdiction === undefined) t.mock.timers.tick(10_000);
+    if (jurisdiction === 'default') t.mock.timers.tick(4_999);
+    beforeDeadline.push(signal.aborted);
+    if (jurisdiction === 'default') t.mock.timers.tick(1);
+    signal.throwIfAborted();
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder.slice(0, 2)]);
+  assert.deepEqual(beforeDeadline, [false, false]);
+  assert.equal(signals[0], signals[1]);
+  assert.equal(signals[0].aborted, true);
 });
 
 test('inventory rejects an extra native Worker before and after the attempt', async t => {
