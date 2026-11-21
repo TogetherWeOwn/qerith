@@ -254,6 +254,13 @@ if it has zero instances. Denied, partial, and nonterminal responses fail.
 This covers only applications visible to the existing credential in that
 account; it does not replace the separate estate or app-fixture readers.
 
+Both passes also read the native Stream live-input roster in the pinned Worker
+account. The unfiltered list requests counts and must return an explicitly empty
+`liveInputs` array with `total` and `range` both zero, within five seconds and
+64 KiB. Disabled inputs, missing counts, denied reads, and continuation evidence
+all fail. This does not cover recordings, billing, or other accounts and does not
+replace the estate or app-fixture reader.
+
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
 requires more than 20 minutes left for deployment, readiness, cases and cleanup.
