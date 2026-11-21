@@ -5,7 +5,7 @@ import { createCeremonyVerifier } from './ceremony';
 import { InvitationUnavailable } from './invitations';
 
 interface Statement {
-  bind(...values: (string | number | number[])[]): Statement;
+  bind(...values: (string | number | number[] | null)[]): Statement;
   first<T>(): Promise<T | null>;
   run(): Promise<unknown>;
 }
@@ -18,6 +18,22 @@ async function invitationHash(token: string): Promise<string> {
   if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new TypeError('Invalid invitation');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export class InvalidMemberDisplayName extends TypeError {
+  constructor() { super('Invalid member display name'); }
+}
+
+function normalizeDisplayName(value: unknown): string {
+  if (typeof value !== 'string') throw new InvalidMemberDisplayName();
+  const name = value.trim();
+  // Match K17's trimmed 1–64 code-point bound before normalizing.
+  if (!name || name.length > 128 || Array.from(name).length > 64 || /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u.test(name)) {
+    throw new InvalidMemberDisplayName();
+  }
+  const normalized = name.normalize('NFC');
+  if (Array.from(normalized).length > 64) throw new InvalidMemberDisplayName();
+  return normalized;
 }
 
 // The RP configuration is trusted server configuration; this service exposes no endpoint.
@@ -43,7 +59,10 @@ export class InvitationEnrollment {
     return options;
   }
 
-  async enroll(token: string, challenge: string, response: RegistrationResponseJSON): Promise<string> {
+  // Pass the invitee's explicit choice, separate from the WebAuthn response.
+  // Omission is for the legacy route only and leaves the account unnamed.
+  async enroll(token: string, challenge: string, response: RegistrationResponseJSON, displayName?: string): Promise<string> {
+    const name = displayName === undefined ? null : normalizeDisplayName(displayName);
     const hash = await invitationHash(token);
     if (typeof challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) throw new InvitationUnavailable();
     const context = `invitation:${hash}`;
@@ -64,8 +83,8 @@ export class InvitationEnrollment {
     // Read identity only from the matching server-owned ceremony. Dependent
     // writes run in the same transaction; uniqueness failures roll them back.
     const batch = await this.db.batch([
-      this.db.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle)
-        SELECT principal_id, 'member', 'active', webauthn_user_handle ${liveRegistration}`).bind(context, challenge, hash),
+      this.db.prepare(`INSERT INTO drive_principals (id, role, status, webauthn_user_handle, display_name)
+        SELECT principal_id, 'member', 'active', webauthn_user_handle, ? ${liveRegistration}`).bind(name, context, challenge, hash),
       this.db.prepare(`INSERT INTO drive_credentials (id, principal_id, public_key, counter, transports, webauthn_user_handle)
         SELECT ?, principal_id, ?, ?, ?, webauthn_user_handle FROM drive_bound_ceremonies
         WHERE context = ? AND purpose = 'registration' AND challenge = ? AND changes() = 1`)
