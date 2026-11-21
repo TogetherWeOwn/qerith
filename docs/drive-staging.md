@@ -176,8 +176,8 @@ Worker rollback does not restore D1 or establish idle state.
 Under the shared staging lifecycle lock, the protected job verifies the dispatch
 SHA and reviewed storage settings, then builds that checkout from the reviewed
 npm lock with dependency lifecycle scripts disabled. The build step has no
-staging credentials. It checks the generated Worker entry and client assets in
-the same job workspace a future caller will use. The job still ends at the
+staging credentials. It checks that the generated Worker entry
+and at least one JavaScript client asset are nonempty in the job workspace. The job still ends at the
 explicit hard stop.
 
 The offline lifecycle coordinator now sequences full-v0 preflight and initial

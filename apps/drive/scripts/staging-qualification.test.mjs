@@ -891,7 +891,7 @@ test('the protected workflow checks pinned settings and builds before the hard s
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           test -s .svelte-kit/cloudflare/_worker.js
-          test -d .svelte-kit/cloudflare/_app/immutable
+          test -n "$(find .svelte-kit/cloudflare/_app/immutable -type f -name '*.js' -size +0c -print -quit)"
           git diff --quiet HEAD -- .
       - name: Fail closed until the live runner and cleanup are reviewed
         run: |
