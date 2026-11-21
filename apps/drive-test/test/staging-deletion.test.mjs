@@ -5,7 +5,8 @@ import { bindings, job, qualification, removal, sentRequest, snapshot } from './
 import { config, sessions, sql } from './fixtures/upload-completion.mjs';
 import { seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
-const enabled = { ...bindings, DRIVE_STAGING_DELETE_REQUESTS: '1', DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+const requestsEnabled = { ...bindings, DRIVE_STAGING_DELETE_REQUESTS: '1' };
+const enabled = { ...requestsEnabled, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
 const canonical = '{"confirm":"permanent-delete"}';
 const path = (id) => `/api/entries/${id}/delete`;
 const request = ({ id, token }, { suffix = '', method = 'POST', body = canonical, headers = {} } = {}) =>
@@ -55,9 +56,14 @@ it('leaves entries, usage, journals and storage untouched unless exact staging a
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each([['ambiguous', false], ['confirmed', true]])('journals the whole tree before dispatch with %s removal evidence', async (scenario, proven) => {
+it.each([
+  ['member', 'ambiguous', enabled, false],
+  ['owner', 'confirmed', requestsEnabled, true],
+])('journals the %s tree before dispatch with %s removal evidence', async (role, scenario, env, proven) => {
   const file = await seedBoundPublication(`staging-${scenario}`);
   const owner = await sql('SELECT owner_id FROM drive_entries WHERE id = ?', file.id).first('owner_id');
+  if (role === 'owner') await sql("UPDATE drive_principals SET role = 'owner' WHERE id = ?", owner).run();
+  expect(await sessions.lookup(file.token)).toEqual({ id: owner, role });
   const folder = crypto.randomUUID();
   await sql("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'folder', 'folder')", folder, owner).run();
   await sql('UPDATE drive_entries SET parent_id = ? WHERE id = ?', folder, file.id).run();
@@ -74,7 +80,7 @@ it.each([['ambiguous', false], ['confirmed', true]])('journals the whole tree be
   });
   vi.stubGlobal('fetch', fetch);
 
-  const response = await dispatchStagingDeletion(request({ ...file, id: folder }), enabled, qualification);
+  const response = await dispatchStagingDeletion(request({ ...file, id: folder }), env, qualification);
   expect([response.status, response.headers.get('cache-control'), await response.text()]).toEqual([202, 'private, no-store', '']);
   expect(fetch.mock.settledResults).toEqual([{ type: 'fulfilled', value: expect.any(Response) }]);
   expect(fetch.mock.calls.map(([req]) => sentRequest(req))).toEqual([['DELETE', `${config.endpoint}/${config.bucket}/${file.key}`, true]]);
