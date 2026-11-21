@@ -17,8 +17,9 @@
   let announcement = $state('');
   const label = (choice: Choice) => choice.displayName?.trim() ? choice.displayName : 'Name unavailable';
   const picked = $derived(selectedIds.flatMap(key => choices.find(choice => choice.recipientId === key) ?? []));
-  const search = $derived(query.trim().normalize().toLowerCase());
-  const matchingNames = $derived(choices.filter(choice => !search || choice.displayName?.normalize().toLowerCase().includes(search)));
+  const foldName = (name: string) => name.normalize().toLowerCase().replaceAll('ς', 'σ'); // Lowercasing can produce final sigma at the end of a prefix.
+  const search = $derived(foldName(query.trim()));
+  const matchingNames = $derived(choices.filter(choice => !search || foldName(choice.displayName ?? '').includes(search)));
   const matches = $derived(matchingNames.filter(choice => !selectedIds.includes(choice.recipientId)));
   const expanded = $derived(open && matches.length > 0);
   const noMatch = $derived(open && !!search && !matches.length);
@@ -95,11 +96,11 @@
     <input bind:this={input} bind:value={query} {id} role="combobox" autocomplete="off"
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? `${id}-choices` : undefined}
       aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
-      placeholder="Find someone by name" onfocus={() => open = true} onclick={() => open = true}
+      placeholder="Find someone by name" onfocus={() => open = true} onclick={() => { active = null; open = true; }}
       oninput={() => { announcement = ''; active = null; open = true; }} onblur={dismiss} onkeydown={keydown} />
   </div>
   {#if expanded}
-    <ul id={`${id}-choices`} role="listbox" aria-label="Available people" class="popover">
+    <ul id={`${id}-choices`} role="listbox" aria-label="Available people" tabindex="-1" class="popover">
       {#each matches as choice, index (choice.recipientId)}
         {@const badge = avatar(choice)}
         <!-- svelte-ignore a11y_click_events_have_key_events (DOM focus stays on the combobox, which handles option keys) -->

@@ -2,12 +2,8 @@
   import ShareRecipientPicker from '../../src/lib/ShareRecipientPicker.svelte';
   import '../../src/lib/tokens.css';
 
-  const choices = [
-    { recipientId: 'fixture-choice-1', displayName: 'Sam Mora' },
-    { recipientId: 'fixture-choice-2', displayName: 'Zoë Chen' },
-    { recipientId: 'fixture-choice-3', displayName: '<b>Riley & Co.</b>' },
-    { recipientId: 'fixture-choice-4', displayName: null },
-  ];
+  const choices = ['Sam Mora', 'Zoë Chen', '<b>Riley & Co.</b>', 'ΟΣΑ', 'Mina Park', null]
+    .map((displayName, index) => ({ recipientId: `fixture-choice-${index + 1}`, displayName }));
   let selectedIds = $state<string[]>([]);
   let submits = $state(0);
 </script>
@@ -16,7 +12,7 @@
   <h1>Share recipient picker</h1>
   <form onsubmit={event => { event.preventDefault(); submits++; }}>
     <ShareRecipientPicker {choices} {selectedIds} onSelectionChange={ids => selectedIds = ids} />
-    <button type="submit" hidden>Submit</button>
+    <button type="submit">Continue</button>
   </form>
 </main>
 

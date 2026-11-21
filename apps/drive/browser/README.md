@@ -65,13 +65,9 @@ and 390×844, with extra captures for greyscale, forced colours and 320px reflow
 Screen reader: carried (`DeleteFileFixture`); run the pass on the first route that
 renders it. No live listing, admission, folder deletes or storage are exercised.
 
-The isolated K13 picker (`?share-recipient`) consumes synthetic choices, never a
-provider or Worker. `share-recipient-*.png`, `axe-share-recipient-*.json` and
-`share-recipient-*-keyboard.json` capture empty selection, options, picked chips
-and no matches at 1280×800, 390×844 and 320px reflow. The scenario checks that
-Enter never commits free text or submits the enclosing form, and that chip
-removal returns focus to the input. Screen reader: carried (`ShareRecipientPicker`)
-to the first route that renders it; fixture ARIA snapshots are supplementary.
+The isolated K13 picker (`?share-recipient`) uses synthetic choices, not a provider.
+`*share-recipient-*` evidence covers keyboard, axe and reflow at 1280×800, 390×844
+and 320×844. Screen reader: carried to the first route rendering `ShareRecipientPicker`.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended

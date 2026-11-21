@@ -62,16 +62,13 @@ async function verifyShareRecipientEvidence(dir) {
   const states = ['empty', 'options', 'picked', 'already-selected', 'no-match'];
   for (const [width, height] of [[390, 844], [1280, 800], [320, 844]]) {
     const trace = JSON.parse(await readFile(join(dir, `share-recipient-${width}-keyboard.json`), 'utf8'));
-    for (const state of states) {
-      const label = `share-recipient-${width}-${state}`;
-      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
-      if (!Array.isArray(axe?.violations) || axe.violations.length || typeof trace?.[state] !== 'string' || !trace[state].trim()) {
-        throw new Error(`Invalid picker evidence: ${label}`);
-      }
-    }
     for (const state of [...states, 'greyscale', 'forced-colours']) {
       const label = `share-recipient-${width}-${state}`;
       if (!hasViewportImageData(await readFile(join(dir, `${label}.png`)), width, height)) throw new Error(`Invalid picker screenshot: ${label}`);
+      if (!states.includes(state)) continue;
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      if (!Array.isArray(axe?.violations) || axe.violations.length || typeof trace?.[state] !== 'string' || !trace[state].trim())
+        throw new Error(`Invalid picker evidence: ${label}`);
     }
   }
 }

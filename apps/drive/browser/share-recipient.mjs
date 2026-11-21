@@ -52,21 +52,31 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       assert.equal(await list.getByRole('option', { name: '<b>Riley & Co.</b>' }).locator('b').count(), 0);
       await list.getByRole('option', { name: 'Name unavailable' }).waitFor();
       await capture('options');
+      assert(await list.evaluate(el => el.scrollHeight > el.clientHeight), 'Listbox must overflow');
+      await key('Tab');
+      assert.equal(await list.count(), 0, 'Forward Tab closes the overflowing listbox');
+      assert(await page.getByRole('button', { name: 'Continue' }).evaluate(el => el.matches(':focus-visible')));
+      await key('Shift+Tab');
+      await focused();
+      await input.fill('ΟΣ');
+      assert.equal(await list.getByRole('option', { name: 'ΟΣΑ', exact: true }).count(), 1, 'Greek prefix matches across sigma forms');
       await key('Escape');
       assert.equal(await list.count(), 0);
-      await focused();
-
       await input.fill('sam mora');
       await key('Enter');
       await selection();
-      for (const [arrow, caret] of [['ArrowLeft', 3], ['ArrowRight', 5]]) {
+      for (const [edit, expected] of [['ArrowLeft', 3], ['ArrowRight', 5], ['click', null]]) {
         await input.evaluate(el => el.setSelectionRange(4, 4));
         await key('ArrowDown');
-        await key(arrow);
-        assert.equal(await input.evaluate(el => el.selectionStart), caret);
-        assert.equal(await input.getAttribute('aria-activedescendant'), null);
+        assert.equal(await input.getAttribute('aria-activedescendant'), await sam.getAttribute('id'));
+        if (edit === 'click') await input.click({ position: { x: 16, y: 16 } });
+        else await key(edit);
+        const caret = await input.evaluate(el => el.selectionStart);
+        assert(expected === null ? caret > 0 && caret < 8 && caret !== 4 : caret === expected, `${edit}: caret moved`);
+        assert.equal(await input.getAttribute('aria-activedescendant'), null, edit);
         await key('Enter');
         await selection();
+        assert.equal(await main.getAttribute('data-submits'), '0', edit);
       }
       await key('ArrowDown');
       await key('Enter');
@@ -102,7 +112,7 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       await input.fill('');
       await key('ArrowUp');
       await key('Enter');
-      await selection(1, 2, 4);
+      await selection(1, 2, 6);
       assert.equal(await status.textContent(), 'Name unavailable selected. 3 selected.');
 
       const remove = name => page.getByRole('button', { name: `Remove ${name}`, exact: true });
@@ -131,7 +141,7 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       assert(await list.getByRole('option', { selected: true }).evaluate(el => getComputedStyle(el).outlineStyle === 'solid'));
       await screenshot('forced-colours');
       await writeFile(resolve(output, `share-recipient-${width}-keyboard.json`), JSON.stringify(evidence, null, 2));
-      console.log(`Share recipient selection, clearing, keyboard, reflow and axe passed at ${width}×${height}`);
+      console.log(`Share recipient selection, clearing, caret editing, overflow Tab, Greek prefix, reflow and axe passed at ${width}×${height}`);
     } finally {
       await context.close();
     }
