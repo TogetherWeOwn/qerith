@@ -16,7 +16,7 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
       page.on('pageerror', error => blocked.push(error.message));
       const opener = page.getByRole('button', { name: 'Open Share' });
       const input = dialog.getByRole('combobox', { name: 'Add people' });
-      const button = name => dialog.getByRole('button', { name, exact: true });
+      const button = name => dialog.getByRole('button', { name, exact: true }), nextPage = button('Next page of people to add');
       const text = value => dialog.getByText(value, { exact: true });
       const focused = locator => locator.and(page.locator(':focus')).waitFor({ timeout: 3000 });
       const writes = async (...ids) => assert.deepEqual(JSON.parse(await page.getByRole('main', { includeHidden: true }).getAttribute('data-writes')), ids);
@@ -52,7 +52,7 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
       assert(await button('Done').evaluate(el => el === document.activeElement));
       const announced = value => dialog.getByRole('status').filter({ hasText: value }).waitFor({ state: 'attached' });
       await input.focus(); await keyboard.press('ArrowDown'); await keyboard.press('Enter'); await announced('Lee Ray selected. 1 selected.');
-      await keyboard.press('Tab'); await focused(button('Next page of people to add')); await keyboard.press('Enter');
+      await keyboard.press('Tab'); await focused(nextPage); await keyboard.press('Enter');
       await announced('Showing page 2 of people to add.');
       await dialog.getByRole('list', { name: 'Selected people' }).getByText('Lee Ray').waitFor();
       await input.fill('not on this page'); await announced('No matching people available on this page.');
@@ -96,8 +96,8 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
             await announced('Loaded people with access.'); await focused(dialog.getByRole('heading', { name: 'People with access' }));
             for (const name of ['Pell Quinn', 'Sam Mora', 'Zoë Chen']) await dialog.getByRole('listitem').filter({ hasText: name }).waitFor();
           } else {
-            await dialog.getByRole('option', { name: 'Lee Ray', exact: true }).waitFor();
-            await button('Next page of people to add').click({ timeout: 3000 }); await announced('Showing page 2 of people to add.');
+            await dialog.getByRole('option', { name: 'Lee Ray', exact: true }).waitFor(); await keyboard.press('Tab'); await focused(nextPage);
+            await input.focus(); await dialog.getByRole('listbox').waitFor(); await nextPage.click({ timeout: 3000 }); await announced('Showing page 2 of people to add.');
             await input.focus(); await dialog.getByRole('option', { name: 'Name unavailable', exact: true }).waitFor();
             assert.equal(await button('Next page of people to add').count(), 0, 'No pages offer Sam or the owner');
             await keyboard.press('Escape'); await button('Next page of people with access').click(); await announced('Loading people with access…');
