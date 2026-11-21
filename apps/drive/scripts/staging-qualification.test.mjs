@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -438,7 +439,7 @@ function lifecycle(t, failure, driftKind) {
   };
   const { version, previousVersion, previousDeployment } = workerRecord;
   let now = Date.now();
-  if (failure === 'clock jump') t.mock.method(Date, 'now', () => now);
+  if (failure === 'clock jump' || failure === 'clock jump during readback') t.mock.method(Date, 'now', () => now);
   const expiresAt = String(now + (failure === 'short window' ? 20 : 25) * 60_000);
   const candidate = { version, expiresAt, previousVersion, previousDeployment };
   const stored = new Map();
@@ -449,10 +450,18 @@ function lifecycle(t, failure, driftKind) {
       stored.set(key, Buffer.from(body));
       return true;
     },
-    read(key) {
+    async read(key, { signal }) {
       const body = stored.get(key);
       const { kind } = JSON.parse(body.toString('utf8'));
       step(`read-${kind}`);
+      if (kind === 'd1' && failure === 'clock jump during readback') {
+        now += 5 * 60_000;
+        await once(signal, 'abort', { signal: AbortSignal.timeout(5_000) });
+        step('read-d1-aborted');
+        await new Promise(resolve => setImmediate(resolve));
+        step('read-d1-drained');
+        signal.throwIfAborted();
+      }
       return kind === driftKind ? Buffer.concat([body, Buffer.from('\n')]) : Buffer.from(body);
     },
   });
@@ -573,6 +582,13 @@ test('qualification preserves the activation window before and after D1', async 
       assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(lastStep) + 1), 'inventory-after']);
     });
   }
+});
+
+test('qualification aborts and drains pending D1 recovery readback after a clock jump', async t => {
+  const { run, events } = lifecycle(t, 'clock jump during readback');
+  await assert.rejects(run(), { name: 'TimeoutError' });
+  assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf('migrate')),
+    'read-d1-aborted', 'read-d1-drained', 'inventory-after']);
 });
 
 test('qualification lifecycle blocks D1 apply and Worker activation on exact-record readback drift', async t => {
