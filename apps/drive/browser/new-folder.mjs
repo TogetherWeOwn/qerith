@@ -9,7 +9,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
   const opener = page.getByRole('button', { name: 'New folder', exact: true });
   const dialog = page.getByRole('dialog', { name: 'New folder in My Drive' });
   const field = dialog.getByRole('textbox', { name: 'Folder name' });
-  const active = page.locator(':focus'), uploadReady = page.getByRole('button', { name: 'Upload', exact: true }).and(page.locator('[aria-disabled="false"]'));
+  const active = page.locator(':focus');
   const status = text => page.getByRole('status').filter({ hasText: text });
   const post = request => request.url() === `${origin}/api/folders` && request.method() === 'POST';
   const requests = [];
@@ -31,7 +31,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
     for (const [width, height] of widths) {
       const evidence = state => capture(page, state, width, true, owner ? 'new-folder' : 'member-new-folder');
       await page.setViewportSize({ width, height });
-      await page.goto(`${origin}/`); await uploadReady.waitFor();
+      await page.goto(`${origin}/`, { waitUntil: 'networkidle' });
       const name = `A Receipts ${width} 🗂️`; // Before the existing Folder NNN fixtures.
       const concurrent = owner && width === 1280;
       if (concurrent) {
@@ -97,7 +97,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         await row.and(page.locator('li')).waitFor();
       }
       if (!owner) continue;
-      await page.reload(); await uploadReady.waitFor();
+      await page.reload({ waitUntil: 'networkidle' });
       await open();
       await submit(name, 409);
       await dialog.getByText(/There's already a folder/).waitFor();
@@ -117,7 +117,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         await cancel();
       }
       await Promise.all([page.waitForURL('**/?page=*'), page.getByRole('link', { name: 'Next page' }).click()]);
-      await uploadReady.waitFor();
+      await page.getByRole('button', { name: 'Upload', exact: true }).and(page.locator('[aria-disabled="false"]')).waitFor();
       const continuation = page.url(), earlier = `B Earlier ${width}`;
       await open();
       await submit(earlier, 201);
