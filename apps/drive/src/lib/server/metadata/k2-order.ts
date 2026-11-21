@@ -16,8 +16,19 @@ type Entry = {
   modified: number | null;
 };
 
+function numericInput(name: string): string {
+  // ICU splits runs above 254 digits. Compare significant length first, then
+  // fixed-width chunks; NUL stops a run without adding a collation weight.
+  return name.normalize('NFC').replace(/\p{Nd}+/gu, (run) => {
+    const digits = [...run];
+    const first = digits.findIndex((digit) => collator.compare(digit, '0') !== 0);
+    const significant = first < 0 ? ['0'] : digits.slice(first);
+    return [significant.length, ...significant.join('').match(/.{1,128}/gu)!].join('\0');
+  });
+}
+
 export function compareK2Names(a: string, b: string): number {
-  return collator.compare(a.normalize('NFC'), b.normalize('NFC'));
+  return collator.compare(numericInput(a), numericInput(b));
 }
 
 // Ordinal UTF-8 order matches SQLite BINARY for stored IDs, including IDs

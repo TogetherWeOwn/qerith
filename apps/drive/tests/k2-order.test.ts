@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { validateName } from '../src/lib/entry-name.ts';
 import { compareK2Entries, compareK2Names } from '../src/lib/server/metadata/k2-order.ts';
 
 type Entry = Parameters<typeof compareK2Entries>[0];
@@ -14,7 +15,11 @@ const ids = (rows: Entry[], sort: typeof sorts[number], direction: typeof direct
 test('English numeric collation handles Unicode digits, long numbers and NFC without folding case or punctuation', () => {
   assert.ok(compareK2Names('file 2', 'file 10') < 0);
   assert.equal(compareK2Names('file ٢', 'file 002'), 0);
-  assert.ok(compareK2Names(`file ${'9'.repeat(40)}`, `file 1${'0'.repeat(40)}`) < 0);
+  const shorter = '9'.repeat(254), longer = `1${'0'.repeat(254)}`, next = `${longer.slice(0, -1)}1`;
+  [shorter, longer, next].forEach(validateName);
+  assert.ok(compareK2Names(shorter, longer) < 0);
+  assert.ok(compareK2Names(longer, next) < 0);
+  assert.equal(compareK2Names(`${'٠'.repeat(127)}1`, '1'), 0);
   assert.equal(compareK2Names('📁 café 2', '📁 café 02'), 0);
   assert.notEqual(compareK2Names('café', 'cafe'), 0);
   assert.notEqual(compareK2Names('File', 'file'), 0);

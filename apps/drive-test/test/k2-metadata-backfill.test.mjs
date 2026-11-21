@@ -2,12 +2,18 @@ import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { backfillK2MetadataPage } from '../../drive/src/lib/server/metadata/k2-metadata-backfill.ts';
 import schema from '../../drive/src/lib/server/metadata/k2-metadata-schema.sql?raw';
-import { sql } from './fixtures/upload-completion.mjs';
-import { seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
+import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
+import { parts, seed, sql } from './fixtures/upload-completion.mjs';
+import { etag, seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
 it('seeks bounded batches, preserves recorded metadata and uses only pinned size evidence', async () => {
   const { id: pinned } = await seedBoundPublication('k2-pinned');
   const { id: resized } = await seedBoundPublication('k2-resized');
+  const { token, intent, identity } = await seed('k2-unpinned', { declaredSize: 7 });
+  const publication = new UploadPublication(env.DB, async () => ({ etag, size: 7 }), token);
+  const { id: unpinned } = await publication.completeAndPublish(identity.ownerId, intent, 2, null, 'legacy', parts);
+  expect(await sql('SELECT completion_operation_id, evidence_revision FROM drive_upload_publications WHERE entry_id = ?', unpinned).first())
+    .toEqual({ completion_operation_id: null, evidence_revision: null });
   await sql('UPDATE drive_entries SET size_bytes = 8 WHERE id = ?', resized).run();
   await sql(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES
     ('x-folder', 'legacy', 'folder.jpg', 'folder', NULL, NULL),
@@ -30,7 +36,8 @@ it('seeks bounded batches, preserves recorded metadata and uses only pinned size
   expect(firstRows.map(({ entry_id }) => entry_id)).toEqual([...before.slice(0, 2).map(({ id }) => id), 'x-recorded']);
   expect(await backfill(null)).toEqual(first);
   expect(await metadata()).toEqual(firstRows);
-  expect(await backfill(first.nextAfterId)).toEqual({ scanned: 2, nextAfterId: 'x-legacy' });
+  expect(await backfill(first.nextAfterId)).toEqual({ scanned: 2, nextAfterId: 'x-folder' });
+  expect(await backfill('x-folder', 1)).toEqual({ scanned: 1, nextAfterId: 'x-legacy' });
   expect(await backfill('x-legacy', 1)).toEqual({ scanned: 1, nextAfterId: 'x-recorded' });
   expect(await backfill('x-recorded')).toEqual({ scanned: 0, nextAfterId: null });
   expect(await backfill('x-legacy')).toEqual({ scanned: 1, nextAfterId: null });
@@ -41,7 +48,7 @@ it('seeks bounded batches, preserves recorded metadata and uses only pinned size
     display_type, type_source: 'entry-kind', modified_at_ms: null, modified_source: null, verified_size_bytes,
   });
   expect(rows).toEqual({
-    [pinned]: legacy('File', 7), [resized]: legacy('File'),
+    [pinned]: legacy('File', 7), [resized]: legacy('File'), [unpinned]: legacy('File'),
     'x-folder': legacy('Folder'), 'x-legacy': legacy('File'),
     'x-recorded': { ...legacy('Project'), type_source: 'drive-write', modified_at_ms: 0, modified_source: 'drive-write' },
   });

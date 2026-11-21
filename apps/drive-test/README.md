@@ -64,19 +64,14 @@ such a conflict through a narrowly reviewed exception, not a global relaxation.
 ## Synthetic K2 seek benchmark
 
 In the prepared `apps/drive-test` project, run `npm test -- test/k2-listing-benchmark.test.mjs`.
-The fixture traverses 5,001 and 10,001 synthetic rows by name and by size, in
-both directions. It checks folder-to-file and known-to-unknown page seams,
-file ties spanning pages, and the end of results. The size tuple keeps zero
-bytes distinct from unknown and reverses only the size: folder rank, unknown
-flag, ascending name rank, and binary ID retain their order.
-
-It reports query time and fixture bytes for the first page, first file page,
-a deep full page, and (for size) the first unknown-size file page, plus D1 rows
-read when available. A separate Worker assertion checks numeric and NFC
-expectations independently of rank generation. This tests a candidate seek
-over precomputed fixture keys, not deployed metadata or locale key generation,
-authorized counts, cursor validation, or route rendering. It is not evidence
-for the deployed Worker/D1 CPU or three-second first-render target.
+It traverses 5,001 and 10,001 rows by name and size in both directions, checking
+folder/file and known/unknown seams, ties spanning pages, and exhaustion.
+Only size reverses: folder rank, unknown flag (distinct from zero bytes),
+ascending name rank, and binary ID retain their order. Diagnostics capture
+query time, bytes, and available D1 rows read for first, first file, deep, and
+first unknown-size file pages. The Worker checks numeric order and NFC apart
+from fixture ranks. Precomputed keys do not validate deployed collation,
+metadata, counts, cursors, route rendering, CPU, or the three-second target.
 
 ## K2 metadata backfill fixture
 
