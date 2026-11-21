@@ -494,6 +494,22 @@ export default {
       const root = await createFolder('Created at root', null);
       assert.deepEqual([root.status, root.headers.get('cache-control')], [201, 'private, no-store']);
       const { id } = await root.json();
+      const recipients = `/api/entries/${id}/eligible-recipients`;
+      const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie }, redirect: 'manual' });
+      for (const [path, method, status, allow] of [
+        [`${recipients}?x-sveltekit-test=1`, 'GET', 400, null],
+        [`${recipients}/__data.json`, 'GET', 404, null],
+        [`${recipients}/__route.js`, 'GET', 404, null],
+        [recipients, 'OPTIONS', 405, 'GET'],
+        [recipients, 'HEAD', 405, 'GET'],
+      ]) {
+        const response = await lookup(path, method);
+        assert.deepEqual([response.status, response.headers.get('cache-control'), response.headers.get('allow'),
+          response.headers.get('access-control-allow-origin'), await response.text()], [status, 'private, no-store', allow, null, '']);
+      }
+      const available = await lookup(`${recipients}?cursor=z`);
+      assert.deepEqual([available.status, available.headers.get('cache-control'), await available.json()],
+        [200, 'private, no-store', { recipients: [], nextCursor: null }]);
       const nested = await createFolder('Created inside', id);
       assert.equal(nested.status, 201);
       const body = await nested.json();

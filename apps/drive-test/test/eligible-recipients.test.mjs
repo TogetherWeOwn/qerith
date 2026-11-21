@@ -3,6 +3,8 @@ import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
 import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { EligibleRecipients } from '../../drive/src/lib/server/metadata/eligible-recipients.ts';
+import { getEligibleRecipients } from '../../drive/src/lib/server/eligible-recipient-route.ts';
+import { eligibleRecipientsRoute, privateRequests, sessionCookie } from '../../drive/src/lib/server/request-auth.ts';
 
 async function setup() {
   await applyD1Migrations(env.DB, env.DRIVE_MIGRATIONS);
@@ -66,4 +68,50 @@ it('pages by ID and rechecks membership and session on every request', async () 
   await env.DB.prepare("INSERT INTO drive_sessions VALUES (?, 'alice', ?)")
     .bind(await tokenHash(live.token), live.expiresAt).run();
   expect(await read.listPage(live.token, 'folder')).toBeNull();
+});
+
+it('serves owned recipient pages as private JSON and denies stale or nonowner sessions', async () => {
+  const { alice, admin, bob, sessions } = await setup();
+  const origin = 'https://drive.example.test';
+  const bindings = { DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_SIGN_IN_FIXTURE: '1' };
+  const handle = privateRequests(bindings);
+  const path = '/api/entries/folder/eligible-recipients';
+  const ask = (session, url = path, beforeList) => handle({
+    event: { request: new Request(origin + url, { headers: session ? { cookie: `${sessionCookie}=${session.token}` } : {} }),
+      route: { id: eligibleRecipientsRoute }, locals: {} },
+    resolve: async ({ request, locals }) => {
+      await beforeList?.();
+      return getEligibleRecipients(request, bindings, locals.driveSession?.token ?? null);
+    },
+  });
+  const deny = async (pending, status) => {
+    const response = await pending;
+    expect([response.status, response.headers.get('cache-control'), await response.text()]).toEqual([status, 'private, no-store', '']);
+  };
+  const list = async (url = path) => {
+    const response = await ask(alice, url);
+    expect([response.status, response.headers.get('cache-control'), response.headers.get('access-control-allow-origin')])
+      .toEqual([200, 'private, no-store', null]);
+    expect(response.headers.get('content-type')).toMatch(/^application\/json\b/);
+    return response.json();
+  };
+  await deny(ask(null), 401);
+  await deny(ask(bob), 404);
+  await deny(ask(admin), 404);
+  await deny(ask(alice, path.replace('folder', 'missing')), 404);
+  expect(await list(`${path}?cursor=z`)).toEqual({ recipients: [], nextCursor: null });
+
+  const displayName = '<b>Bob & friends</b>';
+  const ids = Array.from({ length: 100 }, (_, i) => `recipient / ${String(i).padStart(3, '0')}`);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE drive_principals SET display_name = ? WHERE id = 'bob'").bind(displayName),
+    env.DB.prepare("INSERT INTO drive_principals (id, role, status) SELECT value, 'member', 'active' FROM json_each(?)").bind(JSON.stringify(ids)),
+  ]);
+  const recipients = ids.map(recipientId => ({ recipientId, displayName: null }));
+  const nextCursor = ids[98];
+  expect(await list()).toEqual({ recipients: [{ recipientId: 'bob', displayName }, ...recipients.slice(0, 99)], nextCursor });
+  const next = `${path}?cursor=${encodeURIComponent(nextCursor)}`;
+  expect(await list(next)).toEqual({ recipients: recipients.slice(99), nextCursor: null });
+  await deny(ask(alice, next, () => sessions.revoke(alice.token)), 404); // Revoked after the hook lookup.
+  await deny(ask(alice, next), 401);
 });

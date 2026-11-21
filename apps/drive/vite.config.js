@@ -85,6 +85,7 @@ const buildAdapter = {
       // The adapter can answer before the hook. Gate preview dispatch here.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { dispatchEligibleRecipients } from '../../src/lib/server/eligible-recipient-route.ts';
 import { postFolder } from '../../src/lib/server/folder-route.ts';
 import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
@@ -140,6 +141,9 @@ const handlers = {
         asset: request => env.ASSETS.fetch(request)
       });
     }
+    const forward = request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    const recipients = dispatchEligibleRecipients(request, env, forward);
+    if (recipients) return recipients;
     if (url.pathname === '/api/folders') return postFolder(request, env);
     // Keep listing denials out of the adapter's query validation.
     const listing = listingRequest(request, env);
@@ -170,7 +174,7 @@ const handlers = {
       }
     }
     if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
-    return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    return forward(request);
   }
 };
 
