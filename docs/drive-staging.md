@@ -208,6 +208,16 @@ Before wiring the protected caller, reconcile its pre-activation budget with
 this window: D1 command timeouts alone can consume the five-minute margin,
 before accounting for upload, readback and recovery recording.
 
+The unwired Worker recovery adapter reads the pinned staging config from the
+lost attempt's main-ancestor SHA. It verifies the recorded candidate against
+both the current deployment and the immutable uploaded version, and reads back
+one tagged baseline restore. It does not retry ambiguous writes or overwrite a
+superseding deployment. Observing the original baseline is not proof that a late
+activation cannot arrive. A protected completion caller must authenticate the
+completed source attempt and its durable pre-activation record, hold the shared
+lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
+or R2 cleanup or authorization to issue a receipt.
+
 The unwired large-transfer verifier reads an unencoded, full `200` app download
 as a stream. It requires the five GiB boundary (also the current app maximum),
 checks the actual byte count through EOF, and compares SHA-256 with the digest
