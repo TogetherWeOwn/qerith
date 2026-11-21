@@ -59,6 +59,27 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, file), content);
     }
     await verifyEvidence(dir, head);
+    const verifyContinuation = () => verifyEvidence(dir, head, false, false, false, false, true);
+    await assert.rejects(verifyContinuation(), /root-continuation-390\.json/);
+    const proofPath390 = join(dir, 'root-continuation-390.json');
+    await writeFile(proofPath390, '{}');
+    await assert.rejects(verifyContinuation(), /Invalid continuation trace: 390/);
+    const phase = { requests: [] };
+    const finished = { pending: phase, published: phase };
+    const continuation = { canceled: phase, fresh: phase, suffix: { pending: phase, refused: phase },
+      acknowledged: finished, empty: finished, 'empty-acknowledged': finished };
+    for (const width of [390, 1280]) {
+      await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
+      await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
+      const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000000000003200802000000000000000000000049454e44ae426082', 'hex');
+      png.writeUInt32BE(width, 16);
+      for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
+        await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
+      }
+    }
+    await verifyContinuation();
+    await writeFile(join(dir, 'root-continuation-uploaded-1280.png'), 'not a PNG');
+    await assert.rejects(verifyContinuation(), /Invalid continuation screenshot: uploaded-1280/);
     const verifyFolder = () => verifyEvidence(dir, head, false, false, false, true);
     await assert.rejects(verifyFolder(), /staging-folder-keyboard-390/);
     await writeFile(join(dir, 'staging-folder-keyboard-390.json'), JSON.stringify({ viewport: [390, 844], visibleTabFocus: true,

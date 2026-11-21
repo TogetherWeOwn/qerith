@@ -10,15 +10,16 @@ const name = 'Re-picked.txt';
 const partBytes = 16 * 1024 * 1024;
 const file = buffer => ({ name, mimeType: 'text/plain', buffer });
 const known = Buffer.from('verified bytes');
+const refusedFile = Buffer.alloc(partBytes + 1, 42);
 const cases = [
   { label: 'acknowledged', bytes: known, prefix: known },
   { label: 'empty', bytes: Buffer.alloc(0) },
   { label: 'empty-acknowledged', bytes: Buffer.alloc(0), prefix: Buffer.alloc(0) },
-  { label: 'suffix', bytes: Buffer.alloc(partBytes + 1, 42), prefix: Buffer.alloc(partBytes, 42) },
+  { label: 'suffix', bytes: refusedFile, prefix: refusedFile.subarray(0, partBytes) },
 ];
 const allocate = '/api/uploads';
 const resume = `${allocate}/${intentId}/resume`;
-const part = id => `${allocate}/${id}/parts/1`;
+const part = (id, number = 1) => `${allocate}/${id}/parts/${number}`;
 const complete = id => `${allocate}/${id}/complete`;
 const destination = JSON.stringify({ parentId: null, name });
 const number = value => value.toLocaleString('en-US');
@@ -29,7 +30,8 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
     const unexpected = [];
     await context.route('**/*', route => {
       const url = new URL(route.request().url());
-      if (url.origin === origin && !url.pathname.startsWith(allocate)) return route.continue();
+      const dataRequest = url.pathname.startsWith('/api/') || url.pathname.endsWith('/__data.json');
+      if (url.origin === origin && !dataRequest) return route.continue();
       unexpected.push(url.pathname);
       return route.abort();
     });
@@ -43,7 +45,7 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
         requests.push([method, path, body]);
         if (method === 'GET' && path === resume) return [200, projection];
         if (method === 'POST' && path === allocate) return [201, { id: freshId }];
-        if (method === 'PUT' && [part(intentId), part(freshId)].includes(path)) return [204];
+        if (method === 'PUT' && [part(intentId), part(freshId), part(freshId, 2)].includes(path)) return [204];
         if (method === 'POST' && [complete(intentId), complete(freshId)].includes(path)) return [201, { id: entryId }];
         throw new Error('Unexpected fixture upload request');
       });
@@ -52,6 +54,9 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
           intentId: new URLSearchParams(location.search).has('no-candidate') ? undefined : candidate,
           fetcher: async (path, { method, body }) => {
             const [status, json] = await window.fixtureUploadRequest(method, path, body instanceof Blob ? body.size : body ?? null);
+            if (window.holdFixtureEvidence && path === `/api/uploads/${candidate}/resume`) {
+              await new Promise(release => { window.releaseFixtureEvidence = release; });
+            }
             if (path === `/api/uploads/${candidate}/complete`) {
               await new Promise(release => { window.releaseFixtureCompletion = release; });
             }
@@ -98,17 +103,27 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
       evidence.canceled = { requests: [], refreshes: 0 };
 
       for (const { label, bytes, prefix } of cases) {
-        await page.goto(url);
-        await continuation.waitFor();
+        if (label !== 'acknowledged') {
+          await page.goto(url);
+          await continuation.waitFor();
+        }
         assert.deepEqual(requests, []);
+        if (label === 'suffix') await page.evaluate(() => { window.holdFixtureEvidence = true; });
         projection = { declaredSize: bytes.length, parts: prefix ? [
           { partNumber: 1, sizeBytes: prefix.length, sha256: createHash('sha256').update(prefix).digest('hex') },
         ] : [] };
         await pick(continuation, file(bytes));
         const expected = [['GET', resume, null]];
         if (label === 'suffix') {
-          evidence[label] = await assertState('Upload interrupted.', 0, bytes.length, 0, 0);
+          await page.waitForFunction(() => typeof window.releaseFixtureEvidence === 'function');
+          const pending = await assertState('Continuing upload…', 0, bytes.length, 0, 0);
+          assert.equal(await page.getByText('Uploaded.', { exact: true }).count(), 0);
+          assert.equal(await status.textContent(), `Continuing upload of ${name} to My Drive.`);
+          assert.deepEqual(requests, expected);
+          await page.evaluate(() => window.releaseFixtureEvidence());
+          const refused = await assertState('Upload interrupted.', 0, bytes.length, 0, 0);
           assert.equal(await status.textContent(), `${name}: Upload interrupted.`);
+          evidence[label] = { pending, refused };
         } else {
           if (!prefix) expected.push(['PUT', part(intentId), 0]);
           expected.push(['POST', complete(intentId), destination]);
@@ -129,6 +144,10 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
           evidence[label] = { pending, published };
         }
         assert.deepEqual(requests.splice(0), expected);
+        if (label === 'suffix') {
+          await pick(continuation, null);
+          await assertState('Upload interrupted.', 0, bytes.length, 0, 0);
+        }
       }
 
       await page.screenshot({ path: resolve(output, `root-continuation-suffix-interrupted-${width}.png`) });
@@ -140,12 +159,13 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
       assert.deepEqual(results.violations, []);
       assert.deepEqual(requests, []); // No automatic retry or fresh allocation after refusal.
 
-      // Same name and candidate after a refusal: only a deliberate fresh click allocates.
-      await pick(fresh, file(known));
-      evidence.fresh = await assertState('Uploaded.', known.length, known.length, known.length, 1);
+      // Same page and exact refused file: only a deliberate fresh click allocates.
+      await pick(fresh, file(refusedFile));
+      evidence.fresh = await assertState('Uploaded.', refusedFile.length, refusedFile.length, refusedFile.length, 1);
       assert.deepEqual(requests, [
-        ['POST', allocate, JSON.stringify({ size: known.length })],
-        ['PUT', part(freshId), known.length],
+        ['POST', allocate, JSON.stringify({ size: refusedFile.length })],
+        ['PUT', part(freshId), partBytes],
+        ['PUT', part(freshId, 2), 1],
         ['POST', complete(freshId), destination],
       ]);
       assert.deepEqual(unexpected, []);

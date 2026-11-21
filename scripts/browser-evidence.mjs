@@ -8,7 +8,7 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false) {
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -32,6 +32,23 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
       if (!screenshot.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
           screenshot.length < 45 || screenshot.readUInt32BE(16) !== width || !screenshot.subarray(-8).equals(Buffer.from('49454e44ae426082', 'hex')) ||
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid upload evidence: ${label}`);
+    }
+  }
+  if (continuation) for (const width of [390, 1280]) {
+    const proof = JSON.parse(await readFile(join(dir, `root-continuation-${width}.json`), 'utf8'));
+    const finishing = ['acknowledged', 'empty', 'empty-acknowledged'];
+    const phases = [proof?.canceled, proof?.fresh, proof?.suffix?.pending, proof?.suffix?.refused,
+      ...finishing.flatMap(label => [proof?.[label]?.pending, proof?.[label]?.published])];
+    if (!phases.every(phase => Array.isArray(phase?.requests))) throw new Error(`Invalid continuation trace: ${width}`);
+    const axe = JSON.parse(await readFile(join(dir, `axe-root-continuation-${width}.json`), 'utf8'));
+    if (!Array.isArray(axe?.violations) || axe.violations.length) throw new Error(`Invalid continuation axe evidence: ${width}`);
+    for (const state of [...finishing.map(label => `${label}-finishing`), 'suffix-interrupted', 'uploaded']) {
+      const label = `${state}-${width}`;
+      const png = await readFile(join(dir, `root-continuation-${label}.png`));
+      if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
+          png.readUInt32BE(16) !== width || !png.subarray(-12).equals(Buffer.from('0000000049454e44ae426082', 'hex'))) {
+        throw new Error(`Invalid continuation screenshot: ${label}`);
+      }
     }
   }
   if (staging) {
@@ -83,7 +100,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   const root = process.env.ROOT_EVIDENCE === 'true';
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
-  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true', folder);
+  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
+    folder, process.env.CONTINUATION_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
