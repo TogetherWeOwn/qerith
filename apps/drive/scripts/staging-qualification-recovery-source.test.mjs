@@ -69,6 +69,7 @@ test('refuses stale or mismatched attempts and incomplete or ambiguous source jo
     [[run, { ...listing, total_count: 2 }], 2],
     [[run, { total_count: 2, jobs: [job, job] }], 2],
     [[run, { ...listing, jobs: [{ ...job, run_attempt: 1 }] }], 2],
+    [[run, { ...listing, jobs: [{ ...job, run_attempt: undefined }] }], 2],
     [[run, { ...listing, jobs: [{ ...job, steps: [{ ...job.steps[0], conclusion: 'skipped' }] }] }], 2],
     [[run, listing, { ...run, run_attempt: 3 }], 3],
     [[run, listing, { ...run, status: 'in_progress', conclusion: null }], 3],
@@ -81,41 +82,50 @@ test('refuses stale or mismatched attempts and incomplete or ambiguous source jo
   }
 });
 
-test('the request deadline aborts and drains before the outer source phase deadline', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  // Node's AbortSignal.timeout uses an internal timer outside the mocked clock.
-  t.mock.method(AbortSignal, 'timeout', ms => {
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), ms);
-    return controller.signal;
+for (const stall of ['headers', 'body']) {
+  test(`the request deadline aborts a stalled ${stall} read and drains before the phase deadline`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    // Node's AbortSignal.timeout uses an internal timer outside the mocked clock.
+    t.mock.method(AbortSignal, 'timeout', ms => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    const started = Promise.withResolvers();
+    const drained = Promise.withResolvers();
+    const records = [];
+    let requestSignal;
+    let calls = 0;
+    const readSource = createQualificationRecoverySource({ token: 'fixture', async request(_, { signal }) {
+      calls++;
+      requestSignal = signal;
+      const waitForDrain = async () => {
+        started.resolve();
+        await drained.promise;
+        return signal.reason ?? new Error('Fixture transport drained without abort.');
+      };
+      if (stall === 'headers') throw await waitForDrain();
+      return new Response(new ReadableStream({ async pull(body) { body.error(await waitForDrain()); } },
+        { highWaterMark: 0 }));
+    } });
+    let settled = false;
+    const result = assert.rejects(recover(readSource, records).finally(() => { settled = true; }), /\(source\)/);
+    try {
+      await Promise.race([started.promise, result]);
+      t.mock.timers.tick(4_999);
+      assert.equal(requestSignal.aborted, false);
+      t.mock.timers.tick(1);
+      assert.equal(requestSignal.reason?.name, 'TimeoutError');
+      await new Promise(setImmediate);
+      assert.equal(settled, false);
+    } finally {
+      drained.resolve();
+      await result;
+    }
+    assert.equal(calls, 1);
+    assert.deepEqual(records, []);
   });
-  const drained = Promise.withResolvers();
-  const records = [];
-  let requestSignal;
-  let calls = 0;
-  const readSource = createQualificationRecoverySource({ token: 'fixture', async request(_, { signal }) {
-    calls++;
-    requestSignal = signal;
-    await drained.promise;
-    signal.throwIfAborted();
-    throw new Error('Fixture transport drained without abort.');
-  } });
-  let settled = false;
-  const result = assert.rejects(recover(readSource, records).finally(() => { settled = true; }), /\(source\)/);
-  try {
-    t.mock.timers.tick(4_999);
-    assert.equal(requestSignal.aborted, false);
-    t.mock.timers.tick(1);
-    assert.equal(requestSignal.reason?.name, 'TimeoutError');
-    await new Promise(setImmediate);
-    assert.equal(settled, false);
-  } finally {
-    drained.resolve();
-    await result;
-  }
-  assert.equal(calls, 1);
-  assert.deepEqual(records, []);
-});
+}
 
 test('rejects oversized source responses and drains cancellation before settling', async () => {
   const drained = Promise.withResolvers();
