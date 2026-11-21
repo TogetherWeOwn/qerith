@@ -36,6 +36,7 @@
   const noMatch = $derived(!locked && open && !!search && !matches.length);
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
+  $effect(() => { if (status) announcement = ''; });
 
   function dismiss() { open = false; active = null; }
 

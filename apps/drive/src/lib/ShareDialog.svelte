@@ -24,9 +24,8 @@
 
   const id = $props.id();
   const label = (person: ShareRecipient) => person.displayName?.trim() ? person.displayName : 'Name unavailable';
-  let dialog: HTMLDialogElement;
+  let dialog: HTMLDialogElement, accessTitle: HTMLElement;
   let first: HTMLButtonElement, last: HTMLButtonElement;
-  let accessTitle: HTMLElement;
   let notice = $state<HTMLElement>();
   let opener: HTMLElement | undefined;
   let backdrop = false;
@@ -99,11 +98,10 @@
 
 {#snippet pager(page: SharePage<ShareRecipient>, subject: string)}
   <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
-    {#if page.state === 'loading'}<p>Loading {subject}…</p>
-    {:else if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
+    <p role="status">{#if page.state === 'loading'}Loading {subject}…{:else if page.state === 'ready' && (page.previous || page.next)}Showing one page of {subject}.{/if}</p>
+    {#if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
       {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.retry!)}>Retry</button>{/if}
-    {:else if page.previous || page.next}
-      <p>Showing one page of {subject}.</p>
+    {:else if page.state === 'ready'}
       {#if page.previous}<button type="button" aria-label={`Previous page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.previous!)}>Previous</button>{/if}
       {#if page.next}<button type="button" aria-label={`Next page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.next!)}>Next</button>{/if}
     {/if}

@@ -64,6 +64,7 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
       const removeSam = button('Remove Sam Mora’s direct access'), confirmSam = button('Confirm removal of direct access for Sam Mora');
       await removeSam.click(); await button('Cancel').click(); await writes('opaque-4', 'opaque-5', 'opaque-4', 'opaque-5');
       await removeSam.click(); await confirmSam.click(); await button('Removing direct access for Sam Mora').waitFor();
+      assert.equal(await dialog.getByRole('status').filter({ hasText: /\d+ selected\./ }).count(), 0, 'Removal must not re-announce the cleared selection');
       await key('Escape'); assert(await dialog.isVisible());
       await settle(); await dialog.getByText(/Couldn’t confirm removal/).waitFor();
       await confirmSam.click(); await settle();
@@ -87,7 +88,7 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
         } else {
           assert.equal(await text('Only you can see this.').count(), 0);
           if (mode === 'failed') { await text('Couldn’t load people with access.').waitFor(); await button('Retry loading people with access').click(); await text('Only you can see this.').waitFor(); }
-          else { await button('Next page of people with access').click(); await text('Loading people with access…').waitFor(); }
+          else { await button('Next page of people with access').click(); await announced('Loading people with access…'); }
           await writes();
         }
       }
