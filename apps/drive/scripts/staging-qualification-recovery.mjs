@@ -3,7 +3,9 @@ import { verifyQualificationQuiescence } from './staging-qualification-quiescenc
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
 import { createQualificationRecoverySource } from './staging-qualification-recovery-source.mjs';
-import { runQualificationPhase } from './staging-qualification-worker.mjs';
+import { recoverQualificationWorker, runQualificationPhase } from './staging-qualification-worker.mjs';
+import { recoverQualificationD1 } from './staging-qualification-d1.mjs';
+import { cleanHistoricalQualificationR2 } from './staging-qualification-cleanup.mjs';
 
 const repo = 'TogetherWeOwn/qerith';
 const workflow = '.github/workflows/drive-staging-qualification.yml';
@@ -109,14 +111,34 @@ export async function recoverQualification(request, { readSource, readRecord, re
   if (signal?.aborted || fence.signal.aborted || fenceRemaining(fence) <= 0) throw refused('R2 cleanup');
 }
 
-// Offline composition only. No transport, writer fence or mutation adapter defaults.
+// Offline composition only. The protected caller must supply an authoritative
+// held fence and independently attribute the D1 bookmark and pre-write ledger
+// to the failed attempt. No transport or proof defaults.
 export function createQualificationRecovery(env, cwd, { token, githubRequest, send,
-  readWriterFence, recoverWorker, recoverD1, cleanupR2 } = {}) {
-  if (typeof send !== 'function') throw refused('input');
+  readWriterFence, proveD1Quiescence } = {}) {
+  if ([send, readWriterFence, proveD1Quiescence].some(fn => typeof fn !== 'function')) throw refused('input');
   env = { ...env };
+  const guarded = assertHeld => (...args) => {
+    assertHeld();
+    return send(...args);
+  };
   const readSource = createQualificationRecoverySource({ token, request: githubRequest });
   return (request, signal) => recoverQualification(request, {
-    readSource, readWriterFence, recoverWorker, recoverD1, cleanupR2,
+    readSource, readWriterFence,
+    recoverWorker(source, record, active, assertHeld) {
+      return recoverQualificationWorker(source, record, env, cwd, active, guarded(assertHeld));
+    },
+    async recoverD1(source, record, active, assertHeld) {
+      const proveQuiescence = (scope, signal) => {
+        assertHeld();
+        return proveD1Quiescence(scope, signal);
+      };
+      const result = await recoverQualificationD1(source, record, { proveQuiescence }, env, cwd, active, guarded(assertHeld));
+      return result.status === 'restored';
+    },
+    cleanupR2(context, active, assertHeld) {
+      return cleanHistoricalQualificationR2(context, env, cwd, active, guarded(assertHeld));
+    },
     async readRecord(source, kind, active) {
       const store = await createQualificationR2RecoveryStore(source, env, cwd, { send });
       return readQualificationRecoveryRecord(source, kind, store, active);
