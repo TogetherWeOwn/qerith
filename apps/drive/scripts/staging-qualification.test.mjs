@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -436,7 +437,10 @@ function lifecycle(t, failure, driftKind) {
     events.push(name);
     return !failures.includes(name);
   };
-  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const { version, previousVersion, previousDeployment } = workerRecord;
+  let now = Date.now();
+  if (failure === 'clock jump' || failure === 'clock jump during readback') t.mock.method(Date, 'now', () => now);
+  const expiresAt = String(now + (failure === 'short window' ? 20 : 25) * 60_000);
   const candidate = { version, expiresAt, previousVersion, previousDeployment };
   const stored = new Map();
   const writeRecovery = qualificationRecoveryWriter({ ...recoverySource, sha: env.TESTED_SHA }, {
@@ -446,10 +450,18 @@ function lifecycle(t, failure, driftKind) {
       stored.set(key, Buffer.from(body));
       return true;
     },
-    read(key) {
+    async read(key, { signal }) {
       const body = stored.get(key);
       const { kind } = JSON.parse(body.toString('utf8'));
       step(`read-${kind}`);
+      if (kind === 'd1' && failure === 'clock jump during readback') {
+        now += 5 * 60_000;
+        await once(signal, 'abort', { signal: AbortSignal.timeout(5_000) });
+        step('read-d1-aborted');
+        await new Promise(resolve => setImmediate(resolve));
+        step('read-d1-drained');
+        signal.throwIfAborted();
+      }
       return kind === driftKind ? Buffer.concat([body, Buffer.from('\n')]) : Buffer.from(body);
     },
   });
@@ -489,6 +501,7 @@ function lifecycle(t, failure, driftKind) {
     async migrate({ recordRecovery }) {
       await recordRecovery({ bookmark: 'bookmark' });
       step('migrate');
+      if (failure === 'clock jump') now += 5 * 60_000;
       return { bookmark: 'bookmark' };
     },
     probe: () => step('probe'),
@@ -510,7 +523,7 @@ function lifecycle(t, failure, driftKind) {
       }
     },
   };
-  return { events, stored, testedSha: env.TESTED_SHA,
+  return { events, stored, testedSha: env.TESTED_SHA, expiresAt,
     run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
 }
 
@@ -526,12 +539,12 @@ test('qualification lifecycle loads on plain Node without the test loader', () =
 });
 
 test('qualification lifecycle rejects a fabricated pass map after recording recovery', async t => {
-  const { run, events, stored, testedSha } = lifecycle(t);
+  const { run, events, stored, testedSha, expiresAt } = lifecycle(t);
   await assert.rejects(run(), /case evidence/);
   assert.deepEqual(events, successOrder);
   const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
   const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
-  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const { version, previousVersion, previousDeployment } = workerRecord;
   assert.deepEqual(payloads, [
     { ...scope, kind: 'd1', bookmark: 'bookmark' },
     { ...scope, kind: 'worker', version, expiresAt, previousVersion, previousDeployment },
@@ -557,6 +570,25 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
     assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(failure) + 1),
       ...(finalInventory ? ['inventory-after'] : [])]);
   }
+});
+
+test('qualification preserves the activation window before and after D1', async t => {
+  for (const [failure, lastStep, error] of [
+    ['short window', 'upload', /insufficient time left/], ['clock jump', 'migrate', { name: 'TimeoutError' }],
+  ]) {
+    await t.test(failure, async t => {
+      const { run, events } = lifecycle(t, failure);
+      await assert.rejects(run(), error);
+      assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(lastStep) + 1), 'inventory-after']);
+    });
+  }
+});
+
+test('qualification aborts and drains pending D1 recovery readback after a clock jump', async t => {
+  const { run, events } = lifecycle(t, 'clock jump during readback');
+  await assert.rejects(run(), { name: 'TimeoutError' });
+  assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf('migrate')),
+    'read-d1-aborted', 'read-d1-drained', 'inventory-after']);
 });
 
 test('qualification lifecycle blocks D1 apply and Worker activation on exact-record readback drift', async t => {

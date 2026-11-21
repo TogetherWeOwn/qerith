@@ -6,8 +6,12 @@ import { createQualificationR2RecoveryStore } from './staging-qualification-reco
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import {
-  probeQualificationWorker, runQualificationPhase, uploadQualificationWorker, withQualificationRecovery, withQualificationWorker,
+  probeQualificationWorker, qualificationMigrationTimeLeft, runQualificationPhase, uploadQualificationWorker,
+  withQualificationRecovery, withQualificationWorker,
 } from './staging-qualification-worker.mjs';
+
+const recordBudget = 15_000;
+const insufficientWindow = () => new Error('Staging candidate has insufficient time left for migrations and activation.');
 
 const stagingAdapters = (send = fetch) => ({
   upload: (env, cwd, signal) => uploadQualificationWorker(env, cwd, signal, send),
@@ -65,8 +69,8 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
   };
   const inspect = (phase, parentSignal) => requireProof(inventory, { ...context, phase }, parentSignal, 60_000,
     `Staging zero-idle inventory is unverified (${phase}).`);
-  const record = kind => evidence => requireProof(recordRecovery, { ...evidence, ...context, kind }, signal, 15_000,
-    'Qualification recovery record is unverified.');
+  const record = (kind, parentSignal = signal) => evidence => requireProof(recordRecovery,
+    { ...evidence, ...context, kind }, parentSignal, recordBudget, 'Qualification recovery record is unverified.');
 
   // No staging mutation before reviewed admission and inventory checks.
   await requireProof(assertFullV0, context, signal, 30_000, 'Reviewed full-v0 admission is unverified.');
@@ -77,7 +81,16 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
     // force inheritance or automatically republish a baseline to make it eligible.
     const candidate = await upload(env, cwd, signal);
     signal?.throwIfAborted();
-    const migrations = await migrate({ recordRecovery: record('d1') }, env, cwd, signal);
+    const { expiresAt } = candidate ?? {};
+    const started = performance.now();
+    const remaining = () => qualificationMigrationTimeLeft(expiresAt, recordBudget);
+    const budget = remaining();
+    if (budget <= 0) throw insufficientWindow();
+    const timeLeft = () => Math.min(remaining(), started + budget - performance.now());
+    const migrations = await runQualificationPhase((_, active) => migrate({
+      timeLeft, recordRecovery: record('d1', active),
+    }, env, cwd, active), null, signal, budget, remaining);
+    if (timeLeft() <= 0) throw insufficientWindow();
     signal?.throwIfAborted();
     const deployment = await worker({
       upload: candidate,
