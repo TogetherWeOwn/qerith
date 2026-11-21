@@ -36,7 +36,7 @@ jobs:
       cancel-in-progress: false
     environment: staging
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,6 +57,21 @@ jobs:
           QERITH_S3_ACCESS_KEY_ID: ${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
           QERITH_S3_SECRET_ACCESS_KEY: ${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
         run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification-settings.mjs
+      - name: Build exact qualification source
+        working-directory: apps/drive
+        run: |
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          git diff --quiet HEAD -- .
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          test -s .svelte-kit/cloudflare/_worker.js
+          test -d .svelte-kit/cloudflare/_app/immutable
+          git diff --quiet HEAD -- .
       - name: Fail closed until the live runner and cleanup are reviewed
         run: |
           printf '%s\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
