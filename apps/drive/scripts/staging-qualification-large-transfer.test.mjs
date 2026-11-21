@@ -53,6 +53,20 @@ test('rejects misleading response metadata before pulling and rejects a short bo
     /did not match the upload length/);
 });
 
+test('a body read error is sanitized and releases the reader lock', async () => {
+  let reads = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (++reads === 1) controller.enqueue(new Uint8Array([0x61]));
+      else controller.error(new Error('fixture transport detail'));
+    },
+  }, { highWaterMark: 0 });
+  await assert.rejects(verifyQualificationLargeDownload(new Response(stream, { headers }), digest),
+    { message: 'Large-transfer download stream failed.' });
+  assert.equal(reads, 2);
+  assert.equal(stream.locked, false);
+});
+
 test('cancellation settles a pending body read without returning transfer evidence', async () => {
   const abort = new AbortController();
   const pulling = Promise.withResolvers();
