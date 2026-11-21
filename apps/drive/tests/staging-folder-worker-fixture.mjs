@@ -43,7 +43,7 @@ export async function exerciseStagingFolder({ worker, DB, origin, owner, member,
   assert.ok(!(await body('/', owner, 200, { on: false })).includes(`href="${folder}"`));
   assert.ok(!(await body('/', member, 200)).includes(`href="${folder}"`));
   const first = await body(folderLink, owner, 200, { headers: {
-    'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin',
+    'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin',
   } });
   assert.match(first, /Folder proof title/);
   assert.equal((first.match(/<li\b/g) ?? []).length, 100);

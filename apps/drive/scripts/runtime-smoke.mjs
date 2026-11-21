@@ -141,6 +141,12 @@ export default {
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'const deletion = runtimeDeletion(request, env, bindings => app.fetch(request, bindings, ctx)); if (deletion) return deletion;'}
   ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
+  const mode = request.headers.get('x-test-fetch-mode');
+  if (mode !== null) {
+    request = new Request(request);
+    request.headers.delete('x-test-fetch-mode');
+    request.headers.set('sec-fetch-mode', mode);
+  }
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
   if (request.headers.has('x-test-qualification')) {
@@ -155,12 +161,7 @@ export default {
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
-  const mode = request.headers.get('x-test-fetch-mode');
-  if (mode === null) return app.fetch(request, env, ctx);
-  const input = new Request(request);
-  input.headers.delete('x-test-fetch-mode');
-  input.headers.set('sec-fetch-mode', mode);
-  return app.fetch(input, env, ctx);
+  return app.fetch(request, env, ctx);
 } };`);
   await writeFile(configPath, JSON.stringify({
     ...config,
