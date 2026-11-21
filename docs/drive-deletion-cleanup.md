@@ -1,8 +1,8 @@
 # Drive deletion cleanup (closed)
 
-Both paths are off by default. The generated Worker supplies no server-held
-provider rule or qualification, and no Wrangler config adds a trigger or opt-in.
-Neither a flag alone, upload qualification nor an offline probe can enable either path.
+Both paths are off by default. The generated Worker's default export supplies no
+capability, and no Wrangler config adds a trigger or opt-in. Request headers,
+flags, upload receipts and offline probes cannot supply the capability.
 
 The exact staging confirmation POST and the staging scheduled event are
 admitted separately (`DRIVE_STAGING_DELETE_REQUESTS` and
@@ -10,6 +10,30 @@ admitted separately (`DRIVE_STAGING_DELETE_REQUESTS` and
 permanent-removal rule for the actual normalized endpoint, bucket, storage epoch,
 and signing region. The scheduled callback only accepts the designated cron
 expression and has no HTTP entry point.
+
+## Protected Worker composition
+
+Trusted Worker entrypoint code can call `createDriveWorker(capability)` on the
+generated module. Both callbacks use the same `WorkerDeletionCapability`:
+
+- `sourceSha`, `workerVersion` and `expiresAt` must exactly match the active
+  qualification bindings, including native Worker version metadata and a live
+  qualification window. Expected values must come independently from the
+  protected lane's verified candidate record for the exact upload attempt, not
+  from the active bindings themselves. That record is not a runtime transport;
+  the version is only known after upload. No handoff is implemented here.
+- `storageConfigId` and `region` must match `storageIdentity` for the active
+  endpoint, bucket, epoch and signing region. The protected lane must pass
+  `proveConditionalDelete` against that exact storage using an exclusively held
+  synthetic object and authoritative reads, and separately verify that the
+  provider exposes a positive signal for permanent removal on each signed
+  conditional DELETE. `confirmsRemoval` is the reviewed code-held matcher for
+  that signal, not the probe's pass bit, a status code, subsequent absence or
+  the provider's name. Delete markers and ambiguous or lost replies cannot
+  qualify as permanent removal.
+
+No live provider rule or trusted runtime handoff is currently supplied. If either
+is unavailable, leave the binding closed; do not emit a passing qualification.
 
 After a committed journal, HTTP can attempt one bounded pass scoped to that
 journal. HTTP 202 reports the commit, not provider removal. Unconfirmed and
