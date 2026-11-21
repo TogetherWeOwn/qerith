@@ -8,7 +8,7 @@ const owner = 'owner-fixture';
 const confirmation = '{"confirm":"permanent-delete"}';
 // Use nearby synthetic timestamps to select fixture bindings without changing the cron under test.
 const scheduledAt = Math.floor(Date.now() / 1000) * 1000;
-const scheduledModes = ['qualified', 'absent', 'wrong-sha', 'wrong-version', 'drain-disabled'];
+const scheduledModes = ['requests-disabled', 'absent', 'wrong-sha', 'wrong-version', 'drain-disabled'];
 
 const deletionStorageBindings = {
   DRIVE_S3_ENDPOINT: `${endpoint.toUpperCase()}:443/`, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: 'auto',
@@ -44,7 +44,7 @@ const expired = { ...capability, expiresAt: '1000000000000' };
 const expiredWorker = createDriveWorker(expired);
 function stagingDeletionBindings(env, mode) {
   return { ...env, ...${JSON.stringify(deletionStorageBindings)}, DRIVE_ORIGIN: ${JSON.stringify(stagingOrigin)},
-    DRIVE_STAGING_DELETE_REQUESTS: mode === 'disabled' ? '0' : '1',
+    DRIVE_STAGING_DELETE_REQUESTS: mode === 'requests-disabled' ? '0' : '1',
     DRIVE_STAGING_DELETE_DRAIN: mode === 'drain-disabled' ? '0' : '1',
     DRIVE_QUALIFICATION_SHA: mode === 'wrong-sha' ? 'b'.repeat(40) : capability.sourceSha,
     DRIVE_QUALIFICATION_VERSION: { id: mode === 'wrong-version' ? '00000000-0000-4000-8000-000000000003' : capability.workerVersion },
@@ -144,7 +144,7 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     assert.deepEqual(await snapshot(), before, `Deletion refusal (${status}) changed state or dispatched`);
   }
   const staged = { 'x-test-staging-deletion': 'qualified' };
-  for (const mode of ['absent', 'disabled', 'wrong-sha', 'wrong-version', 'wrong-storage', 'expired']) {
+  for (const mode of ['absent', 'requests-disabled', 'wrong-sha', 'wrong-version', 'wrong-storage', 'expired']) {
     await remove(selected.root, mode === 'expired' ? 503 : 404, { 'x-test-staging-deletion': mode });
     assert.deepEqual(await snapshot(), before, `Staging deletion refusal (${mode}) changed state or dispatched`);
   }
@@ -206,14 +206,15 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     const scheduledTime = new Date(scheduledAt - 1000 * scheduledModes.indexOf(mode));
     assert.equal((await worker.scheduled({ cron, scheduledTime })).outcome, 'ok', `Scheduled deletion (${mode})`);
   };
-  await tick('qualified', '* * * * *');
+  await tick('requests-disabled', '* * * * *');
   assert.deepEqual(await snapshot(), preDrain);
   for (const mode of scheduledModes.slice(1)) {
     await tick(mode);
     assert.deepEqual(await snapshot(), preDrain, `Scheduled refusal (${mode}) changed state or dispatched`);
   }
-  await tick('qualified');
-  assert.ok((await job(unrelated.file))?.completed_at);
+  // A qualified drain must finish pending jobs even when new HTTP deletions are disabled.
+  await tick('requests-disabled');
+  assert.ok((await job(unrelated.file))?.completed_at, 'Drain works with HTTP deletion disabled');
   const { results: calls } = await DB.prepare('SELECT * FROM smoke_deletion_calls ORDER BY key').all();
   assert.deepEqual(calls, ['ambiguous', 'selected', 'unrelated'].map((key) => ({ key: `/${bucket}/${key}`, method: 'DELETE', etag, valid: 1 })));
 
