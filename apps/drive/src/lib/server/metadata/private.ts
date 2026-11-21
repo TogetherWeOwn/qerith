@@ -1,4 +1,7 @@
+import { validateName } from '../../entry-name';
 import { publishedGenerationFilter, publishedGenerationJoins } from './published-generation-sql';
+
+export { validateName };
 
 // Identity integration must supply drive_active_members(id) from live membership.
 // This service accepts a server-authenticated principal, not a client owner ID.
@@ -31,21 +34,6 @@ const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
 // Append to an existing authorization statement, not a prior role snapshot.
 export function requireActiveOwner(required: boolean, principal: 's.principal_id' | 'i.owner_id' | 'o.owner_id' | 'c.owner_id' | 'e.owner_id') {
   return required ? `AND EXISTS (SELECT 1 FROM drive_principals p WHERE p.id = ${principal} AND p.status = 'active' AND p.role = 'owner')` : '';
-}
-
-export function validateName(name: string): void {
-  if (typeof name !== 'string' || name.length === 0) throw new TypeError('Invalid entry name');
-  let bytes = 0;
-  let meaningful = false;
-  for (const character of name) {
-    const code = character.codePointAt(0)!;
-    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
-    if (bytes > 255 || character === '/' || code === 0 || (code >= 0xd800 && code <= 0xdfff)) {
-      throw new TypeError('Invalid entry name');
-    }
-    if (character !== ' ' && character !== '.') meaningful = true;
-  }
-  if (!meaningful) throw new TypeError('Invalid entry name');
 }
 
 export class PrivateMetadata {
