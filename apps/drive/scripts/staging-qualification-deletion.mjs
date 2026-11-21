@@ -60,7 +60,7 @@ export async function exerciseQualificationDeletion(context, signal, io) {
           if (settled) assert.ok(Number.isSafeInteger(job.completedAt) && job.completedAt > 0 && token(job.completionToken));
           else assert.deepEqual([job.completedAt, job.completionToken], [null, null]);
         }
-        return { deletionId, job, journal, now };
+        return { deletionId, job, journal: journal.toSorted((a, b) => a.entryId.localeCompare(b.entryId)), now };
       };
       const remove = async (entryId, scenario, status) => {
         active.throwIfAborted();

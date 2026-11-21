@@ -118,6 +118,27 @@ test('verifies all four deletion cases using only owned fixtures and injected cl
     ['GET', etag, 'no-store'], ['DELETE', etag, undefined], ['GET', undefined, 'no-store']]);
 });
 
+test('accepts reordered journal rows before and after scoped retry', async () => {
+  const { io } = fixture();
+  const inspect = io.inspect;
+  io.inspect = tree => {
+    const state = inspect(tree);
+    if (state.key.endsWith('delete-recovery') && state.job?.completionToken) state.journal.reverse();
+    return state;
+  };
+  const result = await exerciseQualificationDeletion(context, undefined, io);
+  assert.equal(result['delete-rollback-and-retry'], 'pass');
+});
+
+test('refuses to invoke retry when the injected clock does not advance', async () => {
+  const { io } = fixture();
+  let retryCalls = 0;
+  io.advanceRetryClock = () => {};
+  io.retry = () => { retryCalls++; };
+  await assert.rejects(exerciseQualificationDeletion(context, undefined, io), /\(delete-rollback-and-retry\)/);
+  assert.equal(retryCalls, 0);
+});
+
 for (const [name, phase, corrupt] of [
   ['denied response leaks a body', 'envelope', ({ io }) => {
     io.remove = () => new Response('leak', { status: 401, headers: { 'cache-control': 'private, no-store' } });
@@ -155,9 +176,6 @@ for (const [name, phase, corrupt] of [
     const retry = io.retry;
     io.retry = input => { retry(input); io.drainEligible(); };
   }],
-  ['retry runs before the selected job is eligible', 'rollback-and-retry', ({ io }) => {
-    io.advanceRetryClock = () => {};
-  }],
   ['first delete attempt has no observed provider outcome', 'rollback-and-retry', ({ io }) => {
     const inspect = io.inspect;
     io.inspect = tree => {
@@ -173,6 +191,13 @@ for (const [name, phase, corrupt] of [
   ['retry settles another generation', 'rollback-and-retry', ({ io, trees }) => {
     const retry = io.retry;
     io.retry = input => { retry(input); trees.get(input.generation.key).job.generation.revision = 'other'; };
+  }],
+  ['retry changes the deletion journal identity', 'rollback-and-retry', ({ io, trees }) => {
+    const retry = io.retry;
+    io.retry = input => {
+      retry(input);
+      for (const row of trees.get(input.generation.key).journal) row.deletionId = 'other';
+    };
   }],
   ['retry has no completion observation', 'rollback-and-retry', ({ io, trees }) => {
     const retry = io.retry;
