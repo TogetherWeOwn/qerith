@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { qualificationPrefix } from './staging-qualification.mjs';
 import { createQualificationInventory } from './staging-qualification-inventory.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
-import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
 
 const account = '209cf7dd678adfb683947dd7874d05af';
@@ -71,7 +71,9 @@ function fixture(t) {
         trace.push('expiry');
         const age = seconds => ({ condition: { type: 'Age', maxAge: seconds } });
         const response = json({ rules: !state.expiry ? [] : [{ enabled: true, conditions: { prefix: namespace },
-          deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) }] }, state.expiryPage);
+          deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) },
+        ...(state.recordRetention ? [{ enabled: true, conditions: { prefix: 'drive-qualification/recovery/' },
+          deleteObjectsTransition: age(3 * 86400) }] : [])] }, state.expiryPage);
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
         return response;
       }
@@ -110,6 +112,68 @@ function fixture(t) {
   };
   return { context, create, trace, env, cwd, reads, get state() { return state; } };
 }
+
+test('composed lifecycle has no default admission or transport', async t => {
+  const { env, cwd } = fixture(t);
+  const unused = () => assert.fail('Preparation must not call adapters');
+  await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { assertFullV0: unused }), /requires.*explicit transport/);
+});
+
+for (const fault of ['admission', 'retention', 'd1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'both records verified'}`, async t => {
+  const { context, trace, env, cwd, reads, state } = fixture(t);
+  state.recordRetention = fault !== 'retention';
+  const phases = [], stored = new Map();
+  const candidate = { version: uuid('3'), previousVersion: state.version, previousDeployment: state.deployment,
+    expiresAt: String(Date.now() + 25 * 60_000) };
+  const unused = () => assert.fail('Unexpected app or fence adapter');
+  const inputs = { ...reads, readWriterFence: unused, withAccessFixtures: unused, readFileFixtures: unused,
+    openTransferClient: unused, openDeletion: unused,
+    assertFullV0(scope, signal) {
+      signal.throwIfAborted(); assert.deepEqual(scope, context); phases.push('admission');
+      return fault !== 'admission';
+    },
+    async send(request, init) {
+      if (typeof request === 'string') return reads.request(request, init);
+      const path = new URL(request.url).pathname;
+      if (!path.includes('/recovery/')) return reads.send(request);
+      const kind = path.includes('-d1-') ? 'd1' : 'worker';
+      const { sha, runId, attempt } = context;
+      assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${sha}-run-${runId}-attempt-${attempt}`);
+      assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
+      phases.push(`${kind} ${request.method}`);
+      if (request.method === 'PUT') {
+        assert.equal(request.headers.get('if-none-match'), '*');
+        const bytes = Buffer.from(await request.arrayBuffer());
+        assert.deepEqual(JSON.parse(bytes), { schema: 'drive-staging-recovery.v1', kind, sha, runId, attempt,
+          ...(kind === 'd1' ? { bookmark: 'offline_bookmark' } : candidate) });
+        stored.set(kind, bytes);
+        return new Response(null, { headers: { etag: '"created"' } });
+      }
+      const bytes = fault === kind ? Buffer.from('{}') : stored.get(kind);
+      const date = new Date().toUTCString();
+      return new Response(bytes, { headers: { date, 'last-modified': date, 'content-length': bytes.length } });
+    },
+  };
+  const run = await createQualificationLifecycle(env, cwd, inputs, {
+    upload() { phases.push('upload'); return candidate; },
+    async migrate({ recordRecovery }) {
+      await recordRecovery({ bookmark: 'offline_bookmark' }); phases.push('migrate');
+    },
+    async worker({ recordRecovery, upload }) {
+      await recordRecovery(upload); phases.push('activation eligible');
+      throw new Error('stop before activation in offline fixture');
+    },
+  });
+  assert.deepEqual(trace, []);
+  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : fault ? /recovery record is unverified/ : /stop before activation/);
+  await assert.rejects(run(), /already started/);
+  assert.deepEqual(phases, ['admission', ...(fault === 'admission' ? [] : ['upload']),
+    ...(['admission', 'retention'].includes(fault) ? [] : ['d1 PUT', 'd1 GET']),
+    ...(!fault || fault === 'worker' ? ['migrate', 'worker PUT', 'worker GET'] : []),
+    ...(!fault ? ['activation eligible'] : [])]);
+  assert.equal(trace.filter(step => step === 'estate').length, fault === 'admission' ? 0 : 2);
+});
 
 for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body read', 'held with R2 failure']) test(
   `lifecycle estate cleanup under a ${mode} fence`, { timeout: 30_000 }, async t => {
