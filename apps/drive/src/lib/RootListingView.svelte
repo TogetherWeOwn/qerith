@@ -14,12 +14,10 @@
     result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; createFolderAllowed: boolean;
   } = $props();
   let status = $state('');
-  let folderReceipt = $state({ text: '', style: 'hidden' as 'hidden' | 'visible' | 'refresh' });
-  let createdId = $state<string>();
+  let receipt = $state<{ id: string; name: string; loaded: boolean }>();
   let list = $state<ReturnType<typeof FileList>>();
   let refreshed = $state<RootListingResult>();
-  let folderListing = $state.raw<{ from: RootListingResult; listing: RootListingResult }>();
-  let result = $derived(folderListing?.from === initial ? folderListing.listing : refreshed ?? initial);
+  let result = $derived(refreshed ?? initial);
   let busy = $state(false);
   let header: HTMLElement;
   let recovery = $state<HTMLAnchorElement>();
@@ -33,23 +31,32 @@
     void tick().then(() => restoreFocus(focused, next));
   });
 
-  async function refresh() {
-    if (staging) {
+  async function readStagingPage(): Promise<RootListingResult | null> {
+    const url = new URL(location.href);
+    url.searchParams.set('folder-refresh', crypto.randomUUID());
+    const response = await preloadData(url.href);
+    return response.type === 'loaded' ? response.data.listing : null;
+  }
+
+  async function refresh(forFolder = false) {
+    if (staging && !createFolderAllowed) {
       await invalidate('drive:root-listing');
       await tick();
       if (initial.status !== 'ok') throw new Error('Root listing unavailable');
       return;
     }
+    // In opt-in staging both mutations read the same cursor without updating route data.
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
-    const response = await fetch(`/api/root-listing${query}`, { redirect: 'error' });
-    const next: RootListingResult | null = response.ok ? await response.json() : null;
-    if (next?.status !== 'ok') throw new Error('Root listing unavailable');
+    const next = staging ? await readStagingPage() : await fetch(`/api/root-listing${query}`, { redirect: 'error' })
+      .then((response): Promise<RootListingResult> | null => response.ok ? response.json() : null);
     if (version < appliedVersion) return;
+    if (!next || (next.status !== 'ok' && (forFolder || !staging))) throw new Error('Root listing unavailable');
     appliedVersion = version;
     const focused = document.activeElement;
     flushSync(() => { refreshed = next; });
-    restoreFocus(focused);
+    restoreFocus(focused, next.status);
+    if (next.status !== 'ok') throw new Error('Root listing unavailable');
   }
 
   function restoreFocus(focused: Element | null, next: RootListingResult['status'] = 'ok') {
@@ -59,25 +66,12 @@
   }
 
   async function folderCreated(id: string, name: string, close: () => void) {
-    // Read the same authenticated cursor without committing a route update on failure.
-    const from = initial, url = new URL(location.href);
-    url.searchParams.set('folder-refresh', crypto.randomUUID());
-    const next = await preloadData(url.href).catch(() => null);
-    if (next?.type !== 'loaded' || next.data.listing?.status !== 'ok' || initial !== from) {
-      close();
-      folderReceipt = { text: `Created “${name}”. Refresh My Drive to see it.`, style: 'refresh' };
-      await tick();
-      recovery?.focus();
-      return;
-    }
-    folderListing = { from, listing: next.data.listing };
-    createdId = id;
+    await refresh(true).then(() => { receipt = { id, name, loaded: result.status === 'ok' }; },
+      () => { receipt = { id, name, loaded: false }; });
     await tick();
     close();
-    if (items.some(item => item.id === id)) {
-      list?.focusCreatedRow(id);
-      folderReceipt = { text: `Created “${name}”.`, style: 'hidden' };
-    } else folderReceipt = { text: `Created “${name}”. It isn’t on this page.`, style: 'visible' };
+    if (createdVisible) list?.focusCreatedRow(id);
+    else if (needsRefresh) recovery?.focus();
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
@@ -85,6 +79,8 @@
     href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
     reload: true, size: '', bytes: null, modified: '', shared: false
   })) : []);
+  const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
+  const needsRefresh = $derived(receipt && !receipt.loaded && !createdVisible);
 </script>
 
 <header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
@@ -97,20 +93,20 @@
   {/if}
 </header>
 <p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
-{#if createFolderAllowed}<p class:status={folderReceipt.style === 'hidden'} role="status">{folderReceipt.text}</p>{/if}
+{#if createFolderAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
 {/if}
-{#if folderReceipt.style === 'refresh' || result.status === 'unavailable'}
-  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>{folderReceipt.style === 'refresh' ? 'Refresh My Drive' : 'Try again'}</a>
+{#if needsRefresh || result.status === 'unavailable'}
+  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>{needsRefresh ? 'Refresh My Drive' : 'Try again'}</a>
 {:else if result.status === 'invalid-page'}
   <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {/if}
 {#if result.status === 'ok'}
   {#if items.length}
-    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} {createdId} />
+    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} createdId={receipt?.id} />
   {:else if page}
     <p>No more items.</p>
   {:else}

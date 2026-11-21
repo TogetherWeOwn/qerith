@@ -1,5 +1,4 @@
 <script lang="ts">
-  import './dialog.css';
   import { onDestroy, tick } from 'svelte';
   import './tokens.css';
 
@@ -119,7 +118,7 @@
 <button class="primary" type="button" bind:this={opener} onclick={() => { dialog.showModal(); (unconfirmed ? lastButton : nameField)?.focus(); }}>
   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2m4-13v6m-3-3h6"/></svg>Invite someone
 </button>
-<dialog class="drive-dialog" bind:this={dialog} aria-labelledby={`${id}-title`} onkeydown={handleKeydown} closedby={phase === 'saving' ? 'none' : 'closerequest'}
+<dialog bind:this={dialog} aria-labelledby={`${id}-title`} onkeydown={handleKeydown} closedby={phase === 'saving' ? 'none' : 'closerequest'}
   oncancel={event => { event.preventDefault(); dismiss(); }}
   onpointerdown={event => { beganOnBackdrop = event.target === dialog; }}
   onclick={event => { if (beganOnBackdrop && event.target === dialog) dismiss(); }}>
@@ -166,11 +165,16 @@
 </dialog>
 
 <style>
+  dialog { box-sizing: border-box; width: min(calc(100% - 2 * var(--drive-layout-gutter-compact)), calc(var(--drive-layout-measure-reading) * 1ch)); max-width: none; max-height: calc(100dvh - 2 * var(--drive-space-8)); padding: 0; color: var(--drive-color-text-primary); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); font-family: var(--drive-font-ui); }
+  dialog::backdrop { background: var(--drive-color-scrim-sheet); backdrop-filter: blur(var(--drive-elevation-blur)); }
+  .panel { display: grid; gap: var(--drive-space-4); padding: var(--drive-space-inset-card); }
   header, footer, .copy { display: flex; align-items: center; gap: var(--drive-space-2); }
   header { justify-content: space-between; }
   footer { justify-content: flex-end; }
+  h2 { margin: 0; font-size: var(--drive-font-size-title); font-weight: var(--drive-font-weight-semibold); line-height: var(--drive-line-height-title); }
   p { margin: 0; color: var(--drive-color-text-secondary); font-size: var(--drive-font-size-small); line-height: var(--drive-line-height-body); overflow-wrap: anywhere; }
   .status { position: absolute; clip-path: inset(50%); }
+  .notice { background: var(--drive-color-state-danger-bg); color: var(--drive-color-text-primary); border-radius: var(--drive-radius-m); padding: var(--drive-space-4); }
   form, .field { display: grid; gap: var(--drive-space-3); }
   .field { gap: var(--drive-space-1); font-size: var(--drive-font-size-ui); }
   input, textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: var(--drive-size-control-md); padding: var(--drive-space-2) var(--drive-space-inset-room); border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-m); color: inherit; background: var(--drive-color-bg-canvas); font: inherit; }
@@ -187,7 +191,13 @@
   svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
   :is(input, textarea, button):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   @media (max-width: 820px) {
+    dialog { inset: auto 0 0; margin: 0; width: 100%; max-height: 90dvh; border-radius: var(--drive-radius-l) var(--drive-radius-l) 0 0; }
+    .panel { padding-bottom: calc(var(--drive-space-inset-card) + env(safe-area-inset-bottom)); }
     footer, .copy { flex-direction: column; align-items: stretch; }
     .copy button { align-self: start; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    dialog[open] { animation: appear var(--drive-motion-duration-base) var(--drive-motion-ease); }
+    @keyframes appear { from { opacity: 0; transform: translateY(var(--drive-space-2)); } }
   }
 </style>

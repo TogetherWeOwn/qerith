@@ -89,7 +89,7 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker, navigationSite) => {
+  const relay = async (route, target = worker, navigationSite, wait = () => holdRefresh) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
@@ -114,11 +114,10 @@ try {
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
-    if (url.pathname === dataPath) await holdRefresh;
+    if (url.pathname === dataPath) await wait();
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   };
-  let rootRelay = relay;
-  await context.route('**/*', route => rootRelay(route));
+  await context.route('**/*', route => relay(route));
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
   const signInAssets = new Set(assets);
   await Promise.all([page.waitForURL(origin + '/'), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
@@ -273,13 +272,14 @@ try {
   await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'owner', 'Receipts', 'folder')").run();
   await deny('/f/fixture-parent', 404, { cookie });
   const overrides = new Map(); // One owner for each Playwright route, including injected failures.
-  rootRelay = route => {
+  await context.unroute('**/*');
+  await context.route('**/*', route => {
     const { pathname } = new URL(route.request().url());
-    const forward = (optIn = true) => relay(route, optIn ? inviteWorker : worker, 'same-origin');
+    const forward = (optIn = true, wait) => relay(route, optIn ? inviteWorker : worker, 'same-origin', wait);
     const override = overrides.get(pathname);
     overrides.delete(pathname);
     return override ? override(route, forward) : forward();
-  };
+  });
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
