@@ -12,6 +12,7 @@ it('honors pinned numeric and NFC expectations in the Worker collation runtime',
   expect(['file 10', 'file ２', 'file 1'].sort(compareK2Names)).toEqual(['file 1', 'file ２', 'file 10']);
   for (const name of tied) expect(compareK2Names(name, tied[0])).toBe(0);
   expect(compareK2Names('9'.repeat(254), `1${'0'.repeat(254)}`)).toBeLessThan(0);
+  expect(compareK2Names(`${'9'.repeat(254)}1`, `${'9'.repeat(254)}2`)).toBeLessThan(0);
 });
 
 function fixture(count) {
