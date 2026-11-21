@@ -3,6 +3,7 @@ import { assertQualificationJob, qualificationFixtureNamespace, qualificationPre
 import { readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
 import { assertNoQualificationD1MigrationFixtures, assertQualificationD1Roster } from './staging-qualification-d1.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
+import { hasDuplicateMembers } from './staging-qualification-json.mjs';
 import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
 import { inspectQualificationWorker, runQualificationPhase, stagingConfigAt } from './staging-qualification-worker.mjs';
 
@@ -15,22 +16,6 @@ function matchScan(scan, expected) {
   // incomplete or denied list into an empty scan. No pagination fields remain.
   if (scan?.complete !== true || Object.keys(scan).length !== 2 || !Array.isArray(scan.items) ||
       scan.items.length !== expected.length || !isDeepStrictEqual(scan.items, expected)) throw unverified();
-}
-
-// Scan already-valid JSON; a string followed by a colon is an object member.
-// Decode member names so different escape spellings cannot hide a duplicate.
-function hasDuplicateMembers(text) {
-  const objects = [];
-  for (const [token, key, colon] of text.matchAll(/("(?:[^"\\]|\\.)*")([ \t\r\n]*:)?|[{}]/gs)) {
-    if (token === '{') objects.push(new Set());
-    else if (token === '}') objects.pop();
-    else if (colon) {
-      const keys = objects.at(-1), name = JSON.parse(key);
-      if (keys.has(name)) return true;
-      keys.add(name);
-    }
-  }
-  return false;
 }
 
 async function boundedProviderDocument(response, reviver) {

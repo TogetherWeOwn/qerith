@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
+import { assertReviewedEmptyCatalog, censusSql, reviewedMigrationTree } from './staging-qualification-d1-profile.mjs';
+import { hasDuplicateMembers } from './staging-qualification-json.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
 import { validateStagingConfig } from './staging-publish.mjs';
 
@@ -9,16 +11,33 @@ const sameAttempt = ({ sha, runId, attempt }, other) =>
   other?.sha === sha && other.runId === runId && other.attempt === attempt;
 const migrationInvite = 'd1/migration-invite';
 const migrationCeremony = 'd1/migration-ceremony';
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 5000,
+  maxBuffer: 65_536, stdio: ['ignore', 'pipe', 'pipe'] });
 
-function d1(source, env, cwd, send, active, { census = false } = {}) {
+function validReadMeta(meta) {
+  return meta && typeof meta === 'object' && !Array.isArray(meta) && Object.entries(meta).every(([key, value]) => {
+    switch (key) {
+      case 'changes': case 'rows_written': return value === 0;
+      case 'changed_db': return value === false;
+      case 'served_by_primary': return value === true;
+      case 'served_by': case 'served_by_region': case 'served_by_colo': return typeof value === 'string';
+      case 'duration': return Number.isFinite(value) && value >= 0;
+      case 'last_row_id': case 'size_after': case 'rows_read': case 'total_attempts':
+        return Number.isSafeInteger(value) && value >= 0;
+      case 'timings': return Number.isFinite(value?.sql_duration_ms) && value.sql_duration_ms >= 0 &&
+        Object.keys(value).length === 1;
+      default: return false;
+    }
+  });
+}
+
+function d1(source, env, cwd, send, active, { census = false, strict = false } = {}) {
   const { sha, runId, attempt } = source;
   const { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token } = env;
   if (!matches(sha, /^[0-9a-f]{40}$/) || ![runId, attempt].every(id => matches(id, /^[1-9][0-9]{0,19}$/)) ||
       typeof token !== 'string' || !token.trim()) throw new Error();
-  const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 5000,
-    maxBuffer: 65_536, stdio: ['ignore', 'pipe', 'pipe'] });
-  git('merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main');
-  const config = JSON.parse(git('show', `${sha}:apps/drive/wrangler.staging.json`));
+  git(cwd, 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main');
+  const config = JSON.parse(git(cwd, 'show', `${sha}:apps/drive/wrangler.staging.json`));
   validateStagingConfig(config, accountId);
   const { database_id: databaseId, database_name: name } = config.d1_databases[0];
   const collection = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`;
@@ -29,7 +48,7 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body });
     // Readback also uses POST /query; its envelope must still be complete.
     if (signal.aborted || response.status !== 200 || response.headers.has('content-range') || !response.body ||
-        (list && response.headers.has('link'))) {
+        ((list || strict) && response.headers.has('link'))) {
       await response.body?.cancel();
       throw new Error();
     }
@@ -41,9 +60,19 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
       text += decoder.decode(chunk, { stream: true });
     }
     signal.throwIfAborted();
-    const payload = JSON.parse(text + decoder.decode());
+    if (strict && response.headers.has('content-length') && !response.headers.has('content-encoding')) {
+      if (response.headers.get('content-length') !== String(size)) throw new Error();
+    }
+    text += decoder.decode();
+    const payload = JSON.parse(text, strict ? (key, value, context) => {
+      if (['changes', 'rows_written'].includes(key) && context?.source !== '0') throw new Error();
+      return value;
+    } : undefined);
     const { success, errors, result } = payload;
     if (success !== true || !Array.isArray(errors) || errors.length || !result) throw new Error();
+    if (strict && (hasDuplicateMembers(text) ||
+        Object.keys(payload).some(key => !['success', 'errors', 'result', 'messages'].includes(key)) ||
+        (Object.hasOwn(payload, 'messages') && (!Array.isArray(payload.messages) || payload.messages.length)))) throw new Error();
     return payload;
   };
   const call = async (path, method, body) => {
@@ -75,9 +104,35 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
       const result = await call('/query', 'POST', JSON.stringify({ batch }));
       if (!Array.isArray(result) || result.length !== batch.length ||
           !result.every(item => item?.success === true && Array.isArray(item.results))) throw new Error();
+      if (strict && result.some(item => Object.keys(item).some(key => !['success', 'results', 'meta'].includes(key)) ||
+          (Object.hasOwn(item, 'meta') && !validReadMeta(item.meta)))) throw new Error();
       return result.map(item => item.results);
     },
   };
+}
+
+// Unwired inventory reader for a fully migrated, exclusively synthetic staging
+// database. The caller must independently establish scope and writer quiescence.
+// An explicit transport is required so offline callers cannot fall back to fetch.
+export async function readQualificationD1AppFixtures(scope, env, cwd, signal, send) {
+  try {
+    signal?.throwIfAborted();
+    if (typeof send !== 'function') throw new Error();
+    const identity = assertQualificationJob(env, cwd);
+    return await runQualificationPhase(async (_, active) => {
+      const tree = `${identity.sha}:apps/drive/migrations`;
+      if (git(cwd, 'rev-parse', '--verify', tree).trim() !== reviewedMigrationTree) throw new Error();
+      const names = git(cwd, 'ls-tree', '--full-tree', '--name-only', '-z', tree).slice(0, -1).split('\0');
+      const db = d1(identity, env, cwd, send, active, { strict: true });
+      if (scope?.account !== db.accountId || scope.database !== db.databaseId) throw new Error();
+      await db.verifyTarget();
+      const [rows] = await db.query([{ sql: censusSql, params: [JSON.stringify(names)] }]);
+      assertReviewedEmptyCatalog(rows);
+      return { complete: true, items: [] };
+    }, identity, signal, 20_000);
+  } catch {
+    throw new Error('Staging D1 app table emptiness is unverified.');
+  }
 }
 
 // This independently cross-checks the account-visible roster, not compute mode.
