@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { assertNoQualificationD1MigrationFixtures, cleanQualificationD1, recoverQualificationD1 } from './staging-qualification-d1.mjs';
+import { fileURLToPath } from 'node:url';
+import {
+  assertNoQualificationD1MigrationFixtures, cleanQualificationD1, readQualificationD1AppFixtures, recoverQualificationD1,
+} from './staging-qualification-d1.mjs';
 
 const config = new URL('../wrangler.staging.json', import.meta.url);
 const migrations = new URL('../migrations/', import.meta.url);
@@ -21,15 +24,29 @@ const restore = '/time_travel/restore?bookmark=01-baseline';
 const ok = result => Response.json({ success: true, errors: [], result });
 const cleanupError = /fixture cleanup is unverified/;
 const recoveryError = /D1 recovery is unverified/;
+const censusError = /^Error: Staging D1 app table emptiness is unverified\.$/;
+const censusScope = { account: accountId, database: databaseId };
 
-function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
+function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus = false, migrationLimit, sourceDrift } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-d1-recovery-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
   mkdirSync(join(cwd, 'apps/drive'), { recursive: true });
   cpSync(config, join(cwd, 'apps/drive/wrangler.staging.json'));
-  const git = (...args) => execFileSync('/usr/bin/git', args, { cwd, encoding: 'utf8',
-    env: { HOME: cwd, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const gitOutput = (...args) => execFileSync('/usr/bin/git', args, { cwd, encoding: 'utf8',
+    env: { HOME: cwd, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const git = (...args) => gitOutput(...args).trim();
   git('init', '-b', 'main');
-  git('add', 'apps/drive/wrangler.staging.json');
+  let names = readdirSync(migrations).sort();
+  if (reviewedCensus) {
+    const repo = fileURLToPath(new URL('../../../', import.meta.url));
+    const committed = (...args) => execFileSync('/usr/bin/git', ['-C', repo, ...args]);
+    const path = 'apps/drive/migrations';
+    names = committed('ls-tree', '--name-only', '-z', `HEAD:${path}`).toString().slice(0, -1).split('\0');
+    mkdirSync(join(cwd, path));
+    for (const name of names) writeFileSync(join(cwd, path, name), committed('show', `HEAD:${path}/${name}`));
+    if (sourceDrift) writeFileSync(join(cwd, path, names[0]), '\n-- Unreviewed source.\n', { flag: 'a' });
+  }
+  git('add', 'apps/drive');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'fixture');
   const sha = git('rev-parse', 'HEAD');
   git('update-ref', 'refs/remotes/origin/main', sha);
@@ -47,16 +64,22 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
   function baseline() {
     const db = new DatabaseSync(':memory:');
     if (emptyBaseline) return db;
-    db.exec(`CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE, applied_at TEXT);
-      PRAGMA foreign_keys = ON`);
-    for (const [index, name] of readdirSync(migrations).sort().entries()) {
-      db.exec(readFileSync(new URL(name, migrations), 'utf8'));
+    // This is the ledger DDL in pinned Wrangler 4.160.1.
+    db.exec(reviewedCensus ? `CREATE TABLE IF NOT EXISTS "d1_migrations"(
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		name       TEXT UNIQUE,
+		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+);` : 'CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE, applied_at TEXT);');
+    db.exec('PRAGMA foreign_keys = ON');
+    for (const [index, name] of names.slice(0, migrationLimit).entries()) {
+      db.exec(reviewedCensus ? gitOutput('show', `${sha}:apps/drive/migrations/${name}`) :
+        readFileSync(new URL(name, migrations), 'utf8'));
       db.prepare('INSERT INTO d1_migrations VALUES (?, ?, ?)').run(index + 1, name, '2026-11-20 10:00:00');
     }
     return db;
   }
   let db = baseline();
-  t.after(() => { db.close(); rmSync(cwd, { recursive: true, force: true }); });
+  t.after(() => db.close());
   const historical = emptyBaseline ? null : db.prepare(ledger).all();
   const proof = { ...source, accountId, databaseId, bookmark: before, currentBookmark: failed,
     ledgerBefore: historical, writersQuiescent: true };
@@ -73,15 +96,22 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
     }
     assert.equal(path, '/query');
     assert.equal(method, 'POST');
+    const { batch } = JSON.parse(body);
+    if (reviewedCensus) {
+      assert.equal(batch.length, 1);
+      db.exec('PRAGMA query_only = ON');
+    }
     db.exec('BEGIN');
     try {
-      const results = JSON.parse(body).batch.map(({ sql, params = [] }) =>
+      const results = batch.map(({ sql, params = [] }) =>
         ({ success: true, results: db.prepare(sql).all(...params) }));
       db.exec('COMMIT');
       return ok(results);
     } catch (error) {
       db.exec('ROLLBACK');
       throw error;
+    } finally {
+      if (reviewedCensus) db.exec('PRAGMA query_only = OFF');
     }
   };
   let intercept = (path, init) => simulatedFetch(path, init);
@@ -107,6 +137,8 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
     },
     intercept(fn) { intercept = (path, init) => fn(path, init, () => simulatedFetch(path, init)); },
     inspect: (patch = {}, signal) => assertNoQualificationD1MigrationFixtures({ ...env, ...patch }, cwd, signal, send),
+    census: ({ scope = censusScope, patch = {}, signal, transport = send } = {}) =>
+      readQualificationD1AppFixtures(scope, { ...env, ...patch }, cwd, signal, transport),
     clean: (patch = {}, signal) => cleanQualificationD1({ ...source, prefix, ...patch }, env, cwd, signal, send),
     recover: ({ overrides, recordPatch, proveQuiescence = (scope, signal) => {
       assert.deepEqual(scope, { ...source, accountId, databaseId, bookmark: before });
@@ -116,6 +148,106 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
       { proveQuiescence }, env, cwd, signal, send),
   };
 }
+
+test('app table census covers the committed fully migrated schema and returns an empty inventory scan', async t => {
+  const f = fixture(t, { reviewedCensus: true });
+  assert.equal(f.historical.length, 37);
+  assert.equal(f.sql("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table'")[0].n, 35);
+  assert.deepEqual(await f.census(), { complete: true, items: [] });
+  assert.deepEqual(f.calls, ['', '/query']);
+});
+
+test('app table census rejects expired, unnamed and permanent rows under the real guards', async t => {
+  const f = fixture(t, { reviewedCensus: true });
+  f.sql("INSERT INTO drive_webauthn_challenges VALUES ('opaque-challenge', 'authentication', 1, 1)");
+  await assert.rejects(f.census(), censusError);
+  f.sql('DELETE FROM drive_webauthn_challenges');
+  f.sql("INSERT INTO drive_principals (id, role, status) VALUES ('opaque-principal', 'member', 'revoked')");
+  assert.equal(f.sql('SELECT display_name FROM drive_principals')[0].display_name, null);
+  await assert.rejects(f.census(), censusError);
+  f.sql('DELETE FROM drive_principals');
+  assert.deepEqual(await f.census(), { complete: true, items: [] });
+  f.sql("INSERT INTO drive_upload_key_reservations VALUES ('opaque-key')");
+  await assert.rejects(f.census(), censusError);
+  assert.throws(() => f.sql('DELETE FROM drive_upload_key_reservations'), /reservations are permanent/);
+  assert.equal(f.sql('SELECT count(*) AS n FROM drive_upload_key_reservations')[0].n, 1);
+});
+
+test('app table census rejects uninitialized, partially migrated and drifted baselines', async t => {
+  for (const [name, options] of Object.entries({ uninitialized: { emptyBaseline: true },
+    partial: { migrationLimit: 1 }, differentSource: { sourceDrift: true }, current: {} })) {
+    await t.test(name, async t => {
+      const f = fixture(t, { reviewedCensus: true, ...options });
+      if (name !== 'current') {
+        await assert.rejects(f.census(), censusError);
+        assert.deepEqual(f.calls, options.sourceDrift ? [] : ['', '/query']);
+        return;
+      }
+      for (const [introduce, revert] of [
+        ['CREATE TABLE unrelated (value TEXT)', 'DROP TABLE unrelated'],
+        ['CREATE TABLE _cf_KV (key TEXT)', 'DROP TABLE _cf_KV'],
+        ['CREATE INDEX extra_index ON drive_sessions (expires_at)', 'DROP INDEX extra_index'],
+        ["UPDATE d1_migrations SET name = 'unreviewed.sql' WHERE id = 1",
+          "UPDATE d1_migrations SET name = '0001_identity.sql' WHERE id = 1"],
+        ["INSERT INTO sqlite_sequence VALUES ('other', 1)", "DELETE FROM sqlite_sequence WHERE name = 'other'"],
+      ]) {
+        f.sql(introduce);
+        await assert.rejects(f.census(), censusError);
+        f.sql(revert);
+      }
+      assert.deepEqual(await f.census(), { complete: true, items: [] });
+      f.sql('ALTER TABLE drive_webauthn_challenges ADD COLUMN schema_drift TEXT');
+      await assert.rejects(f.census(), censusError);
+      f.sql('DROP TABLE drive_webauthn_challenges');
+      await assert.rejects(f.census(), censusError);
+      f.sql('CREATE VIEW drive_webauthn_challenges AS SELECT 1 WHERE 0');
+      await assert.rejects(f.census(), censusError);
+    });
+  }
+});
+
+test('app table census rejects ambiguous or incomplete provider readback and honors abort', async t => {
+  const f = fixture(t, { reviewedCensus: true });
+  await assert.rejects(f.census({ signal: AbortSignal.abort() }), censusError);
+  await assert.rejects(f.census({ transport: null }), censusError);
+  await assert.rejects(f.census({ scope: { ...censusScope, database: 'unknown' } }), censusError);
+  await assert.rejects(f.census({ patch: { GITHUB_WORKFLOW_SHA: 'b'.repeat(40) } }), censusError);
+  assert.deepEqual(f.calls, []);
+
+  f.intercept(() => ok({ uuid: databaseId, name: 'unknown', version: 'production' }));
+  await assert.rejects(f.census(), censusError);
+  assert.deepEqual(f.calls.splice(0), ['']);
+
+  for (const distort of [
+    response => new Response(response.body, { status: 206 }),
+    response => new Response(response.body, { headers: { 'Content-Range': 'bytes 0-79/200' } }),
+    response => new Response(response.body, { headers: { 'Content-Length': '65536' } }),
+    response => new Response(response.body, { headers: { Link: '</next>; rel="next"' } }),
+    async response => new Response((await response.text()).slice(0, -1)),
+    async response => new Response(`${await response.text()}${' '.repeat(65_536)}`),
+    async response => new Response((await response.text()).replace('"success":true', '"succ\\u0065ss":false,"success":true')),
+    async response => Response.json({ ...await response.json(), result_info: {} }),
+    async response => Response.json({ ...await response.json(), messages: ['partial'] }),
+    async response => { const { result } = await response.json(); return ok([result[0], result[0]]); },
+    async response => { const { result } = await response.json(); result[0].results.pop(); return ok(result); },
+    async response => { const { result } = await response.json(); result[0].meta = { truncated: true }; return ok(result); },
+  ]) {
+    f.intercept((path, _, run) => path === '/query' ? distort(run()) : run());
+    await assert.rejects(f.census(), censusError);
+  }
+
+  const abort = new AbortController();
+  f.intercept(async (path, init, run) => {
+    const response = run();
+    if (path === '/query') {
+      await Promise.resolve();
+      abort.abort();
+      assert.equal(init.signal.aborted, true);
+    }
+    return response;
+  });
+  await assert.rejects(f.census({ signal: abort.signal }), censusError);
+});
 
 test('migration fixture census refuses either kind of residue from earlier attempts without exposing rows', async t => {
   const f = fixture(t);
