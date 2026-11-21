@@ -43,9 +43,21 @@ its cumulative byte count and submits the existing root Complete request once.
 A zero-byte file with an acknowledged part skips PUT; with `parts: []`, the
 client must get a `204` for one empty PUT before reporting zero and completing.
 Nonempty missing suffixes, unavailable evidence and uncertain requests return
-`interrupted`; nothing is allocated or retried. No picker calls this interface.
+`interrupted`; nothing is allocated or retried. The disposable fixture uses
+this legacy transport.
 
-## Why only full prefixes (and empty bytes) can proceed
+The separate, unwired `uploadBoundMultipartToRoot` transport hashes one 16 MiB
+slice at a time and allocates with `{size, expectedPartSha256s}`. The packed
+vector is the concatenation of the lowercase hex digests in part order. The
+successful allocation callback receives only the opaque application intent ID.
+`resumeBoundMultipartToRoot` requires `expectedPartSha256s` alongside
+`declaredSize` and `parts` in the bounded evidence response. It checks that
+every acknowledged slot agrees with the vector and that every selected-file
+slice matches it before sending any missing part. It never falls back to legacy
+evidence, allocates on resume, or replays a write. Neither the picker nor route
+admission is changed by these helpers.
+
+## Why only full prefixes (and empty bytes) can proceed without binding
 
 The [permanent slot claim](../apps/drive/migrations/0020_upload_part_operation_evidence.sql)
 prevents an acknowledged part from being replaced; the HTTP claim also checks

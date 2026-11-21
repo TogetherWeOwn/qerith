@@ -1,3 +1,5 @@
+import { hashMultipartPart, isMultipartSize, multipartPartCount, partBytes, sha256HexLength } from './multipart-upload-plan';
+
 export interface UploadResumeEvidence {
   readonly declaredSize: number;
   readonly parts: readonly {
@@ -8,10 +10,7 @@ export interface UploadResumeEvidence {
   }[];
 }
 
-// Match the sequential picker and its server evidence projection.
-const partBytes = 16 * 1024 * 1024;
-const maxBytes = 5 * 1024 ** 3;
-const sha256Pattern = /^[0-9a-f]{64}$/;
+const nonHex = /[^0-9a-f]/;
 
 type VerifiedUploadPrefix = { readonly parts: number; readonly bytes: number };
 
@@ -25,16 +24,30 @@ function hasFields(value: unknown, ...fields: string[]): value is Record<string,
  * Null means invalid or uncertain; { parts: 0, bytes: 0 } is a valid empty prefix.
  * The result proves neither the remaining bytes nor permission to dispatch an upload.
  */
-export async function verifyUploadResumePrefix(file: Blob, evidence: unknown): Promise<VerifiedUploadPrefix | null> {
+export function verifyUploadResumePrefix(file: Blob, evidence: unknown): Promise<VerifiedUploadPrefix | null> {
+  return verify(file, evidence, false);
+}
+
+/** Require the immutable full-file expectation as well as a matching acknowledged prefix. */
+export function verifyBoundUploadResumePrefix(file: Blob, evidence: unknown): Promise<VerifiedUploadPrefix | null> {
+  return verify(file, evidence, true);
+}
+
+async function verify(file: Blob, evidence: unknown, bound: boolean): Promise<VerifiedUploadPrefix | null> {
   try {
     const size = file.size;
-    if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes ||
-        !hasFields(evidence, 'declaredSize', 'parts') || evidence.declaredSize !== size) return null;
+    const fields = bound ? ['declaredSize', 'parts', 'expectedPartSha256s'] : ['declaredSize', 'parts'];
+    if (!isMultipartSize(size) || !hasFields(evidence, ...fields) || evidence.declaredSize !== size) return null;
+
+    const total = multipartPartCount(size);
+    const vector = bound ? evidence.expectedPartSha256s : undefined;
+    if (bound && (typeof vector !== 'string' || vector.length !== total * sha256HexLength || nonHex.test(vector)))
+      return null;
 
     const parts = evidence.parts;
     if (!Array.isArray(parts)) return null;
     const count = parts.length;
-    if (!Number.isInteger(count) || count < 0 || count > Math.max(1, Math.ceil(size / partBytes))) return null;
+    if (!Number.isInteger(count) || count < 0 || count > total) return null;
 
     // Validate the whole projection before any reads, keeping only the hashes across awaits.
     const hashes: string[] = [];
@@ -44,21 +57,18 @@ export async function verifyUploadResumePrefix(file: Blob, evidence: unknown): P
       if (!hasFields(part, 'partNumber', 'sizeBytes', 'sha256')) return null;
       const { partNumber, sizeBytes, sha256 } = part;
       if (partNumber !== index + 1 || sizeBytes !== Math.min(partBytes, size - index * partBytes) ||
-          typeof sha256 !== 'string' || sha256.length !== 64 || !sha256Pattern.test(sha256)) return null;
+          typeof sha256 !== 'string' || sha256.length !== sha256HexLength || nonHex.test(sha256)) return null;
       hashes.push(sha256);
     }
 
-    let offset = 0;
-    for (const expected of hashes) {
-      const end = Math.min(offset + partBytes, size);
-      const bytes = await file.slice(offset, end).arrayBuffer();
-      if (bytes.byteLength !== end - offset) return null;
-      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-      const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-      if (hex !== expected) return null;
-      offset = end;
+    if (typeof vector === 'string' && !vector.startsWith(hashes.join(''))) return null;
+    for (let index = 0; index < (bound ? total : count); index++) {
+      const offset = index * partBytes;
+      const digestOffset = index * sha256HexLength;
+      const expected = typeof vector === 'string' ? vector.slice(digestOffset, digestOffset + sha256HexLength) : hashes[index];
+      if (await hashMultipartPart(file, offset, Math.min(offset + partBytes, size)) !== expected) return null;
     }
-    return { parts: hashes.length, bytes: offset };
+    return { parts: count, bytes: Math.min(count * partBytes, size) };
   } catch {
     return null;
   }
