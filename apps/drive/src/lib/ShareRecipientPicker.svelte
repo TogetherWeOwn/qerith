@@ -2,9 +2,11 @@
   import { flushSync, tick } from 'svelte';
   type Choice = { recipientId: string; displayName: string | null };
   // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
-  let { choices, selectedIds, onSelectionChange }: {
+  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, locked = false, onPageFeedback, afterField }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
+    selectedChoices?: readonly Choice[]; afterField?: import('svelte').Snippet;
+    locked?: boolean; onPageFeedback?: (message: string, clear?: string) => void;
     onSelectionChange: (ids: string[]) => void;
   } = $props();
 
@@ -15,38 +17,45 @@
   let active = $state<string | null>(null);
   let announcement = $state('');
   const label = (choice: Choice) => choice.displayName?.trim() ? choice.displayName : 'Name unavailable';
-  const picked = $derived(selectedIds.flatMap(key => choices.find(choice => choice.recipientId === key) ?? []));
+  const picked = $derived(selectedIds.flatMap(key => selectedChoices.find(choice => choice.recipientId === key) ?? []));
   const foldName = (name: string) => name.normalize().toLowerCase().replaceAll('ς', 'σ'); // Lowercasing can produce final sigma at the end of a prefix.
   const search = $derived(foldName(query.trim()));
   const matchingNames = $derived(choices.filter(choice => !search || foldName(choice.displayName ?? '').includes(search)));
   const matches = $derived(matchingNames.filter(choice => !selectedIds.includes(choice.recipientId)));
-  const expanded = $derived(open && matches.length > 0);
-  const noMatch = $derived(open && !!search && !matches.length);
+  const expanded = $derived(!locked && open && matches.length > 0);
+  const noMatch = $derived(!locked && open && !!search && !matches.length);
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
 
+  const noMatchMessage = $derived(matchingNames.length ? 'Matching people are already selected.' : 'No matching people available on this page.');
+  $effect(() => {
+    const message = noMatch && noMatchMessage, report = onPageFeedback;
+    if (message && report) { report(message); return () => report('', message); }
+  });
+  function announce(message: string) { if (onPageFeedback) onPageFeedback(message); else announcement = message; }
   function dismiss() { open = false; active = null; }
 
   function select(choice: Choice) {
     if (!expanded || !matches.includes(choice)) return;
     const next = [...selectedIds, choice.recipientId];
-    announcement = `${label(choice)} selected. ${next.length} selected.`;
+    announce(`${label(choice)} selected. ${next.length} selected.`);
     onSelectionChange(next);
     query = '';
     dismiss();
   }
 
   function remove(choice: Choice) {
+    if (locked) return;
     input.focus();
     dismiss();
     const next = selectedIds.filter(id => id !== choice.recipientId);
-    announcement = `${label(choice)} removed. ${next.length} selected.`;
+    announce(`${label(choice)} removed. ${next.length} selected.`);
     onSelectionChange(next);
   }
 
   async function keydown(event: KeyboardEvent) {
     if (event.key === 'Tab' && open) return flushSync(dismiss); // Remove Chromium's implicit scroll stop before native Tab.
-    if (event.isComposing) return;
+    if (event.isComposing || locked) return;
     if (event.key === 'Escape' && (expanded || noMatch)) {
       event.preventDefault();
       event.stopPropagation();
@@ -67,8 +76,10 @@
       if (activeIndex >= 0) document.getElementById(optionId(activeIndex))?.scrollIntoView({ block: 'nearest' });
     }
   }
+</script>
 
-  function avatar(choice: Choice) {
+<script module lang="ts">
+  export function avatar(choice: import('./share-client').ShareRecipient) {
     let hash = 0;
     for (const char of choice.recipientId) hash = (Math.imul(31, hash) + char.codePointAt(0)!) >>> 0;
     const initials = choice.displayName?.trim().split(/\s+/u).slice(0, 2)
@@ -85,17 +96,18 @@
         {#each picked as choice (choice.recipientId)}
           <li class="chip">
             <bdi>{label(choice)}</bdi>
-            <button type="button" aria-label={`Remove ${label(choice)}`} onclick={() => remove(choice)}>×</button>
+            <button type="button" aria-label={`Remove ${label(choice)}`} aria-disabled={locked} onclick={() => remove(choice)}>×</button>
           </li>
         {/each}
       </ul>
     {/if}
-    <input bind:this={input} bind:value={query} {id} role="combobox" autocomplete="off"
+    <input bind:this={input} bind:value={query} {id} readonly={locked} role="combobox" autocomplete="off"
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? `${id}-choices` : undefined}
       aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
       placeholder="Find someone by name" onfocus={() => open = true} onclick={() => { active = null; open = true; }}
       oninput={() => { announcement = ''; active = null; open = true; }} onblur={dismiss} onkeydown={keydown} />
   </div>
+  {@render afterField?.()}
   {#if expanded}
     <ul id={`${id}-choices`} role="listbox" aria-label="Available people" class="popover">
       {#each matches as choice, index (choice.recipientId)}
@@ -109,8 +121,8 @@
       {/each}
     </ul>
   {/if}
-  <div role="status" class:popover={noMatch} class:message={noMatch} class:visually-hidden={!noMatch}>
-    {#if noMatch}{#if matchingNames.length}Matching people are already selected.{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}{:else}{announcement}{/if}
+  <div role={onPageFeedback ? undefined : 'status'} class:popover={noMatch} class:message={noMatch} class:visually-hidden={!noMatch}>
+    {#if noMatch}{#if onPageFeedback || matchingNames.length}{noMatchMessage}{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}{:else if !onPageFeedback}{announcement}{/if}
   </div>
 </div>
 
