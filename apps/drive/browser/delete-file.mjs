@@ -31,6 +31,10 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       page.on('pageerror', error => errors.push(error.message));
       await page.goto(`${origin}/?delete-file`);
       await page.evaluate(axe);
+      await page.locator('dialog').evaluate(dialog => {
+        const record = event => { window.dialogMotion = event.type; };
+        for (const type of ['animationstart', 'transitionrun']) dialog.addEventListener(type, record, true);
+      });
       const dialog = page.getByRole('dialog', { name: /^Delete / });
       const focused = page.locator(':focus');
       const button = label => dialog.getByRole('button', { name: label, exact: true });
@@ -73,7 +77,7 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       if (width < 820) assert(Math.abs(box.y + box.height - height) < 1 && box.width === width, 'mobile bottom sheet');
       else assert(box.y > 4 && box.y + box.height < height, 'desktop modal');
       await capture('open');
-      assert.equal(await dialog.evaluate(el => el.getAnimations({ subtree: true }).length), 0, 'reduced motion');
+      assert.equal(await dialog.evaluate(el => window.dialogMotion ?? el.getAnimations({ subtree: true }).length), 0, 'no dialog motion under reduced motion');
       const grayscale = await page.addStyleTag({ content: 'main, dialog, dialog::backdrop { filter: grayscale(1); }' });
       await page.screenshot({ path: resolve(output, `delete-file-${width}-greyscale.png`) });
       await grayscale.evaluate(el => el.remove());
@@ -84,7 +88,6 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       }), 'forced colours preserve the button border and focus ring');
       await page.screenshot({ path: resolve(output, `delete-file-${width}-forced-colours.png`) });
       await page.emulateMedia({ forcedColors: null });
-
       const expectedErrors = [[400, 'The deletion request was rejected.'], [401, 'Sign in again before deleting this file.'],
         [403, 'That file isn’t available to delete. Refresh My Drive.'], [404, 'That file isn’t available to delete. Refresh My Drive.'],
         [200, uncertain], [0, uncertain], [503, uncertain]];
@@ -97,7 +100,6 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       }
       await capture('error');
       assert.equal(writes.length, expectedErrors.length, 'no implicit retries');
-
       reply = 202;
       held = Promise.withResolvers();
       try {
