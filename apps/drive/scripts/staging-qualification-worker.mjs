@@ -68,7 +68,8 @@ function workerApi(account, name, token, request) {
         headers: { authorization: `Bearer ${token}`, ...(body && { 'content-type': 'application/json' }) },
         body: body && JSON.stringify(body),
       });
-      if (!response.ok || !response.body) {
+      const complete = body ? response.ok : response.status === 200 && !response.headers.has('content-range');
+      if (!complete || !response.body) {
         await response.body?.cancel();
         throw new Error();
       }

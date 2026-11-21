@@ -260,6 +260,18 @@ test('Worker inventory reads the tested configuration and only the pinned Worker
   assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules', 'deployments']);
 });
 
+test('Worker inventory rejects partial schedule readbacks even with an empty result', async t => {
+  for (const [name, init] of [['HTTP 206', { status: 206 }],
+    ['Content-Range on HTTP 200', { headers: { 'content-range': 'bytes 0-53/108' } }]]) {
+    await t.test(name, async sub => {
+      const { calls, inspect, replies } = inventoryFixture(sub);
+      replies.schedules = Response.json({ success: true, errors: [], result: { schedules: [] } }, init);
+      await assert.rejects(inspect(), { message: 'Cannot verify staging Worker cron and resource bindings.' });
+      assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules']);
+    });
+  }
+});
+
 test('Worker inventory rejects cron, unknown bindings, candidates, deployment drift and cancellation', async t => {
   const { bindings, calls, inspect, replies, state } = inventoryFixture(t);
   const error = { message: 'Cannot verify staging Worker cron and resource bindings.' };
