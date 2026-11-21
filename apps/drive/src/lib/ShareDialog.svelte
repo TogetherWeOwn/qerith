@@ -12,7 +12,6 @@
   import { tick } from 'svelte';
   import ShareRecipientPicker, { avatar } from './ShareRecipientPicker.svelte';
   import './dialog.css';
-
   let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove }: {
     name: string; kind: 'File' | 'Folder'; owner: { recipientId: string; driveOwner: boolean };
     access: SharePage<ShareAccess>;
@@ -21,35 +20,29 @@
     // Resolve only after confirmation and refreshing the page(s); reject on failure or uncertainty.
     onShare: (ids: readonly string[]) => Promise<void>; onRemove: (id: string) => Promise<void>;
   } = $props();
-
   const id = $props.id();
   const label = (person: ShareRecipient) => person.displayName?.trim() ? person.displayName : 'Name unavailable';
-  let dialog: HTMLDialogElement, accessTitle: HTMLElement;
-  let first: HTMLButtonElement, last: HTMLButtonElement;
-  let notice = $state<HTMLElement>();
-  let opener: HTMLElement | undefined;
-  let backdrop = false;
-  let session = $state(0), picked = $state<ShareRecipient[]>([]);
-  let confirm = $state<string | null>(null);
-  let pending = $state<'share' | 'remove' | null>(null);
-  let error = $state(''), status = $state(''), pickerFeedback = $state('');
+  let dialog: HTMLDialogElement, accessTitle: HTMLElement, opener: HTMLElement | undefined;
+  let first: HTMLButtonElement, last: HTMLButtonElement, backdrop = false;
+  let notice = $state<HTMLElement>(), session = $state(0);
+  let picked = $state<ShareRecipient[]>([]), added = $state<string[]>([]);
+  let confirm = $state<string | null>(null), pending = $state<'share' | 'remove' | null>(null);
+  let error = $state(''), status = $state(''), live = $state('');
   let paging = $state<'access' | 'candidates' | null>(null);
   const pageText = (page: SharePage<ShareRecipient>, subject: string) => page.state === 'loading' ? `Loading ${subject}…` :
     page.state === 'ready' && page.pageNumber !== null ? `Showing page ${page.pageNumber} of ${subject}.` : '';
-  let added = $state<string[]>([]);
   const allowed = $derived(candidates.rows.filter(person => person.recipientId !== owner.recipientId &&
     !access.rows.some(row => row.recipientId === person.recipientId)));
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
-  const pageStatus = $derived({ access: pageText(access, 'people with access'), candidates: pageText(candidates, 'people to add') });
+  const pageStatus = $derived(paging === 'access' ? pageText(access, 'people with access') : paging ? pageText(candidates, 'people to add') : '');
+  $effect(() => { if (paging) live = pageStatus; });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from: HTMLElement) {
     if (dialog.open) return;
-    opener = from;
-    session++; picked = []; confirm = paging = null; error = status = pickerFeedback = ''; added = [];
-    dialog.showModal();
-    await tick();
+    opener = from; session++; picked = []; confirm = paging = null; error = status = live = ''; added = [];
+    dialog.showModal(); await tick();
     if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
   }
   function close() { if (!pending) { dialog.close(); opener?.focus(); } }
@@ -58,35 +51,30 @@
     const [from, to] = event.shiftKey ? [first, last] : [last, first];
     if (document.activeElement === from) { event.preventDefault(); to.focus(); }
   }
-  function load(event: MouseEvent, key: keyof typeof pageStatus, action: () => void) {
+  function load(event: MouseEvent, key: NonNullable<typeof paging>, action: () => void) {
     if (pending) return;
     (event.currentTarget as HTMLButtonElement).parentElement?.focus();
-    confirm = null; paging = key; status = pickerFeedback = '';
+    confirm = null; paging = key; status = live = '';
     action();
   }
-  function onPageFeedback(message: string) {
-    pickerFeedback = message;
-    if (message) { status = ''; paging = null; }
+  function onPageFeedback(message: string, clear?: string) {
+    if (message) { live = message; status = ''; }
+    else if (live === clear) live = '';
   }
-  function select(ids: string[]) {
-    if (pending) return;
-    picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
-  }
+  function select(ids: string[]) { if (!pending) picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []); }
   async function apply(person?: ShareAccess) {
     if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
-    const submitted = picked;
-    pending = person ? 'remove' : 'share'; paging = null; error = status = pickerFeedback = '';
+    pending = person ? 'remove' : 'share'; paging = null; error = status = live = '';
     try {
       if (person) {
-        await onRemove(person.recipientId);
-        confirm = null;
-        status = !person.inheritedFrom?.trim() ? `Removed direct access for ${label(person)}.` :
-          `Removed direct access for ${label(person)}. Access through ${person.inheritedFrom} remains.`;
+        await onRemove(person.recipientId); confirm = null;
+        const inherited = person.inheritedFrom?.trim();
+        live = status = `Removed direct access for ${label(person)}.${inherited ? ` Access through ${person.inheritedFrom} remains.` : ''}`;
       } else {
-        const ids = submitted.map(choice => choice.recipientId);
+        const submitted = picked, ids = submitted.map(choice => choice.recipientId);
         await onShare(ids);
         added = [...new Set([...added, ...ids])]; picked = [];
-        status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
+        live = status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
       }
     } catch {
       error = `${person ? 'Couldn’t confirm removal of direct access.' : 'Couldn’t confirm sharing.'} Check who has access before trying again.`;
@@ -98,10 +86,9 @@
     }
   }
 </script>
-
-{#snippet pager(page: SharePage<ShareRecipient>, key: keyof typeof pageStatus, subject: string)}
+{#snippet pager(page: SharePage<ShareRecipient>, key: NonNullable<typeof paging>, subject: string)}
   <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
-    <p>{pageStatus[key]}</p>
+    <p>{pageText(page, subject)}</p>
     {#if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
       {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, key, page.retry!)}>Retry</button>{/if}
     {:else if page.state === 'ready'}
@@ -110,7 +97,6 @@
     {/if}
   </div>
 {/snippet}
-
 <dialog class="drive-dialog" bind:this={dialog} aria-labelledby={`${id}-title`} aria-describedby={`${id}-rules`}
   onkeydown={keys} oncancel={event => { event.preventDefault(); close(); }}
   onpointerdown={event => { backdrop = event.target === dialog; }} onclick={event => { if (backdrop && event.target === dialog) close(); }}>
@@ -119,7 +105,7 @@
       <button type="button" class="close" aria-label="Close" aria-disabled={!!pending} bind:this={first} onclick={close}>×</button>
     </header>
     <p id={`${id}-rules`}>People you add can view and download. They can’t change, delete or re-share it.{kind === 'Folder' ? ' They also see anything you add to it later.' : ''}</p>
-    <div class="sr" role="status" aria-live="polite">{paging ? pageStatus[paging] : status || pickerFeedback}</div>
+    <div class="sr" role="status" aria-live="polite">{live}</div>
     {#if error}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{error}</p>{/if}
     {#if nobody}
       <div class="empty"><strong>There’s nobody else on this drive yet.</strong>
@@ -178,13 +164,12 @@
   header { flex-wrap: nowrap; justify-content: space-between; }
   footer { justify-content: flex-end; }
   h2, h3, p, li { overflow-wrap: anywhere; }
-  h3, p, ul { margin: 0; }
   .feedback { padding: var(--drive-space-3); }
   .sr { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
-  h3 { font-size: var(--drive-font-size-ui); }
+  h3, ul { margin: 0; font-size: var(--drive-font-size-ui); }
   p, small, button { color: var(--drive-color-text-secondary); }
-  p { font-size: var(--drive-font-size-small); }
-  ul { padding: 0; list-style: none; font-size: var(--drive-font-size-ui); }
+  p { margin: 0; font-size: var(--drive-font-size-small); }
+  ul { padding: 0; list-style: none; }
   li { min-height: var(--drive-size-control-md); border-block-end: var(--drive-size-line) solid var(--drive-color-line-hairline); }
   li.added, .tag, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
   .avatar, .tag, button { border-radius: var(--drive-radius-pill); }

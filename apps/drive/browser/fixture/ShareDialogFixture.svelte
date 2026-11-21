@@ -8,16 +8,17 @@
   const grant = (choice: ReturnType<typeof person>, direct: boolean, inheritedFrom: string | null = null) => ({ ...choice, direct, inheritedFrom });
   let grants = $state<ShareAccess[]>([grant(pell, true), grant(sam, true, 'Projects'), grant(zoe, false, 'Projects')]);
   let accessState = $state<'ready' | 'failed' | 'loading'>('ready');
-  let second = $state(false), invited = $state(false);
+  let second = $state(false), invited = $state(false), accessPage = $state(1);
   let dialog: ReturnType<typeof ShareDialog>;
   let attempts = 0;
   let writes = $state<string[]>([]);
   const alone = $derived(mode === 'owner' || mode === 'member');
   const eligible = $derived([lee, sam, owner, unnamed].filter(({ recipientId }) =>
     recipientId !== owner.recipientId && !grants.some(row => row.recipientId === recipientId)));
-  function settle() {
-    return new Promise<void>((resolve, reject) => window.addEventListener('fixture-settle', () => [1, 3].includes(++attempts) ? reject() : resolve(), { once: true }));
+  function settle(mutation = true) {
+    return new Promise<void>((resolve, reject) => window.addEventListener('fixture-settle', () => mutation && [1, 3].includes(++attempts) ? reject() : resolve(), { once: true }));
   }
+  async function nextAccess() { accessState = 'loading'; await settle(false); accessPage = 2; accessState = 'ready'; }
   async function share(ids: readonly string[]) {
     writes = [...writes, ...ids];
     await settle();
@@ -35,8 +36,8 @@
   {#if invited}<p>Users and invites</p>{/if}
   <ShareDialog bind:this={dialog} name={mode === 'file' ? 'Budget.pdf' : 'Taxes 2025'} kind={mode === 'file' ? 'File' : 'Folder'}
     owner={{ recipientId: owner.recipientId, driveOwner: mode !== 'member' }} nobodyElse={alone} onInvite={() => invited = true}
-    access={{ state: accessState, rows: alone || accessState !== 'ready' || mode === 'partial' ? [] : grants, complete: mode !== 'partial',
-      ...(mode === 'partial' ? { pageNumber: 1, next: () => accessState = 'loading' } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
+    access={{ state: accessState, rows: alone || accessState !== 'ready' ? [] : mode === 'partial' ? grants.slice(0, accessPage - 1) : grants,
+      complete: mode !== 'partial', ...(mode === 'partial' ? { pageNumber: accessPage, next: accessPage === 1 ? nextAccess : undefined } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
     candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : eligible.slice(second ? 1 : 0, second ? 2 : 1),
       ...(!alone && (second ? { previous: () => second = false } : eligible.length > 1 ? { next: () => second = true } : {})) }} onShare={share} onRemove={remove} />
 </main>
