@@ -25,7 +25,8 @@ function d1(source, env, cwd, send, active) {
     signal.throwIfAborted();
     const response = await send(`${base}${path}`, { method, signal, redirect: 'error',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body });
-    if (!response.ok || !response.body) {
+    // Readback also uses POST /query; its envelope must still be complete.
+    if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
       await response.body?.cancel();
       throw new Error();
     }

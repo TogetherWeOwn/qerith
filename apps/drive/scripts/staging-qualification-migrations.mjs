@@ -40,9 +40,12 @@ function verifiedInputs(cwd, sha, accountId) {
   return { inputs, config: { name: config.name, d1_databases: config.d1_databases } };
 }
 
-function wrangler(binary, cwd, env, args, { timeout = 45_000, discard = false, signal } = {}) {
+const readBudget = 45_000;
+
+function wrangler(binary, cwd, env, args, { timeout, discard = false, signal, applyTimeLeft }) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
+    const deadline = performance.now() + timeout;
     const child = spawn(binary, [...args, '--config', 'wrangler.staging.json'], {
       cwd, env, detached: true, stdio: ['ignore', discard ? 'ignore' : 'pipe', 'pipe'],
     });
@@ -53,6 +56,9 @@ function wrangler(binary, cwd, env, args, { timeout = 45_000, discard = false, s
       if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
     };
     const timer = setTimeout(stop, timeout);
+    // A wall-clock step can consume the readback reserve during apply.
+    const reserveLost = () => applyTimeLeft && !(applyTimeLeft() > 0);
+    const reserveTimer = applyTimeLeft && setInterval(() => { if (reserveLost()) stop(); }, 1_000);
     signal?.addEventListener('abort', stop, { once: true });
     if (signal?.aborted) stop();
     for (const stream of [child.stdout, child.stderr].filter(Boolean)) {
@@ -67,9 +73,11 @@ function wrangler(binary, cwd, env, args, { timeout = 45_000, discard = false, s
     child.on('error', stop);
     child.on('close', code => {
       clearTimeout(timer);
+      clearInterval(reserveTimer);
       signal?.removeEventListener('abort', stop);
-      if (failed || code !== 0) reject(new Error('Bounded staging D1 command failed.'));
-      else resolve(Buffer.concat(output).toString('utf8'));
+      if (failed || code !== 0 || performance.now() >= deadline || reserveLost()) {
+        reject(new Error('Bounded staging D1 command failed.'));
+      } else resolve(Buffer.concat(output).toString('utf8'));
     });
   });
 }
@@ -98,7 +106,7 @@ function readLedger(text, expected) {
 }
 
 // The protected caller must verify storage and await durable recovery recording before mutation.
-export async function applyQualificationMigrations({ recordRecovery }, env, cwd = process.cwd(), signal) {
+export async function applyQualificationMigrations({ recordRecovery, timeLeft }, env, cwd = process.cwd(), signal) {
   cwd = resolve(cwd);
   const identity = assertQualificationJob(env, cwd);
   const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } = env;
@@ -116,10 +124,18 @@ export async function applyQualificationMigrations({ recordRecovery }, env, cwd 
   const app = realpathSync(join(cwd, 'apps/drive'));
   const binary = realpathSync(join(app, 'node_modules/.bin/wrangler'));
   if (!binary.startsWith(`${app}${sep}`) || !lstatSync(binary).isFile()) throw new Error('Invalid staging Wrangler path.');
-  const run = (args, options) => wrangler(binary, snapshotDir.path, {
-    PATH: env.PATH, HOME: env.HOME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
-    CI: 'true', NO_COLOR: '1', WRANGLER_HIDE_BANNER: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false',
-  }, ['d1', ...args], { ...options, signal });
+  const run = (args, { timeout = readBudget, reserve = 0, discard } = {}) => {
+    const remaining = () => Math.floor(timeLeft?.()) - reserve;
+    const available = remaining();
+    if (!Number.isFinite(available) || available <= 0 || (reserve > 0 && available < timeout)) {
+      throw new Error('Staging D1 migration time budget is exhausted.');
+    }
+    return wrangler(binary, snapshotDir.path, {
+      PATH: env.PATH, HOME: env.HOME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
+      CI: 'true', NO_COLOR: '1', WRANGLER_HIDE_BANNER: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false',
+    }, ['d1', ...args], { timeout: Math.min(timeout, available), discard, signal,
+      applyTimeLeft: reserve > 0 ? remaining : undefined });
+  };
   const snapshot = async () => readLedger(await run(['execute', target, '--remote', '--json', '--command', sql]), expected);
   const bookmark = parseProviderJson(await run(['time-travel', 'info', target, '--json']))?.bookmark;
   if (typeof bookmark !== 'string' || !/^[A-Za-z0-9_-]{1,1024}$/.test(bookmark)) {
@@ -129,7 +145,8 @@ export async function applyQualificationMigrations({ recordRecovery }, env, cwd 
   await recordRecovery({ ...identity, bookmark }, signal);
   await run(['migrations', 'list', target, '--remote'], { discard: true });
   const before = await snapshot();
-  await run(['migrations', 'apply', target, '--remote'], { timeout: 120_000, discard: true });
+  // Do not spend the time reserved for the post-apply ledger query.
+  await run(['migrations', 'apply', target, '--remote'], { timeout: 120_000, reserve: readBudget, discard: true });
   const after = await snapshot();
   if (after.length !== expected.size || before.some(({ id, name, applied_at }, i) =>
     after[i]?.id !== id || after[i].name !== name || after[i].applied_at !== applied_at)) {

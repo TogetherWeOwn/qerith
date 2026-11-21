@@ -177,7 +177,13 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
-The offline composer requires every case to pass and binds evidence to the exact invocation.
+The offline entry point rechecks the committed staging target and reviewed R2
+binding, then binds the case runner, estate checks, and signed recovery writer
+to a single SHA/run/attempt. It verifies recovery record retention before the
+candidate upload and again before each record write. It requires explicit
+admission, app fixture, estate and writer-fence adapters; it has no passing
+admission default. The case runner requires every case to pass and binds
+its evidence to the exact invocation.
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. It checks exact-attempt writer quiescence and a held, abortable fence
 before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
@@ -215,9 +221,14 @@ The generated Worker rejects new requests at or after the deadline before app,
 asset or readiness routing. This bounds candidate request admission without a
 runner, but does not stop in-flight work, revoke issued storage URLs, restore the
 previous deployment, or clean up D1. Neither existing staging workflow uses it.
-Before wiring the protected caller, reconcile its pre-activation budget with
-this window: D1 command timeouts alone can consume the five-minute margin,
-before accounting for upload, readback and recovery recording.
+The offline lifecycle gives D1 only the time left after upload and after
+reserving 21 minutes for Worker checks, recovery recording, activation and
+cases. D1 apply starts only if its full two-minute command budget and a
+45-second post-apply ledger read fit. The lifecycle rechecks the wall-clock
+budget while D1 work is pending and stops apply if a clock step consumes the
+ledger reserve. A timeout stops activation and drains the local subprocess;
+it does not prove that D1 rolled back. Reconcile any uncertain D1 mutation
+before retrying.
 
 The unwired Worker recovery adapter reads the pinned staging config from the
 lost attempt's main-ancestor SHA. It verifies the recorded candidate against
@@ -232,10 +243,25 @@ or R2 cleanup or authorization to issue a receipt.
 The offline recovery coordinator can authenticate a historical source through
 bounded GitHub Actions reads: the exact attempt, its successful source job and
 exact-dispatch check, and the latest run metadata. It rejects superseded or
-ambiguous sources before record access. This is not a fence against a later rerun.
-The protected workflow does not invoke recovery.
+ambiguous sources before making signed reads of the two records at the source
+SHA's reviewed binding. A later rerun is excluded by the authoritative writer
+fence, not by the GitHub read. The coordinator verifies that fence against the
+recorded candidate and enforces its loss signal and the earlier of wall-clock
+expiry and the original monotonic deadline through the final readback. It checks
+the deadline at I/O boundaries, samples wall time every second during pending
+I/O, and waits for the adapter to drain after abort. The v1 bookmark and a
+post-list ledger are not independent D1 restore attribution.
+The offline factory binds the native Worker restore, D1 Time Travel and
+exact-prefix R2 cleanup adapters to the historical source SHA. These adapters
+issue requests only under the held fence; source and record reads precede it.
+The factory requires a separate D1 proof provider: unverified attribution stops
+before D1 restoration or R2 cleanup, even if Worker rollback has already
+completed. An interruption after D1 restore requires reconciliation; rerunning
+is not an R2-only resume. The protected workflow supplies neither proof provider
+and does not invoke recovery.
 
-The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+The offline lifecycle and recovery entry points use the recovery store at the
+source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
 attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
 A signed `If-None-Match: *` PUT must be acknowledged before a fresh signed GET.

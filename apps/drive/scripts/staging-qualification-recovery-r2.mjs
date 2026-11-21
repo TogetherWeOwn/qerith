@@ -21,7 +21,17 @@ export function qualificationR2RecoveryStore(source, { request, verifyRetention,
     if (!keys.includes(key)) throw unverified();
     return recoveryNamespace + key;
   };
+  const assertRetention = async signal => {
+    try {
+      signal?.throwIfAborted();
+      if (await verifyRetention(signal) !== true) throw unverified();
+      signal?.throwIfAborted();
+    } catch {
+      throw new Error('Qualification R2 recovery retention is unverified.');
+    }
+  };
   return {
+    assertRetention,
     async create(key, body, signal) {
       try {
         const target = objectKey(key);
@@ -30,7 +40,7 @@ export function qualificationR2RecoveryStore(source, { request, verifyRetention,
         if (!size || size > maxRecordBytes) throw unverified();
         const bytes = new Uint8Array(size);
         bytes.set(body);
-        if (await verifyRetention(signal) !== true) throw unverified();
+        await assertRetention(signal);
         signal?.throwIfAborted();
         const response = await request({ method: 'PUT', key: target, body: bytes, signal,
           headers: { 'if-none-match': '*', 'content-type': 'application/json', 'cache-control': 'private, no-store' },
@@ -76,7 +86,7 @@ export async function createQualificationR2RecoveryStore({ sha, runId, attempt }
     const binding = await readQualificationR2Binding(env, cwd, sha);
     const { createS3Transport } = await import('../src/lib/server/s3/transport.ts');
     return qualificationR2RecoveryStore(source, {
-      request: createS3Transport(binding.settings, { fetch: send, timeoutMs: 5000 }),
+      request: createS3Transport(binding.settings, { fetch: send, timeoutMs: 5000, drainBufferedAbort: true }),
       verifyRetention: signal => verifyRecoveryR2Expiry(binding, env.CLOUDFLARE_API_TOKEN, signal, send),
     });
   } catch {

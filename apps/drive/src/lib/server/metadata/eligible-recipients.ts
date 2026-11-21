@@ -6,7 +6,8 @@ interface Statement {
 }
 interface Database { withSession(constraint: 'first-primary'): { prepare(sql: string): Statement } }
 
-export interface EligibleRecipient { recipientId: string }
+// An unnamed account has no label; callers must not derive one from recipientId.
+export interface EligibleRecipient { recipientId: string; displayName: string | null }
 export interface EligibleRecipientPage { recipients: EligibleRecipient[]; nextCursor: string | null }
 
 const pageSize = 100;
@@ -27,12 +28,12 @@ export class EligibleRecipients {
       JOIN drive_entries e ON e.owner_id = owner.id AND e.id = ?
       WHERE s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
     ), page AS (
-      SELECT p.id AS recipientId FROM drive_principals p
+      SELECT p.id AS recipientId, p.display_name AS displayName FROM drive_principals p
       WHERE p.id > (SELECT ? FROM owned) AND p.id != (SELECT owner_id FROM owned)
         AND p.status = 'active' AND p.role = 'member'
       ORDER BY p.id LIMIT ?
-    ) SELECT recipientId FROM page UNION ALL SELECT NULL FROM owned ORDER BY recipientId`)
-      .bind(entryId, hash, afterId ?? '', pageSize + 1).all<EligibleRecipient | { recipientId: null }>();
+    ) SELECT recipientId, displayName FROM page UNION ALL SELECT NULL, NULL FROM owned ORDER BY recipientId`)
+      .bind(entryId, hash, afterId ?? '', pageSize + 1).all<EligibleRecipient | { recipientId: null; displayName: null }>();
     if (!results.some(row => row.recipientId === null)) return null;
     const rows = results.filter(row => row.recipientId !== null);
     const recipients = rows.slice(0, pageSize);
