@@ -40,6 +40,14 @@ notice recovery, the relay seeds one synthetic Worker document request at a time
 and checks the Worker's expiration header; Chromium checks the rendered notice
 and focus, not cookie-jar deletion.
 
+The isolated RootUpload continuation fixture writes `root-continuation-*.json`,
+finishing, publication and interruption screenshots, and axe results at 1280 and
+390 px. Its injected fetcher records requests for a fully acknowledged file, an
+absent or acknowledged empty part, a refused nonempty suffix, a canceled picker,
+and a deliberate fresh upload with the candidate still present.
+The fixture holds completion to verify accepted bytes without early publication
+or a listing refresh. It does not enable continuation on any Worker route.
+
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended
 fixture state before capture, assert real keyboard focus and activation behavior,
