@@ -2,7 +2,7 @@ import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it } from 'vitest';
 import { Invitations } from '../../drive/src/lib/server/identity/invitations.ts';
-import { InvitationEnrollment } from '../../drive/src/lib/server/identity/enrollment.ts';
+import { InvalidMemberDisplayName, InvitationEnrollment } from '../../drive/src/lib/server/identity/enrollment.ts';
 import { PasskeyLogin } from '../../drive/src/lib/server/identity/login.ts';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { handleInviteAcceptance } from '../../drive/src/lib/server/invite-acceptance.ts';
@@ -20,9 +20,9 @@ async function setup() {
   return { owner, invitations: new Invitations(env.DB), enrollment: new InvitationEnrollment(env.DB, rpID, origin) };
 }
 
-it('atomically redeems once and signs in with the enrolled member passkey', async () => {
+it('atomically stores only the winning invitee name and signs in with the enrolled passkey', async () => {
   const { owner, invitations, enrollment } = await setup();
-  const invite = await invitations.issue(owner);
+  const invite = await invitations.issue(owner, { displayName: 'Prefill', note: 'Invitation note' });
   const { challenge, user, authenticatorSelection } = await enrollment.issueOptions(invite.token);
   expect(authenticatorSelection).toMatchObject({ residentKey: 'required', userVerification: 'required' });
   expect(user.id).toMatch(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
@@ -31,12 +31,15 @@ it('atomically redeems once and signs in with the enrolled member passkey', asyn
   expect(await env.DB.prepare('SELECT id FROM drive_principals WHERE id = ?').bind(pending.principal_id).first()).toBeNull();
   const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const signed = await fixture('registration', { challenge, key });
-  const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => enrollment.enroll(invite.token, challenge, signed.registration)));
+  const attempts = await Promise.allSettled(Array.from({ length: 4 }, (_, i) =>
+    enrollment.enroll(invite.token, challenge, signed.registration, `  José ${i}  `)));
   expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
-  const principal = attempts.find(({ status }) => status === 'fulfilled').value;
+  const winner = attempts.findIndex(({ status }) => status === 'fulfilled');
+  const principal = attempts[winner].value;
   expect(principal).toBe(pending.principal_id);
-  expect(await env.DB.prepare('SELECT role, status, webauthn_user_handle FROM drive_principals WHERE id = ?').bind(principal).first())
-    .toEqual({ role: 'member', status: 'active', webauthn_user_handle: user.id });
+  const readMember = () => env.DB.prepare('SELECT role, status, webauthn_user_handle, display_name FROM drive_principals WHERE id = ?')
+    .bind(principal).first();
+  expect(await readMember()).toEqual({ role: 'member', status: 'active', webauthn_user_handle: user.id, display_name: `José ${winner}` });
   const credential = await env.DB.prepare('SELECT principal_id, webauthn_user_handle, public_key, counter, transports FROM drive_credentials WHERE id = ?').bind(signed.registration.id).first();
   expect(credential.principal_id).toBe(principal);
   expect(credential.webauthn_user_handle).toBe(user.id);
@@ -46,7 +49,10 @@ it('atomically redeems once and signs in with the enrolled member passkey', asyn
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(invite.id).first()).redeemed_at).toBeGreaterThan(0);
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies').first()).n).toBe(0);
   await expect(enrollment.issueOptions(invite.token)).rejects.toThrow();
-  await expect(enrollment.enroll(invite.token, challenge, signed.registration)).rejects.toThrow();
+  await expect(enrollment.enroll(invite.token, challenge, signed.registration, 'Replayed name')).rejects.toThrow();
+  expect((await readMember()).display_name).toBe(`José ${winner}`);
+  expect(await env.DB.prepare('SELECT display_name, note FROM drive_invitations WHERE id = ?').bind(invite.id).first())
+    .toEqual({ display_name: 'Prefill', note: 'Invitation note' });
 
   const login = new PasskeyLogin(env.DB, rpID, origin);
   const loginChallenge = await login.issueChallenge('member-sign-in');
@@ -72,11 +78,27 @@ it('rejects bad ceremonies and unavailable invitations and challenges without pa
     if (state === 'unbound') await env.DB.prepare('UPDATE drive_bound_ceremonies SET webauthn_user_handle = NULL WHERE challenge = ?').bind(challenge).run();
     const target = state === 'different-invite' ? await invitations.issue(owner) : invite;
     if (target !== invite) await enrollment.issueOptions(target.token);
-    await expect(enrollment.enroll(target.token, challenge, signed.registration)).rejects.toThrow();
+    await expect(enrollment.enroll(target.token, challenge, signed.registration, 'Chosen name')).rejects.toThrow();
     expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(target.id).first()).redeemed_at).toBeNull();
   }
   expect((await env.DB.prepare("SELECT count(*) AS n FROM drive_principals WHERE role = 'member'").first()).n).toBe(0);
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_credentials').first()).n).toBe(0);
+});
+
+it('rejects malformed or oversized names without consuming the enrollment', async () => {
+  const { owner, invitations, enrollment } = await setup();
+  const invite = await invitations.issue(owner);
+  const { challenge } = await enrollment.issueOptions(invite.token);
+  const { registration } = await fixture('registration', { challenge });
+  const expandsUnderNfc = String.fromCodePoint(0x0344).repeat(64);
+  for (const name of [null, 42, '   ', 'a\0b', 'a\nb', '\ud800', '🌱'.repeat(65), expandsUnderNfc]) {
+    await expect(enrollment.enroll(invite.token, challenge, registration, name)).rejects.toThrow(InvalidMemberDisplayName);
+  }
+  expect(await env.DB.prepare("SELECT id FROM drive_principals WHERE role = 'member'").first()).toBeNull();
+  const name = '🌱'.repeat(64);
+  const id = await enrollment.enroll(invite.token, challenge, registration, ` ${name} `);
+  expect(await env.DB.prepare('SELECT display_name FROM drive_principals WHERE id = ?').bind(id).first())
+    .toEqual({ display_name: name });
 });
 
 it('composes the HTTP boundary with real invitation enrollment without issuing a session', async () => {
@@ -100,6 +122,8 @@ it('composes the HTTP boundary with real invitation enrollment without issuing a
     expect(result.headers.get('cache-control')).toBe('private, no-store');
   }
   expect((await send('challenge', { token: invite.token })).status).toBe(404);
+  expect(await env.DB.prepare("SELECT display_name FROM drive_principals WHERE role = 'member'").first())
+    .toEqual({ display_name: null }); // The legacy route must not copy the invite prefill.
   for (const state of ['cancelled', 'expired']) {
     const other = await invitations.issue(owner);
     if (state === 'cancelled') await invitations.cancel(owner, other.id);
@@ -114,12 +138,13 @@ it('rolls back invitation, challenge and principal when a credential is not uniq
   const first = await invitations.issue(owner);
   const { challenge: firstChallenge } = await enrollment.issueOptions(first.token);
   const firstSigned = await fixture('registration', { challenge: firstChallenge });
-  await enrollment.enroll(first.token, firstChallenge, firstSigned.registration);
+  const id = await enrollment.enroll(first.token, firstChallenge, firstSigned.registration, 'First member');
   const second = await invitations.issue(owner);
   const { challenge } = await enrollment.issueOptions(second.token);
   const signed = await fixture('registration', { challenge });
-  await expect(enrollment.enroll(second.token, challenge, signed.registration)).rejects.toThrow();
+  await expect(enrollment.enroll(second.token, challenge, signed.registration, 'Rolled back')).rejects.toThrow();
   expect((await env.DB.prepare('SELECT redeemed_at FROM drive_invitations WHERE id = ?').bind(second.id).first()).redeemed_at).toBeNull();
   expect((await env.DB.prepare('SELECT count(*) AS n FROM drive_bound_ceremonies WHERE challenge = ?').bind(challenge).first()).n).toBe(1);
-  expect((await env.DB.prepare("SELECT count(*) AS n FROM drive_principals WHERE role = 'member'").first()).n).toBe(1);
+  expect((await env.DB.prepare("SELECT id, display_name FROM drive_principals WHERE role = 'member'").all()).results)
+    .toEqual([{ id, display_name: 'First member' }]);
 });
