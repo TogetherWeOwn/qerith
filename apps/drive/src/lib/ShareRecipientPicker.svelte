@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-
+  import { flushSync, tick } from 'svelte';
   type Choice = { recipientId: string; displayName: string | null };
   // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
   let { choices, selectedIds, onSelectionChange }: {
@@ -26,10 +25,7 @@
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
 
-  function dismiss() {
-    open = false;
-    active = null;
-  }
+  function dismiss() { open = false; active = null; }
 
   function select(choice: Choice) {
     if (!expanded || !matches.includes(choice)) return;
@@ -49,6 +45,7 @@
   }
 
   async function keydown(event: KeyboardEvent) {
+    if (event.key === 'Tab' && open) return flushSync(dismiss); // Remove Chromium's implicit scroll stop before native Tab.
     if (event.isComposing) return;
     if (event.key === 'Escape' && (expanded || noMatch)) {
       event.preventDefault();
@@ -100,7 +97,7 @@
       oninput={() => { announcement = ''; active = null; open = true; }} onblur={dismiss} onkeydown={keydown} />
   </div>
   {#if expanded}
-    <ul id={`${id}-choices`} role="listbox" aria-label="Available people" tabindex="-1" class="popover">
+    <ul id={`${id}-choices`} role="listbox" aria-label="Available people" class="popover">
       {#each matches as choice, index (choice.recipientId)}
         {@const badge = avatar(choice)}
         <!-- svelte-ignore a11y_click_events_have_key_events (DOM focus stays on the combobox, which handles option keys) -->
@@ -120,11 +117,9 @@
 <style>
   .picker { position: relative; }
   label { display: block; margin-block-end: var(--drive-space-2); font-weight: var(--drive-font-weight-semibold); }
-  .field {
-    display: flex; align-items: center; flex-wrap: wrap; gap: var(--drive-space-1);
+  .field { display: flex; align-items: center; flex-wrap: wrap; gap: var(--drive-space-1);
     padding-inline: var(--drive-space-inset-room); background: var(--drive-color-bg-canvas);
-    border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-m);
-  }
+    border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-m); }
   .field:hover { border-color: var(--drive-color-text-tertiary); }
   .field:has(input:focus-visible), button:focus-visible {
     outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring);

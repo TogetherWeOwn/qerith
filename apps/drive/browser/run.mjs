@@ -269,7 +269,8 @@ try {
   await exerciseOwnerInvite(browser, origin, axe, output);
   await exerciseRootUploadContinuation(browser, origin, axe, output);
   await exerciseDeleteFile(browser, origin, axe, output);
-  await exerciseShareRecipient(browser, origin, axe, output);
+  const pickerBrowser = await chromium.launch({ headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] });
+  try { await exerciseShareRecipient(pickerBrowser, origin, axe, output); } finally { await pickerBrowser.close(); }
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
