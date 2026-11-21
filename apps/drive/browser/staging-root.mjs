@@ -285,7 +285,7 @@ try {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
-  await proveNewFolder(page, origin, DB, 'owner', (path, handler) => overrides.set(path, handler));
+  await proveNewFolder(page, origin, DB, 'owner', (path, handler) => overrides.set(path, handler), index);
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });

@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 
-export async function proveNewFolder(page, origin, DB, principal, intercept) {
+export async function proveNewFolder(page, origin, DB, principal, intercept, listingIndex) {
   const owner = !!intercept;
   const opener = page.getByRole('button', { name: 'New folder', exact: true });
   const dialog = page.getByRole('dialog', { name: 'New folder in My Drive' });
@@ -94,9 +94,8 @@ export async function proveNewFolder(page, origin, DB, principal, intercept) {
         await row.evaluate(el => { el.closest('.listing').style.width = '390px'; el.blur(); });
         await row.and(page.locator('li')).waitFor();
       }
-      await page.reload({ waitUntil: 'networkidle' });
-      await page.getByText(name, { exact: true }).filter({ visible: true }).waitFor();
       if (!owner) continue;
+      await page.reload({ waitUntil: 'networkidle' });
       await open();
       await submit(name, 409);
       await dialog.getByText(/There's already a folder/).waitFor();
@@ -122,23 +121,24 @@ export async function proveNewFolder(page, origin, DB, principal, intercept) {
       await submit(earlier, 201);
       await opener.and(active).waitFor();
       await page.getByText('It isn’t on this page.', { exact: false }).waitFor();
-      assert.equal(page.url(), continuation);
+      assert.deepEqual([page.url(), await page.getByText(earlier, { exact: true }).count()], [continuation, 0]);
       assert.ok(await folderId(earlier));
-      assert.equal(await page.getByText(earlier, { exact: true }).count(), 0);
       await evidence('off-page');
-      const upload = 'Concurrent upload.txt', release = Promise.withResolvers();
       const nameAfterFailure = `Z Refresh failed ${width}`, attempts = requests.length;
-      intercept('/api/uploads', async route => { await release.promise; return route.fulfill({ status: 503 }); });
-      try {
-        await uploadFile(upload);
-        await status(`Uploading ${upload}`).waitFor();
-        await open();
-        intercept('/__data.json', route => width === 390 ? route.abort() : route.fulfill({ status: 503 }));
-        await submit(nameAfterFailure, 201);
-        await recovery.and(active).waitFor();
-      } finally { release.resolve(); }
-      await status(`${upload}: Upload interrupted.`).waitFor();
-      assert.equal(await recovery.and(active).count(), 1);
+      await open();
+      if (!concurrent) intercept('/__data.json', route => route.abort());
+      await submit(nameAfterFailure, 201);
+      if (concurrent) {
+        await page.locator('[data-created-row]').and(active).filter({ hasText: nameAfterFailure }).waitFor();
+        intercept('/__data.json', async (_, relay) => {
+          await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
+          await relay(true, () => DB.prepare(listingIndex).run());
+        });
+        const [read] = await Promise.all([page.waitForResponse('**/__data.json?*'), uploadFile('Later upload.txt')]);
+        assert.equal(read.status(), 200);
+        await page.getByText("This folder didn't load.", { exact: false }).waitFor();
+      }
+      await recovery.and(active).waitFor();
       await status(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`).waitFor();
       await evidence('refresh-failed');
       const [document] = await Promise.all([

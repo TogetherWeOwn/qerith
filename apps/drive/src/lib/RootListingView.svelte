@@ -71,7 +71,7 @@
     await tick();
     close();
     if (createdVisible) list?.focusCreatedRow(id);
-    else if (needsRefresh) recovery?.focus();
+    else recovery?.focus();
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
@@ -80,7 +80,7 @@
     reload: true, size: '', bytes: null, modified: '', shared: false
   })) : []);
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
-  const needsRefresh = $derived(receipt && !receipt.loaded && !createdVisible);
+  const needsRefresh = $derived(receipt && (result.status === 'unavailable' || (result.status === 'ok' && !receipt.loaded && !createdVisible)));
 </script>
 
 <header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
@@ -93,7 +93,7 @@
   {/if}
 </header>
 <p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
-{#if createFolderAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
+{#if createFolderAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
 {:else if result.status === 'invalid-page'}
