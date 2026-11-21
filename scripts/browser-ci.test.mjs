@@ -104,7 +104,10 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
         const wrongHeight = Buffer.from(png), overrun = Buffer.from(png);
         wrongHeight.writeUInt32BE(844, 20);
         overrun.writeUInt32BE(png.length, 33); // IDAT claims more bytes than the file contains.
-        for (const invalid of [headerOnly, wrongHeight, overrun]) {
+        const malformedType = Buffer.from(png);
+        malformedType[37] |= 0x80; // Set the high bit on the I in IDAT, leaving the payload intact.
+        malformedType.writeUInt32BE(crc32(malformedType.subarray(37, -16)), malformedType.length - 16);
+        for (const invalid of [headerOnly, wrongHeight, overrun, malformedType]) {
           await writeFile(screenshot, invalid);
           await assert.rejects(verifyContinuation(), /Invalid continuation screenshot: uploaded-1280/);
         }

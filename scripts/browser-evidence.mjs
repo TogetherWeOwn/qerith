@@ -17,7 +17,7 @@ function hasViewportImageData(png, width, height) {
     const length = png.readUInt32BE(offset);
     const end = offset + length + 12;
     if (end > png.length) return false;
-    const type = png.toString('ascii', offset + 4, offset + 8);
+    const type = png.toString('latin1', offset + 4, offset + 8); // Preserve the high bit of each byte.
     if (type === 'IEND') return hasData && end === png.length &&
       png.subarray(offset).equals(Buffer.from('0000000049454e44ae426082', 'hex'));
     if (type === 'IDAT' && length > 0) hasData = true;

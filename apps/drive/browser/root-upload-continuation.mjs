@@ -10,6 +10,7 @@ const name = 'Re-picked.txt';
 const partBytes = 16 * 1024 * 1024;
 const file = buffer => ({ name, mimeType: 'text/plain', buffer });
 const repicked = Buffer.alloc(partBytes + 1, 42);
+repicked[partBytes] = 33; // The suffix hash must differ from the first byte's hash.
 const prefix = repicked.subarray(0, partBytes);
 const cases = [
   { label: 'acknowledged', bytes: repicked, parts: [prefix, repicked.subarray(partBytes)] },
