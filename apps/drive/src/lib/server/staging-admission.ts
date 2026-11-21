@@ -1,11 +1,12 @@
 import { isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-navigation';
 import { downloadRedirect, downloadSignIn, isExactDownloadGet } from './download-navigation';
+import { dispatchEligibleRecipients } from './eligible-recipient-route';
 import { entryChangeRequest, entryChangeSource, type MetadataWriteEnv } from './entry-change-route';
 import { postFolder } from './folder-route';
 import { Sessions } from './identity/sessions';
 import { getMoveDestinations, moveDestinationsPath } from './move-destinations';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
+import { eligibleRecipientEntry, readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor } from './shared-page';
 import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
@@ -21,7 +22,8 @@ interface PreviewAssets {
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'upload-resume' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'upload-resume' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' } |
+  { kind: 'read-grant' | 'eligible-recipients' } |
   { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' } | { kind: 'move-destinations' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
   { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'shared' | 'shared-asset' | 'root'; deadline?: number };
@@ -89,15 +91,19 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const url = new URL(request.url);
   const { pathname, search } = url;
   const invite = admitsStagingInvite(env);
-  const readGrant = admitsStagingReadGrants(env) && readGrantAdmissionRoute(request, url);
-  const target: Target | null = readGrant ? { kind: 'read-grant' } : invite && ownerLifecycleRoute(request, url)
-    ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite, admitsSharedListing(env));
+  const grants = admitsStagingReadGrants(env);
+  const readGrant = grants && readGrantAdmissionRoute(request, url);
+  const eligibleRecipients = grants && request.method === 'GET' && eligibleRecipientEntry(request, url) !== null;
+  const target: Target | null = readGrant ? { kind: 'read-grant' } : eligibleRecipients ? { kind: 'eligible-recipients' }
+    : invite && ownerLifecycleRoute(request, url) ? { kind: 'owner-lifecycle' }
+    : route(request, url, assets, invite, admitsSharedListing(env));
   if (!target) return deny(404);
+  const grantManagement = target.kind === 'read-grant' || target.kind === 'eligible-recipients';
   if (target.kind === 'upload-resume') {
     if (!allowsStagingInviteSite(request)) return deny(403);
     if (!isBodylessUploadResume(request)) return deny(400);
   }
-  if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant' || target.kind === 'metadata-write' ||
+  if ((target.kind === 'owner-lifecycle' || grantManagement || target.kind === 'metadata-write' ||
       target.kind === 'move-destinations') && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
@@ -128,7 +134,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       }
       const memberRoute = target.kind === 'upload' || target.kind === 'upload-resume'
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
-        : target.kind === 'read-grant' || invite && (target.kind === 'root' || target.kind === 'root-data' ||
+        : grantManagement || invite && (target.kind === 'root' || target.kind === 'root-data' ||
           target.kind === 'private-asset' || target.kind === 'download' ||
           target.kind === 'folder' || target.kind === 'folder-asset' || target.kind === 'metadata-write' ||
           target.kind === 'move-destinations');
@@ -197,6 +203,8 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
       return target.operation === 'create-folder' ? postFolder(request, env) : entryChangeRequest(request, env) ?? deny(404);
     case 'move-destinations':
       return getMoveDestinations(request, env);
+    case 'eligible-recipients':
+      return dispatchEligibleRecipients(request, env, dispatch.adapter) ?? deny(404);
     case 'read-grant': {
       const url = new URL(request.url);
       // The adapter can reject reserved query keys before Drive's hook runs.

@@ -404,6 +404,11 @@ export default {
       assert.equal(publication.status, 201, 'owner can publish');
       assert.match(await (await get('/', { cookie })).text(), /staging-fixture\.txt/);
       const { id } = await publication.json();
+      for (const action of ['read-grants', 'eligible-recipients']) {
+        const closed = await get(`/api/entries/${id}/${action}`, { cookie, 'x-test-qualification': '1' });
+        assert.deepEqual([closed.status, closed.headers.get('cache-control'), await closed.text()], [404, 'private, no-store', ''],
+          `candidate readiness alone leaves ${action} closed on an owned entry`);
+      }
       const generation = await DB.prepare('SELECT owner_id, etag FROM drive_published_generations WHERE entry_id = ?').bind(id).first();
       assert.deepEqual(generation, { owner_id: 'fixture', etag: '"object"' }, 'the deletion probe targets an owned, pinned generation');
       const deletionState = async () => (await DB.batch([
