@@ -673,7 +673,9 @@ test('inventory rejects any native Queue before and after the attempt', async t 
     f.state.queueList = undefined;
     const inspect = f.create();
     if (phase === 'after') assert.equal(await inspect('before'), true);
-    f.state.queueList = emptyPagedRoster({ result: [{ queue_name: 'synthetic', consumers: [] }] });
+    const queues = [{ queue_name: 'synthetic', consumers: [] }];
+    f.state.queueList = emptyPagedRoster({ result: queues,
+      result_info: { page: 1, per_page: 100, count: queues.length, total_count: queues.length, total_pages: 1 } });
     await assert.rejects(inspect(phase), error);
     assert.equal(f.trace.at(-1), 'queues');
   }
