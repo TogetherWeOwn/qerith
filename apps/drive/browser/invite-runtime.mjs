@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { tsImport } from 'tsx/esm/api';
 import { proveNewFolder } from './new-folder.mjs';
+import { proveRename } from './rename.mjs';
 import { proveMemberDownload } from './member-download.mjs';
 import { proveOwnerIssue } from './owner-invite-runtime.mjs';
 import { capture, widths } from './root-listing.mjs';
@@ -226,6 +227,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
       for (const path of ownerNodes) await memberRoot.check(path, 'GET', 404);
       await proveNewFolder(page, origin, DB, id);
+      await proveRename(page, { origin, DB, principal: id });
     }
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();
@@ -285,6 +287,7 @@ async function proveMemberRoot(page, context, { worker, asset, ...options }, cap
     return response;
   };
   assert.equal(await (await check('/', 'HEAD', 200)).text(), '');
+  assert.equal((await options.defaultWorker.fetch(`${origin}/`, { headers: { origin, cookie } })).status, 403);
   await check(asset, 'GET', 200);
   const { name, checkRevoked } = await proveMemberDownload(page, { ...options, worker, cookie, check, captureState });
   const data = await (await check(dataPath, 'GET', 200)).text();

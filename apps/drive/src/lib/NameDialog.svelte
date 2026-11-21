@@ -1,12 +1,15 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { flushSync, tick } from 'svelte';
   import { entryId } from './download-id';
+  import { isMetadataId } from './metadata-id';
   import { validateName } from './entry-name';
   import './dialog.css';
 
-  let { available, items, oncreated }: {
+  let { available, items, oncreated, onrenamed, onreturn }: {
     available: boolean;
     items: { name: string; kind: string }[];
+    onrenamed: (id: string, name: string, close: () => void) => Promise<void>;
+    onreturn: (id: string) => void;
     oncreated: (id: string, name: string, close: () => void) => Promise<void>;
   } = $props();
   const id = $props.id();
@@ -14,9 +17,11 @@
   let first: HTMLButtonElement, last: HTMLButtonElement;
   let opener = $state<HTMLButtonElement>(), notice = $state<HTMLParagraphElement>();
   let backdrop = false;
-  let name = $state(''), checking = $state(false), pending = $state(false);
+  let name = $state(''), checking = $state(false), pending = $state(false), refreshing = $state(false);
   let clash = $state(''), failure = $state('');
+  let target = $state<{ id: string; name: string; kind: string; path: string }>();
   const invalid = $derived(checking ? nameError(name) || clash : '');
+  const pendingText = $derived(refreshing ? 'Refreshing My Drive…' : target ? 'Renaming…' : 'Making folder…');
 
   function nameError(value: string) {
     try { validateName(value); return ''; } catch {
@@ -27,75 +32,94 @@
     }
   }
 
-  function open() {
-    name = clash = failure = ''; checking = false;
-    dialog.showModal(); field.focus();
+  export function open(entry?: NonNullable<typeof target>) {
+    if (dialog.open) return;
+    flushSync(() => { target = entry; name = entry?.name ?? ''; clash = failure = ''; checking = false; });
+    // Selection uses the displayed text; the binding retains stored line breaks until edit.
+    const dot = entry?.kind === 'File' ? field.value.lastIndexOf('.') : -1;
+    const end = dot > 0 && dot < field.value.length - 1 ? dot : field.value.length;
+    dialog.showModal(); field.focus(); field.setSelectionRange(0, end);
   }
-  function close() { dialog?.close(); opener?.focus(); }
-  function dismiss() { if (!pending) close(); }
+  function close() { dialog.close(); }
+  function dismiss() {
+    if (pending) return;
+    close();
+    if (target) onreturn(target.id);
+    else opener?.focus();
+  }
   function keys(event: KeyboardEvent) {
     if (event.key !== 'Tab') return;
     const [from, to] = event.shiftKey ? [first, last] : [last, first];
     if (document.activeElement === from) { event.preventDefault(); to.focus(); }
   }
 
-  async function makeFolder(event: SubmitEvent) {
+  async function save(event: SubmitEvent) {
     event.preventDefault();
     if (pending) return;
+    const entry = target;
+    if (entry && name === entry.name) { dismiss(); return; }
     checking = true; failure = '';
     if (invalid) { await tick(); field.focus(); return; }
     pending = true;
     const submitted = name;
-    const unknown = 'We couldn’t confirm the folder was created. Check My Drive before trying again.';
-    let created: string | undefined;
+    const unknown = entry ? 'We couldn’t confirm the rename. Check My Drive before trying again.' :
+      'We couldn’t confirm the folder was created. Check My Drive before trying again.';
+    let saved: string | undefined;
     try {
-      const response = await fetch('/api/folders', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',
-        body: JSON.stringify({ name: submitted, parentId: null }),
+      const response = await fetch(entry?.path ?? '/api/folders', {
+        method: entry ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',
+        body: JSON.stringify(entry ? { kind: 'rename', name: submitted } : { name: submitted, parentId: null }),
+        ...(entry ? { signal: AbortSignal.timeout(15_000) } : {}),
       });
-      if (response.status === 201) {
-        const folder = await response.json();
-        if (typeof folder?.id === 'string' && entryId.test(folder.id) && folder.kind === 'folder' &&
-            folder.parentId === null && folder.name === submitted) created = folder.id;
+      if (response.status === (entry ? 200 : 201)) {
+        const row = await response.json();
+        const expected = entry ? row?.id === entry.id && row.kind === entry.kind.toLowerCase() &&
+          (row.parentId === null || isMetadataId(row.parentId)) :
+          typeof row?.id === 'string' && entryId.test(row.id) && row.kind === 'folder' && row.parentId === null;
+        if (expected && row.name === submitted) saved = row.id;
         else failure = unknown;
       } else if (response.status === 409) {
-        // The empty 409 doesn't expose the conflicting entry's kind. Only name a kind we can already see.
-        const kind = items.find(item => item.name === submitted)?.kind.toLowerCase();
-        clash = `There's already ${kind ? `a ${kind}` : 'an item'} called "${submitted}" here. Pick another name.`;
-      } else if (response.status === 400) failure = 'Check the folder name and try again.';
-      else if (response.status === 401) failure = 'Sign in again before making a folder.';
-      else if (response.status === 403 || response.status === 404) failure = 'You can’t make a folder here. Refresh My Drive.';
+        // Rename checks the live parent, which need not match this listing.
+        const kind = !entry && items.find(item => item.name === submitted)?.kind.toLowerCase();
+        clash = entry ? `The name "${submitted}" is already in use. Pick another name.` :
+          `There's already ${kind ? `a ${kind}` : 'an item'} called "${submitted}" here. Pick another name.`;
+      } else if (response.status === 400) failure = entry ? 'Check the name and try again.' : 'Check the folder name and try again.';
+      else if (response.status === 401) failure = entry ? 'Sign in again before renaming this item.' : 'Sign in again before making a folder.';
+      else if (response.status === 403 || response.status === 404) failure = entry ?
+        'This item can’t be renamed. Refresh My Drive.' : 'You can’t make a folder here. Refresh My Drive.';
       else failure = unknown;
     } catch { failure = unknown; }
 
-    try { if (created) await oncreated(created, submitted, close); }
-    finally { pending = false; }
-    if (!created) { await tick(); (clash ? field : notice)?.focus(); }
+    try {
+      if (saved && entry) { refreshing = true; await onrenamed(saved, submitted, close); }
+      else if (saved) await oncreated(saved, submitted, () => { close(); opener?.focus(); });
+    } finally { refreshing = pending = false; }
+    if (!saved) { await tick(); (clash ? field : notice)?.focus(); }
   }
 </script>
 
-{#if available}<button class="new-folder" type="button" bind:this={opener} onclick={open}>New folder</button>{/if}
+{#if available}<button class="new-folder" type="button" bind:this={opener} onclick={() => open()}>New folder</button>{/if}
 <dialog class="drive-dialog" bind:this={dialog} aria-labelledby={`${id}-title`} closedby={pending ? 'none' : 'closerequest'}
   onkeydown={keys} oncancel={event => { event.preventDefault(); dismiss(); }}
   onpointerdown={event => { backdrop = event.target === dialog; }}
   onclick={event => { if (backdrop && event.target === dialog) dismiss(); }}>
-  <form class="panel" onsubmit={makeFolder} autocomplete="off">
+  <form class="panel" onsubmit={save} autocomplete="off">
     <header>
-      <h2 id={`${id}-title`}>New folder in My Drive</h2>
+      <h2 id={`${id}-title`}>{#if target}Rename “<bdi>{target.name}</bdi>”{:else}New folder in My Drive{/if}</h2>
       <button class="close" type="button" aria-label="Close" aria-disabled={pending} bind:this={first} onclick={dismiss}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
     </header>
-    <p class="status" role="status">{pending ? 'Making folder…' : ''}</p>
+    <p class="status" role="status">{pending ? pendingText : ''}</p>
     {#if failure}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{failure}</p>{/if}
     <div class="field">
-      <label for={`${id}-name`}>Folder name</label>
+      <label for={`${id}-name`}>{target ? 'Name' : 'Folder name'}</label>
       <input id={`${id}-name`} bind:this={field} bind:value={name} dir="auto" readonly={pending} oninput={() => { clash = ''; }}
         aria-invalid={!!invalid} aria-describedby={invalid ? `${id}-error` : undefined} />
       {#if invalid}<span id={`${id}-error`} role="alert" dir="auto">{invalid}</span>{/if}
     </div>
     <footer>
-      <button class="primary" type="submit" aria-disabled={pending} aria-busy={pending}>{pending ? 'Making folder…' : 'Make folder'}</button>
+      <button class="primary" type="submit" aria-disabled={pending} aria-busy={pending}>{pending ? pendingText : target ? 'Rename' : 'Make folder'}</button>
       <button type="button" aria-disabled={pending} bind:this={last} onclick={dismiss}>Cancel</button>
     </footer>
   </form>
@@ -106,6 +130,7 @@
   header { justify-content: space-between; }
   footer { justify-content: flex-end; }
   p { margin: 0; overflow-wrap: anywhere; }
+  h2 { min-width: 0; overflow-wrap: anywhere; }
   .status { position: absolute; clip-path: inset(50%); }
   .field { display: grid; gap: var(--drive-space-1); font-size: var(--drive-font-size-ui); }
   .field span { color: var(--drive-color-state-danger); font-size: var(--drive-font-size-small); overflow-wrap: anywhere; }
