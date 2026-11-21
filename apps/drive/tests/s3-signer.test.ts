@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { AwsClient } from 'aws4fetch';
 import { createS3Signer } from '../src/lib/server/s3/signer';
 
 // Published examples: https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html
@@ -58,6 +59,18 @@ test('signs the actual normalized request and preserves fetch options', async ()
     method: 'PUT', body: 'hello', keepalive: true,
     headers: { 'x-amz-content-sha256': emptyHash }
   }), /keepalive/);
+});
+
+test('signs with the original abort signal, not the normalization request signal', async (t) => {
+  const sign = t.mock.method(AwsClient.prototype, 'sign');
+  const signer = createS3Signer({ ...options, fetch });
+  const controller = new AbortController();
+  const request = await signer.sign('https://example.invalid/', {
+    headers: { 'x-amz-content-sha256': emptyHash }, signal: controller.signal
+  });
+  assert.equal(sign.mock.calls[0]?.arguments[1]?.signal, controller.signal);
+  controller.abort();
+  assert.equal(request.signal.reason, controller.signal.reason);
 });
 
 test('snapshots mutable bodies before asynchronous signing', async () => {
