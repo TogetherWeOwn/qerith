@@ -208,6 +208,73 @@ test('rejects at fence expiry even when the timeout callback has not run', async
   assert.deepEqual(calls, trace);
 });
 
+test('a wall-clock rollback cannot extend the verified fence into a later phase or final readback', async t => {
+  const epoch = 1_780_000_000_000;
+  t.mock.timers.enable({ apis: ['Date'], now: epoch });
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => elapsed);
+  for (const [name, phase, count] of [['recoverD1', 'D1 recovery', 6], ['cleanupR2', 'R2 cleanup', 7]]) {
+    t.mock.timers.setTime(epoch);
+    elapsed = 0;
+    const { adapters, calls } = fixture();
+    override(adapters, 'recoverWorker', result => {
+      elapsed = 40_000;
+      t.mock.timers.setTime(epoch - 20_000); // A 60-second wall-clock rollback.
+      return result;
+    });
+    let blockedAtBoundary = false;
+    override(adapters, name, (result, ...args) => {
+      const assertHeld = args.at(-1);
+      assertHeld();
+      elapsed = 65_000;
+      t.mock.timers.setTime(epoch + 5_000);
+      try { assertHeld(); } catch { blockedAtBoundary = true; }
+      return result;
+    });
+    await assert.rejects(recoverQualification(source, adapters), new RegExp(`\\(${phase}\\)`));
+    assert.equal(blockedAtBoundary, true);
+    assert.deepEqual(calls, trace.slice(0, count));
+  }
+});
+
+test('fence deadline aborts in-flight recovery and waits for it to drain', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_780_000_000_000 });
+  t.mock.method(performance, 'now', () => Date.now() - 1_780_000_000_000);
+  for (const [name, phase, count] of [['recoverD1', 'D1 recovery', 6], ['cleanupR2', 'R2 cleanup', 7]]) {
+    const { adapters, calls, fence } = fixture();
+    const started = Promise.withResolvers();
+    const drained = Promise.withResolvers();
+    const leaseMs = 10_000;
+    override(adapters, 'readWriterFence', proof => {
+      proof.snapshot.fence.until = Date.now() + leaseMs;
+      return proof;
+    });
+    override(adapters, name, async (result, ...args) => {
+      const [active, assertHeld] = args.slice(-2);
+      started.resolve({ active, assertHeld });
+      await drained.promise;
+      return result; // An adapter reporting success after drain must not certify recovery.
+    });
+    let settled = false;
+    const rejected = assert.rejects(recoverQualification(source, adapters).finally(() => { settled = true; }),
+      { message: `Staging qualification recovery is unverified (${phase}).` });
+    const { active, assertHeld } = await started.promise;
+    try {
+      t.mock.timers.tick(leaseMs - 1);
+      assertHeld();
+      t.mock.timers.tick(1);
+      assert.equal(fence.signal.aborted, false); // The lease timer, not revocation, aborted the phase.
+      assert.equal(active.aborted, true);
+      assert.throws(assertHeld);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false);
+      assert.deepEqual(calls, trace.slice(0, count));
+    } finally { drained.resolve(); }
+    await rejected;
+    assert.deepEqual(calls, trace.slice(0, count));
+  }
+});
+
 test('phase deadline aborts in-flight work, waits for it to drain and never starts recovery', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { adapters, calls } = fixture();

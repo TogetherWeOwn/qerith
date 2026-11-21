@@ -125,12 +125,16 @@ test('recovery only reads signed historical records after authenticating the exa
   const jobs = { total_count: 1, jobs: [{ name: 'source', status: 'completed', conclusion: 'success',
     run_id: 182, run_attempt: 3, head_sha: source.sha, steps: [{ name: 'Verify exact dispatch source before staging approval',
       status: 'completed', conclusion: 'success' }] }] };
-  for (const superseded of [true, false]) {
+  const version = '11111111-1111-1111-1111-111111111111', expiresAt = '1780000000000';
+  const previousVersion = '22222222-2222-2222-2222-222222222222';
+  const previousDeployment = '33333333-3333-3333-3333-333333333333';
+  for (const outcome of ['superseded', 'copied record', 'verified']) {
     const calls = [];
+    const fence = new AbortController();
     let gitHubReads = 0;
     const recover = createQualificationRecovery(env, cwd, {
       token: 'fixture', githubRequest: async () => Response.json([run, jobs,
-        { ...run, run_attempt: superseded ? 4 : 3 }][gitHubReads++]),
+        { ...run, run_attempt: outcome === 'superseded' ? 4 : 3 }][gitHubReads++]),
       async send(request) {
         assert.equal(gitHubReads, 3);
         assert.equal(request.method, 'GET');
@@ -138,20 +142,35 @@ test('recovery only reads signed historical records after authenticating the exa
         const kind = calls.length ? 'worker' : 'd1';
         assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${source.sha}-run-182-attempt-3`);
         calls.push(kind);
-        // A Worker record copied from a different attempt must stop recovery.
         const body = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind, ...source,
-          ...(kind === 'worker' ? { attempt: '2', version: '11111111-1111-1111-1111-111111111111',
-            expiresAt: '1780000000000', previousVersion: '22222222-2222-2222-2222-222222222222',
-            previousDeployment: '33333333-3333-3333-3333-333333333333' } : { bookmark: 'pre_apply' }) });
+          ...(kind === 'worker' ? { attempt: outcome === 'copied record' ? '2' : attempt,
+            version, expiresAt, previousVersion, previousDeployment } : { bookmark: 'pre_apply' }) });
         const date = new Date().toUTCString();
         return new Response(body, { headers: { date, 'last-modified': date, 'content-length': String(Buffer.byteLength(body)) } });
       },
-      readWriterFence() { calls.push('fence'); }, recoverWorker() { calls.push('Worker'); },
-      recoverD1() { calls.push('D1'); }, cleanupR2() { calls.push('R2 cleanup'); },
+      readWriterFence(candidate) {
+        assert.deepEqual(candidate, { ...source, version, expiresAt });
+        calls.push('fence');
+        const at = Date.now(), settled = { state: 'settled', at }, fenced = { state: 'fenced', at };
+        return { signal: fence.signal, snapshot: {
+          fence: { coverage: 'exclusive', current: source, superseded: false, since: at, until: at + 60_000 },
+          observedAt: at, runner: settled, candidate: { ...fenced, version, expiresAt }, inFlight: settled,
+          storageUrls: fenced, storageInFlight: settled, providerOperations: settled,
+        } };
+      },
+      recoverWorker(_identity, record) {
+        assert.deepEqual([record.previousVersion, record.previousDeployment], [previousVersion, previousDeployment]);
+        calls.push('Worker');
+        return { status: 'baseline-observed', version: previousVersion, deployment: previousDeployment };
+      },
+      recoverD1(_identity, record) { assert.equal(record.bookmark, 'pre_apply'); calls.push('D1'); return true; },
+      cleanupR2(context) { assert.deepEqual(context, { ...source, prefix }); calls.push('R2 cleanup'); return true; },
     });
-    await assert.rejects(recover(source), superseded ? /\(source\)/ : /\(worker record\)/);
+    if (outcome === 'verified') assert.equal(await recover(source), undefined);
+    else await assert.rejects(recover(source), outcome === 'superseded' ? /\(source\)/ : /\(worker record\)/);
     assert.equal(gitHubReads, 3);
-    assert.deepEqual(calls, superseded ? [] : ['d1', 'worker']);
+    assert.deepEqual(calls, outcome === 'superseded' ? [] : outcome === 'copied record' ? ['d1', 'worker'] :
+      ['d1', 'worker', 'fence', 'Worker', 'D1', 'R2 cleanup']);
   }
 });
 

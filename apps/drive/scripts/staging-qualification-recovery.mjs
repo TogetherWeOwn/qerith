@@ -13,6 +13,7 @@ const matches = (value, pattern) => typeof value === 'string' && pattern.test(va
 const sameAttempt = (value, { sha, runId, attempt }) =>
   value?.sha === sha && value.runId === runId && value.attempt === attempt;
 const refused = phase => new Error(`Staging qualification recovery is unverified (${phase}).`);
+const fenceRemaining = ({ validUntil, deadline }) => Math.min(validUntil - Date.now(), deadline - performance.now());
 
 // Unwired. The protected caller holds the shared lifecycle lock throughout.
 // readSource authenticates the exact workflow attempt and its source job from
@@ -35,12 +36,12 @@ export async function recoverQualification(request, { readSource, readRecord, re
   const phase = async (name, timeout, task, fence) => {
     try {
       const parent = fence ? AbortSignal.any([signal, fence.signal].filter(Boolean)) : signal;
-      const budget = fence ? Math.min(timeout, fence.validUntil - Date.now()) : timeout;
+      const budget = fence ? Math.min(timeout, fenceRemaining(fence)) : timeout;
       if (budget <= 0) throw refused(name);
       return await runQualificationPhase(async (_, active) => {
         const assertHeld = () => {
           active.throwIfAborted();
-          if (fence && Date.now() >= fence.validUntil) throw refused(name);
+          if (fence && fenceRemaining(fence) <= 0) throw refused(name);
         };
         assertHeld();
         const value = await task(active, assertHeld);
@@ -75,8 +76,10 @@ export async function recoverQualification(request, { readSource, readRecord, re
     const candidate = Object.freeze({ ...source, version, expiresAt });
     const { snapshot, signal: held } = await readWriterFence(candidate, active) ?? {};
     if (!(held instanceof AbortSignal) || held === active) throw refused('writer quiescence');
-    const { validUntil } = verifyQualificationQuiescence(candidate, snapshot, { now: Date.now, signal: held });
-    return { signal: held, validUntil };
+    // A wall-clock rollback cannot extend the lease across recovery phases.
+    const sampledAt = performance.now();
+    const { verifiedAt, validUntil } = verifyQualificationQuiescence(candidate, snapshot, { now: Date.now, signal: held });
+    return { signal: held, validUntil, deadline: sampledAt + (validUntil - verifiedAt) };
   });
   const requireProof = async (name, timeout, task) => {
     if (await phase(name, timeout, task, fence) !== true) throw refused(name);
@@ -91,7 +94,7 @@ export async function recoverQualification(request, { readSource, readRecord, re
           restored.deployment !== worker.previousDeployment)) throw refused('Worker restore');
   await requireProof('D1 recovery', 120_000, (active, assertHeld) => recoverD1(source, d1, active, assertHeld));
   await requireProof('R2 cleanup', 60_000, (active, assertHeld) => cleanupR2(context, active, assertHeld));
-  if (signal?.aborted || fence.signal.aborted || Date.now() >= fence.validUntil) throw refused('R2 cleanup');
+  if (signal?.aborted || fence.signal.aborted || fenceRemaining(fence) <= 0) throw refused('R2 cleanup');
 }
 
 // Offline composition only. No transport, writer fence or mutation adapter defaults.

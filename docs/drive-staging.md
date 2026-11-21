@@ -235,10 +235,10 @@ exact-dispatch check, and the latest run metadata. It rejects superseded or
 ambiguous sources before making signed reads of the two records at the source
 SHA's reviewed binding. A later rerun is excluded by the authoritative writer
 fence, not by the GitHub read. The coordinator verifies that fence against the
-recorded candidate and enforces its loss signal and deadline through the final
-readback. The v1 bookmark and a post-list ledger are not independent D1 restore
-attribution. Mutation adapters remain unwired; the protected workflow does not
-invoke recovery.
+recorded candidate and enforces its loss signal and the earlier of wall-clock
+expiry and the original monotonic deadline through the final readback. The v1
+bookmark and a post-list ledger are not independent D1 restore attribution.
+Mutation adapters remain unwired; the protected workflow does not invoke recovery.
 
 The unwired recovery store uses the source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
