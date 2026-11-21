@@ -18,8 +18,12 @@ function isId(value: unknown): value is string {
     !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value) && encoder.encode(value).length <= 512;
 }
 
+export function isShareMutationId(id: string): boolean {
+  return isId(id) && id !== '.' && id !== '..';
+}
+
 function encodeId(id: string, pathSegment = false): string {
-  if (!isId(id) || (pathSegment && (id === '.' || id === '..'))) throw new TypeError('Invalid Share ID');
+  if (!(pathSegment ? isShareMutationId(id) : isId(id))) throw new TypeError('Invalid Share ID');
   return encodeURIComponent(id).replaceAll("'", '%27');
 }
 
@@ -70,8 +74,11 @@ export function entryShare(entryId: string, fetcher: typeof fetch = fetch) {
     return { recipients: items, nextCursor };
   }
 
-  async function change(recipientId: string, method: 'PUT' | 'DELETE'): Promise<void> {
-    const response = await fetcher(`${path}/read-grants/${encodeId(recipientId, true)}`, { ...request, method });
+  async function change(recipientId: string, method: 'PUT' | 'DELETE', signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const response = await fetcher(`${path}/read-grants/${encodeId(recipientId, true)}`, {
+      ...request, method, ...(signal && { signal }),
+    });
     if (response.status !== 204) throw new Error('Share change not confirmed');
   }
 
@@ -92,7 +99,7 @@ export function entryShare(entryId: string, fetcher: typeof fetch = fetch) {
       return { recipientId, displayName };
     }),
     listDirectGrants: (options: ReadOptions = {}) => readPage('read-grants', options, (recipientId) => ({ recipientId })),
-    grant: (recipientId: string) => change(recipientId, 'PUT'),
-    revoke: (recipientId: string) => change(recipientId, 'DELETE'),
+    grant: (recipientId: string, signal?: AbortSignal) => change(recipientId, 'PUT', signal),
+    revoke: (recipientId: string, signal?: AbortSignal) => change(recipientId, 'DELETE', signal),
   };
 }

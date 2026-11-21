@@ -6,49 +6,72 @@
     state: 'loading' | 'failed' | 'ready'; rows: readonly T[];
     previous?: () => void; next?: () => void; retry?: () => void;
   };
+  // Writes stop at the first unconfirmed attempt. The suffix was never sent.
+  export type ShareChange = { confirmed: number; uncertain: boolean };
 </script>
 <script lang="ts">
   import { tick } from 'svelte';
   import ShareRecipientPicker, { avatar } from './ShareRecipientPicker.svelte';
   import type { ShareAccess, ShareRecipient } from './share-client';
   import './dialog.css';
-  let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove }: {
+  let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove, onreturn, observedIneligible }: {
     name: string; kind: 'File' | 'Folder'; owner: { recipientId: string; driveOwner: boolean };
     access: SharePage<ShareAccess>;
     // The caller must exclude anyone with effective access, including access not on the current page.
     candidates: SharePage<ShareRecipient>; nobodyElse?: boolean; onInvite?: () => void;
-    // Resolve only after confirmation and refreshing the page(s); reject on failure or uncertainty.
-    onShare: (ids: readonly string[]) => Promise<void>; onRemove: (id: string) => Promise<void>;
+    // A void result confirms every write and refreshes access before resolving.
+    onShare: (ids: readonly string[]) => Promise<ShareChange | void>;
+    onRemove: (id: string) => Promise<ShareChange | void>;
+    onreturn?: () => void; observedIneligible?: (recipientId: string) => boolean;
   } = $props();
   const id = $props.id();
   const label = (person: ShareRecipient) => person.displayName?.trim() ? person.displayName : 'Name unavailable';
+  const names = new Intl.ListFormat('en');
+  const listNames = (people: ShareRecipient[]) => names.format(people.map(label));
   let dialog: HTMLDialogElement, accessTitle: HTMLElement, opener: HTMLElement | undefined;
   let first: HTMLButtonElement, last: HTMLButtonElement, backdrop = false;
+  const focusLost = () => document.activeElement === document.body || document.activeElement === dialog;
+  function focusPicker() {
+    if (dialog?.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
+  }
   let notice = $state<HTMLElement>(), session = $state(0);
   let picked = $state<ShareRecipient[]>([]), added = $state<string[]>([]);
   let confirm = $state<string | null>(null), pending = $state<'share' | 'remove' | null>(null);
-  let error = $state(''), live = $state(''), status = $state('');
+  let error = $state(''), live = $state(''), status = $state(''), selectionNotice = $state('');
   let paging = $state<'access' | 'candidates' | null>(null);
   const pageText = (page: SharePage<ShareRecipient>, subject: string, unpaged = '') => page.state === 'loading' ? `Loading ${subject}…` :
     page.state === 'ready' ? page.pageNumber === null ? unpaged : `Showing page ${page.pageNumber} of ${subject}.` : '';
-  const allowed = $derived(candidates.rows.filter(person => person.recipientId !== owner.recipientId &&
-    !access.rows.some(row => row.recipientId === person.recipientId)));
+  const canSelect = ({ recipientId }: ShareRecipient) => recipientId !== owner.recipientId &&
+    !(observedIneligible?.(recipientId) ?? access.rows.some(row => row.recipientId === recipientId));
+  const allowed = $derived(candidates.rows.filter(canSelect));
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
-    picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
+    !picked.every(canSelect));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
   const pageStatus = $derived(paging === 'access' ? pageText(access, 'people with access', 'Loaded people with access.') :
     paging ? pageText(candidates, 'people to add', 'Loaded people to add.') : '');
   const accessPagerEmpty = $derived(paging === 'access' && access.state === 'ready' && !access.previous && !access.next);
   $effect(() => { if (paging) live = pageStatus; });
+  $effect(() => {
+    if (pending) return;
+    const eligible = picked.filter(canSelect);
+    if (eligible.length !== picked.length) {
+      const active = document.activeElement;
+      picked = eligible;
+      selectionNotice = 'People who are no longer eligible were removed from the selection.';
+      if (active && dialog?.contains(active)) void tick().then(() => {
+        if (!active.isConnected && focusLost()) focusPicker();
+      });
+    }
+  });
   $effect(() => { if (accessPagerEmpty && document.activeElement?.id === `${id}-access-pager`) accessTitle.focus(); });
+  $effect(() => { if (nobody && focusLost()) focusPicker(); });
   // Mount per entry; its identity and owner must not change during a dialog session.
-  export async function open(from: HTMLElement) {
+  export async function open(from?: HTMLElement) {
     if (dialog.open) return;
-    opener = from; session++; picked = []; confirm = paging = null; error = live = status = ''; added = [];
-    dialog.showModal(); await tick();
-    if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
+    opener = from; session++; picked = []; confirm = paging = null; error = live = status = selectionNotice = ''; added = [];
+    dialog.showModal(); await tick(); focusPicker();
   }
-  function close() { if (!pending) { dialog.close(); opener?.focus(); } }
+  function close() { if (!pending) { dialog.close(); opener?.focus(); onreturn?.(); } }
   function keys(event: KeyboardEvent) {
     if (event.key !== 'Tab') return;
     const [from, to] = event.shiftKey ? [first, last] : [last, first];
@@ -57,27 +80,47 @@
   function load(event: MouseEvent, key: NonNullable<typeof paging>, action: () => void) {
     if (pending) return;
     (event.currentTarget as HTMLButtonElement).parentElement?.focus();
-    confirm = null; paging = key; live = status = '';
+    confirm = null; paging = key; live = status = selectionNotice = '';
     action();
   }
   function onPageFeedback(message: string, clear?: string) {
     if (message) { live = message; status = ''; }
     else if (live === clear) live = '';
   }
-  function select(ids: string[]) { if (!pending) picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []); }
+  function select(ids: string[]) {
+    if (pending) return;
+    selectionNotice = '';
+    picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
+  }
   async function apply(person?: ShareAccess) {
     if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
-    pending = person ? 'remove' : 'share'; paging = null; error = live = status = '';
+    pending = person ? 'remove' : 'share'; paging = null; error = live = status = selectionNotice = '';
     try {
       if (person) {
-        await onRemove(person.recipientId); confirm = null;
-        const inherited = person.inheritedFrom?.trim();
-        status = `Removed direct access for ${label(person)}.${inherited ? ` Access through ${person.inheritedFrom} remains.` : ''}`;
+        const result = await onRemove(person.recipientId);
+        confirm = null;
+        if (result && !result.confirmed) {
+          error = result.uncertain ? 'Couldn’t confirm removal of direct access. Check who has access before trying again.' : 'Removal wasn’t sent.';
+        } else {
+          const inherited = !result && access.state === 'ready' &&
+            access.rows.find(row => row.recipientId === person.recipientId)?.inheritedFrom?.trim();
+          status = `Removed direct access for ${label(person)}.${inherited ? ` Access through ${inherited} remains.` : ''}`;
+        }
       } else {
         const submitted = picked, ids = submitted.map(choice => choice.recipientId);
-        await onShare(ids);
-        added = [...new Set([...added, ...ids])]; picked = [];
-        status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
+        const { confirmed, uncertain } = await onShare(ids) ?? { confirmed: ids.length, uncertain: false };
+        added = [...new Set([...added, ...ids.slice(0, confirmed)])]; picked = [];
+        if (confirmed === ids.length) {
+          status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
+        } else {
+          const unsent = submitted.slice(confirmed + Number(uncertain));
+          error = [
+            confirmed && `Shared with ${listNames(submitted.slice(0, confirmed))}.`,
+            uncertain && `Couldn’t confirm sharing with ${label(submitted[confirmed])}.`,
+            unsent.length && `Sharing wasn’t sent for ${listNames(unsent)}.`,
+            uncertain && 'Check who has access before trying again.',
+          ].filter(Boolean).join(' ');
+        }
       }
     } catch {
       error = `${person ? 'Couldn’t confirm removal of direct access.' : 'Couldn’t confirm sharing.'} Check who has access before trying again.`;
@@ -85,7 +128,7 @@
       pending = null;
       await tick();
       if (error) notice?.focus();
-      else if (dialog.open && !dialog.contains(document.activeElement)) (person ? accessTitle : last).focus();
+      else if (dialog?.open && !dialog.contains(document.activeElement)) (person ? accessTitle : last).focus();
     }
   }
 </script>
@@ -121,7 +164,7 @@
           onSelectionChange={select} {onPageFeedback} afterField={candidatePages} locked={!!pending || candidates.state !== 'ready'} />
       {/key}
     {/if}
-    <p class:sr={!status} role="status">{status || live}</p>
+    <p class:sr={!status} role="status">{status || [live, selectionNotice].filter(Boolean).join(' ')}</p>
     <section aria-labelledby={`${id}-access`}>
       <h3 id={`${id}-access`} tabindex="-1" bind:this={accessTitle}>People with access</h3>
       <ul role="list">
