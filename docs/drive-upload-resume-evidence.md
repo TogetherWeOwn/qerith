@@ -1,12 +1,13 @@
 # Drive same-intent resume evidence
 
-The disposable Worker/D1 fixture serves `GET /api/uploads/<intentId>/resume`
-for one canonical lowercase UUID. Neither the app nor staging admits the route.
-The request must be bodyless and have no query string. An `Origin` header, when
-present, must match the Worker origin; `Sec-Fetch-Site` must be absent or
-`same-origin`. The handler derives the active session, principal and login
-generation on the server and uses the qualified, normalized upload storage
-binding. The reader rechecks these inputs and the evidence in the same fresh
+Staging serves `GET /api/uploads/<intentId>/resume` only with
+`DRIVE_STAGING_INVITE_ACCEPTANCE=1`, for a live upload-authorized owner or member
+reading their own allocation. The disposable Worker/D1 fixture remains separate.
+Both accept one canonical lowercase UUID. The request must be bodyless and have
+no query string. An `Origin` header, when present, must match the Worker origin;
+`Sec-Fetch-Site` must be absent or `same-origin`. The handler derives the active
+session, principal and login generation on the server and uses the qualified,
+normalized upload storage binding. The reader rechecks these inputs and the evidence in the same fresh
 `first-primary` D1 snapshot.
 
 The shared [`UploadResumeEvidence`](../apps/drive/src/lib/upload-resume-evidence.ts)
@@ -18,6 +19,10 @@ projection contains only:
   exact bytes acknowledged for that slot. Parts follow the picker's 16 MiB
   layout; the final part uses the exact remaining byte count. A zero-byte
   file has one planned part with size 0.
+- `expectedPartSha256s` (bound intents only): the complete immutable plan set at
+  allocation, packed as one 64-character lowercase hex digest per slot. Every
+  acknowledged digest must match its slot. The plan is not an acknowledgement:
+  even a complete plan can accompany `parts: []`.
 
 Every route response is `private, no-store`. Only a `200` carries JSON;
 `parts: []` means the eligible allocation has **no** recorded part operations.
@@ -26,9 +31,11 @@ missing or foreign intent. A gap, wrong part length, unknown or uncertain
 result, or legacy receipt without exact byte proof invalidates the entire
 projection. Sealing, cleanup and publication fences also make it unavailable.
 An initially missing or inactive session receives `401`; unavailable server
-storage qualification receives `503`. The exact path rejects other methods
-with `405` (`Allow: GET`), invalid query/body with `400`, and cross-origin or
-non-same-origin fetch metadata with `403`.
+storage qualification receives `503`. Staging rejects other methods, query
+strings, path aliases, and flag-off requests with `404`. On the fixture, the
+exact path rejects other methods with `405` (`Allow: GET`) and queries with
+`400`. Both reject invalid body framing with `400` and disallowed origins or
+fetch metadata with `403`.
 
 This is evidence at the read snapshot only. The route never contacts the
 provider or grants authority to send or complete an upload.
@@ -40,12 +47,25 @@ accepts an explicit candidate and re-picked file. It fetches evidence for that
 candidate only (64 KiB response cap) and checks the size and every acknowledged
 part against the file before any write. After verifying a full prefix it reports
 its cumulative byte count and submits the existing root Complete request once.
-A zero-byte file with an acknowledged part skips PUT; with `parts: []`, the
-client must get a `204` for one empty PUT before reporting zero and completing.
+This client still accepts only the legacy projection. A zero-byte file with an
+acknowledged part skips PUT; with `parts: []`, the client must get a `204` for
+one empty PUT before reporting zero and completing.
 Nonempty missing suffixes, unavailable evidence and uncertain requests return
-`interrupted`; nothing is allocated or retried. No picker calls this interface.
+`interrupted`; nothing is allocated or retried. The disposable fixture uses
+this legacy transport.
 
-## Why only full prefixes (and empty bytes) can proceed
+The separate, unwired `uploadBoundMultipartToRoot` transport hashes one 16 MiB
+slice at a time and allocates with `{size, expectedPartSha256s}`. The packed
+vector is the concatenation of the lowercase hex digests in part order. The
+successful allocation callback receives only the opaque application intent ID.
+`resumeBoundMultipartToRoot` requires `expectedPartSha256s` alongside
+`declaredSize` and `parts` in the bounded evidence response. It checks that
+every acknowledged slot agrees with the vector and that every selected-file
+slice matches it before sending any missing part. It never falls back to legacy
+evidence, allocates on resume, or replays a write. Neither the picker nor route
+admission is changed by these helpers.
+
+## Why only full prefixes (and empty bytes) can proceed without binding
 
 The [permanent slot claim](../apps/drive/migrations/0020_upload_part_operation_evidence.sql)
 prevents an acknowledged part from being replaced; the HTTP claim also checks
@@ -60,15 +80,37 @@ still uses the existing live authorization, storage and publication checks.
 A competing request can deny or preempt completion, but cannot substitute
 bytes in these cases.
 
-For a nonempty missing suffix, a slot claim does not bind the rest of the
-intent to the same file. Different writers can supply different slots, and
+For a nonempty missing suffix on an unbound intent, a slot claim does not bind
+the rest of the intent to the same file. Different writers can supply different slots, and
 Complete validates receipts and aggregate size, not a selected-file manifest.
 Waiting for the client's own PUTs or rereading evidence before Complete cannot
-fence a competing Complete. Before sending nonempty suffixes, the producer needs
-an atomic per-intent continuation claim: compare the current slot set and its
-acknowledged hashes to the verified prefix, pin the full ordered part lengths
-and SHA-256 hashes, and bind the claim to the existing intent version, session
-and storage identity. Every PUT path must enforce that claim and check the body
-against its pinned slot before dispatch. Every Complete path must require an
-exact acknowledged match to the pinned manifest at sealing. Unclaimed or stale
-writers must not bypass either check on a claimed intent.
+fence a competing Complete. The full file expectation must be bound at creation,
+not retrofitted after any part has been dispatched.
+
+## Expected parts producer and claim handoff
+
+The server-only [`UploadIntents`](../apps/drive/src/lib/server/metadata/upload-intents.ts)
+method `claimNewExpectedAllocation(principalId, sessionHash, size, endpoint,
+bucket, epoch, mode, parts): Promise<UploadIntent | null>` takes trusted server
+identity, session hash, normalized storage namespace and mode (`'owner'` or
+`'active'`). Its `parts: readonly ExpectedUploadPart[]` is an ordered proposal of
+`{ partNumber: number; sizeBytes: number; sha256: string }` records following the
+same 16 MiB plan as above. It commits the fresh intent, full vector, storage
+binding and version-1 allocation claim in one D1 batch. It returns no manifest,
+does not contact S3, and is not called by any upload route.
+
+The live part claim uses the intent row's immutable `declared_size`
+and `expected_part_sha256s: string | null`. For integer slot `n` in
+`1..length(expected_part_sha256s)/64`, the expected digest is
+`substr(expected_part_sha256s, (n - 1) * 64 + 1, 64)` (lowercase hex); the
+expected size is `min(16777216, declared_size - (n - 1) * 16777216)`. The server
+hashes the bounded request snapshot and checks its slot, size and digest in
+the fresh D1 claim **before any S3 dispatch**. The claim does not expose the vector or
+use client hashes. `NULL` preserves legacy fresh uploads and cannot authorize
+suffix continuation. The same snapshot and digest feed the existing trusted
+receipt path; a lost acknowledgement does not permit another dispatch.
+
+No route creates a bound intent yet. Before enabling suffix continuation,
+reconcile the acknowledged prefix with the verified file; never treat an
+in-flight or uncertain slot as missing. Sealing must require an exact
+acknowledged match to the full plan; a proposal alone cannot complete an upload.

@@ -58,6 +58,7 @@ esac
   const env = { PATH: localWrangler ? `${dirname(process.execPath)}:/usr/bin:/bin` : '/usr/bin:/bin',
     HOME: root, CLOUDFLARE_API_TOKEN: 'synthetic',
     CLOUDFLARE_ACCOUNT_ID: '209cf7dd678adfb683947dd7874d05af', GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_REF: 'refs/heads/main',
     GITHUB_EVENT_NAME: 'workflow_dispatch', TESTED_SHA: sha, GITHUB_SHA: sha, GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2',

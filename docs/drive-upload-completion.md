@@ -12,3 +12,15 @@
 Unknown and foreign intents and inaccessible folders have the same empty `404`.
 A session denied at request admission gets an empty `401`; if access is lost
 before the conflict lookup, no conflict or publication receipt is returned.
+
+## Bound manifests (D1 migration `0038_upload_bound_completion.sql`)
+
+At seal insertion, a bound intent must have exactly the planned slots in order,
+with the planned length and a trusted acknowledged SHA-256 for each slot. An
+empty file still needs a zero-byte receipt for slot 1. Expected digests are not
+receipts; legacy or uncertain part observations cannot complete a bound intent.
+Dispatch and publication both exclude pre-upgrade bound seals with mismatched
+or missing proof, even when a provider completion receipt is already recorded.
+Unsealed legacy claims and publications remain available only to unbound
+intents. The migration leaves existing evidence and published generations
+intact and does not change allocation, part dispatch, or resume admission.

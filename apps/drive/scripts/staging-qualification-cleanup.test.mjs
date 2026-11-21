@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
+import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
+import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
+import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
+import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { fixture as accessFixture } from './staging-qualification-access.test.mjs';
+import { setup as fileFixture } from './staging-qualification-files.test.mjs';
+import { fixture as transferFixture } from './staging-qualification-app-transfer.test.mjs';
+import { fixture as deletionFixture } from './staging-qualification-deletion.test.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -23,6 +33,7 @@ function job(t, target = endpoint) {
   git('init', '-q', '--initial-branch=main', '--template=');
   const dir = join(cwd, 'apps/drive/scripts');
   mkdirSync(dir, { recursive: true });
+  copyFileSync(new URL('../wrangler.staging.json', import.meta.url), join(dir, '../wrangler.staging.json'));
   const identitySha256 = createHash('sha256').update(JSON.stringify([JSON.stringify([target, bucket, 'fixture-epoch']),
     'auto', 'fixture-key'])).digest('hex');
   writeFileSync(join(dir, 'staging-storage-qualification.json'), JSON.stringify({ version: 1, passed: true, failures: [],
@@ -34,12 +45,70 @@ function job(t, target = endpoint) {
   git('update-ref', 'refs/remotes/origin/main', sha);
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
     TESTED_SHA: sha, GITHUB_SHA: sha, GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
-    GITHUB_RUN_ID: '182', GITHUB_RUN_ATTEMPT: '3', QERITH_S3_ENDPOINT: target, QERITH_S3_BUCKET: bucket,
+    GITHUB_RUN_ID: '182', GITHUB_RUN_ATTEMPT: '3', CLOUDFLARE_ACCOUNT_ID: '209cf7dd678adfb683947dd7874d05af',
+    QERITH_S3_ENDPOINT: target, QERITH_S3_BUCKET: bucket,
     QERITH_S3_REGION: 'auto', QERITH_S3_STORAGE_EPOCH: 'fixture-epoch',
     QERITH_S3_ACCESS_KEY_ID: 'fixture-key', QERITH_S3_SECRET_ACCESS_KEY: 'fixture-secret' };
-  return { cwd, env, context: { sha, prefix, runId: '182', attempt: '3' } };
+  return { cwd, git, env, context: { sha, prefix, runId: '182', attempt: '3' } };
 }
+
+test('protected settings must match the committed staging target and reviewed R2 identity', async t => {
+  const { cwd, env } = job(t);
+  // The gate must read both files from the committed SHA, not the working tree.
+  writeFileSync(join(cwd, 'apps/drive/wrangler.staging.json'), '{}');
+  writeFileSync(join(cwd, 'apps/drive/scripts/staging-storage-qualification.json'), '{}');
+  await assertQualificationSettings(env, cwd);
+  for (const override of [{ CLOUDFLARE_ACCOUNT_ID: '' }, { CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) },
+    { QERITH_S3_STORAGE_EPOCH: 'other' }, { QERITH_S3_BUCKET: 'other-bucket' }, { QERITH_S3_ACCESS_KEY_ID: 'other-key' },
+    { QERITH_S3_SECRET_ACCESS_KEY: '' }]) {
+    await assert.rejects(assertQualificationSettings({ ...env, ...override }, cwd), /reviewed storage binding is unverified/);
+  }
+  const nonR2 = job(t, 'https://storage.example.test');
+  await assert.rejects(assertQualificationSettings(nonR2.env, nonR2.cwd), /reviewed storage binding is unverified/);
+
+  // Match the protected workflow's plain Node invocation, without the test loader or credential environment.
+  const cli = fileURLToPath(new URL('./staging-qualification-settings.mjs', import.meta.url));
+  const run = overrides => {
+    const { error, status, stdout, stderr } = spawnSync(process.execPath, [cli], {
+      cwd, env: { PATH: process.env.PATH, ...env, ...overrides }, encoding: 'utf8', timeout: 30_000
+    });
+    assert.ifError(error);
+    return { status, stdout, stderr };
+  };
+  assert.deepEqual(run(), { status: 0, stdout: '', stderr: '' });
+  assert.deepEqual(run({ QERITH_S3_BUCKET: 'other-bucket' }), {
+    status: 1, stdout: '', stderr: 'Protected staging target or reviewed storage binding is unverified.\n'
+  });
+});
+
+test('composed cases require exact attempt and fail closed on unobserved access', async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const trace = [];
+  const adapters = Object.fromEntries(['readFileFixtures', 'openTransferClient', 'openDeletion']
+    .map(name => [name, () => trace.push(name)]));
+  adapters.withAccessFixtures = (identity, signal) => {
+    trace.push({ identity, aborted: signal.aborted });
+    return { 'passkey-positive': 'pass' }; // Not observed through the access checker.
+  };
+  await assert.rejects(createQualificationExercise(env, cwd, adapters), /adapters/);
+  assert.deepEqual(trace, []);
+  adapters.send = () => trace.push('send');
+  await assert.rejects(createQualificationExercise(env, cwd, { ...adapters, openDeletion: undefined }), /adapters/);
+  await assert.rejects(createQualificationExercise({ ...env, QERITH_S3_BUCKET: 'other' }, cwd, adapters), /S3 cases are unverified/);
+  const run = await createQualificationExercise(env, cwd, adapters);
+  const { signal } = new AbortController();
+  for (const override of [{ sha: 'a'.repeat(40) }, { runId: '184' }, { attempt: '4' }, { prefix: 'drive-qualification/' }, { version: '' }]) {
+    await assert.rejects(run({ ...active, ...override }, signal), /\(scope\)/);
+  }
+  await assert.rejects(run(active, AbortSignal.abort()), /\(scope\)/);
+  assert.deepEqual(trace, []);
+  await assert.rejects(run(active, signal), /\(access\)/);
+  await assert.rejects(run(active, signal), /\(scope\)/);
+  assert.deepEqual(trace, [{ identity: active, aborted: false }]);
+});
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];
 const objectAge = 3 * 86400;
@@ -190,8 +259,89 @@ test('the protected R2 adapter signs and scopes every request with a reviewed bi
   assert.deepEqual(trace, ['GET', 'GET', 'DELETE', 'DELETE', 'GET', 'GET']);
 });
 
-test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
-  const { cwd, env, context } = job(t);
+test('signed recovery uses the source commit and requires a byte-identical GET after create', async t => {
+  const { cwd, git, env, context } = job(t);
+  writeFileSync(join(cwd, 'apps/drive/scripts/staging-storage-qualification.json'), '{}');
+  git('commit', '-qam', 'new head without a reviewed storage binding');
+  const head = git('rev-parse', 'HEAD');
+  env.GITHUB_SHA = env.TESTED_SHA = head;
+  env.CLOUDFLARE_API_TOKEN = 'fixture-api-token';
+  const { sha, runId, attempt } = context;
+  const record = { kind: 'd1', ...context, bookmark: 'offline_bookmark' };
+  const canonical = Buffer.from(JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: 'd1',
+    sha, runId, attempt, bookmark: record.bookmark }));
+  const objectURL = `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-d1-${sha}-run-${runId}-attempt-${attempt}`;
+  const lifecycleURL = `https://api.cloudflare.com/client/v4/accounts/${r2Account}/r2/buckets/${bucket}/lifecycle`;
+
+  const deniedPolicies = ['missing retention', 'partial status', 'content range', 'paginated policy'];
+  for (const outcome of ['verified', 'readback drift', 'oversized readback', 'lost acknowledgement', ...deniedPolicies]) {
+    await t.test(outcome, async () => {
+      const trace = [];
+      let stored, fixtureError, streamCancelled;
+      const canWrite = !deniedPolicies.includes(outcome);
+      const lostAcknowledgement = new Error('fixture lost the acknowledgement after storing bytes');
+      const respond = async (request, init) => {
+        if (typeof request === 'string') {
+          trace.push('lifecycle');
+          assert.equal(request, lifecycleURL);
+          assert.equal(init.method, 'GET');
+          assert.equal(init.headers.authorization, 'Bearer fixture-api-token');
+          const policy = expiryPayload(outcome === 'missing retention' ? [] : [objects]);
+          if (outcome === 'paginated policy') policy.result_info = { cursor: 'next' };
+          return Response.json(policy, { status: outcome === 'partial status' ? 206 : 200,
+            headers: outcome === 'content range' ? { 'content-range': 'bytes 0-255/512' } : {} });
+        }
+        trace.push(request.method);
+        assert.equal(request.url, objectURL);
+        assert.equal(request.redirect, 'manual');
+        const authorization = request.headers.get('authorization');
+        assert.match(authorization, /^AWS4-HMAC-SHA256 Credential=fixture-key\/\d{8}\/auto\/s3\/aws4_request, SignedHeaders=/);
+        if (request.method === 'PUT') {
+          assert.equal(request.headers.get('if-none-match'), '*');
+          assert.match(authorization.split('SignedHeaders=')[1].split(',')[0], /(?:^|;)if-none-match(?:;|$)/);
+          assert.equal(request.headers.get('x-amz-content-sha256'), createHash('sha256').update(canonical).digest('hex'));
+          stored = Buffer.from(await request.arrayBuffer());
+          if (outcome === 'lost acknowledgement') throw lostAcknowledgement;
+          return new Response(null, { headers: { etag: '"created"' } });
+        }
+        assert.equal(request.headers.get('cache-control'), 'no-cache, no-store');
+        const date = new Date(Date.now() + 1000).toUTCString();
+        if (outcome === 'oversized readback') {
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(2048));
+              controller.enqueue(Uint8Array.of(1));
+            },
+            cancel(reason) { streamCancelled = reason; },
+          }), { headers: { date, 'last-modified': date } });
+        }
+        const bytes = outcome === 'readback drift' ? Buffer.concat([stored, Buffer.from('\n')]) : stored;
+        return new Response(bytes, { headers: { date, 'last-modified': date, 'content-length': bytes.length } });
+      };
+      const send = (...args) => respond(...args).catch(error => {
+        // Production masks transport errors; don't let it mask a broken fixture.
+        if (error !== lostAcknowledgement) fixtureError ??= error;
+        throw error;
+      });
+      await assert.rejects(createQualificationR2RecoveryStore({ sha: head, runId, attempt }, env, cwd, { send }),
+        /recovery storage is unverified/);
+      assert.deepEqual(trace, []);
+      const store = await createQualificationR2RecoveryStore(context, env, cwd, { send });
+      const write = qualificationRecoveryWriter(context, store);
+      try {
+        if (outcome === 'verified') assert.equal(await write(record), true);
+        else await assert.rejects(write(record), { message: 'Staging qualification recovery record is unverified.' });
+      } finally {
+        assert.ifError(fixtureError);
+        assert.deepEqual(trace, canWrite ? ['lifecycle', 'PUT', ...(outcome === 'lost acknowledgement' ? [] : ['GET'])] : ['lifecycle']);
+      }
+      assert.deepEqual(stored, canWrite ? canonical : undefined);
+      if (outcome === 'oversized readback') assert.equal(streamCancelled?.message, 'S3 response exceeds limit');
+    });
+  }
+});
+
+function storageFixture() {
   const key = `${prefix}provider-multipart-fixture`;
   const split = 5 * 1024 * 1024;
   const whole = Buffer.concat([Buffer.alloc(split, 0x35), Buffer.alloc(257, 0x9a)]);
@@ -244,11 +394,120 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
     return new Response(bytes, { status: ranged ? 206 : 200, headers: { etag: tag, 'content-length': String(bytes.length),
       ...(ranged && { 'content-range': `bytes ${split - 2}-${split + 1}/${whole.length}` }) } });
   };
+  return { send, trace };
+}
+
+const storageCalls = ['HEAD', 'POST', 'PUT', 'GET', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET'];
+
+test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
+  const { cwd, env, context } = job(t);
+  const { send, trace } = storageFixture();
   const exercise = await createQualificationStorageCases(env, cwd, { send });
   assert.throws(() => exercise({ ...context, runId: '183' }), /cases are unverified/);
   assert.deepEqual(trace, []);
   assert.deepEqual(await exercise(context), { 's3-multipart': 'pass', 's3-range': 'pass', 's3-retry': 'pass', 's3-persistence': 'pass' });
-  assert.deepEqual(trace, ['HEAD', 'POST', 'PUT', 'GET', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET']);
+  assert.deepEqual(trace, storageCalls);
+});
+
+function composedLifecycle({ cwd, env, active, phases, exercise, signal, after = () => true }) {
+  return runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
+    inventory({ phase }) { phases.push(phase); return phase === 'after' ? after() : true; },
+    cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
+  }, env, cwd, signal, {
+    upload: () => active, migrate: () => null,
+    async worker({ upload, exercise, cleanup }, _env, _cwd, workerSignal) {
+      try { return await exercise(upload, workerSignal); }
+      finally { await cleanup(upload, workerSignal); phases.push('restore'); }
+    },
+  });
+}
+
+const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
+
+test('lifecycle aborts and drains an escaped access callback before recovery', { timeout: 10_000 }, async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const phases = [], entered = Promise.withResolvers(), release = Promise.withResolvers();
+  const fixture = accessFixture(async (_command, response) => {
+    entered.resolve();
+    await release.promise;
+    return response;
+  }, active);
+  let signal, late, callback;
+  const unused = () => phases.push('unexpected adapter');
+  const exercise = await createQualificationExercise(env, cwd, {
+    readFileFixtures: unused, send: unused, openTransferClient: unused, openDeletion: unused,
+    withAccessFixtures(scope, activeSignal, run) {
+      signal = activeSignal;
+      callback = fixture.withFixtures(scope, signal, fixtures => { late = () => run(fixtures); return late(); }).catch(() => {});
+      return Promise.resolve();
+    },
+  });
+  const result = assert.rejects(composedLifecycle({ cwd, env, active, phases, exercise, signal: new AbortController().signal }), /\(access\)/);
+  try {
+    await entered.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(phases, ['before']);
+    assert.equal(signal.aborted, true);
+  } finally { release.resolve(); }
+  await result;
+  await callback;
+  await assert.rejects(late());
+  assert.equal(fixture.transcript[0][0], 'owner sign-in');
+  assert.deepEqual(phases, lifecycleOrder);
+});
+
+for (const ending of ['success and replay', 'unverified final inventory', 'cancelled at final inventory']) test(
+  `lifecycle runs all 19 cases for one candidate: ${ending}`, { timeout: 90_000 }, async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const binding = { endpoint, bucket, epoch: env.QERITH_S3_STORAGE_EPOCH };
+  const access = accessFixture(undefined, active);
+  const files = fileFixture(undefined, prefix);
+  const storage = storageFixture();
+  const large = transferFixture({ scope: active }), resume = transferFixture({ scope: active, resume: true });
+  const { io, trees } = deletionFixture({ scope: binding, prefix });
+  const phases = [];
+  let scopeReads = 0, clients = 0;
+  Object.defineProperty(io, 'scope', { get: () => ++scopeReads === 1 ? binding : { ...binding, bucket: 'different' } });
+  const compose = await createQualificationExercise(env, cwd, {
+    withAccessFixtures: access.withFixtures,
+    readFileFixtures(scope) { assert.deepEqual(scope, active); return files; },
+    send: storage.send,
+    openTransferClient: (...args) => (++clients === 1 ? large : resume).openClient(...args),
+    openDeletion(scope, reviewed) {
+      assert.deepEqual(scope, active);
+      assert.deepEqual(reviewed, binding);
+      assert.ok(Object.isFrozen(reviewed));
+      return io;
+    },
+  });
+  const controller = new AbortController();
+  const run = exercise => composedLifecycle({ cwd, env, active, phases, exercise, signal: controller.signal,
+    after() {
+      if (ending === 'cancelled at final inventory') controller.abort();
+      return ending !== 'unverified final inventory';
+    },
+  });
+  let cases;
+  const result = run(async (invocation, phaseSignal) => {
+    cases = await compose(invocation, phaseSignal);
+    assert.throws(() => verifyQualificationExercise(cases, { ...invocation }, phaseSignal), /case evidence/);
+    assert.throws(() => verifyQualificationExercise(cases, invocation, new AbortController().signal), /case evidence/);
+    return cases;
+  });
+  if (ending === 'success and replay') assert.equal((await result).deployment, cases);
+  else await assert.rejects(result, ending === 'unverified final inventory' ? /inventory is unverified \(after\)/ : { name: 'AbortError' });
+  assert.deepEqual(cases, Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass'])));
+  assert.deepEqual(access.transcript, []);
+  assert.deepEqual(storage.trace, storageCalls);
+  assert.deepEqual([large.clients, resume.clients, scopeReads, trees.size], [1, 2, 1, 8]);
+  assert.deepEqual(phases, lifecycleOrder);
+  if (ending === 'success and replay') {
+    // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
+    await assert.rejects(run(() => cases), /case evidence/);
+    assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
+  }
 });
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {

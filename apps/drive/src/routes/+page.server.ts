@@ -2,7 +2,7 @@ import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
+import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import { wireUploadStorage } from '../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
@@ -26,7 +26,11 @@ export const load: PageServerLoad = async (event) => {
   const fixture = admitsSignInFixture(env);
   const staging = env.DRIVE_ORIGIN === stagingOrigin;
   const preview = fixture || staging;
-  if (staging) event.depends('drive:root-listing');
+  if (staging) {
+    event.depends('drive:root-listing');
+    // Track explicit listing preloads without using the nonce to select data.
+    event.url.searchParams.get('folder-refresh');
+  }
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   const role = event.locals.driveSession?.principal.role;
@@ -36,6 +40,8 @@ export const load: PageServerLoad = async (event) => {
     !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER));
   const uploadMode: DriveUploadMode = uploadStorageReady ? uploadPolicy : 'disabled';
   return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
+    metadataWriteAllowed: admitsStagingInvite(env) && (role === 'owner' || role === 'member'),
     ownerInvites: role === 'owner' && admitsStagingInvite(env),
+    sharedListing: role === 'member' && admitsSharedListing(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
 };

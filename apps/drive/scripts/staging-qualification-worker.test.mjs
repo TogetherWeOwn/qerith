@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { allowsQualificationTraffic, qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
-import { inspectQualificationWorker, probeQualificationWorker, uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
+import { inspectQualificationWorker, probeQualificationWorker, recoverQualificationWorker,
+  uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -149,6 +150,7 @@ function fixture(t, upload = false) {
   const account = '209cf7dd678adfb683947dd7874d05af';
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/main', GITHUB_SHA: sha, TESTED_SHA: sha, GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_RUN_ID: '18', GITHUB_RUN_ATTEMPT: '2',
     CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: 'fake-token' };
@@ -212,7 +214,7 @@ function fixture(t, upload = false) {
     if (state[`${name}Lost`]) throw new Error('untrusted diagnostic fake-token');
     return json({ id: isActivation ? active : restored });
   }
-  return { calls, state, options, controller, identity, cwd, app, env,
+  return { calls, state, options, controller, identity, cwd, app, env, git, request,
     run: (override, fetcher = request) => withQualificationWorker(options, { ...env, ...override }, cwd, controller.signal, fetcher) };
 }
 
@@ -254,8 +256,21 @@ test('Worker inventory reads the tested configuration and only the pinned Worker
     await assert.rejects(inspect(override), /Cannot verify staging Worker cron and resource bindings/);
     assert.deepEqual(calls, []);
   }
-  assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'] });
+  assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'],
+    attemptRestore: false });
   assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules', 'deployments']);
+});
+
+test('Worker inventory rejects partial schedule readbacks even with an empty result', async t => {
+  for (const [name, init] of [['HTTP 206', { status: 206 }],
+    ['Content-Range on HTTP 200', { headers: { 'content-range': 'bytes 0-53/108' } }]]) {
+    await t.test(name, async sub => {
+      const { calls, inspect, replies } = inventoryFixture(sub);
+      replies.schedules = Response.json({ success: true, errors: [], result: { schedules: [] } }, init);
+      await assert.rejects(inspect(), { message: 'Cannot verify staging Worker cron and resource bindings.' });
+      assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules']);
+    });
+  }
 });
 
 test('Worker inventory rejects cron, unknown bindings, candidates, deployment drift and cancellation', async t => {
@@ -499,6 +514,7 @@ test('runs cleanup after cancellation and preserves an unverified cleanup even w
     const cleanupFailure = new Error('Qualification prefix cleanup is unverified.');
     options.cleanup = (identity, signal) => {
       assert.equal(identity.version, candidate);
+      assert.equal(identity.expiresAt, expiresAt);
       assert.equal(signal.aborted, false);
       calls.push('cleanup');
       throw cleanupFailure;
@@ -593,6 +609,103 @@ test('does not overwrite a different deployment or report an unverified rollback
     });
     assert.equal(calls.includes('restore'), failure.startsWith('restore'));
   }
+});
+
+function recoveryFixture(t) {
+  const f = fixture(t);
+  const { sha, runId, attempt } = f.identity;
+  const source = { sha, runId, attempt };
+  const record = { ...source, ...f.options.upload, kind: 'worker' };
+  const baselineVersion = () => ({ id: baseline, resources: { bindings: f.state.candidateBindings.slice(0, 2) } });
+  const recover = (overrides = {}, sourceAttempt = source) => recoverQualificationWorker(sourceAttempt,
+    { ...record, ...overrides }, { ...f.env, GITHUB_JOB: 'recover' }, f.cwd, f.controller.signal, async (url, init) => {
+      await f.state.beforeRequest?.(init);
+      if (init.method === 'GET' && url.endsWith(`/versions/${baseline}`)) {
+        f.calls.push('baseline-version');
+        return json(f.state.baselineVersion ?? baselineVersion());
+      }
+      const response = await f.request(url, init);
+      f.state.afterRequest?.();
+      return response;
+    });
+  f.state.current = deployment(active, candidate, f.state.tag);
+  return { ...f, recover, source, baselineVersion };
+}
+
+test('lost-run recovery restores only the recorded candidate and confirms the tagged baseline', async t => {
+  const { recover, calls, state, git, app } = recoveryFixture(t);
+  t.mock.method(Date, 'now', () => Number(expiresAt) + 1);
+  writeFileSync(join(app, 'wrangler.staging.json'), 'not the source attempt config');
+  git('commit', '-qam', 'later main');
+  git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD'));
+  const evidence = { status: 'restored', deployment: restored, version: baseline };
+  assert.deepEqual(await recover(), evidence);
+  assert.equal(state.current.annotations['workers/message'], `restore-${state.tag}`);
+  assert.deepEqual(calls.splice(0), ['current', 'baseline-version', 'version', 'current', 'restore', 'current']);
+  assert.deepEqual(await recover(), evidence);
+  assert.deepEqual(calls.splice(0), ['current', 'baseline-version', 'current']);
+  state.current = deployment(prior, baseline);
+  assert.deepEqual(await recover(), { status: 'baseline-observed', deployment: prior, version: baseline });
+  assert.deepEqual(calls, ['current', 'baseline-version', 'current']);
+});
+
+test('lost-run recovery rejects mismatched and non-main source attempts before provider access', async t => {
+  const { recover, calls, source, git } = recoveryFixture(t);
+  for (const record of [{ attempt: '3' }, { kind: 'd1' }, { previousVersion: candidate }, { expiresAt: 'never' }]) {
+    await assert.rejects(recover(record), /recovery is unverified/);
+  }
+  git('commit', '-q', '--allow-empty', '-m', 'not on main');
+  const sha = git('rev-parse', 'HEAD');
+  await assert.rejects(recover({ sha }, { ...source, sha }), /recovery is unverified/);
+  assert.deepEqual(calls, []);
+});
+
+test('lost-run recovery never writes when the deployment or version evidence has changed', async t => {
+  const { recover, state, calls, baselineVersion } = recoveryFixture(t);
+  for (const current of [deployment(foreign, candidate, 'another attempt'), deployment(foreign, baseline),
+    deployment(foreign, foreign, state.tag), null]) {
+    state.current = current;
+    await assert.rejects(recover(), /recovery is unverified/);
+    assert.deepEqual(calls.splice(0), ['current']);
+  }
+  state.current = deployment(active, candidate, state.tag);
+  const wrongBindings = baselineVersion();
+  wrongBindings.resources.bindings.push(...varsToBindings({ DRIVE_QUALIFICATION_SHA: sha }));
+  state.baselineVersion = wrongBindings;
+  await assert.rejects(recover(), /recovery is unverified/);
+  delete state.baselineVersion;
+  await assert.rejects(recover({ expiresAt: String(Number(expiresAt) - 1) }), /recovery is unverified/);
+  assert.equal(calls.splice(0).includes('restore'), false);
+  state.beforeRequest = () => {
+    if (calls.at(-1) === 'version') state.current = deployment(foreign, candidate, state.tag);
+  };
+  await assert.rejects(recover(), /recovery is unverified/);
+  assert.deepEqual(calls, ['current', 'baseline-version', 'version', 'current']);
+});
+
+test('lost-run recovery does not certify or retry an ambiguous restore', async t => {
+  for (const failure of ['restoreLost', 'restoreIgnored', 'wrongReadbackTag']) {
+    const { recover, state, calls } = recoveryFixture(t);
+    state[failure] = true;
+    state.beforeRequest = () => {
+      if (calls.at(-1) === 'restore' && failure === 'wrongReadbackTag') {
+        state.current = deployment(restored, baseline, 'other restore');
+      }
+    };
+    await assert.rejects(recover(), { message: 'Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.' });
+    assert.equal(calls.filter(call => call === 'restore').length, 1);
+  }
+});
+
+test('lost-run recovery rejects cancellation even when restore readback succeeds', async t => {
+  const { recover, state, calls, controller } = recoveryFixture(t);
+  state.afterRequest = () => {
+    // The stub already accepted an un-aborted signal and produced valid readback evidence.
+    if (calls.at(-2) === 'restore' && calls.at(-1) === 'current') controller.abort();
+  };
+  await assert.rejects(recover(), { message: 'Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.' });
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(calls, ['current', 'baseline-version', 'version', 'current', 'restore', 'current']);
 });
 
 test('rejects oversized, malformed or failed provider responses without mutation or diagnostic leaks', async t => {

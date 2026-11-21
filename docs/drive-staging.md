@@ -116,9 +116,14 @@ Worker version or its absence; Worker rollback is separate from D1 recovery.
 ancestor of fetched `origin/main`. A dispatch of today's head with yesterday's
 SHA as input cannot qualify yesterday's head. Only after source validation does
 the protected `staging` job enter the shared `drive-staging-lifecycle` queue.
-That job intentionally fails: it has no live runner, secrets or upload step. Do not
-dispatch this increment. Required CI uses local Git history, synthetic evidence
-and a fake Wrangler; none is live qualification.
+The protected job independently checks out the dispatch commit, requires the
+workflow definition's own SHA to match, and compares its existing staging
+settings with the target config and reviewed native R2 binding in that commit.
+This check is local: it neither authenticates to a provider nor establishes app
+admission, writer scope, or native expiry. The job still intentionally fails
+and has no receipt step. Do not dispatch this increment. Required `ci-ok` now
+includes all qualification adapter and policy tests through `drive-bootstrap`;
+fixture transports, local Git history, and Wrangler local mode are not live proof.
 
 The qualification-only D1 adapter is not called by either staging workflow.
 It snapshots verified SQL and D1 config from the tested commit outside the checkout.
@@ -172,8 +177,14 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
-These are ordering checks with offline callbacks, not provider evidence. The
-qualification workflow still has no caller and cannot issue a receipt.
+The offline composer requires every case to pass and binds evidence to the exact invocation.
+The estate composer runs the bounded inventory before mutation and after Worker
+restore. It checks exact-attempt writer quiescence and a held, abortable fence
+before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
+before restore. D1 fixture cleanup does not roll back migrations or clean app
+fixtures. The estate, fixture and writer-fence inputs are injected; offline
+passing tests are not provider evidence. The protected job still stops and
+cannot issue a receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects
@@ -207,6 +218,43 @@ previous deployment, or clean up D1. Neither existing staging workflow uses it.
 Before wiring the protected caller, reconcile its pre-activation budget with
 this window: D1 command timeouts alone can consume the five-minute margin,
 before accounting for upload, readback and recovery recording.
+
+The unwired Worker recovery adapter reads the pinned staging config from the
+lost attempt's main-ancestor SHA. It verifies the recorded candidate against
+both the current deployment and the immutable uploaded version, and reads back
+one tagged baseline restore. It does not retry ambiguous writes or overwrite a
+superseding deployment. Observing the original baseline is not proof that a late
+activation cannot arrive. A protected completion caller must authenticate the
+completed source attempt and its durable pre-activation record, hold the shared
+lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
+or R2 cleanup or authorization to issue a receipt.
+
+The offline recovery coordinator can authenticate a historical source through
+bounded GitHub Actions reads: the exact attempt, its successful source job and
+exact-dispatch check, and the latest run metadata. It rejects superseded or
+ambiguous sources before record access. This is not a fence against a later rerun.
+The protected workflow does not invoke recovery.
+
+The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+It stores separate, versioned D1 and Worker records per exact SHA, run and
+attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
+A signed `If-None-Match: *` PUT must be acknowledged before a fresh signed GET.
+The transport caps readback at 2 KiB before buffering excess bytes and returns
+raw bytes unchanged for comparison against the canonical UTF-8 record. Each S3
+operation has a five-second budget. A collision, missing or ambiguous write,
+byte mismatch or cancellation fails closed without retry or overwrite.
+
+Before PUT, the store requires a complete, unpaginated lifecycle policy with a
+three-day native expiry rule covering the recovery prefix and no conflicting
+overlaps. GET requires a provider `Date` within 30 seconds of the runner clock
+and rejects records at or beyond three days on either clock, even if physical
+deletion is delayed. This is not deletion proof, and the store cannot list or
+delete. Live use still requires
+a private binding, a signer allowed on this prefix, provider-enforced conditional
+writes, and a protected caller that authenticates the exact source attempt before
+any read and holds the staging lifecycle lock. Offline fixtures prove none of
+those live prerequisites. Recovery records are neither success receipts nor
+runner-local files.
 
 The unwired large-transfer verifier reads an unencoded, full `200` app download
 as a stream. It requires the five GiB boundary (also the current app maximum),

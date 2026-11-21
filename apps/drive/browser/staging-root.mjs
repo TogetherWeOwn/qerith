@@ -4,6 +4,9 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { proveSharedListing } from './shared-listing.mjs';
+import { proveNewFolder } from './new-folder.mjs';
+import { proveRename } from './rename.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -38,6 +41,10 @@ export default { fetch(request, env, ctx) {
     configured.DRIVE_STAGING_INVITE_ACCEPTANCE = '1';
     input.headers.delete('x-fixture-invite');
   }
+  if (input.headers.get('x-fixture-shared') === '1') {
+    configured.DRIVE_STAGING_SHARED_LISTING = '1';
+    input.headers.delete('x-fixture-shared');
+  }
   return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
 await writeFile(configPath, JSON.stringify({ ...config, main,
@@ -71,6 +78,8 @@ try {
 
   browser = await chromium.launch({ ignoreDefaultArgs: ['--disable-back-forward-cache'] });
   const context = await browser.newContext();
+  // Leave time for Playwright to report the failing operation before the fixture deadline.
+  context.setDefaultTimeout(15_000);
   const page = await context.newPage();
   // Keep interception armed across documents and chooser events, as in the sign-in fixture.
   page.on('filechooser', () => {});
@@ -88,7 +97,7 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker, navigationSite) => {
+  const relay = async (route, target = worker, navigationSite, wait = () => holdRefresh) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
@@ -113,7 +122,7 @@ try {
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
-    if (url.pathname === dataPath) await holdRefresh;
+    if (url.pathname === dataPath) await wait();
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   };
   await context.route('**/*', route => relay(route));
@@ -127,6 +136,7 @@ try {
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'New folder', exact: true }).count(), 0);
   await page.keyboard.press('Tab');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -142,6 +152,7 @@ try {
     ['GET', 200, 'private, no-store']);
   const row = page.getByRole('link', { name: file.name, exact: true });
   await row.waitFor();
+  assert.equal(await page.getByRole('button', { name: `Actions for ${file.name}` }).count(), 0); // Owner default off.
   page.off('request', countNavigation);
   assert.equal(navigations, 0, 'upload refreshed the row without navigation');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
@@ -153,6 +164,8 @@ try {
     return [response.status, response.headers.get('content-range'), Array.from(new Uint8Array(await response.arrayBuffer()))];
   }, await row.getAttribute('href'));
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
+  await proveSharedListing(browser, { origin, DB, worker, relay, ownerCookie: cookie, memberToken,
+    file, downloadPath: await row.getAttribute('href') });
 
   // Without invite mode the owner picker still rejects files above the preview cap.
   const size = 16 * 1024 * 1024 + 1;
@@ -258,6 +271,7 @@ try {
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       otherMemberCookie: `${sessionName}=${memberToken}`,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
+  console.log('Staging-origin: invite context closed; checking route denials');
   const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});
@@ -269,13 +283,28 @@ try {
 
   await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'owner', 'Receipts', 'folder')").run();
   await deny('/f/fixture-parent', 404, { cookie });
-  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
+  const overrides = new Map(); // One owner for each Playwright route, including injected failures.
+  await context.unroute('**/*');
+  await context.route('**/*', route => {
+    const { pathname } = new URL(route.request().url());
+    const forward = (optIn = true, wait) => relay(route, optIn ? inviteWorker : worker, 'same-origin', wait);
+    const override = overrides.get(pathname);
+    overrides.delete(pathname);
+    return override ? override(route, forward) : forward();
+  });
+  console.log('Staging-origin: checking folder documents and accessibility');
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
+  const intercept = (path, handler) => overrides.set(path, handler);
+  console.log('Staging-origin: checking owner folder creation');
+  await proveNewFolder(page, origin, DB, 'owner', intercept, index);
+  console.log('Staging-origin: checking owner rename');
+  await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
 
+  console.log('Staging-origin: checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
   await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });

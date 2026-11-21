@@ -13,8 +13,10 @@
   <title>{data.listing ? 'My Drive' : 'Drive'}</title>
 </svelte:head>
 
-{#if data.ownerInvites}<DriveNav current="home" />{/if}
-<main id="main" class:owner={data.ownerInvites} tabindex="-1">
+{#if data.ownerInvites || data.sharedListing}
+  <DriveNav current="home" owner={data.ownerInvites} shared={data.sharedListing} />
+{/if}
+<main id="main" class:owner={data.ownerInvites || data.sharedListing} tabindex="-1">
   {#if downloadNotice}
     <div role="alert">
       <p>{`${downloadNotice.name ?? 'The file'} didn’t download.${data.staging ? '' : ' Try again.'}`}</p>
@@ -25,7 +27,7 @@
   {/if}
   {#if data.listing}
     <RootListingView result={data.listing} page={data.page} uploadMode={data.uploadMode}
-      staging={data.staging} downloadAllowed={data.downloadAllowed} />
+      staging={data.staging} downloadAllowed={data.downloadAllowed} metadataWriteAllowed={data.metadataWriteAllowed} />
   {:else}
     Service unavailable.
   {/if}

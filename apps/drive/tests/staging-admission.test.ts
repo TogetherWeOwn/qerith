@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { admitStagingRequest, dispatchStagingRequest } from '../src/lib/server/staging-admission';
-import { stagingOrigin } from '../src/lib/server/request-auth';
+import { privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
 
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
@@ -459,4 +459,63 @@ test('foreign site metadata permits only the top-level invite document and never
   }
   assert.deepEqual(calls, ['document', 'asset', 'present', 'challenge', 'enroll']);
   assert.equal(reads(), 0);
+});
+
+test('resume is an exact bodyless GET in both staging admission layers', async () => {
+  const path = `/api/uploads/${id}/resume`, route = { id: '/api/uploads/[intentId]/resume' };
+  const check = async (input: Request, status: number, role: Parameters<typeof runtime>[0] = 'member', flag = '1') => {
+    const { env, reads } = runtime(role);
+    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: flag };
+    let resolved = 0;
+    const adapter = async () => {
+      resolved++;
+      return new Response(null, { status: 204, headers: { 'cache-control': 'private, no-store' } });
+    };
+    const unexpected = () => assert.fail('resume must only dispatch to the adapter');
+    const handle = privateRequests(bindings);
+    for (const result of [
+      await dispatchStagingRequest(input, bindings, true, assets, { adapter, ceremony: unexpected, invite: unexpected, asset: unexpected }),
+      await handle({ event: { request: input, route, locals: {} }, resolve: adapter } as unknown as Parameters<typeof handle>[0]),
+    ]) denied(result, status);
+    assert.equal(resolved, status === 204 ? 2 : 0);
+    if (status === 400 || status === 403 || status === 404) assert.equal(reads(), 0);
+  };
+  for (const role of ['owner', 'member'] as const) {
+    await check(request(path, 'GET', { cookie, 'content-length': '0' }), 204, role);
+    await check(request(path), 404, role, '0');
+  }
+  for (const alias of [path + '?', path + '?x-sveltekit-invalidated=1', path + '/', path + '/extra',
+    path.replace(id, id.toUpperCase()), path.replace(id, '%30' + id.slice(1)), path.replace('/resume', '/%72esume')]) {
+    await check(request(alias), 404);
+  }
+  for (const method of ['HEAD', 'POST', 'OPTIONS']) await check(request(path, method), 404);
+  await check(request(path, 'GET', { cookie, origin: 'https://other.example.test' }), 403);
+  for (const site of ['same-site', 'cross-site', 'none']) {
+    await check(request(path, 'GET', { cookie, 'sec-fetch-site': site }), 403);
+  }
+  await check(request(path, 'GET', { cookie, 'content-length': '1' }), 400);
+  await check(request(path, 'GET', { cookie, 'content-length': '0', 'transfer-encoding': 'chunked' }), 400);
+  await check(request(path, 'GET', {}), 401);
+  await check(request(path), 401, 'revoked');
+});
+
+test('Shared with me admits only exact documents for live members with both flags', async () => {
+  const shared = '/shared';
+  const cases = [
+    [shared, 404, 'member', 'GET', '0'], [shared, 404, 'owner'],
+    [shared, 401, 'revoked'], [shared, 503, 'offline'], [shared, 404, 'member', 'POST'],
+    [shared + '/', 404], [shared + '/__data.json', 404], [shared + '?cursor=%FF', 400],
+    [shared + '?cursor=one&cursor=two', 400], [shared + '?cursor=' + encodeURIComponent('é'.repeat(257)), 400],
+    [shared + '?cursor=old%3A%2B%26id', 200], [shared, 200, 'member', 'HEAD'],
+  ] as const;
+  const success = async () => new Response(null, { headers: { 'cache-control': 'private, no-store' } });
+  const dispatch = { adapter: success, asset: success, ceremony: success, invite: success };
+  for (const [path, expected, role = 'member', method = 'GET', flag = '1'] of cases) {
+    const env = { ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_SHARED_LISTING: flag };
+    const input = request(path, method);
+    const handle = privateRequests(env);
+    const event = { request: input, route: { id: shared }, locals: {} };
+    denied(await dispatchStagingRequest(input, env, true, assets, dispatch), expected);
+    denied(await handle({ event, resolve: success } as unknown as Parameters<typeof handle>[0]), expected);
+  }
 });

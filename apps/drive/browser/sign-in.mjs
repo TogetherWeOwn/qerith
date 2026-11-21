@@ -154,7 +154,7 @@ try {
   };
   assert.equal((await worker.fetch(`${origin}/f/legacy%3Areceipts`, { headers: navigation, redirect: 'manual' })).status, 401);
   await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'fixture-owner', 'Receipts', 'folder')").run();
-  await Promise.all([signInFrom(first, '/f/fixture-parent?page=old-session'), signInFrom(second, '/shared?tab=two')]);
+  await Promise.all([signInFrom(first, '/f/fixture-parent?page=old-session'), signInFrom(second, '/')]);
   await captureSignedOut(first);
   assert.equal(await first.evaluate(async endpoint => (await fetch(`${endpoint}challenge`, { method: 'POST' })).status, endpoint), 200);
   await first.evaluate(() => sessionStorage.setItem('fixture-interrupted-upload', 'present'));
@@ -231,6 +231,3 @@ try {
   await browser?.close();
   await harness.close();
 }
-
-// Run the separate staging-origin scenario only after the original fixture has closed.
-await import('./staging-root.mjs');

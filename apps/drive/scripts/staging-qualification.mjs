@@ -62,7 +62,7 @@ export function assertDispatch(env, cwd = process.cwd()) {
 export function assertQualificationJob(env, cwd) {
   const testedSha = assertDispatch(env, cwd);
   const { GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt, GITHUB_WORKFLOW_REF: workflow } = env;
-  if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' ||
+  if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' || env.GITHUB_WORKFLOW_SHA !== testedSha ||
       workflow !== `${repo}/.github/workflows/drive-staging-qualification.yml@${main}` ||
       !requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
     throw new Error('Requires the protected staging qualification job.');

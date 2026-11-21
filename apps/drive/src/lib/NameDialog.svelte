@@ -1,0 +1,148 @@
+<script lang="ts">
+  import { flushSync, tick } from 'svelte';
+  import { entryId } from './download-id';
+  import { isMetadataId } from './metadata-id';
+  import { validateName } from './entry-name';
+  import './dialog.css';
+
+  let { available, items, oncreated, onrenamed, onreturn }: {
+    available: boolean;
+    items: { name: string; kind: string }[];
+    onrenamed: (id: string, name: string, close: () => void) => Promise<void>;
+    onreturn: (id: string) => void;
+    oncreated: (id: string, name: string, close: () => void) => Promise<void>;
+  } = $props();
+  const id = $props.id();
+  let dialog: HTMLDialogElement, field: HTMLInputElement;
+  let first: HTMLButtonElement, last: HTMLButtonElement;
+  let opener = $state<HTMLButtonElement>(), notice = $state<HTMLParagraphElement>();
+  let backdrop = false;
+  let name = $state(''), checking = $state(false), pending = $state(false), refreshing = $state(false);
+  let clash = $state(''), failure = $state('');
+  let target = $state<{ id: string; name: string; kind: string; path: string }>();
+  const invalid = $derived(checking ? nameError(name) || clash : '');
+  const pendingText = $derived(refreshing ? 'Refreshing My Drive…' : target ? 'Renaming…' : 'Making folder…');
+
+  function nameError(value: string) {
+    try { validateName(value); return ''; } catch {
+      if (!value) return 'Type a name.';
+      if (/^[ .]+$|\//.test(value)) return 'Names can\'t contain "/" or be only dots or spaces.';
+      if (new TextEncoder().encode(value).length > 255) return 'That name is too long. Shorten it and try again.';
+      return 'Remove unsupported characters and try again.';
+    }
+  }
+
+  export function open(entry?: NonNullable<typeof target>) {
+    if (dialog.open) return;
+    flushSync(() => { target = entry; name = entry?.name ?? ''; clash = failure = ''; checking = false; });
+    // Selection uses the displayed text; the binding retains stored line breaks until edit.
+    const dot = entry?.kind === 'File' ? field.value.lastIndexOf('.') : -1;
+    const end = dot > 0 && dot < field.value.length - 1 ? dot : field.value.length;
+    dialog.showModal(); field.focus(); field.setSelectionRange(0, end);
+  }
+  function close() { dialog.close(); }
+  function dismiss() {
+    if (pending) return;
+    close();
+    if (target) onreturn(target.id);
+    else opener?.focus();
+  }
+  function keys(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    const [from, to] = event.shiftKey ? [first, last] : [last, first];
+    if (document.activeElement === from) { event.preventDefault(); to.focus(); }
+  }
+
+  async function save(event: SubmitEvent) {
+    event.preventDefault();
+    if (pending) return;
+    const entry = target;
+    if (entry && name === entry.name) { dismiss(); return; }
+    checking = true; failure = '';
+    if (invalid) { await tick(); field.focus(); return; }
+    pending = true;
+    const submitted = name;
+    const unknown = entry ? 'We couldn’t confirm the rename. Check My Drive before trying again.' :
+      'We couldn’t confirm the folder was created. Check My Drive before trying again.';
+    let saved: string | undefined;
+    try {
+      const response = await fetch(entry?.path ?? '/api/folders', {
+        method: entry ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',
+        body: JSON.stringify(entry ? { kind: 'rename', name: submitted } : { name: submitted, parentId: null }),
+        ...(entry ? { signal: AbortSignal.timeout(15_000) } : {}),
+      });
+      if (response.status === (entry ? 200 : 201)) {
+        const row = await response.json();
+        const expected = entry ? row?.id === entry.id && row.kind === entry.kind.toLowerCase() &&
+          (row.parentId === null || isMetadataId(row.parentId)) :
+          typeof row?.id === 'string' && entryId.test(row.id) && row.kind === 'folder' && row.parentId === null;
+        if (expected && row.name === submitted) saved = row.id;
+        else failure = unknown;
+      } else if (response.status === 409) {
+        // Rename checks the live parent, which need not match this listing.
+        const kind = !entry && items.find(item => item.name === submitted)?.kind.toLowerCase();
+        clash = entry ? `The name "${submitted}" is already in use. Pick another name.` :
+          `There's already ${kind ? `a ${kind}` : 'an item'} called "${submitted}" here. Pick another name.`;
+      } else if (response.status === 400) failure = entry ? 'Check the name and try again.' : 'Check the folder name and try again.';
+      else if (response.status === 401) failure = entry ? 'Sign in again before renaming this item.' : 'Sign in again before making a folder.';
+      else if (response.status === 403 || response.status === 404) failure = entry ?
+        'This item can’t be renamed. Refresh My Drive.' : 'You can’t make a folder here. Refresh My Drive.';
+      else failure = unknown;
+    } catch { failure = unknown; }
+
+    try {
+      if (saved && entry) { refreshing = true; await onrenamed(saved, submitted, close); }
+      else if (saved) await oncreated(saved, submitted, () => { close(); opener?.focus(); });
+    } finally { refreshing = pending = false; }
+    if (!saved) { await tick(); (clash ? field : notice)?.focus(); }
+  }
+</script>
+
+{#if available}<button class="new-folder" type="button" bind:this={opener} onclick={() => open()}>New folder</button>{/if}
+<dialog class="drive-dialog" bind:this={dialog} aria-labelledby={`${id}-title`} closedby={pending ? 'none' : 'closerequest'}
+  onkeydown={keys} oncancel={event => { event.preventDefault(); dismiss(); }}
+  onpointerdown={event => { backdrop = event.target === dialog; }}
+  onclick={event => { if (backdrop && event.target === dialog) dismiss(); }}>
+  <form class="panel" onsubmit={save} autocomplete="off">
+    <header>
+      <h2 id={`${id}-title`}>{#if target}Rename “<bdi>{target.name}</bdi>”{:else}New folder in My Drive{/if}</h2>
+      <button class="close" type="button" aria-label="Close" aria-disabled={pending} bind:this={first} onclick={dismiss}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <p class="status" role="status">{pending ? pendingText : ''}</p>
+    {#if failure}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{failure}</p>{/if}
+    <div class="field">
+      <label for={`${id}-name`}>{target ? 'Name' : 'Folder name'}</label>
+      <input id={`${id}-name`} bind:this={field} bind:value={name} dir="auto" readonly={pending} oninput={() => { clash = ''; }}
+        aria-invalid={!!invalid} aria-describedby={invalid ? `${id}-error` : undefined} />
+      {#if invalid}<span id={`${id}-error`} role="alert" dir="auto">{invalid}</span>{/if}
+    </div>
+    <footer>
+      <button class="primary" type="submit" aria-disabled={pending} aria-busy={pending}>{pending ? pendingText : target ? 'Rename' : 'Make folder'}</button>
+      <button type="button" aria-disabled={pending} bind:this={last} onclick={dismiss}>Cancel</button>
+    </footer>
+  </form>
+</dialog>
+
+<style>
+  header, footer { display: flex; align-items: center; gap: var(--drive-space-2); }
+  header { justify-content: space-between; }
+  footer { justify-content: flex-end; }
+  p { margin: 0; overflow-wrap: anywhere; }
+  h2 { min-width: 0; overflow-wrap: anywhere; }
+  .status { position: absolute; clip-path: inset(50%); }
+  .field { display: grid; gap: var(--drive-space-1); font-size: var(--drive-font-size-ui); }
+  .field span { color: var(--drive-color-state-danger); font-size: var(--drive-font-size-small); overflow-wrap: anywhere; }
+  input { box-sizing: border-box; width: 100%; min-width: 0; min-height: var(--drive-size-control-md); padding: var(--drive-space-2) var(--drive-space-inset-room); border: var(--drive-size-line) solid var(--drive-color-line-control); border-radius: var(--drive-radius-m); color: inherit; background: var(--drive-color-bg-canvas); font: inherit; }
+  input[aria-invalid='true'] { border-color: var(--drive-color-state-danger); }
+  button { flex: none; min-height: var(--drive-size-control-sm); padding-inline: var(--drive-space-inset-room); border: var(--drive-size-line) solid transparent; border-radius: var(--drive-radius-pill); background: transparent; color: var(--drive-color-text-secondary); font: inherit; font-size: var(--drive-font-size-ui); font-weight: var(--drive-font-weight-semibold); font-stretch: var(--drive-font-width-button); cursor: pointer; }
+  button.primary { min-height: var(--drive-size-control-md); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); }
+  button:not(.primary):not([aria-disabled='true']):hover, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
+  button.primary:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
+  button[aria-disabled='true'] { color: var(--drive-color-text-secondary); cursor: default; }
+  .close { padding: 0; min-width: var(--drive-size-control-sm); }
+  svg { display: block; margin: auto; width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
+  :is(input, button, .notice):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  @media (max-width: 820px) { footer { flex-direction: column; align-items: stretch; } }
+</style>

@@ -59,7 +59,12 @@ function generatedAssets(builder) {
   visited.clear();
   // SSR-only: ship styles and their font, not the generated client entry.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
-  return { signIn, root, invite, people, folder: [...assets].filter(path => /\.(?:css|woff2)$/.test(path)) };
+  const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
+  const folder = styles();
+  assets.clear();
+  visited.clear();
+  include(leaf('/src/routes/shared/+page.svelte'));
+  return { signIn, root, invite, people, folder, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -88,7 +93,9 @@ import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/own
 import { allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
+import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
+import { dispatchStagingDeletion, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
@@ -99,7 +106,8 @@ const assets = {
   root: new Set(generated.root),
   invite: new Set(generated.invite),
   people: new Set(generated.people),
-  folder: new Set(generated.folder)
+  folder: new Set(generated.folder),
+  shared: new Set(generated.shared)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;
@@ -110,12 +118,19 @@ const unavailable = () => new Response('Service unavailable', {
 const unavailableAssets = { fetch: unavailable };
 
 export default {
+  async scheduled(event, env) {
+    // There is no configured trigger or server-held deletion qualification.
+    await runStagingDeletionDrain(event, env);
+  },
   async fetch(request, env, ctx) {
     if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
+      // No qualified rule is installed. Upload readiness does not admit deletion.
+      const deletion = dispatchStagingDeletion(request, env);
+      if (deletion) return deletion;
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
       if (url.pathname === readinessPath) return qualificationReadiness(request, env, ready);
@@ -136,6 +151,9 @@ export default {
       pathname = decodeURIComponent(url.pathname);
     } catch {
       return unavailable();
+    }
+    if (pathname === sharedRoute || pathname.startsWith(sharedRoute + '/')) {
+      return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } });
     }
     const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete\\/?$/.exec(pathname)?.[1];
     if (entryId) return deletePrivateEntry(request, entryId, env);

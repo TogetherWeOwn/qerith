@@ -4,10 +4,309 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
+import { assertDispatch, assertQualificationJob, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
+import { qualificationExerciseCases } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
+import { qualificationRecoveryWriter, readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
+import { qualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { verifyRecoveryR2Expiry } from './staging-qualification-expiry.mjs';
+
+const recoverySource = Object.freeze({ sha: 'a'.repeat(40), runId: '182', attempt: '3' });
+const recoveryContext = { ...recoverySource, prefix: 'drive-qualification/full-v0/182/3/' };
+const d1Record = { ...recoveryContext, kind: 'd1', bookmark: 'offline_bookmark' };
+const workerRecord = { ...recoveryContext, kind: 'worker', version: '11111111-1111-1111-1111-111111111111',
+  expiresAt: '1780000000000', previousVersion: '22222222-2222-2222-2222-222222222222',
+  previousDeployment: '33333333-3333-3333-3333-333333333333' };
+const invalidRecord = { message: 'Staging qualification recovery record is unverified.' };
+
+test('recovery writer requires fresh readback of a create-only record before acknowledging', async () => {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const enteredRead = Promise.withResolvers();
+  const readback = Promise.withResolvers();
+  const stored = new Map();
+  const store = {
+    async create(key, body, receivedSignal) {
+      assert.equal(receivedSignal, signal);
+      if (stored.has(key)) return false;
+      stored.set(key, body);
+      return true;
+    },
+    async read(key, options) {
+      assert.deepEqual(options, { maxBytes: 2048, signal });
+      enteredRead.resolve();
+      await readback.promise;
+      return Uint8Array.from(stored.get(key));
+    },
+  };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  let acknowledged = false;
+  const pending = write({ ...d1Record, internal: 'not serialized' }, signal).then(value => {
+    acknowledged = value;
+    return value;
+  });
+  await Promise.race([enteredRead.promise, pending]);
+  assert.equal(acknowledged, false);
+  readback.resolve();
+  assert.equal(await pending, true);
+  assert.equal(await write(workerRecord, signal), true);
+  const { sha, runId, attempt } = recoverySource;
+  for (const record of [d1Record, workerRecord]) {
+    const { prefix, ...payload } = record;
+    const key = `drive-staging-recovery-${record.kind}-${sha}-run-${runId}-attempt-${attempt}`;
+    assert.deepEqual(stored.get(key), new TextEncoder().encode(JSON.stringify({
+      schema: 'drive-staging-recovery.v1', kind: record.kind, sha, runId, attempt,
+      ...(record.kind === 'd1' ? { bookmark: record.bookmark } : {
+        version: record.version, expiresAt: record.expiresAt, previousVersion: record.previousVersion,
+        previousDeployment: record.previousDeployment,
+      }),
+    })));
+    assert.deepEqual(await readQualificationRecoveryRecord(recoverySource, record.kind, store, signal),
+      { schema: 'drive-staging-recovery.v1', ...payload });
+  }
+  await assert.rejects(write(d1Record, signal), invalidRecord);
+  assert.equal(stored.size, 2);
+});
+
+test('recovery writer never creates after cancellation during serialization', async () => {
+  const controller = new AbortController();
+  let creates = 0;
+  const write = qualificationRecoveryWriter(recoverySource, {
+    create() { creates++; return true; },
+    read() { return Buffer.from(canonicalD1); },
+  });
+  await assert.rejects(write({ ...d1Record, get bookmark() {
+    controller.abort();
+    return d1Record.bookmark;
+  } }, controller.signal), invalidRecord);
+  assert.equal(creates, 0);
+});
+
+test('recovery store methods retain their receiver and setup errors are sanitized', async () => {
+  const store = {
+    records: new Map(),
+    create(key, value) { this.records.set(key, Uint8Array.from(value)); return true; },
+    read(key) { return this.records.get(key); },
+  };
+  assert.equal(await qualificationRecoveryWriter(recoverySource, store)(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  for (const malformed of [undefined, null, { read: true }, { get read() { throw new Error('store setup failed'); } }]) {
+    assert.throws(() => qualificationRecoveryWriter(recoverySource, malformed), invalidRecord);
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', malformed), invalidRecord);
+  }
+  assert.throws(() => qualificationRecoveryWriter(recoverySource, {
+    ...store, get create() { throw new Error('store setup failed'); },
+  }), invalidRecord);
+});
+
+test('recovery writer refuses invalid scope, ambiguous creation, readback drift and cancellation', async () => {
+  const calls = [];
+  assert.throws(() => qualificationRecoveryWriter(recoverySource, { create: () => true }), invalidRecord);
+  const controller = new AbortController();
+  let outcome;
+  const write = qualificationRecoveryWriter(recoverySource, {
+    create() {
+      calls.push('create');
+      if (outcome === 'lost-ack') throw new Error('Create result unknown');
+      return true;
+    },
+    read() {
+      calls.push('read');
+      if (outcome === 'cancelled') controller.abort();
+      return Buffer.from(canonicalD1 + (outcome === 'drift' ? '\n' : ''));
+    },
+  });
+  for (const record of [{ ...d1Record, attempt: '2' }, { ...d1Record, prefix: 'another-prefix/' },
+    { ...d1Record, bookmark: 'line\nbreak' }, { ...workerRecord, version: workerRecord.previousVersion }]) {
+    await assert.rejects(write(record), invalidRecord);
+    assert.deepEqual(calls, []);
+  }
+  for (const [result, expected] of [['lost-ack', ['create']], ['drift', ['create', 'read']],
+    ['cancelled', ['create', 'read']]]) {
+    outcome = result;
+    await assert.rejects(write(d1Record, controller.signal), invalidRecord);
+    assert.deepEqual(calls.splice(0), expected);
+  }
+  await assert.rejects(write(d1Record, controller.signal), invalidRecord);
+  assert.deepEqual(calls, []);
+});
+
+const canonicalD1 = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: 'd1',
+  ...recoverySource, bookmark: d1Record.bookmark });
+
+test('recovery writer validates and stores the same bookmark', async () => {
+  let reads = 0;
+  let body;
+  const store = {
+    create(_key, value) { body = value; return true; },
+    read() { return body; },
+  };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  assert.equal(await write({ ...d1Record, get bookmark() {
+    return ++reads === 1 ? d1Record.bookmark : 'not a bookmark';
+  } }), true);
+  assert.equal(reads, 1);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+});
+
+test('recovery writer and reader compare the actual byte view without conversion', async () => {
+  const canonical = Buffer.from(canonicalD1);
+  const backing = new Uint8Array(canonical.length + 2).fill(0xff);
+  backing.set(canonical, 1);
+  const view = backing.subarray(1, -1);
+  const unused = () => assert.fail('Byte validation must not call object hooks');
+  Object.defineProperties(view, { byteLength: { get: unused }, valueOf: { value: unused } });
+  const store = { create: () => true, read: () => view };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  assert.equal(await write(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  view[0] = 0xff;
+  await assert.rejects(write(d1Record), invalidRecord);
+  await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store), invalidRecord);
+});
+
+test('recovery writer and reader reject a BOM prefix and normalized text', async () => {
+  const prefixed = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(canonicalD1)]);
+  for (const read of [() => prefixed, () => new Response(prefixed).text()]) {
+    const store = { create: () => true, read };
+    await assert.rejects(qualificationRecoveryWriter(recoverySource, store)(d1Record), invalidRecord);
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store), invalidRecord);
+  }
+});
+
+test('recovery reader rejects copied, malformed, oversized and cancelled records', async () => {
+  const invalidBodies = ['{', 'x'.repeat(2049), canonicalD1.replace('"3"', '"2"'),
+    canonicalD1.replace('"182"', '"183"'), canonicalD1.replace(recoverySource.sha, 'b'.repeat(40)),
+    canonicalD1.replace('recovery.v1', 'recovery.v2'), canonicalD1.replace('"d1"', '"worker"'),
+    `{"unexpected":true,${canonicalD1.slice(1)}`, `{"kind":"d1",${canonicalD1.slice(1)}`];
+  for (const body of [undefined, ...invalidBodies.map(text => Buffer.from(text))]) {
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', { read: () => body }), invalidRecord);
+  }
+  const controller = new AbortController();
+  const store = { read() { controller.abort(); return Buffer.from(canonicalD1); } };
+  await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store, controller.signal), invalidRecord);
+  let reads = 0;
+  await assert.rejects(readQualificationRecoveryRecord({ ...recoverySource, runId: '../182' }, 'd1', {
+    read() { reads++; return Buffer.from(canonicalD1); },
+  }), invalidRecord);
+  assert.equal(reads, 0);
+});
+
+const recoveryClock = Date.UTC(2026, 10, 20);
+const recoveryObject = (body, modified = recoveryClock, date = recoveryClock) => ({ status: 200, body,
+  headers: new Headers({ date: new Date(date).toUTCString(), 'last-modified': new Date(modified).toUTCString(),
+    'content-length': body.byteLength }) });
+
+test('R2 recovery tolerates a fresh provider clock lead without extending the three-day cutoff', async () => {
+  const bytes = Buffer.from(canonicalD1);
+  const key = `drive-staging-recovery-d1-${recoverySource.sha}-run-182-attempt-3`;
+  const read = response => qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    request: () => response }).read(key, { maxBytes: 2048 });
+  const ahead = recoveryClock + 1000, behind = recoveryClock - 1000;
+  const ttl = 3 * 86_400_000;
+  assert.deepEqual(await read(recoveryObject(bytes, ahead, ahead)), bytes);
+  assert.deepEqual(await read(recoveryObject(bytes, ahead - ttl + 1000, ahead)), bytes);
+  const missingDate = recoveryObject(bytes), invalidDate = recoveryObject(bytes);
+  missingDate.headers.delete('date');
+  invalidDate.headers.set('date', '2026-11-20');
+  for (const response of [recoveryObject(bytes, ahead - ttl, ahead), recoveryObject(bytes, recoveryClock - ttl, behind),
+    recoveryObject(bytes, ahead, recoveryClock), recoveryObject(bytes, behind, recoveryClock - 31_000),
+    recoveryObject(bytes, recoveryClock - 31_000, recoveryClock - 31_000), missingDate, invalidDate]) {
+    await assert.rejects(read(response), /recovery storage is unverified/);
+  }
+});
+
+test('R2 recovery creates both exact keys and a fresh store reads them without local state', async () => {
+  const durable = new Map();
+  const calls = [];
+  const signal = new AbortController().signal;
+  const makeStore = () => qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    verifyRetention: async () => true, request: async ({ method, key, body, headers, maxResponseBytes, signal: sent }) => {
+      assert.equal(sent, signal);
+      calls.push([method, key]);
+      if (method === 'PUT') {
+        assert.equal(headers['if-none-match'], '*');
+        assert.equal(maxResponseBytes, 0);
+        if (durable.has(key)) return { status: 412 };
+        durable.set(key, Uint8Array.from(body));
+        return { status: 200, headers: new Headers({ etag: '"created"' }) };
+      }
+      assert.equal(headers['cache-control'], 'no-cache, no-store');
+      assert.equal(maxResponseBytes, 2048);
+      return recoveryObject(durable.get(key));
+    } });
+  const write = qualificationRecoveryWriter(recoverySource, makeStore());
+  for (const { prefix, ...record } of [d1Record, workerRecord]) {
+    assert.equal(await write({ prefix, ...record }, signal), true);
+    assert.deepEqual(await readQualificationRecoveryRecord(recoverySource, record.kind, makeStore(), signal),
+      { schema: 'drive-staging-recovery.v1', ...record });
+    const key = `drive-qualification/recovery/drive-staging-recovery-${record.kind}-${record.sha}-run-182-attempt-3`;
+    assert.deepEqual(calls.splice(0), [['PUT', key], ['GET', key], ['GET', key]]);
+  }
+  await assert.rejects(write({ ...d1Record, bookmark: 'replacement' }, signal), invalidRecord);
+  assert.deepEqual(calls.splice(0).map(([method]) => method), ['PUT']);
+  for (const source of [{ ...recoverySource, attempt: '4' }, { ...recoverySource, runId: '183' },
+    { ...recoverySource, sha: 'b'.repeat(40) }]) {
+    await assert.rejects(readQualificationRecoveryRecord(source, 'd1', makeStore(), signal), invalidRecord);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('R2 recovery returns raw bytes without attempting UTF-8 decoding', async () => {
+  const bytes = Uint8Array.of(0xef, 0xbb, 0xbf, 0xff);
+  const store = qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    request: () => recoveryObject(bytes) });
+  const key = `drive-staging-recovery-d1-${recoverySource.sha}-run-182-attempt-3`;
+  assert.deepEqual(await store.read(key, { maxBytes: 2048 }), bytes);
+});
+
+test('R2 recovery fails closed on a lost PUT acknowledgement and invalid byte readback', async () => {
+  const methods = [];
+  let sent;
+  const run = result => {
+    const store = qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+      verifyRetention: () => true, request({ method, body }) {
+        methods.push(method);
+        if (method === 'GET') return result;
+        sent = body;
+        if (!result) throw new Error('response lost after commit');
+        return { status: 200, headers: new Headers({ etag: '"created"' }) };
+      } });
+    return qualificationRecoveryWriter(recoverySource, store)(d1Record);
+  };
+  await assert.rejects(run(), invalidRecord);
+  assert.deepEqual(sent, Uint8Array.from(Buffer.from(canonicalD1)));
+  assert.deepEqual(methods.splice(0), ['PUT']);
+  for (const response of [recoveryObject(Buffer.from(String.fromCodePoint(0xfeff) + canonicalD1)), recoveryObject(Buffer.alloc(2049)),
+    recoveryObject(Buffer.from([0xff])), recoveryObject(Buffer.from(canonicalD1 + '\n')),
+    recoveryObject(Buffer.from(canonicalD1), recoveryClock - 3 * 86_400_000), { status: 404, headers: new Headers() }]) {
+    await assert.rejects(run(response), invalidRecord);
+    assert.deepEqual(methods.splice(0), ['PUT', 'GET']);
+  }
+});
+
+test('R2 recovery retention requires a covering three-day rule and refuses a write without it', async () => {
+  const rule = (prefix, days) => ({ enabled: true, conditions: { prefix },
+    deleteObjectsTransition: { condition: { type: 'Age', maxAge: days * 86_400 } } });
+  const covering = rule('drive-qualification/', 3);
+  const binding = { account: 'offline', settings: { bucket: 'fixture' } };
+  const verify = rules => verifyRecoveryR2Expiry(binding, 'fixture', undefined, async (url, init) => {
+    assert.match(url, /\/accounts\/offline\/r2\/buckets\/fixture\/lifecycle$/);
+    assert.equal(init.method, 'GET');
+    return Response.json({ success: true, errors: [], result: { rules } });
+  });
+  assert.equal(await verify([covering, rule(recoveryContext.prefix, 1)]), true);
+  for (const rules of [[rule(recoveryContext.prefix, 3)], [rule('', 3)],
+    [covering, rule('drive-qualification/recovery/partial', 2)], [covering, rule('drive-qualification/recovery/', 4)]]) {
+    await assert.rejects(verify(rules));
+  }
+  let sends = 0;
+  const store = qualificationR2RecoveryStore(recoverySource, { verifyRetention: () => verify([]), request: () => sends++ });
+  await assert.rejects(qualificationRecoveryWriter(recoverySource, store)(d1Record), invalidRecord);
+  assert.equal(sends, 0);
+});
 
 function history(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-qualification-'));
@@ -57,6 +356,16 @@ test('dispatch, checkout and fetched main history must independently agree', t =
   git('switch', '-q', '--detach', env.GITHUB_SHA);
   git('update-ref', '-d', 'refs/remotes/origin/main');
   assert.throws(() => assertDispatch(env, cwd), /origin\/main/);
+});
+
+test('the protected job requires the workflow definition itself to match the dispatch SHA', t => {
+  const { cwd, env, ancestor } = history(t);
+  Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification', GITHUB_WORKFLOW_SHA: env.TESTED_SHA,
+    GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
+  assert.equal(assertQualificationJob(env, cwd).sha, env.TESTED_SHA);
+  for (const value of [undefined, '', ancestor]) {
+    assert.throws(() => assertQualificationJob({ ...env, GITHUB_WORKFLOW_SHA: value }, cwd), /protected staging/);
+  }
 });
 
 test('only a complete successful full-v0 run has the pinned consumer name', t => {
@@ -112,9 +421,13 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
 });
 
-function lifecycle(t, failure, controller = new AbortController()) {
+const exerciseResults = Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass']));
+
+function lifecycle(t, failure, driftKind) {
+  const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_SHA: env.TESTED_SHA,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
   const events = [];
   const prefix = 'drive-qualification/full-v0/182/3/';
@@ -123,23 +436,35 @@ function lifecycle(t, failure, controller = new AbortController()) {
     events.push(name);
     return !failures.includes(name);
   };
-  const candidate = { version: 'candidate' };
+  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const candidate = { version, expiresAt, previousVersion, previousDeployment };
+  const stored = new Map();
+  const writeRecovery = qualificationRecoveryWriter({ ...recoverySource, sha: env.TESTED_SHA }, {
+    create(key, body) {
+      step(`create-${JSON.parse(Buffer.from(body).toString('utf8')).kind}`);
+      if (stored.has(key)) return false;
+      stored.set(key, Buffer.from(body));
+      return true;
+    },
+    read(key) {
+      const body = stored.get(key);
+      const { kind } = JSON.parse(body.toString('utf8'));
+      step(`read-${kind}`);
+      return kind === driftKind ? Buffer.concat([body, Buffer.from('\n')]) : Buffer.from(body);
+    },
+  });
   const ops = {
     assertFullV0: () => step('full-v0'),
     inventory({ phase, sha }, signal) {
       assert.equal(sha, env.TESTED_SHA);
       assert.equal(signal.aborted, false);
-      if (failure === 'cancel-after-restore' && phase === 'after') controller.abort();
       return step(`inventory-${phase}`);
     },
-    async recordRecovery({ kind, ...data }) {
-      await Promise.resolve();
-      assert.equal(data.prefix, prefix);
-      assert.equal(kind === 'd1' ? data.bookmark : data.previousVersion, kind === 'd1' ? 'bookmark' : 'baseline');
-      return step(`record-${kind}`);
+    recordRecovery(record, signal) {
+      return step(`record-${record.kind}`) && writeRecovery(record, signal);
     },
-    async exercise({ version, prefix: keyPrefix }, signal) {
-      assert.equal(version, 'candidate');
+    async exercise({ version: activeVersion, prefix: keyPrefix }, signal) {
+      assert.equal(activeVersion, version);
       assert.equal(keyPrefix, prefix);
       step('exercise');
       if (failure === 'cancel') controller.abort();
@@ -147,11 +472,11 @@ function lifecycle(t, failure, controller = new AbortController()) {
       step('exercise-settled');
       signal.throwIfAborted();
       if (failure === 'exercise') throw new Error('Case failed');
-      return { 'passkey-positive': 'pass' };
+      return exerciseResults;
     },
-    cleanup({ prefix: keyPrefix, version }, signal) {
+    cleanup({ prefix: keyPrefix, version: activeVersion }, signal) {
       assert.equal(keyPrefix, prefix);
-      assert.equal(version, 'candidate');
+      assert.equal(activeVersion, version);
       assert.equal(signal.aborted, false);
       return step('cleanup');
     },
@@ -169,7 +494,7 @@ function lifecycle(t, failure, controller = new AbortController()) {
     probe: () => step('probe'),
     async worker({ upload, recordRecovery, probe, exercise, cleanup }, _env, _cwd, signal) {
       assert.equal(upload, candidate);
-      await recordRecovery({ previousVersion: 'baseline' });
+      await recordRecovery(candidate);
       step('activate');
       try {
         if (!probe()) throw new Error('Readiness failed');
@@ -185,17 +510,38 @@ function lifecycle(t, failure, controller = new AbortController()) {
       }
     },
   };
-  return { events, run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
+  return { events, stored, testedSha: env.TESTED_SHA,
+    run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
 }
 
-const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'migrate', 'record-worker',
-  'activate', 'probe', 'exercise', 'exercise-settled', 'cleanup', 'restore', 'inventory-after'];
+const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'create-d1', 'read-d1', 'migrate',
+  'record-worker', 'create-worker', 'read-worker', 'activate', 'probe', 'exercise', 'exercise-settled',
+  'cleanup', 'restore', 'inventory-after'];
 
-test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
-  const { run, events } = lifecycle(t);
-  assert.deepEqual(await run(), { migrations: { bookmark: 'bookmark' },
-    deployment: { cases: { 'passkey-positive': 'pass' }, restoredDeployment: 'restored' } });
+test('qualification lifecycle loads on plain Node without the test loader', () => {
+  const lifecycleUrl = new URL('./staging-qualification-lifecycle.mjs', import.meta.url);
+  execFileSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(lifecycleUrl.href)})`], {
+    env: { PATH: process.env.PATH }, timeout: 30_000,
+  });
+});
+
+test('qualification lifecycle rejects a fabricated pass map after recording recovery', async t => {
+  const { run, events, stored, testedSha } = lifecycle(t);
+  await assert.rejects(run(), /case evidence/);
   assert.deepEqual(events, successOrder);
+  const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
+  const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
+  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  assert.deepEqual(payloads, [
+    { ...scope, kind: 'd1', bookmark: 'bookmark' },
+    { ...scope, kind: 'worker', version, expiresAt, previousVersion, previousDeployment },
+  ]);
+});
+
+test('exercise covers exactly the full-v0 cases not proved by the lifecycle', () => {
+  const lifecycleCases = ['sha-bound-readiness', 'migration-ledger', 'time-travel-bookmark',
+    'rollback-or-disablement', 'zero-idle-inventory', 'prefix-cleanup-verified'];
+  assert.deepEqual([...qualificationExerciseCases, ...lifecycleCases].sort(), [...requiredCases].sort());
 });
 
 test('qualification lifecycle rejects missing admission, a stale baseline and unrecorded recovery', async t => {
@@ -213,10 +559,19 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
   }
 });
 
+test('qualification lifecycle blocks D1 apply and Worker activation on exact-record readback drift', async t => {
+  for (const kind of ['d1', 'worker']) {
+    const { run, events } = lifecycle(t, undefined, kind);
+    await assert.rejects(run(), invalidRecord);
+    assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(`read-${kind}`) + 1), 'inventory-after']);
+  }
+});
+
 test('qualification failures and cancellation suppress the result without skipping recovery', async t => {
   for (const [failure, error] of [
     ['exercise', /Case failed/], ['cancel', { name: 'AbortError' }], ['cleanup', /prefix cleanup is unverified/],
-    ['inventory-after', /inventory is unverified/], ['cancel-after-restore', { name: 'AbortError' }],
+    ['inventory-after', error => error instanceof AggregateError &&
+      /inventory is unverified \(after\)/.test(error.errors[1]?.message)],
   ]) {
     const { run, events } = lifecycle(t, failure);
     await assert.rejects(run(), error);
@@ -224,7 +579,7 @@ test('qualification failures and cancellation suppress the result without skippi
   }
   const { run, events } = lifecycle(t, 'probe');
   await assert.rejects(run(), /Readiness failed/);
-  assert.deepEqual(events, [...successOrder.slice(0, 8), 'restore', 'inventory-after']);
+  assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf('probe') + 1), 'restore', 'inventory-after']);
 });
 
 test('final inventory failure preserves Worker rollback reconciliation', async t => {
@@ -427,7 +782,7 @@ test('provider storage cases fail closed on cancellation or a mismatched prefix'
   assert.deepEqual(trace, []);
 });
 
-test('the staged workflow has no producer or provider path', () => {
+test('the protected workflow checks pinned settings and still has no provider or receipt path', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-qualification.yml', import.meta.url), 'utf8');
   const gate = "github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'";
   const [name, trigger, permissions, ...jobs] = workflow.trimEnd().split('\n\n');
@@ -472,7 +827,26 @@ test('the staged workflow has no producer or provider path', () => {
         env:
           TESTED_SHA: \${{ inputs.tested_sha }}
         run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification.mjs`);
-  assert.equal(qualificationSteps, `      - name: Fail closed until the live runner and cleanup are reviewed
+  assert.equal(qualificationSteps, `      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: \${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify protected source and staged settings offline
+        env:
+          TESTED_SHA: \${{ inputs.tested_sha }}
+          CLOUDFLARE_ACCOUNT_ID: \${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          QERITH_S3_ENDPOINT: \${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: \${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: \${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: \${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: \${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: \${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+        run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification-settings.mjs
+      - name: Fail closed until the live runner and cleanup are reviewed
         run: |
           printf '%s\\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
           exit 1`);

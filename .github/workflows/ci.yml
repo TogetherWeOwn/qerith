@@ -347,18 +347,6 @@ jobs:
       - name: Test staging source guard
         if: hashFiles('.github/workflows/drive-staging-preparation.yml', 'apps/drive/scripts/staging-source.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-source.test.mjs
-      - name: Test staging qualification policy without dispatch
-        if: hashFiles('.github/workflows/drive-staging-qualification.yml', 'apps/drive/scripts/staging-qualification.test.mjs') != ''
-        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification.test.mjs
-      - name: Test staging qualification large-transfer verification offline
-        if: hashFiles('apps/drive/scripts/staging-qualification-large-transfer.test.mjs') != ''
-        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-large-transfer.test.mjs
-      - name: Test staging qualification migrations without provider access
-        if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
-        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-migrations.test.mjs
-      - name: Test staging qualification Worker lifecycle without provider access
-        if: hashFiles('apps/drive/scripts/staging-qualification-worker.test.mjs') != ''
-        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-worker.test.mjs
       - name: Test offline bundle validation
         run: timeout --signal=TERM --kill-after=10s 60s python3 -I -m unittest discover -s scripts/screen-reader -p 'test_bundle_*.py' -v
 
@@ -429,9 +417,13 @@ jobs:
         # Older PR checkouts may have the unit tests but predate this integration check.
         if: hashFiles('apps/drive/scripts/test-qualification-wrangler.sh') != ''
         run: bash scripts/test-qualification-wrangler.sh
-      - name: Test signed qualification cleanup and native R2 expiry offline
-        if: hashFiles('apps/drive/scripts/staging-qualification-cleanup.test.mjs') != ''
-        run: timeout --signal=TERM --kill-after=10s 60s node --import tsx --test scripts/staging-qualification-cleanup.test.mjs
+      - name: Test all staging qualification adapters and policy offline
+        if: hashFiles('.github/workflows/drive-staging-qualification.yml', 'apps/drive/scripts/staging-qualification*.test.mjs') != ''
+        run: |
+          if [[ -f ../../.github/workflows/drive-staging-qualification.yml ]]; then
+            test -f scripts/staging-qualification.test.mjs
+          fi
+          timeout --signal=TERM --kill-after=10s 120s node --import tsx --test 'scripts/staging-qualification*.test.mjs'
       - name: Check Drive project types and configuration coverage
         run: |
           npm run check
@@ -556,14 +548,24 @@ jobs:
           test -f apps/drive/browser/sign-in.mjs
           npm run build --prefix apps/drive
           (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
+      - name: Exercise generated staging-origin fixture in Chromium with local D1
+        # Earlier heads either lack this fixture or already run it from sign-in.mjs.
+        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''
+        working-directory: tested/apps/drive/browser
+        env:
+          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+        run: timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
           ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
           UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
+          CONTINUATION_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/root-upload-continuation.mjs') != '' }}
+          DELETE_FILE_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/delete-file.mjs') != '' }}
           STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
           STAGING_FOLDER_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/tests/staging-folder-worker-fixture.mjs') != '' }}
+          STAGING_SHARED_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/shared-listing.mjs') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

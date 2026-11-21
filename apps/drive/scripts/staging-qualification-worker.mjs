@@ -68,7 +68,8 @@ function workerApi(account, name, token, request) {
         headers: { authorization: `Bearer ${token}`, ...(body && { 'content-type': 'application/json' }) },
         body: body && JSON.stringify(body),
       });
-      if (!response.ok || !response.body) {
+      const complete = body ? response.ok : response.status === 200 && !response.headers.has('content-range');
+      if (!complete || !response.body) {
         await response.body?.cancel();
         throw new Error();
       }
@@ -82,6 +83,7 @@ function workerApi(account, name, token, request) {
       }
       const payload = JSON.parse(text + decoder.decode());
       if (payload?.success !== true || !payload.result || !Array.isArray(payload.errors) || payload.errors.length) throw new Error();
+      if (path === `${script}/schedules` && Object.hasOwn(payload, 'result_info')) throw new Error();
       return payload.result;
     } catch {
       // Never log provider bodies, headers, or errors.
@@ -92,8 +94,10 @@ function workerApi(account, name, token, request) {
   return {
     version,
     async assertNoSchedules(signal) {
-      const { schedules } = await call(`${script}/schedules`, signal);
-      if (!Array.isArray(schedules) || schedules.length !== 0) throw new Error('Cannot verify empty staging Worker schedules.');
+      const result = await call(`${script}/schedules`, signal);
+      if (!Array.isArray(result.schedules) || result.schedules.length || Object.keys(result).length !== 1) {
+        throw new Error('Cannot verify empty staging Worker schedules.');
+      }
     },
     async recentUploads(signal) {
       // Same unfiltered, newest-first list used by Wrangler's secret list --latest-version.
@@ -156,15 +160,69 @@ function checkedBindings(version, config, vars) {
   return bindings;
 }
 
+export function stagingConfigAt(cwd, sha, account) {
+  const config = JSON.parse(execFileSync('git', ['show', `${sha}:apps/drive/wrangler.staging.json`],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 65_536, timeout: 5_000 }));
+  validateStagingConfig(config, account);
+  return config;
+}
+
+// Unwired: the protected caller must authenticate the completed source attempt
+// and its pre-activation record, exclude pending writes, and hold the lifecycle lock.
+export async function recoverQualificationWorker(source, record, env, cwd, signal, request = fetch) {
+  const { sha, runId, attempt } = source ?? {};
+  const { kind, version, expiresAt, previousVersion, previousDeployment } = record ?? {};
+  const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
+  try {
+    if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) ||
+        ![runId, attempt].every(value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)) ||
+        kind !== 'worker' || record.sha !== sha || record.runId !== runId || record.attempt !== attempt ||
+        ![version, previousVersion, previousDeployment].every(isUuid) || version === previousVersion ||
+        typeof expiresAt !== 'string' || !/^[1-9][0-9]{12}$/.test(expiresAt) ||
+        typeof token !== 'string' || !token.trim()) throw new Error();
+    signal?.throwIfAborted();
+    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main'],
+      { cwd, stdio: 'ignore', timeout: 5_000 });
+    const config = stagingConfigAt(cwd, sha, account);
+    const api = workerApi(account, config.name, token, request);
+    const tag = `${sha}-${runId}-${attempt}`;
+    const restoreTag = `restore-${tag}`;
+    const before = await api.current(signal);
+    const original = sameDeployment(before, { id: previousDeployment, version: previousVersion });
+    const alreadyRestored = before.version === previousVersion && before.message === restoreTag;
+    if (!original && !alreadyRestored && (before.version !== version || before.message !== tag)) throw new Error();
+
+    const baseline = await api.version(previousVersion, signal);
+    if (baseline.id !== previousVersion || hasCandidateBinding(checkedBindings(baseline, config, {}))) throw new Error();
+    if (!original && !alreadyRestored) {
+      const bindings = checkedBindings(await api.assertUploaded(version, tag, signal), config, {
+        DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt,
+      });
+      if (bindings.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata') throw new Error();
+    }
+    const confirmed = await api.current(signal);
+    if (!sameDeployment(before, confirmed) || before.message !== confirmed.message) throw new Error();
+    if (original || alreadyRestored) {
+      signal?.throwIfAborted();
+      return { status: original ? 'baseline-observed' : 'restored', deployment: before.id, version: previousVersion };
+    }
+    const restored = await api.deploy(previousVersion, restoreTag, signal);
+    const after = await api.current(signal);
+    if (!sameDeployment(restored, after) || after.message !== restoreTag) throw new Error();
+    signal?.throwIfAborted();
+    return { status: 'restored', deployment: after.id, version: previousVersion };
+  } catch {
+    throw new Error('Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.');
+  }
+}
+
 // Only Worker cron/binding evidence, not a whole-estate inventory or an atomic fence.
 export async function inspectQualificationWorker(env, cwd, signal, request = fetch) {
   try {
-    const { sha } = assertQualificationJob(env, cwd);
+    const { sha, runId, attempt } = assertQualificationJob(env, cwd);
     const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
     if (typeof token !== 'string' || !token.trim()) throw new Error();
-    const config = JSON.parse(execFileSync('git', ['show', `${sha}:apps/drive/wrangler.staging.json`],
-      { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 65_536, timeout: 5_000 }));
-    validateStagingConfig(config, account);
+    const config = stagingConfigAt(cwd, sha, account);
     const api = workerApi(account, config.name, token, request);
     const timeout = 15_000;
     const deadline = performance.now() + timeout;
@@ -177,10 +235,12 @@ export async function inspectQualificationWorker(env, cwd, signal, request = fet
       throw new Error();
     }
     await api.assertNoSchedules(bounded);
-    if (!sameDeployment(before, await api.current(bounded))) throw new Error();
+    const confirmed = await api.current(bounded);
+    if (!sameDeployment(before, confirmed) || before.message !== confirmed.message) throw new Error();
     bounded.throwIfAborted();
     if (performance.now() >= deadline) throw new Error();
-    return { version: before.version, deployment: before.id, schedules: 0, resources: ['DB', 'ASSETS'] };
+    return { version: before.version, deployment: before.id, schedules: 0, resources: ['DB', 'ASSETS'],
+      attemptRestore: before.message === `restore-${sha}-${runId}-${attempt}` };
   } catch {
     throw new Error('Cannot verify staging Worker cron and resource bindings.');
   }
@@ -311,7 +371,7 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
     signal?.throwIfAborted();
     return withQualificationRecovery(() => runQualificationPhase(exercise, identity, signal, caseBudget), async () => {
       // Cleanup must finish before rollback and has its own budget after cancellation.
-      if (await runQualificationPhase(cleanup, identity, undefined, cleanupBudget) !== true) {
+      if (await runQualificationPhase(cleanup, { ...identity, expiresAt }, undefined, cleanupBudget) !== true) {
         throw new Error('Qualification prefix cleanup is unverified.');
       }
     });
