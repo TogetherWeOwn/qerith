@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { assertDispatch, qualificationReceiptName } from './staging-qualification.mjs';
+import { assertDispatch, assertQualificationJob, qualificationReceiptName } from './staging-qualification.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
@@ -357,6 +357,16 @@ test('dispatch, checkout and fetched main history must independently agree', t =
   assert.throws(() => assertDispatch(env, cwd), /origin\/main/);
 });
 
+test('the protected job requires the workflow definition itself to match the dispatch SHA', t => {
+  const { cwd, env, ancestor } = history(t);
+  Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification', GITHUB_WORKFLOW_SHA: env.TESTED_SHA,
+    GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
+  assert.equal(assertQualificationJob(env, cwd).sha, env.TESTED_SHA);
+  for (const value of [undefined, '', ancestor]) {
+    assert.throws(() => assertQualificationJob({ ...env, GITHUB_WORKFLOW_SHA: value }, cwd), /protected staging/);
+  }
+});
+
 test('only a complete successful full-v0 run has the pinned consumer name', t => {
   const { cwd, env, ancestor } = history(t);
   // Keep this fixture independent so removing a case from the policy cannot weaken the test.
@@ -414,6 +424,7 @@ function lifecycle(t, failure, driftKind) {
   const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_SHA: env.TESTED_SHA,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
   const events = [];
   const prefix = 'drive-qualification/full-v0/182/3/';
@@ -756,7 +767,7 @@ test('provider storage cases fail closed on cancellation or a mismatched prefix'
   assert.deepEqual(trace, []);
 });
 
-test('the staged workflow has no producer or provider path', () => {
+test('the protected workflow checks pinned settings and still has no provider or receipt path', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-qualification.yml', import.meta.url), 'utf8');
   const gate = "github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'";
   const [name, trigger, permissions, ...jobs] = workflow.trimEnd().split('\n\n');
@@ -801,7 +812,26 @@ test('the staged workflow has no producer or provider path', () => {
         env:
           TESTED_SHA: \${{ inputs.tested_sha }}
         run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification.mjs`);
-  assert.equal(qualificationSteps, `      - name: Fail closed until the live runner and cleanup are reviewed
+  assert.equal(qualificationSteps, `      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: \${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Verify protected source and staged settings offline
+        env:
+          TESTED_SHA: \${{ inputs.tested_sha }}
+          CLOUDFLARE_ACCOUNT_ID: \${{ secrets.QERITH_STAGING_CLOUDFLARE_ACCOUNT_ID }}
+          QERITH_S3_ENDPOINT: \${{ secrets.QERITH_S3_ENDPOINT }}
+          QERITH_S3_BUCKET: \${{ secrets.QERITH_S3_BUCKET }}
+          QERITH_S3_REGION: \${{ secrets.QERITH_S3_REGION }}
+          QERITH_S3_STORAGE_EPOCH: \${{ secrets.QERITH_S3_STORAGE_EPOCH }}
+          QERITH_S3_ACCESS_KEY_ID: \${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
+          QERITH_S3_SECRET_ACCESS_KEY: \${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
+        run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification-settings.mjs
+      - name: Fail closed until the live runner and cleanup are reviewed
         run: |
           printf '%s\\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
           exit 1`);

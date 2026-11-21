@@ -38,6 +38,7 @@ function fixture(t) {
   context.prefix = qualificationPrefix(context);
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
     TESTED_SHA: sha, GITHUB_SHA: sha, GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_RUN_ID: context.runId, GITHUB_RUN_ATTEMPT: context.attempt, CLOUDFLARE_ACCOUNT_ID: account,
     CLOUDFLARE_API_TOKEN: 'fixture-token', QERITH_S3_ENDPOINT: endpoint, QERITH_S3_BUCKET: bucket, QERITH_S3_REGION: 'auto',

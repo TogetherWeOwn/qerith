@@ -150,6 +150,7 @@ function fixture(t, upload = false) {
   const account = '209cf7dd678adfb683947dd7874d05af';
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_REF: 'refs/heads/main', GITHUB_SHA: sha, TESTED_SHA: sha, GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_RUN_ID: '18', GITHUB_RUN_ATTEMPT: '2',
     CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: 'fake-token' };

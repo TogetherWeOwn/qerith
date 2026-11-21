@@ -35,6 +35,7 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
   git('update-ref', 'refs/remotes/origin/main', sha);
   const source = { sha, runId: '17', attempt: '2' };
   const env = { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: 'synthetic', GITHUB_ACTIONS: 'true',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
     GITHUB_JOB: 'qualification', GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_REF: 'refs/heads/main',
     GITHUB_EVENT_NAME: 'workflow_dispatch', TESTED_SHA: sha, GITHUB_SHA: sha, GITHUB_RUN_ID: '17', GITHUB_RUN_ATTEMPT: '2' };
