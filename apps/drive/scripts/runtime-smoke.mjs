@@ -8,6 +8,7 @@ import { readinessHeaders, readinessPath } from '../src/lib/server/qualification
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from '../tests/entry-change-worker-fixture.mjs';
+import { exerciseMoveDestinations } from '../tests/move-destinations-worker-fixture.mjs';
 import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
@@ -422,6 +423,7 @@ export default {
       await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
       await exerciseEntryChange({ worker, DB, origin, session, staging });
       await exerciseStagingFolderCreate({ worker, DB, origin, session });
+      await exerciseMoveDestinations({ worker, DB, origin, session });
       await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file, downloadBytes: data });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
