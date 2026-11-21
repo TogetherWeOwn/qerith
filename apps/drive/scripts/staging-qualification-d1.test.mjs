@@ -22,7 +22,7 @@ const ok = result => Response.json({ success: true, errors: [], result });
 const cleanupError = /fixture cleanup is unverified/;
 const recoveryError = /D1 recovery is unverified/;
 
-function fixture(t, { emptyBaseline = false } = {}) {
+function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-d1-recovery-'));
   mkdirSync(join(cwd, 'apps/drive'), { recursive: true });
   cpSync(config, join(cwd, 'apps/drive/wrangler.staging.json'));
@@ -68,7 +68,7 @@ function fixture(t, { emptyBaseline = false } = {}) {
       db.close();
       db = baseline();
       current = postRestore;
-      return ok({ bookmark: before, previous_bookmark: '02-undo-point' });
+      return ok({ bookmark: echoTarget ? before : postRestore, previous_bookmark: '02-undo-point' });
     }
     assert.equal(path, '/query');
     assert.equal(method, 'POST');
@@ -158,9 +158,9 @@ test('teardown refuses redeemed fixtures, unknown targets, ambiguous writes and 
   assert.deepEqual(f.calls, ['', '/query', 'DELETE batch']);
 });
 
-test('recovery restores the recorded pre-mutation schema and ledger, including a previously absent ledger', async t => {
-  for (const emptyBaseline of [false, true]) {
-    const f = fixture(t, { emptyBaseline });
+test('recovery verifies either native POST bookmark form with a present or absent historical ledger', async t => {
+  for (const [emptyBaseline, echoTarget] of [[false, true], [false, false], [true, true], [true, false]]) {
+    const f = fixture(t, { emptyBaseline, echoTarget });
     f.sql('CREATE TABLE interrupted_migration (id INTEGER)');
     if (emptyBaseline) f.sql('CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY, name TEXT, applied_at TEXT)');
     f.sql("INSERT INTO d1_migrations VALUES (999, 'interrupted.sql', '2026-11-20 11:00:00')");
@@ -220,7 +220,7 @@ test('recovery will not restore without exact source, authenticated proof, and u
 });
 
 test('recovery does not retry a lost response or certify a wrong bookmark or rewritten history', async t => {
-  for (const fault of ['lost', 'wrong-target', 'bad-undo', 'unchanged', 'bad-head', 'rewritten']) {
+  for (const fault of ['lost', 'mismatch', 'bad-post', 'bad-undo', 'unchanged', 'bad-head', 'rewritten']) {
     const f = fixture(t);
     f.intercept((path, _, run) => {
       if (path === '/time_travel/bookmark' && f.calls.includes(restore) && fault === 'bad-head') return ok({ bookmark: '' });
@@ -228,14 +228,14 @@ test('recovery does not retry a lost response or certify a wrong bookmark or rew
       if (fault === 'unchanged') return ok({ bookmark: f.proof.bookmark, previous_bookmark: '02-undo-point' });
       const result = run();
       if (fault === 'lost') throw new Error('synthetic lost response');
-      if (fault === 'wrong-target') return ok({ bookmark: '01-other', previous_bookmark: '02-undo-point' });
+      if (fault === 'mismatch' || fault === 'bad-post') return ok({ bookmark: fault === 'mismatch' ? '04-other' : '', previous_bookmark: '02-undo-point' });
       if (fault === 'bad-undo') return ok({ bookmark: f.proof.bookmark, previous_bookmark: '' });
       if (fault === 'rewritten') f.sql("UPDATE d1_migrations SET applied_at = '2026-11-20 22:00:00' WHERE id = 1");
       return result;
     });
     await assert.rejects(f.recover(), recoveryError, fault);
     assert.deepEqual(f.calls, ['', '/time_travel/bookmark', restore,
-      ...(['unchanged', 'bad-head', 'rewritten'].includes(fault) ? ['/time_travel/bookmark'] : []),
+      ...(['mismatch', 'unchanged', 'bad-head', 'rewritten'].includes(fault) ? ['/time_travel/bookmark'] : []),
       ...(fault === 'rewritten' ? ['/query', '/query'] : [])], fault);
   }
 });

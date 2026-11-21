@@ -129,11 +129,12 @@ export async function recoverQualificationD1(source, record, { proveQuiescence }
       if (await current() !== currentBookmark) throw new Error();
       // At most one native restore. Never infer success from an ambiguous POST.
       const restored = await db.call(`/time_travel/restore?bookmark=${bookmark}`, 'POST');
-      // The POST identifies the restore target and undo point, not the live head.
-      if (restored.bookmark !== bookmark || !bookmarkToken(restored.previous_bookmark)) throw new Error();
-      // Bind both live reads under the caller's fence, independently of the POST.
+      // Native responses can echo the target or report the new live head; the
+      // latter must match an independent read under the same writer fence.
+      if (!bookmarkToken(restored.bookmark) || !bookmarkToken(restored.previous_bookmark)) throw new Error();
       const restoredHead = await current();
-      if (!bookmarkToken(restoredHead) || restoredHead === currentBookmark) throw new Error();
+      if (!bookmarkToken(restoredHead) || restoredHead === currentBookmark ||
+          (restored.bookmark !== bookmark && restored.bookmark !== restoredHead)) throw new Error();
       const [tables] = await db.query([{ sql: "SELECT type FROM sqlite_schema WHERE name = 'd1_migrations' COLLATE NOCASE" }]);
       if (expected === null) {
         if (tables.length) throw new Error();
