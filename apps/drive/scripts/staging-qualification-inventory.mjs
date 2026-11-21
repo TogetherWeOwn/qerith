@@ -17,10 +17,8 @@ function matchScan(scan, expected) {
       scan.items.length !== expected.length || !isDeepStrictEqual(scan.items, expected)) throw unverified();
 }
 
-// The native lifecycle endpoint is a single policy document, not a list API.
-// Reject a partial document before handing it to the existing rule validator.
-async function singleLifecycleDocument(response) {
-  if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
+async function boundedR2Document(response) {
+  if (response.status !== 200 || response.headers.has('content-range') || response.headers.has('link') || !response.body) {
     await response.body?.cancel();
     throw unverified();
   }
@@ -32,10 +30,34 @@ async function singleLifecycleDocument(response) {
     size += chunk.byteLength;
   }
   const bytes = buffer.subarray(0, size);
-  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  return { bytes, parsed: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
+}
+
+// The native lifecycle endpoint is a single policy document, not a list API.
+async function singleLifecycleDocument(response) {
+  const { bytes, parsed } = await boundedR2Document(response);
   if (Object.hasOwn(parsed, 'result_info') || !Array.isArray(parsed.result?.rules) ||
       Object.keys(parsed.result).length !== 1) throw unverified();
   return new Response(bytes);
+}
+
+async function assertR2Roster(account, bucket, token, request, signal) {
+  if (!token?.trim()) throw unverified();
+  const pageSize = 10;
+  await runQualificationPhase(async (_, active) => {
+    // Do not filter by bucket name or jurisdiction: either could hide an extra bucket.
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets?per_page=${pageSize}`;
+    const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+      headers: { authorization: `Bearer ${token}` } });
+    const { parsed } = await boundedR2Document(response);
+    const { success, errors, result, result_info: page } = parsed;
+    if (success !== true || !Array.isArray(errors) || errors.length ||
+        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+        !Array.isArray(result?.buckets) || Object.keys(result).length !== 1 || result.buckets.length !== 1 ||
+        result.buckets[0]?.name !== bucket || result.buckets[0]?.jurisdiction !== 'default' ||
+        page?.per_page !== pageSize || (Object.hasOwn(page, 'cursor') && page.cursor !== '') ||
+        Object.keys(page).some(key => !['per_page', 'cursor'].includes(key))) throw unverified();
+  }, null, signal, 15_000);
 }
 
 // Unwired. The eventual readers must enumerate the bounded staging estate,
@@ -74,6 +96,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
+        await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
         // storage-proof namespaces have their own retention/cleanup policies.
