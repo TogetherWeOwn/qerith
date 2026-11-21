@@ -398,8 +398,8 @@ it('delivers inherited grants through the invite gate and rechecks them at dispa
   const rangeHeaders = { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' };
   const transport = vi.fn(async () => new Response('bc', { status: 206, headers: rangeHeaders }));
   const onReadError = vi.fn();
-  const get = (bindings = storage) => publishedDownload(new Request(`${stagingOrigin}/api/download/${id}`,
-    { headers: { range: 'bytes=1-2' } }), id, reader, bindings, onReadError, transport);
+  const get = (bindings = storage, headers = { range: 'bytes=1-2' }) => publishedDownload(
+    new Request(`${stagingOrigin}/api/download/${id}`, { headers }), id, reader, bindings, onReadError, transport);
   const deny = async response => {
     expect([response.status, await response.text()]).toEqual([404, '']);
     expect([...response.headers]).toEqual([['cache-control', 'private, no-store']]);
@@ -416,6 +416,9 @@ it('delivers inherited grants through the invite gate and rechecks them at dispa
   expect(transport).not.toHaveBeenCalled();
 
   await grant();
+  transport.mockResolvedValueOnce(new Response('abcdefg', { headers: { etag, 'content-length': '7' } }));
+  const full = await get(storage, {});
+  expect([full.status, full.headers.get('content-range'), await full.text()]).toEqual([200, null, 'abcdefg']);
   const allowed = await get();
   expect([allowed.status, allowed.headers.get('content-range'), await allowed.text()]).toEqual([206, 'bytes 1-2/7', 'bc']);
   expect(JSON.stringify([...allowed.headers])).not.toContain(key);
@@ -434,5 +437,5 @@ it('delivers inherited grants through the invite gate and rechecks them at dispa
   await deny(await get());
   expect(onReadError).not.toHaveBeenCalled();
   expect(transport.mock.calls.map(([request]) => [request.headers.get('if-match'), request.headers.get('range')]))
-    .toEqual(Array.from({ length: 3 }, () => [etag, 'bytes=1-2']));
+    .toEqual([[etag, null], ...Array.from({ length: 3 }, () => [etag, 'bytes=1-2'])]);
 });
