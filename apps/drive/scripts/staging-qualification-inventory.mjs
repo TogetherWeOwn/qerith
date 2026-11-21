@@ -90,11 +90,12 @@ async function assertR2Roster(account, bucket, token, request, signal) {
 }
 
 // Shared for native page-number lists with an explicitly empty terminal page.
-async function assertEmptyNativePage(account, path, token, request, signal) {
+async function assertEmptyNativePage(account, path, token, request, signal, { pageSize = 10 } = {}) {
   if (!token?.trim()) throw unverified();
-  const pageSize = 10;
   await runQualificationPhase(async (_, active) => {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/${path}?page=1&per_page=${pageSize}`;
+    // Queues uses the provider's default page size, as in pinned Wrangler.
+    const query = pageSize === null ? 'page=1' : `page=1&per_page=${pageSize}`;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/${path}?${query}`;
     const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
       headers: { authorization: `Bearer ${token}` } });
     if (response.headers.has('link')) {
@@ -110,11 +111,13 @@ async function assertEmptyNativePage(account, path, token, request, signal) {
       return value;
     });
     const { success, errors, messages, result, result_info: page } = parsed;
-    const validPage = { page: [1], per_page: [pageSize], count: [0], total_count: [0], total_pages: [0, 1] };
+    const validPage = { page: [1], count: [0], total_count: [0], total_pages: [0, 1] };
     if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
         Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
         !Array.isArray(result) || result.length || page?.total_count !== 0 ||
-        Object.entries(page).some(([key, value]) => !Object.hasOwn(validPage, key) || !validPage[key].includes(value))) {
+        Object.entries(page).some(([key, value]) => key === 'per_page'
+          ? !Number.isSafeInteger(value) || value < 1 || (pageSize !== null && value !== pageSize)
+          : !Object.hasOwn(validPage, key) || !validPage[key].includes(value))) {
       throw unverified();
     }
   }, null, signal, 5_000);
@@ -202,6 +205,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         await assertNoContainerApplications(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoStreamInputs(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertEmptyNativePage(account, 'workflows', env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertEmptyNativePage(account, 'queues', env.CLOUDFLARE_API_TOKEN, request, active, { pageSize: null });
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and

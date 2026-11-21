@@ -31,7 +31,7 @@ const bucketRoster = (overrides, init) => Response.json({ success: true, errors:
 const streamEmpty = { liveInputs: [], range: 0, total: 0 };
 const streamRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: streamEmpty, ...overrides }, init);
-const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows'];
+const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows', 'queues'];
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
 const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
@@ -147,6 +147,12 @@ function fixture(t) {
         trace.push('workflows');
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
         return state.workflowList ?? emptyPagedRoster();
+      }
+      if (url === `${root}${account}/queues?page=1`) {
+        trace.push('queues');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onQueueList?.(init.signal);
+        return state.queueList ?? emptyPagedRoster({ result_info: { ...namespacePage, per_page: 100 } });
       }
       const scripts = `${root}${account}/workers/scripts`;
       if (url === scripts) {
@@ -659,6 +665,52 @@ test('inventory rejects rounded native Workflows pagination before and after the
       assert.equal(f.trace.at(-1), 'workflows');
     }
   }
+});
+
+test('inventory rejects any native Queue before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    f.state.queueList = undefined;
+    const inspect = f.create();
+    if (phase === 'after') assert.equal(await inspect('before'), true);
+    const queues = [{ queue_name: 'synthetic', consumers: [] }];
+    f.state.queueList = emptyPagedRoster({ result: queues,
+      result_info: { page: 1, per_page: 100, count: queues.length, total_count: queues.length, total_pages: 1 } });
+    await assert.rejects(inspect(phase), error);
+    assert.equal(f.trace.at(-1), 'queues');
+  }
+});
+
+test('inventory requires a complete, bounded native Queue roster', async t => {
+  const f = fixture(t), empty = await emptyPagedRoster().text();
+  const malformedPage = [undefined, { total_count: 1 }, { total_count: 0, total_pages: 2 },
+    { total_count: 0, cursor: 'next' }, { total_count: 0, per_page: '100' }];
+  for (const reply of [emptyPagedRoster({}, { status: 403 }), emptyPagedRoster({}, { status: 206 }),
+    emptyPagedRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    ...malformedPage.map(result_info => emptyPagedRoster({ result_info })),
+    new Response(empty.replace('"total_count":0', '"total_count":1e-400')),
+    new Response(empty.replace('"result":[]', '"result":[{}],"result":[]')),
+    new Response(empty.padEnd(65_537, ' '))]) {
+    const inspect = f.create();
+    f.state.queueList = reply;
+    await assert.rejects(inspect('before'), error);
+    assert.equal(f.trace.at(-1), 'queues');
+  }
+});
+
+test('inventory rejects a native Queue roster returned after its deadline', async t => {
+  const f = fixture(t), inspect = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onQueueList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(inspect('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'queues');
 });
 
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
