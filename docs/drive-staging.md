@@ -272,9 +272,16 @@ Workflows definition fails, even with no active instances. This read does not
 prove instance absence, cover other accounts, or replace the estate or
 app-fixture reader. The response shape is verified only offline.
 
-The native R2 bucket and lifecycle, Durable Objects, Containers, Stream, and
-Workflows inventory reads reject duplicate JSON fields, even when the last
-value would otherwise satisfy the check.
+Both passes also require an explicitly empty native Queues roster in the pinned
+Worker account. The unfiltered first page uses the provider's default page size
+and must report `total_count: 0` with no continuation, within five seconds and
+64 KiB. Even a queue without consumers fails. The response shape is tested only
+offline; this does not cover other accounts or replace the estate or app-fixture
+reader.
+
+The native R2 bucket and lifecycle, Durable Objects, Containers, Stream,
+Workflows, and Queues inventory reads reject duplicate JSON fields, even when
+the last value would otherwise satisfy the check.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
