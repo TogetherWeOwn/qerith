@@ -208,6 +208,14 @@ Before wiring the protected caller, reconcile its pre-activation budget with
 this window: D1 command timeouts alone can consume the five-minute margin,
 before accounting for upload, readback and recovery recording.
 
+The unwired large-transfer verifier reads an unencoded, full `200` app download
+as a stream. It requires the five GiB boundary (also the current app maximum),
+checks the actual byte count through EOF, and compares SHA-256 with the digest
+of the independently hashed upload fixture. Offline CI feeds a synthetic body
+without a five GiB allocation. The verifier does not upload a file, establish
+app authentication, or exercise interrupted resume. The protected caller must
+obtain the authenticated response under its bounded case signal.
+
 Remaining source slices, in dependency order:
 
 1. Implement whole-estate zero-idle inventory, D1 fixture cleanup, and verified

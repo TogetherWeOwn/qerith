@@ -350,6 +350,9 @@ jobs:
       - name: Test staging qualification policy without dispatch
         if: hashFiles('.github/workflows/drive-staging-qualification.yml', 'apps/drive/scripts/staging-qualification.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification.test.mjs
+      - name: Test staging qualification large-transfer verification offline
+        if: hashFiles('apps/drive/scripts/staging-qualification-large-transfer.test.mjs') != ''
+        run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-large-transfer.test.mjs
       - name: Test staging qualification migrations without provider access
         if: hashFiles('apps/drive/scripts/staging-qualification-migrations.test.mjs') != ''
         run: timeout --signal=TERM --kill-after=10s 60s node --test apps/drive/scripts/staging-qualification-migrations.test.mjs
