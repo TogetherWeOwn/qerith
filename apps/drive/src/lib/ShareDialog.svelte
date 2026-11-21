@@ -84,10 +84,14 @@
     action();
   }
   function onPageFeedback(message: string, clear?: string) {
-    if (message) { live = message; status = selectionNotice = ''; }
+    if (message) { live = message; status = ''; }
     else if (live === clear) live = '';
   }
-  function select(ids: string[]) { if (!pending) picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []); }
+  function select(ids: string[]) {
+    if (pending) return;
+    selectionNotice = '';
+    picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
+  }
   async function apply(person?: ShareAccess) {
     if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
     pending = person ? 'remove' : 'share'; paging = null; error = live = status = selectionNotice = '';
