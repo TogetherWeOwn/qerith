@@ -47,9 +47,12 @@ does not replace exact-SHA qualification.
 Use only synthetic fixtures tagged with the originating run ID in D1 and R2.
 Enforce the staging-only absolute deadline, clean up on success and failure and
 via a trusted main-only completion workflow, and sweep older tags before new
-writes. Record leftover rows as cleanup defects, not admission gates. Reported
-R2 expiry covers only `drive-qualification/` (three days); the seven-day
-multipart-abort rule remains. Neither proves that qualification cleanup ran.
+writes. Record leftover rows as cleanup defects, not app-admission gates. The
+full-v0 inventory below still requires its reserved migration keys to be absent;
+reconcile older residue separately before retrying, since exact-attempt cleanup
+will not remove it. Reported R2 expiry covers only `drive-qualification/` (three
+days); the seven-day multipart-abort rule remains. Neither proves that
+qualification cleanup ran.
 
 The manual staging storage proof does not deploy a Worker. Before dispatch,
 review provider evidence that the staging signer is scoped to the Drive

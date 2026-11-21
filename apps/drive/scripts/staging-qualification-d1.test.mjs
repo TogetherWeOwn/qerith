@@ -120,8 +120,14 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
 test('migration fixture census refuses either kind of residue from earlier attempts without exposing rows', async t => {
   const f = fixture(t);
   assert.equal(await f.inspect(), true);
-  f.seed([other[0], 'drive-qualification/full-v0-other/17/1/', 'unrelated/']);
-  const censusError = /D1 migration fixture absence is unverified/;
+  f.seed([other[0], 'drive-qualification/full-v0-other/17/1/', 'unrelated/', `${prefix}decoy/`,
+    'drive-qualification/full-v0/17/02/', 'drive-qualification/full-v0/17x/2/',
+    `drive-qualification/full-v0/${'1'.repeat(21)}/2/`]);
+  const censusError = error => {
+    assert.equal(error.message, 'Staging D1 migration fixture absence is unverified.');
+    assert.equal(error.cause, undefined);
+    return true;
+  };
   f.sql('UPDATE drive_invitations SET redeemed_at = 5 WHERE id = ?', invite(other[0]));
   // Leave only invitation residue from the previous attempt.
   f.sql('DELETE FROM drive_bound_ceremonies WHERE context = ?', ceremony(other[0]));
@@ -221,6 +227,18 @@ test('recovery verifies either native POST bookmark form with a present or absen
     await assert.rejects(f.recover(), recoveryError);
     assert.deepEqual(f.calls.slice(-2), ['', '/time_travel/bookmark']);
   }
+});
+
+test('restore acknowledgement with result_info still requires independent bookmark and ledger readback', async t => {
+  const f = fixture(t);
+  f.intercept(async (path, _, run) => {
+    const response = run();
+    if (path !== restore) return response;
+    return Response.json({ ...await response.json(), result_info: {} });
+  });
+  assert.deepEqual(await f.recover(), { status: 'restored' });
+  assert.deepEqual(f.calls, ['', '/time_travel/bookmark', restore, '/time_travel/bookmark', '/query', '/query',
+    '/time_travel/bookmark']);
 });
 
 test('recovery requires an absent ledger to stay absent regardless of table name casing', async t => {

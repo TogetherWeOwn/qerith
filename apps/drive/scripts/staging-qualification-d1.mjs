@@ -10,7 +10,7 @@ const sameAttempt = ({ sha, runId, attempt }, other) =>
 const migrationInvite = 'd1/migration-invite';
 const migrationCeremony = 'd1/migration-ceremony';
 
-function d1(source, env, cwd, send, active) {
+function d1(source, env, cwd, send, active, { census = false } = {}) {
   const { sha, runId, attempt } = source;
   const { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token } = env;
   if (!matches(sha, /^[0-9a-f]{40}$/) || ![runId, attempt].every(id => matches(id, /^[1-9][0-9]{0,19}$/)) ||
@@ -43,7 +43,7 @@ function d1(source, env, cwd, send, active) {
     const payload = JSON.parse(text + decoder.decode());
     const { success, errors, result } = payload;
     if (success !== true || !Array.isArray(errors) || errors.length || !result ||
-        Object.hasOwn(payload, 'result_info')) throw new Error();
+        (census && Object.hasOwn(payload, 'result_info'))) throw new Error();
     return result;
   };
   return {
@@ -61,18 +61,30 @@ function d1(source, env, cwd, send, active) {
   };
 }
 
+// GLOB narrows the index range but '*' can cross slashes. Validate the
+// remaining run/attempt pair against the D1 client's bounded ID grammar.
+function migrationFixtureExists(table, key, suffix) {
+  const start = qualificationFixtureNamespace.length + 1;
+  return `EXISTS(SELECT 1 FROM (
+    SELECT substr(${key}, ${start}, length(${key}) - ${start + suffix.length}) AS ids
+    FROM ${table} WHERE ${key} GLOB ? AND instr(${key}, char(0)) = 0
+  ) WHERE trim(ids, '0123456789') = '/' AND instr(ids, '/') <= 21
+    AND length(ids) - instr(ids, '/') <= 20)`;
+}
+
 // A point-in-time read of both migration fixture keys across every full-v0
 // attempt. This neither discovers other app fixtures nor excludes writers.
 export async function assertNoQualificationD1MigrationFixtures(env, cwd, signal, send) {
   try {
+    signal?.throwIfAborted();
     const identity = assertQualificationJob(env, cwd);
     return await runQualificationPhase(async (_, active) => {
-      const db = d1(identity, env, cwd, send, active);
+      const db = d1(identity, env, cwd, send, active, { census: true });
       await db.verifyTarget();
-      const pattern = suffix => `${qualificationFixtureNamespace}*/${suffix}`;
+      const pattern = suffix => `${qualificationFixtureNamespace}[1-9]*/[1-9]*/${suffix}`;
       const [rows] = await db.query([{
-        sql: `SELECT EXISTS(SELECT 1 FROM drive_invitations WHERE id GLOB ?) AS invite_present,
-                     EXISTS(SELECT 1 FROM drive_bound_ceremonies WHERE context GLOB ?) AS ceremony_present`,
+        sql: `SELECT ${migrationFixtureExists('drive_invitations', 'id', migrationInvite)} AS invite_present,
+                     ${migrationFixtureExists('drive_bound_ceremonies', 'context', migrationCeremony)} AS ceremony_present`,
         params: [pattern(migrationInvite), pattern(migrationCeremony)],
       }]);
       const [row] = rows;
