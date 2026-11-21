@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
 
   type Choice = { recipientId: string; displayName: string | null };
-  // The caller supplies unique, eligible choices and owns the selection. No grants are written here.
+  // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
   let { choices, selectedIds, onSelectionChange }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
@@ -32,7 +32,7 @@
 
   function select(choice: Choice) {
     if (!expanded || !matches.includes(choice)) return;
-    const next = [...picked.map(person => person.recipientId), choice.recipientId];
+    const next = [...selectedIds, choice.recipientId];
     announcement = `${label(choice)} selected. ${next.length} selected.`;
     onSelectionChange(next);
     query = '';
@@ -42,8 +42,9 @@
   function remove(choice: Choice) {
     input.focus();
     dismiss();
-    announcement = `${label(choice)} removed. ${picked.length - 1} selected.`;
-    onSelectionChange(picked.filter(person => person !== choice).map(person => person.recipientId));
+    const next = selectedIds.filter(id => id !== choice.recipientId);
+    announcement = `${label(choice)} removed. ${next.length} selected.`;
+    onSelectionChange(next);
   }
 
   async function keydown(event: KeyboardEvent) {
@@ -56,6 +57,8 @@
       // Free text (even an exact match) is not a selection or form submission.
       event.preventDefault();
       if (activeIndex >= 0) select(matches[activeIndex]);
+    } else if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      active = null;
     } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && matches.length) {
       event.preventDefault();
       const index = event.key === 'ArrowDown' ? Math.min(activeIndex + 1, matches.length - 1)

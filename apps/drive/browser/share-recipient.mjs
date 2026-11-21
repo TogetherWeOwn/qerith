@@ -59,6 +59,15 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       await input.fill('sam mora');
       await key('Enter');
       await selection();
+      for (const [arrow, caret] of [['ArrowLeft', 3], ['ArrowRight', 5]]) {
+        await input.evaluate(el => el.setSelectionRange(4, 4));
+        await key('ArrowDown');
+        await key(arrow);
+        assert.equal(await input.evaluate(el => el.selectionStart), caret);
+        assert.equal(await input.getAttribute('aria-activedescendant'), null);
+        await key('Enter');
+        await selection();
+      }
       await key('ArrowDown');
       await key('Enter');
       await selection(1);
@@ -114,8 +123,9 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       assert.deepEqual(unexpected, []);
       assert.equal(await main.evaluate(el => el.getAnimations({ subtree: true }).length), 0);
       await key('ArrowDown');
-      await page.addStyleTag({ content: 'main { filter: grayscale(1); }' });
+      const greyscale = await page.addStyleTag({ content: 'main { filter: grayscale(1); }' });
       await screenshot('greyscale');
+      await greyscale.evaluate(el => el.remove());
       await page.emulateMedia({ forcedColors: 'active' });
       assert(await input.evaluate(el => getComputedStyle(el.parentElement).outlineStyle === 'solid'));
       assert(await list.getByRole('option', { selected: true }).evaluate(el => getComputedStyle(el).outlineStyle === 'solid'));
