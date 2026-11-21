@@ -47,3 +47,29 @@ WHERE i.state = 'allocated' AND i.completion_acknowledged = 0 AND i.upload_id = 
     WHERE p.intent_id = o.intent_id AND u.kind = 'uncertain'
   )
   AND NOT EXISTS (SELECT 1 FROM drive_upload_bound_manifest_mismatches bad WHERE bad.operation_id = o.operation_id);
+
+-- Filter recorded receipts at admission and at the atomic publication insert:
+-- drive_upload_publications_admit already requires this same live view.
+DROP VIEW drive_upload_publishable_completions;
+CREATE VIEW drive_upload_publishable_completions AS
+SELECT e.*, auth.token_hash AS session_hash
+FROM drive_upload_completed_receipt_evidence e
+JOIN drive_upload_intents i ON i.id = e.intent_id AND i.owner_id = e.owner_id AND i.object_key = e.object_key
+JOIN drive_active_members m ON m.id = i.owner_id
+JOIN drive_sessions auth ON auth.principal_id = i.owner_id AND auth.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+WHERE i.state = 'completing' AND i.completion_acknowledged = 0 AND i.version = e.claim_version
+  AND i.upload_id = e.upload_id AND i.declared_size = e.size_bytes
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_completion_quarantine q WHERE q.operation_id = e.operation_id)
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts a WHERE a.intent_id = e.intent_id)
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = e.intent_id)
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones t WHERE t.intent_id = e.intent_id)
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p JOIN drive_upload_part_observations u USING (operation_id)
+    WHERE p.intent_id = e.intent_id AND u.kind = 'uncertain')
+  AND NOT EXISTS (SELECT 1 FROM drive_upload_bound_manifest_mismatches bad WHERE bad.operation_id = e.operation_id);
+
+-- An unsealed legacy attempt already in flight cannot publish a bound upload.
+CREATE TRIGGER drive_upload_bound_manifest_guard_legacy_publication
+BEFORE INSERT ON drive_upload_publications
+WHEN NEW.completion_operation_id IS NULL
+  AND EXISTS (SELECT 1 FROM drive_upload_intents WHERE id = NEW.intent_id AND expected_part_sha256s IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'bound upload publication requires a sealed manifest'); END;

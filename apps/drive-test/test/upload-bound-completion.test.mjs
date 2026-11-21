@@ -63,22 +63,72 @@ async function fixture(planned, { unbound = false, schema = migrations, digestBy
 
 const right = Uint8Array.of(1), wrong = Uint8Array.of(2), empty = new Uint8Array();
 
-// D1 state is shared inside this file: test the upgrade before applying the full schema.
-it('fences a pre-upgrade bound seal with a valid total but wrong digest', async () => {
-  const f = await fixture([right], { schema: migrations.filter(({ name }) => name < migration) });
-  await f.part(1, wrong);
+const preBoundCompletion = migrations.filter(({ name }) => name < migration);
+
+async function preUpgradeSeal(bytes, recordReceipt = false) {
+  const f = await fixture([right], { schema: preBoundCompletion });
+  await f.part(1, bytes);
   const { intentId, ownerId, objectKey, storageEpoch, uploadId, intentVersion } = f.scope;
-  const operationId = crypto.randomUUID(), candidate = () => sql('SELECT 1 FROM drive_upload_sealed_candidates WHERE operation_id = ?', operationId).first();
+  const operationId = crypto.randomUUID();
   await sql('INSERT INTO drive_upload_completion_operations VALUES (?, ?, ?, ?, ?, ?, ?)',
     operationId, intentId, ownerId, objectKey, storageEpoch, uploadId, intentVersion).run();
   await sql("INSERT INTO drive_upload_sealed_snapshots VALUES (?, '[1]', 1)", operationId).run();
-  expect(await candidate()).not.toBeNull();
+  const dispatch = () => producer(f.fetch, f.verifyParts).complete(f.token, { operationId, intentId, ownerId });
+  if (recordReceipt) {
+    expect(await dispatch()).toBe('recorded');
+    f.fetch.mockClear();
+    f.verifyParts.mockClear();
+  }
+  return { ...f, operationId, dispatch };
+}
+
+const candidate = (view, { operationId }) => sql(`SELECT 1 FROM ${view} WHERE operation_id = ?`, operationId).first();
+const entry = ({ scope }) => sql('SELECT id FROM drive_entries WHERE owner_id = ?', scope.ownerId).first();
+const insertPublication = ({ scope }, operationId = null, revision = null) => sql(`INSERT INTO drive_upload_publications
+  (intent_id, intent_version, entry_id, owner_id, object_key, name, size_bytes, object_etag, completion_operation_id, evidence_revision)
+  VALUES (?, ?, ?, ?, ?, 'file', 1, ?, ?, ?)`, scope.intentId, scope.intentVersion + 1, crypto.randomUUID(),
+  scope.ownerId, scope.objectKey, etag, operationId, revision).run();
+
+// D1 state is shared inside this file: stage old evidence before applying the full schema.
+it('fences pre-upgrade bound dispatch and publication without rewriting receipts or published entries', async () => {
+  const undispatched = await preUpgradeSeal(wrong);
+  const mismatched = await preUpgradeSeal(wrong, true);
+  const exact = await preUpgradeSeal(right, true);
+  const published = await preUpgradeSeal(wrong, true);
+  expect((await published.complete()).status).toBe(201);
+  const priorEntry = await entry(published);
+  const legacy = await fixture([right], { schema: preBoundCompletion });
+  const { intentId, objectKey, uploadId, intentVersion } = legacy.scope;
+  await sql('INSERT INTO drive_upload_publication_attempts VALUES (?, ?, ?, ?, 1)', intentId, objectKey, uploadId, intentVersion).run();
+
+  const sealed = 'drive_upload_sealed_candidates', publishable = 'drive_upload_publishable_completions';
+  expect(await candidate(sealed, undispatched)).not.toBeNull();
+  expect(await candidate(publishable, mismatched)).not.toBeNull();
+  const receipt = await evidence('receipts', mismatched.operationId);
   await applyD1Migrations(env.DB, migrations);
-  expect(await candidate()).toBeNull();
-  expect(await producer(f.fetch, f.verifyParts).complete(f.token, { operationId, intentId, ownerId })).toBe('not-admitted');
-  expect(await evidence('dispatches', operationId)).toBeNull();
-  expect(f.verifyParts).not.toHaveBeenCalled();
-  expect(f.fetch).not.toHaveBeenCalled();
+
+  expect(await candidate(sealed, undispatched)).toBeNull();
+  await expect(sql('INSERT INTO drive_upload_completion_dispatches VALUES (?, ?, ?, ?, ?, ?)',
+    undispatched.operationId, endpoint, bucket, undispatched.scope.intentVersion + 1, '0'.repeat(64),
+    await tokenHash(undispatched.token)).run()).rejects.toThrow('invalid or duplicate upload dispatch');
+  expect(await undispatched.dispatch()).toBe('not-admitted');
+  expect(await evidence('dispatches', undispatched.operationId)).toBeNull();
+
+  expect(await candidate(publishable, mismatched)).toBeNull();
+  expect((await mismatched.complete()).status).toBe(404);
+  await expect(insertPublication(mismatched, mismatched.operationId, receipt.evidence_revision)).rejects.toThrow('upload publication not admitted');
+  await expect(insertPublication(legacy)).rejects.toThrow('bound upload publication requires a sealed manifest');
+  expect(await evidence('receipts', mismatched.operationId)).toEqual(receipt);
+  for (const f of [undispatched, mismatched, legacy]) {
+    expect(await entry(f)).toBeNull();
+    expect(f.verifyParts).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+  }
+  expect((await exact.complete()).status).toBe(201);
+  expect(exact.fetch.mock.calls.map(([request]) => request.method)).toEqual(['HEAD']);
+  expect(await entry(published)).toEqual(priorEntry);
+  expect(await sql('SELECT entry_id FROM drive_published_generations WHERE intent_id = ?', published.scope.intentId).first())
+    .toEqual({ entry_id: priorEntry.id });
 });
 
 it.each(['exact ordered parts', 'bound zero bytes', 'unbound sparse legacy receipt'])('publishes %s', async (label) => {

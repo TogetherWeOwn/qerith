@@ -19,7 +19,8 @@ At seal insertion, a bound intent must have exactly the planned slots in order,
 with the planned length and a trusted acknowledged SHA-256 for each slot. An
 empty file still needs a zero-byte receipt for slot 1. Expected digests are not
 receipts; legacy or uncertain part observations cannot complete a bound intent.
-The candidate query also excludes pre-upgrade bound seals with mismatched or
-missing proof. The legacy completion claim remains available only to unbound
-intents. This migration does not change allocation, part dispatch, or resume
-admission and does not rewrite existing evidence.
+Dispatch and publication both exclude pre-upgrade bound seals with mismatched
+or missing proof, even when a provider completion receipt is already recorded.
+Unsealed legacy claims and publications remain available only to unbound
+intents. The migration leaves existing evidence and published generations
+intact and does not change allocation, part dispatch, or resume admission.
