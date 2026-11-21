@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { normalizeSpeech, unavailableResponse, verifyManifest } from './route-evidence-checks.mjs';
+import { assertFreshArrivals, routes } from '../route-evidence/arrival-diagnostic.mjs';
+import { normalizeSpeech, unavailableHeadingSpeech, unavailableResponse, verifyManifest } from './route-evidence-checks.mjs';
 
 const readJson = (name) => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
 
@@ -91,4 +92,61 @@ test('speech normalization ignores whitespace but preserves extra phrases', () =
   const reference = normalizeSpeech(['Folder', 'unavailable']);
   assert.equal(normalizeSpeech(['  Folder\n unavailable  ']), reference);
   assert.notEqual(normalizeSpeech(['Folder unavailable', 'Extra phrase']), reference);
+});
+
+test('unavailable arrival requires the exact spoken level-1 heading', () => {
+  const document = 'Folder unavailable Drive, document. main landmark,';
+  const heading = "heading, level 1, This folder isn't available";
+  assert.match(normalizeSpeech([document, `${heading}.`]), unavailableHeadingSpeech);
+  for (const wrong of ['', `${heading} to guest accounts.`, heading.replace('level 1', 'level 2')]) {
+    assert.doesNotMatch(normalizeSpeech([document, wrong]), unavailableHeadingSpeech);
+  }
+});
+
+const origin = 'http://localhost';
+function freshSamples() {
+  return routes.map((route, index) => {
+    const state = { foreground: true, ready: 'complete' };
+    const documentStart = 10 * index;
+    return { route, index, errors: [], reset: true, stopped: true,
+      arrival: 'Folder unavailable Drive, document.', title: 'Folder unavailable Drive', controlTitle: 'Route evidence self-check Drive',
+      profile: `route-firefox-${index}`, screenReader: { id: index + 1, configHash: 'a'.repeat(64) },
+      navigationStarted: documentStart + 1, captureEnded: documentStart + 3,
+      control: { ...state, url: `${origin}/f/populated`, documentStart },
+      arrived: { ...state, url: `${origin}/f/${route}`, documentStart: documentStart + 2 } };
+  });
+}
+
+test('the lifecycle diagnostic requires a full schedule of fresh, foreground document arrivals', () => {
+  assertFreshArrivals(freshSamples(), origin);
+  for (const [change, error] of [
+    [copy => copy.pop(), /Incomplete first-arrival schedule/],
+    [copy => { copy[1].route = 'denied'; }, /Fresh 2 missing/],
+    [copy => { copy[1].reset = false; }, /Fresh 2 missing/],
+    [copy => { copy[1].stopped = false; }, /Fresh 2 missing/],
+    [copy => { copy[1].screenReader.id = copy[0].screenReader.id; }, /NVDA instance was not fresh/],
+    [copy => { copy[1].screenReader.configHash = 'b'.repeat(64); }, /NVDA settings differ/],
+    [copy => { copy[1].profile = copy[0].profile; }, /Firefox profile was not fresh/],
+    [copy => { copy[1].control.foreground = false; }, /control not ready in foreground/],
+    [copy => { copy[1].controlTitle += ' different'; }, /control title speech differs/],
+    [copy => { copy[1].arrived.foreground = false; }, /arrival not ready in foreground/],
+    [copy => { copy[1].arrived.documentStart = copy[1].control.documentStart; }, /not a new arrival document/],
+  ]) {
+    const copy = freshSamples();
+    change(copy);
+    assert.throws(() => assertFreshArrivals(copy, origin), error);
+  }
+});
+
+test('the lifecycle diagnostic does not accept missing speech or reconcile different complete arrivals or titles', () => {
+  for (const [field, value, error] of [
+    ['arrival', '', /missing separate arrival or title speech/],
+    ['title', '', /missing separate arrival or title speech/],
+    ['arrival', 'Folder unavailable Drive, document clickable.', /Unavailable announcements differ/],
+    ['title', 'Another title', /Unavailable titles differ/],
+  ]) {
+    const samples = freshSamples();
+    samples[3][field] = value;
+    assert.throws(() => assertFreshArrivals(samples, origin), error);
+  }
 });

@@ -42,6 +42,7 @@ export function verifyManifest(manifest, lock) {
 }
 
 export const normalizeSpeech = (phrases) => phrases.join(' ').replace(/\s+/g, ' ').trim();
+export const unavailableHeadingSpeech = /\bheading\W+level 1\W+This folder isn't available\.?$/i;
 
 // Compares HTTP evidence only. Callers must independently assert unavailable page identity.
 export async function unavailableResponse(response) {

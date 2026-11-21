@@ -35,8 +35,17 @@ await cp(new URL('./.npmrc', import.meta.url), join(output, '.npmrc'));
 const page = join(output, route);
 if (selfCheck) {
   await mkdir(page, { recursive: true });
-  await writeFile(join(page, '+page.server.ts'), `export const load = ({params}) => ({ title: params.folderId === 'next' ? 'New document' : 'Route evidence self-check' });\n`);
-  await writeFile(join(page, '+page.svelte'), `<script>export let data;</script><svelte:head><title>{data.title} · Drive</title></svelte:head><main data-sveltekit-reload><h1>{data.title}</h1><a href="/f/next">New document</a></main>\n`);
+  await writeFile(join(page, '+page.server.ts'), `export const load = ({params}) => {
+  const unavailable = ['denied', 'missing'].includes(params.folderId);
+  const title = unavailable ? 'Folder unavailable' : params.folderId === 'next' ? 'New document' : 'Route evidence self-check';
+  return { title, unavailable };
+};\n`);
+  await writeFile(join(page, '+page.svelte'), `<script>export let data;</script>
+<svelte:head><title>{data.title} · Drive</title></svelte:head>
+<main data-sveltekit-reload>
+  {#if data.unavailable}<h1>This folder isn't available.</h1>
+  {:else}<h1>{data.title}</h1><a href="/f/next">New document</a>{/if}
+</main>\n`);
 } else {
   const path = join(page, '+page.server.ts');
   const loader = await readFile(path, 'utf8');
