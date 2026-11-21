@@ -17,9 +17,7 @@ function matchScan(scan, expected) {
       scan.items.length !== expected.length || !isDeepStrictEqual(scan.items, expected)) throw unverified();
 }
 
-// The native lifecycle endpoint is a single policy document, not a list API.
-// Reject a partial document before handing it to the existing rule validator.
-async function singleLifecycleDocument(response) {
+async function boundedR2Document(response) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -32,10 +30,44 @@ async function singleLifecycleDocument(response) {
     size += chunk.byteLength;
   }
   const bytes = buffer.subarray(0, size);
-  const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  return { bytes, parsed: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
+}
+
+// The native lifecycle endpoint is a single policy document, not a list API.
+async function singleLifecycleDocument(response) {
+  const { bytes, parsed } = await boundedR2Document(response);
   if (Object.hasOwn(parsed, 'result_info') || !Array.isArray(parsed.result?.rules) ||
       Object.keys(parsed.result).length !== 1) throw unverified();
   return new Response(bytes);
+}
+
+async function assertR2Roster(account, bucket, token, request, signal) {
+  if (!token?.trim()) throw unverified();
+  const pageSize = 10;
+  await runQualificationPhase(async (_, active) => {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets?per_page=${pageSize}`;
+    // Keep the headerless, name-unfiltered read, but don't rely on it for jurisdiction coverage.
+    for (const jurisdiction of [null, 'default', 'eu', 'us', 'fedramp', 'fedramp-high']) {
+      active.throwIfAborted();
+      const expected = !jurisdiction || jurisdiction === 'default' ? 1 : 0;
+      const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+        headers: { authorization: `Bearer ${token}`, ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) } });
+      if (response.headers.has('link')) {
+        await response.body?.cancel();
+        throw unverified();
+      }
+      const { parsed } = await boundedR2Document(response);
+      const { success, errors, messages, result, result_info: page } = parsed;
+      if (success !== true || !Array.isArray(errors) || errors.length ||
+          (messages !== undefined && (!Array.isArray(messages) || messages.some(message => typeof message !== 'string'))) ||
+          Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+          !Array.isArray(result?.buckets) || Object.keys(result).length !== 1 || result.buckets.length !== expected ||
+          (expected && (result.buckets[0]?.name !== bucket || result.buckets[0]?.jurisdiction !== 'default')) ||
+          page?.total_count !== expected || (Object.hasOwn(page, 'per_page') && page.per_page !== pageSize) ||
+          (Object.hasOwn(page, 'cursor') && page.cursor !== '') ||
+          Object.keys(page).some(key => !['total_count', 'per_page', 'cursor'].includes(key))) throw unverified();
+    }
+  }, null, signal, 15_000);
 }
 
 // Unwired. The eventual readers must enumerate the bounded staging estate,
@@ -74,6 +106,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
+        await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
         // storage-proof namespaces have their own retention/cleanup policies.
