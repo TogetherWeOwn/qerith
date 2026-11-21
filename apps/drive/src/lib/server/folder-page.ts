@@ -1,14 +1,16 @@
 import { entryId } from '../download-id';
 import { isFolderId } from '../folder-id';
+import { entryChangePath } from '../metadata-id';
 import { browseFolder, type BrowseResult } from './browse';
 import type { ReadAccess, ReadEntry } from './metadata/read-access';
 
 interface Dependencies {
   authorize(request: Request): Promise<string | null>;
   readAccess: Pick<ReadAccess, 'get' | 'list'>;
+  metadataWriteAllowed?: boolean;
 }
 
-type FolderEntry = ReadEntry & { downloadable?: true };
+type FolderEntry = ReadEntry & { downloadable?: true; movable?: true };
 export type FolderPage = BrowseResult<{ name: string; entries: FolderEntry[]; nextPage: string | null; paged: boolean }>;
 // 12-byte nonce + 255-byte zero-padded name + 16-byte GCM tag, encoded unpadded.
 const pagePattern = /^[A-Za-z0-9_-]{378}$/;
@@ -36,9 +38,14 @@ export async function folderPage(request: Request, id: string, dependencies?: De
       // This is a live name boundary, not a snapshot. Even a replacement at that name is behind it.
       const page = await dependencies.readAccess.list(token, id, after === null ? null : { name: after, id: '' });
       if (!page || page.entries.length > 100) return null;
+      const canMove = dependencies.metadataWriteAllowed === true && page.ownsFolder === true;
       const entries = page.entries.slice(page.entries[0]?.name === after ? 1 : 0)
-        .map(({ id, name, kind, downloadable }): FolderEntry => kind === 'file' && downloadable === 1 && entryId.test(id) ?
-          { id, name, kind, downloadable: true } : { id, name, kind });
+        .map(({ id, name, kind, downloadable }): FolderEntry => {
+          const entry: FolderEntry = { id, name, kind };
+          if (kind === 'file' && downloadable === 1 && entryId.test(id)) entry.downloadable = true;
+          if (canMove && entryChangePath(id)) entry.movable = true;
+          return entry;
+        });
       let nextPage = null;
       if (page.nextCursor) {
         const iv = crypto.getRandomValues(new Uint8Array(12));

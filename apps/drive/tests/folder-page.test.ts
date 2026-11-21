@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
+import { openFolderMove } from '../src/routes/f/[folderId]/move-action';
 
 const request = (query = '') => new Request(`https://example.test/f/private?${query}`);
 const unavailable = { status: 'unavailable' };
@@ -19,7 +20,7 @@ test('does not read without authorization or with a malformed page', async () =>
 test('rejects invalid folder IDs before authorization or metadata reads', async () => {
   const auth = test.mock.fn(authorize);
   const readFolder = test.mock.fn(get);
-  const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
+  const list = test.mock.fn(async () => ({ entries: [], nextCursor: null, ownsFolder: false }));
   const deps = { authorize: auth, readAccess: { get: readFolder, list } };
   for (const [label, id] of [['empty', ''], ['dot', '.'], ['dot-dot', '..'], ['129 characters', 'x'.repeat(129)]]) {
     assert.deepEqual(await folderPage(request(), id, deps), unavailable, label);
@@ -41,7 +42,7 @@ test('rejects invalid folder IDs before authorization or metadata reads', async 
 test('stops before listing when the folder lookup is denied or returns a file', async () => {
   for (const folder of [null, { ...await get('', 'private'), kind: 'file' as const }]) {
     const readFolder = test.mock.fn(async () => folder);
-    const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
+    const list = test.mock.fn(async () => ({ entries: [], nextCursor: null, ownsFolder: false }));
     assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get: readFolder, list } }), unavailable);
     assert.equal(readFolder.mock.callCount(), 1);
     assert.equal(list.mock.callCount(), 0);
@@ -54,7 +55,7 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
   const last = { id: 'last', name: 'ZZ', kind: 'file' as const };
   for (const anchor of [cursor, { ...cursor, name: 'A' }]) {
     const item = { ...anchor, kind: 'file' as const };
-    const readAccess = { get, list: async () => ({ entries: [{ ...item, object_key: 'private-key' }], nextCursor: anchor }) };
+    const readAccess = { get, list: async () => ({ entries: [{ ...item, object_key: 'private-key' }], nextCursor: anchor, ownsFolder: false }) };
     const page = await folderPage(request(), 'private', { authorize, readAccess });
     assert(page.status === 'ok' && page.folder.nextPage);
     assert.deepEqual(page.folder.entries, [item]);
@@ -63,7 +64,8 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
     // An entry that takes the boundary name is behind the cursor too.
     for (const entries of [[later], [{ ...item, id: 'replacement', name: anchor.name }, later], null]) {
       const list = test.mock.fn(async (_token: string, _id: string, after?: typeof cursor | null) =>
-        after?.name === later.name ? { entries: [last], nextCursor: null } : entries && { entries, nextCursor: later });
+        after?.name === later.name ? { entries: [last], nextCursor: null, ownsFolder: false } :
+          entries && { entries, nextCursor: later, ownsFolder: false });
       const deps = { authorize, readAccess: { get, list } };
       const continuation = await folderPage(next, 'private', deps);
       assert.deepEqual(list.mock.calls.map(call => call.arguments), [[await authorize(), 'private', { name: anchor.name, id: '' }]]);
@@ -96,7 +98,7 @@ test('only projects a positive download hint on a canonical file ID', async () =
     { ...file, id: 'legacy-file', downloadable: 1 as const },
     { ...file, id: 'folder', kind: 'folder' as const, downloadable: 1 as const },
   ];
-  const readAccess = { get, list: async () => ({ entries, nextCursor: null }) };
+  const readAccess = { get, list: async () => ({ entries, nextCursor: null, ownsFolder: false }) };
   const page = await folderPage(request(), 'private', { authorize, readAccess });
   assert.equal(page.status, 'ok');
   assert.deepEqual(page.folder.entries, [
@@ -105,7 +107,27 @@ test('only projects a positive download hint on a canonical file ID', async () =
   ]);
 });
 
+test('dispatches Move only for addressable rows in an owned folder with writes enabled', async () => {
+  const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' as const };
+  const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' as const };
+  const invalid = { ...file, id: '..' };
+  const downloadable = { ...file, downloadable: true };
+  for (const [metadataWriteAllowed, ownsFolder] of [[undefined, true], [true, false], [true, true]] as const) {
+    const entries = [{ ...file, downloadable: 1 as const, movable: true, object_key: 'private-key' }, folder, { ...invalid, movable: true }];
+    const list = async () => ({ entries, nextCursor: null, ownsFolder });
+    const page = await folderPage(request(), 'private', { authorize, readAccess: { get, list }, metadataWriteAllowed });
+    assert.equal(page.status, 'ok');
+    const enabled = metadataWriteAllowed === true && ownsFolder;
+    assert.deepEqual(page.folder.entries, enabled ? [{ ...downloadable, movable: true }, { ...folder, movable: true }, invalid] :
+      [downloadable, folder, invalid]);
+    const open = test.mock.fn<Parameters<typeof openFolderMove>[2]>();
+    for (const id of [file.id, folder.id, invalid.id, 'not-on-this-page']) openFolderMove(page, id, open);
+    openFolderMove({ status: 'unavailable' }, file.id, open);
+    assert.deepEqual(open.mock.calls.map(({ arguments: args }) => args), enabled ? [[file], [folder]] : []);
+  }
+});
+
 test('does not disclose the title if live listing is denied, fails or exceeds the bound', async () => {
-  for (const list of [async () => null, async () => { throw new Error('storage failed'); }, async () => ({ entries: Array(101).fill(await get('', 'private')), nextCursor: null })])
+  for (const list of [async () => null, async () => { throw new Error('storage failed'); }, async () => ({ entries: Array(101).fill(await get('', 'private')), nextCursor: null, ownsFolder: false })])
     assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get, list } }), unavailable);
 });

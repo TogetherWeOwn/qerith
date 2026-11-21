@@ -15,7 +15,7 @@ interface Database { prepare(sql: string): Statement }
 export interface ReadEntry { id: string; name: string; kind: 'file' | 'folder' }
 export interface ReadCursor { name: string; id: string }
 type ListedReadEntry = ReadEntry & { downloadable?: 0 | 1 };
-export interface ReadPage { entries: ListedReadEntry[]; nextCursor: ReadCursor | null }
+export interface ReadPage { entries: ListedReadEntry[]; nextCursor: ReadCursor | null; ownsFolder: boolean }
 export interface FolderPage {
   entries: ReadEntry[];
   total: number;
@@ -39,13 +39,13 @@ const sessionRemainingMs = "s.expires_at - CAST(unixepoch('subsec') * 1000 AS IN
 
 // Anchor at the requested entry, not at a previously authorized ancestor. Each
 // statement rechecks both parties and the session against the current tree.
-const entryAccess = (includeLifetime: boolean) => `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
+const entryAccess = (projection = '') => `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
   SELECT id, parent_id, owner_id FROM drive_entries WHERE id = ?
   UNION
   SELECT e.id, e.parent_id, e.owner_id FROM drive_entries e
     JOIN ancestors a ON e.id = a.parent_id AND e.owner_id = a.owner_id
 ), permitted AS (
-  SELECT target.id${includeLifetime ? `, ${sessionRemainingMs} AS remainingMs` : ''} FROM drive_entries target
+  SELECT target.id${projection} FROM drive_entries target
   JOIN drive_principals owner ON owner.id = target.owner_id AND owner.status = 'active'
   JOIN drive_sessions s ON s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
   JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active'
@@ -55,8 +55,9 @@ const entryAccess = (includeLifetime: boolean) => `WITH RECURSIVE ancestors(id, 
   ))
 )`;
 
-const access = entryAccess(false);
-const publishedGrantAccess = entryAccess(true);
+const access = entryAccess();
+const folderAccess = entryAccess(', target.owner_id = reader.id AS owned');
+const publishedGrantAccess = entryAccess(`, ${sessionRemainingMs} AS remainingMs`);
 
 const ownAccess = (allowMembers: boolean) => `WITH permitted AS (
   SELECT e.id, ${sessionRemainingMs} AS remainingMs FROM drive_entries e
@@ -179,28 +180,30 @@ export class ReadAccess {
     }
     const hash = await sessionHash(token);
     if (!hash) return null;
-    // A sentinel distinguishes an accessible empty folder from an inaccessible ID
-    // without an authorization query separate from the listing.
+    // The sentinel distinguishes a readable empty folder from an inaccessible one.
+    // Ownership comes from the same live check as the same-owner child listing.
     const boundary = cursor ? 'AND (e.name, e.id) > (?, ?)' : '';
     // Compute a hint on the same authorized, bounded page. The download route reauthorizes.
     const availability = this.downloadScope ? `, EXISTS (SELECT 1 FROM drive_entries e ${publishedGenerationJoins}
       WHERE e.id = children.id AND ${publishedGenerationFilter}) AS downloadable` : '';
-    const sentinel = this.downloadScope ? ', 0' : '';
-    const rows = (await this.db.prepare(`${access}, folder AS (
-      SELECT e.id, e.owner_id FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
+    const sentinelAvailability = this.downloadScope ? ', 0' : '';
+    const rows = (await this.db.prepare(`${folderAccess}, folder AS (
+      SELECT e.owner_id, p.owned FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
       SELECT e.id, e.name, e.kind FROM drive_entries e INDEXED BY drive_entries_sibling_name
         JOIN folder f ON e.owner_id = f.owner_id
       WHERE COALESCE(e.parent_id, '') = ? ${boundary} ORDER BY e.name, e.id LIMIT 101
-    ) SELECT id, name, kind${availability} FROM children UNION ALL
-      SELECT NULL, NULL, NULL${sentinel} FROM folder ORDER BY name, id`)
+    ) SELECT id, name, kind, NULL AS owned${availability} FROM children UNION ALL
+      SELECT NULL, NULL, NULL, owned${sentinelAvailability} FROM folder ORDER BY name, id`)
       .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []), ...(this.downloadScope ?? []))
-      .all<ListedReadEntry | { id: null; name: null; kind: null }>()).results;
-    if (!rows.some((row) => row.id === null)) return null;
-    const items = rows.filter((row): row is ListedReadEntry => row.id !== null);
-    const entries = items.slice(0, 100);
+      .all<(ListedReadEntry & { owned: null }) | { id: null; name: null; kind: null; owned: 0 | 1 }>()).results;
+    const sentinel = rows.find(row => row.id === null);
+    if (!sentinel) return null;
+    const items = rows.filter(row => row.id !== null);
+    const entries = items.slice(0, 100).map(({ id, name, kind, downloadable }) =>
+      downloadable === undefined ? { id, name, kind } : { id, name, kind, downloadable });
     const last = entries[entries.length - 1];
-    return { entries, nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
+    return { entries, ownsFolder: sentinel.owned === 1, nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
   async listPage(token: string, folderId: string, cursor: string | null = null, direction: ListingDirection = 'asc'): Promise<FolderPage | null> {
