@@ -2,6 +2,7 @@
   import { invalidate, preloadData } from '$app/navigation';
   import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
+  import EntryShareDialog from './EntryShareDialog.svelte';
   import FileList from './FileList.svelte';
   import NameDialog from './NameDialog.svelte';
   import MoveDialog from './MoveDialog.svelte';
@@ -13,14 +14,17 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed, folderLinks }: {
+  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed, folderLinks, shareOwner, onInvite }: {
     result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean;
     metadataWriteAllowed: boolean; folderLinks: boolean;
+    shareOwner?: { recipientId: string; driveOwner: boolean };
+    onInvite?: () => void;
   } = $props();
   let status = $state('');
   let receipt = $state<{ id: string; name: string; loaded: boolean }>();
   let nameDialog = $state<ReturnType<typeof NameDialog>>();
   let moveDialog = $state<ReturnType<typeof MoveDialog>>();
+  let sharing = $state.raw<{ id: string; ownerId: string; current: () => boolean }>();
   let moveReceipt = $state<{ id: string | null; name: string }>();
   let movedButNotRefreshed = $state<string[]>([]);
   let heading: HTMLHeadingElement;
@@ -95,6 +99,18 @@
     if (!list?.focusActions(id)) (recovery ?? heading).focus();
   }
 
+  function openShare(id: string) {
+    if (shareOwner && items.some(item => item.id === id && item.shareable)) {
+      const target = { id, ownerId: shareOwner.recipientId, current: () => sharing === target && shareItem?.id === id };
+      sharing = target;
+    }
+  }
+
+  function closeShare(id: string) {
+    sharing = undefined;
+    returnToRow(id);
+  }
+
   function openRename(id: string) {
     const item = items.find(item => item.id === id && !item.shared);
     const path = entryChangePath(id);
@@ -142,18 +158,29 @@
 
   // loadRootListing returns only this session's owned entries at parent_id IS NULL.
   const items = $derived(result.status === 'ok' ? result.folder.entries.filter(({ id }) => !movedButNotRefreshed.includes(id)).map(({ id, name, kind, downloadable }) => ({
-    id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
+    id, name, kind: kind === 'folder' ? 'Folder' as const : 'File' as const, glyph: kind,
     href: kind === 'folder' ? (folderLinks && isLinkableFolderId(id) ? `/f/${id}` : undefined) :
       downloadAllowed && downloadable !== false && entryId.test(id) ? `/api/download/${id}` : undefined,
-    reload: true, size: '', bytes: null, modified: '', shared: false, renamable: metadataWriteAllowed && !!entryChangePath(id)
+    reload: true, size: '', bytes: null, modified: '', shared: false, owned: true,
+    renamable: metadataWriteAllowed && !!entryChangePath(id), shareable: !!shareOwner && !!entryChangePath(id)
   })) : []);
+  const shareItem = $derived(sharing && shareOwner?.recipientId === sharing.ownerId
+    ? items.find(item => item.id === sharing?.id && item.shareable) : undefined);
+  $effect(() => {
+    if (!sharing || shareItem) return;
+    const { id } = sharing;
+    sharing = undefined;
+    void tick().then(() => {
+      if (!sharing && document.activeElement === document.body) returnToRow(id);
+    });
+  });
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
   const needsRefresh = $derived(receipt && (result.status === 'unavailable' || (result.status === 'ok' && !receipt.loaded && !createdVisible)));
 </script>
 
 <header bind:this={header} class:can-create={metadataWriteAllowed && result.status === 'ok'}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
-  <h1 bind:this={heading} tabindex={metadataWriteAllowed ? -1 : undefined}>My Drive</h1>
+  <h1 bind:this={heading} tabindex={metadataWriteAllowed || staging ? -1 : undefined}>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
     <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
@@ -186,7 +213,9 @@
 {/if}
 {#if result.status === 'ok'}
   {#if items.length}
-    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} onRename={metadataWriteAllowed ? openRename : undefined} onMove={metadataWriteAllowed ? openMove : undefined} createdId={receipt?.id} />
+    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items}
+      onRename={metadataWriteAllowed ? openRename : undefined} onMove={metadataWriteAllowed ? openMove : undefined}
+      onShare={shareOwner ? openShare : undefined} createdId={receipt?.id} />
   {:else if page}
     <p>No more items.</p>
   {:else}
@@ -200,6 +229,14 @@
       {/if}
     </nav>
   {/if}
+{/if}
+
+{#if sharing && shareItem && shareOwner}
+  {@const id = shareItem.id}
+  {#key sharing}
+    <EntryShareDialog entryId={id} name={shareItem.name} kind={shareItem.kind} owner={shareOwner}
+      isCurrent={sharing.current} onreturn={() => closeShare(id)} {onInvite} />
+  {/key}
 {/if}
 
 <style>

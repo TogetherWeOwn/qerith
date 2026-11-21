@@ -11,6 +11,7 @@ import { proveMove } from './move.mjs';
 import { proveNestedMove } from './nested-move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
+import { proveRootShare } from './root-share.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 
 const origin = 'https://qerith-drive-staging.5150.workers.dev';
@@ -47,6 +48,10 @@ export default { fetch(request, env, ctx) {
     configured.DRIVE_STAGING_SHARED_LISTING = '1';
     input.headers.delete('x-fixture-shared');
   }
+  if (input.headers.has('x-fixture-read-grants')) {
+    configured.DRIVE_STAGING_READ_GRANTS = input.headers.get('x-fixture-read-grants');
+    input.headers.delete('x-fixture-read-grants');
+  }
   return withEnv(configured, () => worker.fetch(input, configured, ctx));
 } };`);
 await writeFile(configPath, JSON.stringify({ ...config, main,
@@ -55,7 +60,7 @@ await writeFile(configPath, JSON.stringify({ ...config, main,
 }));
 const harness = createTestHarness({ workers: [{ configPath, vars: { DRIVE_ORIGIN: origin } }] });
 let browser;
-try {
+stagingRoot: try {
   await harness.listen();
   const worker = harness.getWorker();
   const { DB } = await worker.getEnv();
@@ -135,6 +140,10 @@ try {
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure);
   const cookie = `${sessionName}=${session.value}`;
+  if (process.argv.includes('--root-share-only')) {
+    await proveRootShare(browser, { origin, DB, worker, relay, ownerToken: session.value, memberToken });
+    break stagingRoot;
+  }
 
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
