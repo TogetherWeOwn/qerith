@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 import { tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { PrivateDeletion } from '../../drive/src/lib/server/metadata/private-deletion.ts';
 import { PrivateMetadata } from '../../drive/src/lib/server/metadata/private.ts';
-import { createPublishedReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
+import { createPublishedReadAccess, ReadAccess } from '../../drive/src/lib/server/metadata/read-access.ts';
 import { ReadGrants } from '../../drive/src/lib/server/metadata/read-grants.ts';
 import { UploadPublication } from '../../drive/src/lib/server/metadata/upload-publication.ts';
 import { publishedDownload } from '../../drive/src/lib/server/published-download.ts';
@@ -64,6 +64,24 @@ it('resolves the current listed name and exact generation for a live owner or gr
   await sql("UPDATE drive_principals SET status = 'revoked' WHERE id = ?", owner).run();
   expect(await resolveGeneration(restored, id)).toBeNull();
   expect(primary.mock.calls).toEqual(Array.from({ length: 16 }, () => ['first-primary']));
+});
+
+it('folder listing checks the current storage identity without hiding metadata', async () => {
+  const { id, token } = await seedBoundPublication('folder-availability');
+  const owner = 'owner-folder-availability';
+  const metadata = new PrivateMetadata(env.DB);
+  const { id: folder } = await metadata.createFolder(owner, null, 'Folder');
+  await metadata.move(owner, id, folder, 'File');
+  const cases = [
+    [[config.endpoint, config.bucket, epoch], 1],
+    [['https://other.example', config.bucket, epoch], 0],
+    [[config.endpoint, 'other-bucket', epoch], 0],
+    [[config.endpoint, config.bucket, 'wrong-epoch'], 0],
+  ];
+  for (const [scope, downloadable] of cases) {
+    const reads = new ReadAccess(env.DB.withSession('first-primary'), scope);
+    expect(await reads.list(token, folder)).toEqual({ entries: [{ id, name: 'File', kind: 'file', downloadable }], nextCursor: null });
+  }
 });
 
 it('resolves only own bound generations in own-file mode, even when a grant exists', async () => {
