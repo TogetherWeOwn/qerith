@@ -43,11 +43,25 @@ test('authenticates the exact failed attempt and its source step before recovery
   assert.deepEqual(records, [[source, 'd1']]);
 });
 
+test('accepts both main workflow path suffixes on either metadata response', async () => {
+  for (const [attemptSuffix, latestSuffix] of [['@main', '@refs/heads/main'], ['@refs/heads/main', '@main']]) {
+    const { readSource, calls } = fixture([
+      { ...run, path: run.path + attemptSuffix }, listing, { ...run, path: run.path + latestSuffix },
+    ]);
+    const records = [];
+    await assert.rejects(recover(readSource, records), /\(d1 record\)/);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(records, [[source, 'd1']]);
+  }
+});
+
 test('refuses stale or mismatched attempts and incomplete or ambiguous source jobs before reading records', async () => {
   for (const [responses, count] of [
     [[{ ...run, head_repository: { full_name: 'fork/qerith' } }], 1],
     [[{ ...run, head_sha: 'b'.repeat(40) }], 1],
     [[{ ...run, path: '.github/workflows/other.yml' }], 1],
+    [[{ ...run, path: `${run.path}@refs/tags/main` }], 1],
+    [[run, listing, { ...run, path: `${run.path}@preview` }], 3],
     [[{ ...run, head_branch: 'preview' }], 1],
     [[{ ...run, event: 'pull_request' }], 1],
     [[new Response(null, { status: 403 })], 1],
@@ -65,6 +79,42 @@ test('refuses stale or mismatched attempts and incomplete or ambiguous source jo
     assert.equal(calls.length, count);
     assert.deepEqual(records, []);
   }
+});
+
+test('the request deadline aborts and drains before the outer source phase deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // Node's AbortSignal.timeout uses an internal timer outside the mocked clock.
+  t.mock.method(AbortSignal, 'timeout', ms => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), ms);
+    return controller.signal;
+  });
+  const drained = Promise.withResolvers();
+  const records = [];
+  let requestSignal;
+  let calls = 0;
+  const readSource = createQualificationRecoverySource({ token: 'fixture', async request(_, { signal }) {
+    calls++;
+    requestSignal = signal;
+    await drained.promise;
+    signal.throwIfAborted();
+    throw new Error('Fixture transport drained without abort.');
+  } });
+  let settled = false;
+  const result = assert.rejects(recover(readSource, records).finally(() => { settled = true; }), /\(source\)/);
+  try {
+    t.mock.timers.tick(4_999);
+    assert.equal(requestSignal.aborted, false);
+    t.mock.timers.tick(1);
+    assert.equal(requestSignal.reason?.name, 'TimeoutError');
+    await new Promise(setImmediate);
+    assert.equal(settled, false);
+  } finally {
+    drained.resolve();
+    await result;
+  }
+  assert.equal(calls, 1);
+  assert.deepEqual(records, []);
 });
 
 test('rejects oversized source responses and drains cancellation before settling', async () => {

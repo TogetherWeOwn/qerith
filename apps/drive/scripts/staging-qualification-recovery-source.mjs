@@ -1,5 +1,6 @@
 const repository = 'TogetherWeOwn/qerith';
 const workflow = '.github/workflows/drive-staging-qualification.yml';
+const mainWorkflowPaths = [workflow, `${workflow}@main`, `${workflow}@refs/heads/main`];
 const sourceStep = 'Verify exact dispatch source before staging approval';
 const api = `https://api.github.com/repos/${repository}/actions/runs/`;
 const decimalId = /^[1-9][0-9]{0,19}$/;
@@ -38,7 +39,7 @@ export function createQualificationRecoverySource({ token, request }) {
     try {
       if (!matches(sha, /^[0-9a-f]{40}$/) || !matches(runId, decimalId) || !matches(attempt, decimalId)) throw refused();
       const exactRun = run => exactId(run?.id, runId) && exactId(run.run_attempt, attempt) &&
-        run.head_sha === sha && run.head_branch === 'main' && run.path === workflow &&
+        run.head_sha === sha && run.head_branch === 'main' && mainWorkflowPaths.includes(run.path) &&
         run.repository?.full_name === repository && run.head_repository?.full_name === repository &&
         run.event === 'workflow_dispatch' && run.status === 'completed' &&
         ['failure', 'cancelled', 'timed_out'].includes(run.conclusion);
