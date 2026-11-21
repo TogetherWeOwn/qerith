@@ -568,7 +568,8 @@ test('inventory rejects any native Stream input before and after the attempt', a
   for (const phase of ['before', 'after']) {
     const run = f.create();
     if (phase === 'after') assert.equal(await run('before'), true);
-    f.state.streamList = streamRoster({ result: { liveInputs: [{ enabled: false }], range: 1, total: 1 } });
+    // Zero counts must not override a disabled input in the array.
+    f.state.streamList = streamRoster({ result: { ...streamEmpty, liveInputs: [{ enabled: false }] } });
     await assert.rejects(run(phase), error);
     assert.equal(f.trace.at(-1), 'stream');
   }

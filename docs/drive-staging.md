@@ -258,8 +258,10 @@ Both passes also read the native Stream live-input roster in the pinned Worker
 account. The unfiltered list requests counts and must return an explicitly empty
 `liveInputs` array with `total` and `range` both zero, within five seconds and
 64 KiB. Disabled inputs, missing counts, denied reads, and continuation evidence
-all fail. This does not cover recordings, billing, or other accounts and does not
-replace the estate or app-fixture reader.
+all fail. The empty-response shape is tested with offline fixtures, not confirmed
+against a live account. If the provider omits either count even when requested,
+qualification fails closed. This does not cover recordings, billing, or other
+accounts and does not replace the estate or app-fixture reader.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
