@@ -218,15 +218,26 @@ completed source attempt and its durable pre-activation record, hold the shared
 lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
 or R2 cleanup or authorization to issue a receipt.
 
-The recovery-record adapter defines separate, versioned D1 and Worker records
-for each exact SHA, run and attempt. It acknowledges a record only after a
-create-only write and byte-for-byte readback of the canonical UTF-8 record; a
-missing or ambiguous write, mismatch or cancellation fails closed. Its storage
-interface is still unwired. The protected caller must provide private transport
-that returns fresh, raw bytes without text decoding, enforces the read limit
-before buffering, and retains records through recovery. Authenticate the source
-run before any read. An app fixture or a file left on the runner is not durable
-evidence, and these records are not success receipts.
+The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+It stores separate, versioned D1 and Worker records per exact SHA, run and
+attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
+A signed `If-None-Match: *` PUT must be acknowledged before a fresh signed GET.
+The transport caps readback at 2 KiB before buffering excess bytes and returns
+raw bytes unchanged for comparison against the canonical UTF-8 record. Each S3
+operation has a five-second budget. A collision, missing or ambiguous write,
+byte mismatch or cancellation fails closed without retry or overwrite.
+
+Before PUT, the store requires a complete, unpaginated lifecycle policy with a
+three-day native expiry rule covering the recovery prefix and no conflicting
+overlaps. GET requires a provider `Date` within 30 seconds of the runner clock
+and rejects records at or beyond three days on either clock, even if physical
+deletion is delayed. This is not deletion proof, and the store cannot list or
+delete. Live use still requires
+a private binding, a signer allowed on this prefix, provider-enforced conditional
+writes, and a protected caller that authenticates the exact source attempt before
+any read and holds the staging lifecycle lock. Offline fixtures prove none of
+those live prerequisites. Recovery records are neither success receipts nor
+runner-local files.
 
 The unwired large-transfer verifier reads an unencoded, full `200` app download
 as a stream. It requires the five GiB boundary (also the current app maximum),

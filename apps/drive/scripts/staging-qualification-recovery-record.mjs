@@ -2,7 +2,7 @@ import { types } from 'node:util';
 import { qualificationPrefix } from './staging-qualification.mjs';
 
 const schema = 'drive-staging-recovery.v1';
-const maxRecordBytes = 2048;
+export const maxRecordBytes = 2048;
 const byteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const matches = (value, pattern) => typeof value === 'string' && pattern.test(value);
@@ -18,6 +18,8 @@ function scope({ sha, runId, attempt }, kind) {
 function name({ sha, runId, attempt, kind }) {
   return `drive-staging-recovery-${kind}-${sha}-run-${runId}-attempt-${attempt}`;
 }
+
+export const qualificationRecoveryKey = (source, kind) => name(scope(source, kind));
 
 function serialize(identity, input) {
   if (identity.kind === 'd1') {
