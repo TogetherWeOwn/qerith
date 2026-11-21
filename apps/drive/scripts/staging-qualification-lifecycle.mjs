@@ -20,7 +20,7 @@ const stagingAdapters = (send = fetch) => ({
 // caller must hold the lifecycle lock and supply real admission and estate,
 // app fixture and writer-fence adapters. `stages` is an offline test seam.
 export async function createQualificationLifecycle(env, cwd, { assertFullV0, readWriterFence, readEstate, readFixtures,
-  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send } = {}, stages = stagingAdapters(send)) {
+  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send } = {}, stageOverrides) {
   if (typeof assertFullV0 !== 'function' || typeof send !== 'function') {
     throw new Error('Qualification lifecycle requires reviewed admission and an explicit transport.');
   }
@@ -33,11 +33,21 @@ export async function createQualificationLifecycle(env, cwd, { assertFullV0, rea
   });
   const store = await createQualificationR2RecoveryStore(source, settings, cwd, { send });
   const recordRecovery = qualificationRecoveryWriter(source, store);
+  const stages = { ...stagingAdapters(send), ...stageOverrides };
   let started = false;
   return async signal => {
     if (started) throw new Error('Qualification lifecycle already started.');
     started = true;
-    return runQualificationLifecycle({ ...estate, assertFullV0, exercise, recordRecovery }, settings, cwd, signal, stages);
+    return runQualificationLifecycle({ ...estate, assertFullV0, exercise, recordRecovery }, settings, cwd, signal, {
+      ...stages,
+      async upload(env, cwd, signal) {
+        // A stranded, undeployed upload would make the next baseline ineligible.
+        // Check retention before uploading, without replacing the per-write checks.
+        await store.assertRetention(signal);
+        signal?.throwIfAborted();
+        return stages.upload(env, cwd, signal);
+      },
+    });
   };
 }
 

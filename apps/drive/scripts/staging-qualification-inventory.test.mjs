@@ -10,9 +10,14 @@ import { createQualificationInventory } from './staging-qualification-inventory.
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
 import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
+import { qualificationReadiness, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
+
+const json = result => Response.json({ success: true, errors: [], result });
+const dbBinding = { name: 'DB', type: 'd1', id: '87ac8041-ad2d-4650-b0d7-05bb78846f60' };
+const resourceBindings = [dbBinding, { name: 'ASSETS', type: 'assets' }];
 
 const account = '209cf7dd678adfb683947dd7874d05af';
-const database = '87ac8041-ad2d-4650-b0d7-05bb78846f60';
+const database = dbBinding.id;
 const storageAccount = 'a'.repeat(32), bucket = 'fixture-bucket';
 const worker = 'qerith-drive-staging', namespace = 'drive-qualification/full-v0/';
 const endpoint = `https://${storageAccount}.r2.cloudflarestorage.com`;
@@ -84,20 +89,20 @@ function fixture(t) {
       if (path === 'deployments') return json({ deployments: [{ id: state.deployment,
         annotations: { 'workers/message': state.message }, versions: [{ version_id: state.version, percentage: 100 }] }] });
       assert.equal(path, `versions/${state.version}`);
-      return json({ id: state.version, resources: { bindings: [{ name: 'DB', type: 'd1', id: database },
-        { name: 'ASSETS', type: 'assets' }] } });
+      return json({ id: state.version, resources: { bindings: resourceBindings } });
     },
     async send(request) {
       const url = new URL(request.url);
       assert.equal(request.method, 'GET'); assert.equal(url.origin + url.pathname, `${endpoint}/${bucket}/`);
-      assert.equal(url.searchParams.get('prefix'), namespace);
+      const prefix = url.searchParams.get('prefix');
+      assert.ok(prefix === namespace || (state.cleanup && prefix === context.prefix));
       assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
       const stale = `<Key>${namespace}11/2/stale</Key>`;
       const uploads = url.searchParams.has('uploads'), kind = uploads ? 'uploads' : 'objects';
-      trace.push(kind);
+      trace.push(prefix === context.prefix ? 'r2-cleanup' : kind);
       const init = state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined;
       const paginated = uploads ? state.uploadPage : state.objectPage;
-      const envelope = `<Prefix>${namespace}</Prefix><EncodingType>url</EncodingType><IsTruncated>${!!paginated}</IsTruncated>`;
+      const envelope = `<Prefix>${prefix}</Prefix><EncodingType>url</EncodingType><IsTruncated>${!!paginated}</IsTruncated>`;
       if (uploads) return new Response(`<ListMultipartUploadsResult><Bucket>${bucket}</Bucket>${envelope}${state.upload ?
         `<Upload>${stale}<UploadId>pending</UploadId></Upload>` : ''}${paginated ?
         '<NextKeyMarker>next</NextKeyMarker><NextUploadIdMarker>next</NextUploadIdMarker>' : ''}</ListMultipartUploadsResult>`, init);
@@ -120,28 +125,99 @@ test('composed lifecycle has no default admission or transport', async t => {
   await assert.rejects(createQualificationLifecycle(env, cwd, { assertFullV0: unused }), /requires.*explicit transport/);
 });
 
-for (const fault of ['admission', 'retention', 'd1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'both records verified'}`, async t => {
+function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
+  const app = join(cwd, 'apps/drive');
+  for (const dir of ['.svelte-kit/cloudflare', 'node_modules/.bin']) mkdirSync(join(app, dir), { recursive: true });
+  writeFileSync(join(app, '.svelte-kit/cloudflare/_worker.js'), 'unused');
+  writeFileSync(join(app, 'node_modules/.bin/wrangler'), 'unused');
+  const { sha, runId, attempt } = context;
+  const tag = `${sha}-${runId}-${attempt}`;
+  const { version, previousVersion, expiresAt } = candidate;
+  const script = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${worker}`;
+  const d1 = `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${database}`;
+  return async (url, init) => {
+    init.signal.throwIfAborted();
+    if (url.startsWith(stagingOrigin)) {
+      assert.equal(state.version, version);
+      trace.push('probe');
+      return qualificationReadiness(new Request(url, init), { DRIVE_ORIGIN: stagingOrigin,
+        DRIVE_QUALIFICATION_SHA: sha, DRIVE_QUALIFICATION_VERSION: { id: version } }, true);
+    }
+    if (url === `${script}/versions/${version}`) {
+      return json({ id: version, annotations: { 'workers/tag': tag }, resources: { bindings: [...resourceBindings,
+        { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text', text: sha },
+        { name: 'DRIVE_QUALIFICATION_EXPIRES_AT', type: 'plain_text', text: expiresAt },
+        { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }] } });
+    }
+    if (url === `${script}/deployments` && init.method === 'POST') {
+      const activation = state.version === previousVersion;
+      const target = activation ? version : previousVersion;
+      const message = activation ? tag : `restore-${tag}`;
+      assert.deepEqual(JSON.parse(init.body), { strategy: 'percentage', versions: [{ version_id: target, percentage: 100 }],
+        annotations: { 'workers/message': message } });
+      Object.assign(state, { version: target, message, deployment: uuid(activation ? '4' : '5'), restorePending: !activation });
+      trace.push(activation ? 'activate' : 'restore');
+      return json({ id: state.deployment });
+    }
+    if (url === `${script}/deployments` && state.restorePending) {
+      trace.push('restore-readback');
+      state.restorePending = false;
+    }
+    if (url === d1 || url === `${d1}/query`) {
+      assert.equal(state.version, version);
+      trace.push('d1-cleanup');
+      return json(url === d1 ? { uuid: database, name: worker, version: 'production' } :
+        [{ success: true, results: [] }, { success: true, results: [] }]);
+    }
+    return reads.request(url, init);
+  };
+}
+
+for (const fault of ['admission', 'retention', 'default retention', 'd1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
   const { context, trace, env, cwd, reads, state } = fixture(t);
-  state.recordRetention = fault !== 'retention';
-  const phases = [], stored = new Map();
+  const noRetention = ['retention', 'default retention'].includes(fault);
+  state.recordRetention = !noRetention;
+  const stored = new Map();
   const candidate = { version: uuid('3'), previousVersion: state.version, previousDeployment: state.deployment,
     expiresAt: String(Date.now() + 25 * 60_000) };
-  const unused = () => assert.fail('Unexpected app or fence adapter');
-  const inputs = { ...reads, readWriterFence: unused, withAccessFixtures: unused, readFileFixtures: unused,
-    openTransferClient: unused, openDeletion: unused,
+  const unused = () => assert.fail('Unexpected app adapter');
+  const unexpectedNetwork = t.mock.method(globalThis, 'fetch', () => assert.fail('Unexpected network request'));
+  const nativeRequest = fault === 'worker' || !fault ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
+  const identity = { sha: context.sha, runId: context.runId, attempt: context.attempt };
+  const { expiresAt, version } = candidate;
+  const inputs = { ...reads, readFileFixtures: unused, openTransferClient: unused, openDeletion: unused,
+    async withAccessFixtures(scope, signal) {
+      signal.throwIfAborted();
+      assert.deepEqual(scope, { ...context, version });
+      assert.equal(state.version, version);
+      trace.push('cases');
+      throw new Error('Synthetic case failure');
+    },
+    readWriterFence(source, signal) {
+      signal.throwIfAborted();
+      assert.deepEqual(source, { ...identity, version, expiresAt });
+      assert.equal(state.version, version);
+      trace.push('fence');
+      state.cleanup = true;
+      const at = Date.now(), fenced = { state: 'fenced', at };
+      return { signal: new AbortController().signal, snapshot: { observedAt: at,
+        fence: { since: at, until: at + 60_000, coverage: 'exclusive', superseded: false, current: identity },
+        runner: fenced, candidate: { ...fenced, version, expiresAt }, inFlight: fenced, storageUrls: fenced,
+        storageInFlight: fenced, providerOperations: fenced } };
+    },
     assertFullV0(scope, signal) {
-      signal.throwIfAborted(); assert.deepEqual(scope, context); phases.push('admission');
+      signal.throwIfAborted(); assert.deepEqual(scope, context); trace.push('admission');
       return fault !== 'admission';
     },
     async send(request, init) {
-      if (typeof request === 'string') return reads.request(request, init);
+      if (typeof request === 'string') return nativeRequest(request, init);
       const path = new URL(request.url).pathname;
       if (!path.includes('/recovery/')) return reads.send(request);
       const kind = path.includes('-d1-') ? 'd1' : 'worker';
       const { sha, runId, attempt } = context;
       assert.equal(request.url, `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-${kind}-${sha}-run-${runId}-attempt-${attempt}`);
       assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
-      phases.push(`${kind} ${request.method}`);
+      trace.push(`${kind} ${request.method}`);
       if (request.method === 'PUT') {
         assert.equal(request.headers.get('if-none-match'), '*');
         const bytes = Buffer.from(await request.arrayBuffer());
@@ -155,24 +231,28 @@ for (const fault of ['admission', 'retention', 'd1', 'worker', null]) test(`comp
       return new Response(bytes, { headers: { date, 'last-modified': date, 'content-length': bytes.length } });
     },
   };
-  const run = await createQualificationLifecycle(env, cwd, inputs, {
-    upload() { phases.push('upload'); return candidate; },
+  const run = await createQualificationLifecycle(env, cwd, inputs, fault === 'default retention' ? undefined : {
+    upload() { trace.push('upload'); return candidate; },
     async migrate({ recordRecovery }) {
-      await recordRecovery({ bookmark: 'offline_bookmark' }); phases.push('migrate');
-    },
-    async worker({ recordRecovery, upload }) {
-      await recordRecovery(upload); phases.push('activation eligible');
-      throw new Error('stop before activation in offline fixture');
+      await recordRecovery({ bookmark: 'offline_bookmark' }); trace.push('migrate');
     },
   });
   assert.deepEqual(trace, []);
-  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : fault ? /recovery record is unverified/ : /stop before activation/);
+  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : noRetention ? /recovery retention is unverified/ :
+    fault ? /recovery record is unverified/ : /access.*unverified|unverified.*access/);
   await assert.rejects(run(), /already started/);
-  assert.deepEqual(phases, ['admission', ...(fault === 'admission' ? [] : ['upload']),
-    ...(['admission', 'retention'].includes(fault) ? [] : ['d1 PUT', 'd1 GET']),
+  const milestones = ['admission', 'estate', 'upload', 'd1 PUT', 'd1 GET', 'migrate', 'worker PUT', 'worker GET',
+    'activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'];
+  assert.deepEqual(trace.filter(step => milestones.includes(step)), ['admission',
+    ...(fault === 'admission' ? [] : ['estate']),
+    ...(fault === 'admission' || noRetention ? [] : ['upload', 'd1 PUT', 'd1 GET']),
     ...(!fault || fault === 'worker' ? ['migrate', 'worker PUT', 'worker GET'] : []),
-    ...(!fault ? ['activation eligible'] : [])]);
-  assert.equal(trace.filter(step => step === 'estate').length, fault === 'admission' ? 0 : 2);
+    ...(!fault ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
+    ...(fault === 'admission' ? [] : ['estate'])]);
+  const cleanup = fault ? trace : trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
+  assert.deepEqual(cleanup.filter(step => step.endsWith('-cleanup')).sort(),
+    fault ? [] : ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')]);
+  assert.equal(unexpectedNetwork.mock.callCount(), 0);
 });
 
 for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body read', 'held with R2 failure']) test(
