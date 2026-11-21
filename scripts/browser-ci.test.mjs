@@ -3,7 +3,6 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { crc32, deflateSync } from 'node:zlib';
 import { verifyEvidence } from './browser-evidence.mjs';
 import { selectCheckout } from './select-browser-checkout.mjs';
 
@@ -60,66 +59,6 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, file), content);
     }
     await verifyEvidence(dir, head);
-    const verifyContinuation = () => verifyEvidence(dir, head, false, false, false, false, true);
-    await assert.rejects(verifyContinuation(), /root-continuation-390\.json/);
-    const proofPath390 = join(dir, 'root-continuation-390.json');
-    await writeFile(proofPath390, '{}');
-    await assert.rejects(verifyContinuation(), /Invalid continuation trace: 390/);
-    const intent = '/api/uploads/00000000-0000-4000-8000-000000000101';
-    const fresh = '/api/uploads/00000000-0000-4000-8000-000000000103';
-    const resume = ['GET', `${intent}/resume`, null];
-    const destination = '{"parentId":null,"name":"Re-picked.txt"}';
-    const finished = (...parts) => {
-      const requests = [resume, ...parts, ['POST', `${intent}/complete`, destination]];
-      return { pending: { requests }, published: { requests } };
-    };
-    const evidenceOnly = { requests: [resume] };
-    const continuation = { canceled: { requests: [] }, suffix: { pending: evidenceOnly, refused: evidenceOnly },
-      acknowledged: finished(), empty: finished(['PUT', `${intent}/parts/1`, 0]), 'empty-acknowledged': finished(),
-      fresh: { requests: [['POST', '/api/uploads', '{"size":16777217}'], ['PUT', `${fresh}/parts/1`, 16777216],
-        ['PUT', `${fresh}/parts/2`, 1], ['POST', `${fresh}/complete`, destination]] } };
-    const chunk = (type, data) => {
-      const png = Buffer.alloc(data.length + 12);
-      png.writeUInt32BE(data.length);
-      png.write(type, 4);
-      data.copy(png, 8);
-      png.writeUInt32BE(crc32(png.subarray(4, -4)), png.length - 4);
-      return png;
-    };
-    for (const [width, height] of [[390, 844], [1280, 800]]) {
-      await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
-      await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
-      const header = Buffer.alloc(13);
-      header.writeUInt32BE(width);
-      header.writeUInt32BE(height, 4);
-      header[8] = 8; // 8-bit greyscale, filter 0 on each row.
-      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
-        chunk('IDAT', deflateSync(Buffer.alloc((width + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
-      for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
-        await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
-      }
-      if (width === 1280) {
-        const screenshot = join(dir, 'root-continuation-uploaded-1280.png');
-        const headerOnly = Buffer.concat([png.subarray(0, 33), png.subarray(-12)]);
-        const wrongHeight = Buffer.from(png), overrun = Buffer.from(png);
-        wrongHeight.writeUInt32BE(844, 20);
-        overrun.writeUInt32BE(png.length, 33); // IDAT claims more bytes than the file contains.
-        const malformedType = Buffer.from(png);
-        malformedType[37] |= 0x80; // Set the high bit on the I in IDAT, leaving the payload intact.
-        malformedType.writeUInt32BE(crc32(malformedType.subarray(37, -16)), malformedType.length - 16);
-        for (const invalid of [headerOnly, wrongHeight, overrun, malformedType]) {
-          await writeFile(screenshot, invalid);
-          await assert.rejects(verifyContinuation(), /Invalid continuation screenshot: uploaded-1280/);
-        }
-        await writeFile(screenshot, png);
-      }
-    }
-    await verifyContinuation();
-    for (const requests of [[], continuation.fresh.requests.map(([method, path, body]) => [method, path.replace(fresh, intent), body]),
-      continuation.fresh.requests.map(([method, path, body]) => [method, path, method === 'PUT' ? 0 : body])]) {
-      await writeFile(proofPath390, JSON.stringify({ ...continuation, fresh: { requests } }));
-      await assert.rejects(verifyContinuation(), /Invalid continuation trace: 390/);
-    }
     const verifyFolder = () => verifyEvidence(dir, head, false, false, false, true);
     await assert.rejects(verifyFolder(), /staging-folder-keyboard-390/);
     await writeFile(join(dir, 'staging-folder-keyboard-390.json'), JSON.stringify({ viewport: [390, 844], visibleTabFocus: true,

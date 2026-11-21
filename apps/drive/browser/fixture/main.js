@@ -2,7 +2,6 @@ import { mount } from 'svelte';
 import Fixture from './Fixture.svelte';
 import InviteFixture from './InviteFixture.svelte';
 import OwnerInviteFixture from './OwnerInviteFixture.svelte';
-import RootUploadFixture from './RootUploadFixture.svelte';
 import sansUrl from '../../src/lib/fonts/QerithSans-latin.woff2?url';
 import monoUrl from '../../src/lib/fonts/FragmentMono-Regular-latin.woff2?url';
 
@@ -20,9 +19,4 @@ if (params.has('listing') || params.has('owner-invite')) {
   })).then(() => faces);
 }
 
-const target = document.getElementById('app');
-if (params.has('root-upload')) {
-  mount(RootUploadFixture, { target, props: window.fixtureRootUpload });
-} else {
-  mount(params.has('owner-invite') ? OwnerInviteFixture : params.has('invite') ? InviteFixture : Fixture, { target });
-}
+mount(params.has('owner-invite') ? OwnerInviteFixture : params.has('invite') ? InviteFixture : Fixture, { target: document.getElementById('app') });

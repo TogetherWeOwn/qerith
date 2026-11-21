@@ -1,17 +1,14 @@
 <script lang="ts">
-  import { resumeMultipartToRoot, uploadMultipartToRoot, uploadToRoot } from './root-upload';
+  import { uploadMultipartToRoot, uploadToRoot } from './root-upload';
   import type { DriveUploadMode } from './server/request-auth';
   import './tokens.css';
 
-  let { mode, announce, refresh, paginated, busy = $bindable(false), fixtureResumeIntentId, fixtureFetcher }: {
+  let { mode, announce, refresh, paginated, busy = $bindable(false) }: {
     mode: Exclude<DriveUploadMode, 'disabled'>;
     announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
-    // Only the disposable fixture supplies these. Never discover or persist an intent here.
-    fixtureResumeIntentId?: string; fixtureFetcher?: typeof fetch;
   } = $props();
   const id = $props.id();
   let picker = $state<HTMLInputElement>();
-  let continuePicker = $state<HTMLInputElement>();
   let selected = $state<{ name: string; size: number }>();
   let acceptedBytes = $state(0);
   let message = $state('');
@@ -22,7 +19,7 @@
     if (!busy) picker?.click();
   }
 
-  async function upload(event: Event, intentId?: string) {
+  async function upload(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
@@ -34,18 +31,11 @@
     published = false;
 
     try {
-      const continuing = intentId !== undefined;
-      announce(continuing ? `Continuing upload of ${file.name} to My Drive.` : `Uploading ${file.name} to My Drive.`);
-      message = continuing ? 'Continuing upload…' : 'Uploading…';
-      const partAccepted = (bytes: number) => { acceptedBytes = bytes; };
-      const result = continuing
-        ? await resumeMultipartToRoot(intentId, file, bytes => {
-            partAccepted(bytes);
-            message = 'Finishing upload…';
-          }, fixtureFetcher)
-        : mode === 'multipart'
-          ? await uploadMultipartToRoot(file, partAccepted, fixtureFetcher)
-          : await uploadToRoot(file, () => partAccepted(file.size), fixtureFetcher);
+      announce(`Uploading ${file.name} to My Drive.`);
+      message = 'Uploading…';
+      const result = mode === 'multipart'
+        ? await uploadMultipartToRoot(file, bytes => { acceptedBytes = bytes; })
+        : await uploadToRoot(file, () => { acceptedBytes = file.size; });
       if (result.status === 'published') {
         published = true;
         message = 'Uploaded.';
@@ -68,16 +58,7 @@
 </script>
 
 <button type="button" aria-disabled={!picker || busy} onclick={openPicker}>Upload</button>
-<input type="file" hidden bind:this={picker} onchange={event => upload(event)} />
-{#if mode === 'multipart' && fixtureResumeIntentId !== undefined}
-  {#key fixtureResumeIntentId}
-    <button class="quiet" type="button" aria-disabled={!continuePicker || busy}
-      onclick={() => { if (!busy) continuePicker?.click(); }}>Continue upload</button>
-    <input type="file" hidden bind:this={continuePicker} onchange={event => {
-      if (mode === 'multipart' && fixtureResumeIntentId !== undefined) void upload(event, fixtureResumeIntentId);
-    }} />
-  {/key}
-{/if}
+<input type="file" hidden bind:this={picker} onchange={upload} />
 {#if selected}
   <section aria-labelledby={`${id}-uploads`}>
     <h2 id={`${id}-uploads`}>Uploads</h2>
@@ -90,9 +71,8 @@
 
 <style>
   button { min-height: var(--drive-size-control-md); padding-inline: var(--drive-space-4); border: var(--drive-size-line) solid transparent; border-radius: var(--drive-radius-pill); background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
-  button:not(.quiet):not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
-  button.quiet, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
-  button.quiet:not([aria-disabled='true']):hover { border-color: var(--drive-color-line-hairline-strong); }
+  button:not([aria-disabled='true']):hover { background: var(--drive-color-accent-hover); }
+  button[aria-disabled='true'] { background: var(--drive-color-bg-raised); color: var(--drive-color-text-primary); }
   button:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   section { grid-column: 1 / -1; box-sizing: border-box; max-width: var(--drive-layout-rail-max); margin-block: var(--drive-space-3); padding: var(--drive-space-3); background: var(--drive-color-bg-surface); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-l); overflow-wrap: anywhere; }
   h2, p { margin: 0 0 var(--drive-space-2); }

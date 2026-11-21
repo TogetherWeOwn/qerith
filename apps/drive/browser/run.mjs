@@ -12,7 +12,6 @@ import { createServer } from 'vite';
 import { exerciseKeyboard, exerciseWaitAnnouncement, states, waitForFixture } from './scenario.mjs';
 import { exerciseInviteAcceptance } from './invite-acceptance.mjs';
 import { exerciseOwnerInvite } from './owner-invite.mjs';
-import { exerciseRootUploadContinuation } from './root-upload-continuation.mjs';
 
 const filenameCases = [
   ['unicode', 'áááááááááááá👩‍👩‍👧‍👦.txt'],
@@ -265,7 +264,6 @@ try {
   browser = await chromium.launch({ headless: true });
   await exerciseInviteAcceptance(browser, origin, axe, output);
   await exerciseOwnerInvite(browser, origin, axe, output);
-  await exerciseRootUploadContinuation(browser, origin, axe, output);
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
