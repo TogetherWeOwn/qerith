@@ -206,10 +206,12 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
   const objectURL = `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-d1-${sha}-run-${runId}-attempt-${attempt}`;
   const lifecycleURL = `https://api.cloudflare.com/client/v4/accounts/${r2Account}/r2/buckets/${bucket}/lifecycle`;
 
-  for (const outcome of ['verified', 'readback drift', 'lost acknowledgement', 'missing retention']) {
+  const deniedPolicies = ['missing retention', 'partial status', 'content range', 'paginated policy'];
+  for (const outcome of ['verified', 'readback drift', 'oversized readback', 'lost acknowledgement', ...deniedPolicies]) {
     await t.test(outcome, async () => {
       const trace = [];
-      let stored, fixtureError;
+      let stored, fixtureError, streamCancelled;
+      const canWrite = !deniedPolicies.includes(outcome);
       const lostAcknowledgement = new Error('fixture lost the acknowledgement after storing bytes');
       const respond = async (request, init) => {
         if (typeof request === 'string') {
@@ -217,7 +219,10 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
           assert.equal(request, lifecycleURL);
           assert.equal(init.method, 'GET');
           assert.equal(init.headers.authorization, 'Bearer fixture-api-token');
-          return Response.json(expiryPayload(outcome === 'missing retention' ? [] : [objects]));
+          const policy = expiryPayload(outcome === 'missing retention' ? [] : [objects]);
+          if (outcome === 'paginated policy') policy.result_info = { cursor: 'next' };
+          return Response.json(policy, { status: outcome === 'partial status' ? 206 : 200,
+            headers: ['partial status', 'content range'].includes(outcome) ? { 'content-range': 'bytes 0-255/512' } : {} });
         }
         trace.push(request.method);
         assert.equal(request.url, objectURL);
@@ -233,8 +238,18 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
           return new Response(null, { headers: { etag: '"created"' } });
         }
         assert.equal(request.headers.get('cache-control'), 'no-cache, no-store');
+        const date = new Date(Date.now() + 1000).toUTCString();
+        if (outcome === 'oversized readback') {
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(2048));
+              controller.enqueue(Uint8Array.of(1));
+            },
+            cancel(reason) { streamCancelled = reason; },
+          }), { headers: { date, 'last-modified': date } });
+        }
         const bytes = outcome === 'readback drift' ? Buffer.concat([stored, Buffer.from('\n')]) : stored;
-        return new Response(bytes, { headers: { 'last-modified': new Date().toUTCString(), 'content-length': bytes.length } });
+        return new Response(bytes, { headers: { date, 'last-modified': date, 'content-length': bytes.length } });
       };
       const send = (...args) => respond(...args).catch(error => {
         // Production masks transport errors; don't let it mask a broken fixture.
@@ -246,12 +261,15 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
       assert.deepEqual(trace, []);
       const store = await createQualificationR2RecoveryStore(context, env, cwd, { send });
       const write = qualificationRecoveryWriter(context, store);
-      if (outcome === 'verified') assert.equal(await write(record), true);
-      else await assert.rejects(write(record), { message: 'Staging qualification recovery record is unverified.' });
-      assert.ifError(fixtureError);
-      assert.deepEqual(stored, outcome === 'missing retention' ? undefined : canonical);
-      assert.deepEqual(trace, ['lifecycle', ...(outcome === 'missing retention' ? [] : ['PUT']),
-        ...(['verified', 'readback drift'].includes(outcome) ? ['GET'] : [])]);
+      try {
+        if (outcome === 'verified') assert.equal(await write(record), true);
+        else await assert.rejects(write(record), { message: 'Staging qualification recovery record is unverified.' });
+      } finally {
+        assert.ifError(fixtureError);
+        assert.deepEqual(trace, canWrite ? ['lifecycle', 'PUT', ...(outcome === 'lost acknowledgement' ? [] : ['GET'])] : ['lifecycle']);
+      }
+      assert.deepEqual(stored, canWrite ? canonical : undefined);
+      if (outcome === 'oversized readback') assert.equal(streamCancelled?.message, 'S3 response exceeds limit');
     });
   }
 });

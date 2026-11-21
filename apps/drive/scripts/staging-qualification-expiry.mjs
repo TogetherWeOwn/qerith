@@ -8,9 +8,12 @@ export const recoveryAgeSeconds = 3 * 86_400;
 const deletion = ['deleteObjectsTransition', recoveryAgeSeconds];
 const fixtureTransitions = [deletion, ['abortMultipartUploadsTransition', 7 * 86_400]];
 
-function checkRules({ success, errors, result }, target, recovery) {
+function checkRules(payload, target, recovery) {
+  const { success, errors, result } = payload;
   const transitions = recovery ? [deletion] : fixtureTransitions;
-  if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(result?.rules)) throw new Error();
+  // This endpoint returns one complete policy, never a page of rules.
+  if (success !== true || !Array.isArray(errors) || errors.length || Object.hasOwn(payload, 'result_info') ||
+      !Array.isArray(result?.rules) || Object.keys(result).length !== 1) throw new Error();
   const covered = new Set();
   for (const rule of result.rules) {
     if (typeof rule?.enabled !== 'boolean') throw new Error();
@@ -33,7 +36,7 @@ function checkRules({ success, errors, result }, target, recovery) {
 }
 
 async function boundedPayload(response) {
-  if (!response.ok || !response.body) {
+  if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw new Error();
   }

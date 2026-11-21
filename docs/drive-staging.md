@@ -227,10 +227,12 @@ raw bytes unchanged for comparison against the canonical UTF-8 record. Each S3
 operation has a five-second budget. A collision, missing or ambiguous write,
 byte mismatch or cancellation fails closed without retry or overwrite.
 
-Before PUT, the store reads back an existing three-day native expiry rule
-covering the recovery prefix and rejects conflicting overlaps. GET rejects
-records at or beyond three days even if physical deletion is delayed. This is
-not deletion proof, and the store cannot list or delete. Live use still requires
+Before PUT, the store requires a complete, unpaginated lifecycle policy with a
+three-day native expiry rule covering the recovery prefix and no conflicting
+overlaps. GET requires a provider `Date` within 30 seconds of the runner clock
+and rejects records at or beyond three days on either clock, even if physical
+deletion is delayed. This is not deletion proof, and the store cannot list or
+delete. Live use still requires
 a private binding, a signer allowed on this prefix, provider-enforced conditional
 writes, and a protected caller that authenticates the exact source attempt before
 any read and holds the staging lifecycle lock. Offline fixtures prove none of

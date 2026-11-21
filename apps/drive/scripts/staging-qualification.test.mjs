@@ -194,8 +194,28 @@ test('recovery reader rejects copied, malformed, oversized and cancelled records
 });
 
 const recoveryClock = Date.UTC(2026, 10, 20);
-const recoveryObject = (body, modified = recoveryClock) => ({ status: 200, body,
-  headers: new Headers({ 'last-modified': new Date(modified).toUTCString(), 'content-length': body.byteLength }) });
+const recoveryObject = (body, modified = recoveryClock, date = recoveryClock) => ({ status: 200, body,
+  headers: new Headers({ date: new Date(date).toUTCString(), 'last-modified': new Date(modified).toUTCString(),
+    'content-length': body.byteLength }) });
+
+test('R2 recovery tolerates a fresh provider clock lead without extending the three-day cutoff', async () => {
+  const bytes = Buffer.from(canonicalD1);
+  const key = `drive-staging-recovery-d1-${recoverySource.sha}-run-182-attempt-3`;
+  const read = response => qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    request: () => response }).read(key, { maxBytes: 2048 });
+  const ahead = recoveryClock + 1000, behind = recoveryClock - 1000;
+  const ttl = 3 * 86_400_000;
+  assert.deepEqual(await read(recoveryObject(bytes, ahead, ahead)), bytes);
+  assert.deepEqual(await read(recoveryObject(bytes, ahead - ttl + 1000, ahead)), bytes);
+  const missingDate = recoveryObject(bytes), invalidDate = recoveryObject(bytes);
+  missingDate.headers.delete('date');
+  invalidDate.headers.set('date', '2026-11-20');
+  for (const response of [recoveryObject(bytes, ahead - ttl, ahead), recoveryObject(bytes, recoveryClock - ttl, behind),
+    recoveryObject(bytes, ahead, recoveryClock), recoveryObject(bytes, behind, recoveryClock - 31_000),
+    recoveryObject(bytes, recoveryClock - 31_000, recoveryClock - 31_000), missingDate, invalidDate]) {
+    await assert.rejects(read(response), /recovery storage is unverified/);
+  }
+});
 
 test('R2 recovery creates both exact keys and a fresh store reads them without local state', async () => {
   const durable = new Map();

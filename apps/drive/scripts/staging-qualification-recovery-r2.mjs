@@ -6,6 +6,13 @@ import { readQualificationR2Binding } from './staging-qualification-storage.mjs'
 const unverified = () => new Error('Qualification R2 recovery storage is unverified.');
 const byteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get;
 const sizeOf = body => types.isUint8Array(body) ? byteLength.call(body) : 0;
+const maxClockDifferenceMs = 30_000;
+
+function httpTime(value) {
+  const ms = Date.parse(value ?? '');
+  if (!Number.isFinite(ms) || new Date(ms).toUTCString() !== value) throw unverified();
+  return ms;
+}
 
 // Only the two exact keys are addressable. No list, replace, delete or retry.
 export function qualificationR2RecoveryStore(source, { request, verifyRetention, now = Date.now }) {
@@ -43,13 +50,15 @@ export function qualificationR2RecoveryStore(source, { request, verifyRetention,
         const { status, headers, body } = await request({ method: 'GET', key: target, signal,
           headers: { 'cache-control': 'no-cache, no-store' }, maxResponseBytes: maxBytes });
         signal?.throwIfAborted();
-        const modified = headers.get('last-modified');
-        const timestamp = Date.parse(modified ?? '');
-        const age = now() - timestamp;
         const size = sizeOf(body);
         if (status !== 200 || headers.has('content-range') || headers.has('content-encoding') ||
-            !size || size > maxBytes || headers.get('content-length') !== String(size) || !Number.isFinite(age) ||
-            new Date(timestamp).toUTCString() !== modified || age < 0 || age >= recoveryAgeSeconds * 1000) throw unverified();
+            !size || size > maxBytes || headers.get('content-length') !== String(size)) throw unverified();
+        const providerTime = httpTime(headers.get('date'));
+        const modified = httpTime(headers.get('last-modified'));
+        const runnerTime = now();
+        // Allow clock skew for freshness, but never extend expiry on either clock.
+        if (!Number.isFinite(runnerTime) || Math.abs(providerTime - runnerTime) > maxClockDifferenceMs ||
+            modified > providerTime || Math.max(providerTime, runnerTime) - modified >= recoveryAgeSeconds * 1000) throw unverified();
         return body;
       } catch {
         throw unverified();
