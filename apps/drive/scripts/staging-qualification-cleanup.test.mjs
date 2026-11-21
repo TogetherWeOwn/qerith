@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
+import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
+import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 
 const bucket = 'fixture-bucket';
@@ -38,7 +40,7 @@ function job(t, target = endpoint) {
     GITHUB_RUN_ID: '182', GITHUB_RUN_ATTEMPT: '3', QERITH_S3_ENDPOINT: target, QERITH_S3_BUCKET: bucket,
     QERITH_S3_REGION: 'auto', QERITH_S3_STORAGE_EPOCH: 'fixture-epoch',
     QERITH_S3_ACCESS_KEY_ID: 'fixture-key', QERITH_S3_SECRET_ACCESS_KEY: 'fixture-secret' };
-  return { cwd, env, context: { sha, prefix, runId: '182', attempt: '3' } };
+  return { cwd, git, env, context: { sha, prefix, runId: '182', attempt: '3' } };
 }
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];
@@ -188,6 +190,63 @@ test('the protected R2 adapter signs and scopes every request with a reviewed bi
   assert.deepEqual(trace, []);
   assert.equal(await cleanup(context), true);
   assert.deepEqual(trace, ['GET', 'GET', 'DELETE', 'DELETE', 'GET', 'GET']);
+});
+
+test('signed recovery uses the source commit and requires a byte-identical GET after create', async t => {
+  const { cwd, git, env, context } = job(t);
+  writeFileSync(join(cwd, 'apps/drive/scripts/staging-storage-qualification.json'), '{}');
+  git('commit', '-qam', 'new head without a reviewed storage binding');
+  const head = git('rev-parse', 'HEAD');
+  env.GITHUB_SHA = env.TESTED_SHA = head;
+  env.CLOUDFLARE_API_TOKEN = 'fixture-api-token';
+  const { sha, runId, attempt } = context;
+  const record = { kind: 'd1', ...context, bookmark: 'offline_bookmark' };
+  const canonical = Buffer.from(JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: 'd1',
+    sha, runId, attempt, bookmark: record.bookmark }));
+  const objectURL = `${endpoint}/${bucket}/drive-qualification/recovery/drive-staging-recovery-d1-${sha}-run-${runId}-attempt-${attempt}`;
+  const lifecycleURL = `https://api.cloudflare.com/client/v4/accounts/${r2Account}/r2/buckets/${bucket}/lifecycle`;
+
+  for (const outcome of ['verified', 'readback drift', 'lost acknowledgement', 'missing retention']) {
+    await t.test(outcome, async () => {
+      const trace = [];
+      let stored;
+      const send = async (request, init) => {
+        if (typeof request === 'string') {
+          trace.push('lifecycle');
+          assert.equal(request, lifecycleURL);
+          assert.equal(init.method, 'GET');
+          assert.equal(init.headers.authorization, 'Bearer fixture-api-token');
+          return Response.json(expiryPayload(outcome === 'missing retention' ? [] : [objects]));
+        }
+        trace.push(request.method);
+        assert.equal(request.url, objectURL);
+        assert.equal(request.redirect, 'manual');
+        const authorization = request.headers.get('authorization');
+        assert.match(authorization, /^AWS4-HMAC-SHA256 Credential=fixture-key\/\d{8}\/auto\/s3\/aws4_request, SignedHeaders=/);
+        if (request.method === 'PUT') {
+          assert.equal(request.headers.get('if-none-match'), '*');
+          assert.match(authorization.split('SignedHeaders=')[1].split(',')[0], /(?:^|;)if-none-match(?:;|$)/);
+          assert.equal(request.headers.get('x-amz-content-sha256'), createHash('sha256').update(canonical).digest('hex'));
+          stored = Buffer.from(await request.arrayBuffer());
+          if (outcome === 'lost acknowledgement') throw new Error('fixture lost the acknowledgement after storing bytes');
+          return new Response(null, { headers: { etag: '"created"' } });
+        }
+        assert.equal(request.headers.get('cache-control'), 'no-cache, no-store');
+        const bytes = outcome === 'readback drift' ? Buffer.concat([stored, Buffer.from('\n')]) : stored;
+        return new Response(bytes, { headers: { 'last-modified': new Date().toUTCString(), 'content-length': bytes.length } });
+      };
+      await assert.rejects(createQualificationR2RecoveryStore({ sha: head, runId, attempt }, env, cwd, { send }),
+        /recovery storage is unverified/);
+      assert.deepEqual(trace, []);
+      const store = await createQualificationR2RecoveryStore(context, env, cwd, { send });
+      const write = qualificationRecoveryWriter(context, store);
+      if (outcome === 'verified') assert.equal(await write(record), true);
+      else await assert.rejects(write(record), { message: 'Staging qualification recovery record is unverified.' });
+      assert.deepEqual(stored, outcome === 'missing retention' ? undefined : canonical);
+      assert.deepEqual(trace, ['lifecycle', ...(outcome === 'missing retention' ? [] : ['PUT']),
+        ...(['verified', 'readback drift'].includes(outcome) ? ['GET'] : [])]);
+    });
+  }
 });
 
 test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
