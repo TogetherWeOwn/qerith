@@ -19,8 +19,9 @@ function name({ sha, runId, attempt, kind }) {
 
 function serialize(identity, input) {
   if (identity.kind === 'd1') {
-    if (!matches(input.bookmark, /^[A-Za-z0-9_-]{1,1024}$/)) throw invalid();
-    return JSON.stringify({ ...identity, bookmark: input.bookmark });
+    const { bookmark } = input;
+    if (!matches(bookmark, /^[A-Za-z0-9_-]{1,1024}$/)) throw invalid();
+    return JSON.stringify({ ...identity, bookmark });
   }
   const { version, expiresAt, previousVersion, previousDeployment } = input;
   if (![version, previousVersion, previousDeployment].every(value => matches(value, uuid)) ||
@@ -28,9 +29,17 @@ function serialize(identity, input) {
   return JSON.stringify({ ...identity, version, expiresAt, previousVersion, previousDeployment });
 }
 
+async function readBytes(read, key, signal) {
+  const bytes = await read(key, { maxBytes: maxRecordBytes, signal });
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > maxRecordBytes) throw invalid();
+  return Buffer.from(bytes);
+}
+
 // Unwired. The caller supplies a private, durable create-only store and bounds
-// and authenticates both operations. Read must be fresh, not a local write echo.
-// The transport must limit bytes before buffering. Do not log record contents.
+// and authenticates both operations. Create receives canonical UTF-8 bytes; read
+// returns fresh raw Uint8Array bytes without decoding or normalization, not a
+// local write echo. The transport must limit bytes before buffering. Do not log
+// record contents.
 export function qualificationRecoveryWriter(source, { create, read } = {}) {
   if (typeof create !== 'function' || typeof read !== 'function') throw invalid();
   const { sha, runId, attempt } = scope(source, 'd1');
@@ -43,12 +52,12 @@ export function qualificationRecoveryWriter(source, { create, read } = {}) {
         throw invalid();
       }
       const key = name(identity);
-      const body = serialize(identity, record);
+      const body = Buffer.from(serialize(identity, record));
       // An ambiguous create must fail this attempt, not be retried or treated
       // as success based on a coincidentally matching existing record.
-      if (await create(key, body, signal) !== true) throw invalid();
+      if (await create(key, Uint8Array.from(body), signal) !== true) throw invalid();
       signal?.throwIfAborted();
-      if (await read(key, { maxBytes: maxRecordBytes, signal }) !== body) throw invalid();
+      if (!body.equals(await readBytes(read, key, signal))) throw invalid();
       signal?.throwIfAborted();
       return true;
     } catch {
@@ -63,12 +72,11 @@ export async function readQualificationRecoveryRecord(source, kind, { read }, si
   try {
     const identity = scope(source, kind);
     signal?.throwIfAborted();
-    const body = await read(name(identity), { maxBytes: maxRecordBytes, signal });
-    if (typeof body !== 'string' || Buffer.byteLength(body) > maxRecordBytes) throw invalid();
-    const record = JSON.parse(body);
+    const body = await readBytes(read, name(identity), signal);
+    const record = JSON.parse(body.toString('utf8'));
     // A byte comparison also rejects duplicate/unknown fields and binds the
     // storage payload to the expected kind, commit, run and attempt.
-    if (serialize(identity, record) !== body) throw invalid();
+    if (!body.equals(Buffer.from(serialize(identity, record)))) throw invalid();
     signal?.throwIfAborted();
     return record;
   } catch {
