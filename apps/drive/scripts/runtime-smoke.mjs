@@ -372,7 +372,7 @@ export default { fetch(request, env, ctx) {
       await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
       await exerciseEntryChange({ worker, DB, origin, session, staging });
       await exerciseStagingFolderCreate({ worker, DB, origin, session });
-      await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file });
+      await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file, downloadBytes: data });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);

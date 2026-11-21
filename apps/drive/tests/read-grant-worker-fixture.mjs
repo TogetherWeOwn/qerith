@@ -32,7 +32,7 @@ export async function refusePreviewReadGrants({ worker, origin, cookie }) {
   }
 }
 
-export async function exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner, download }) {
+export async function exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner, download, downloadBytes }) {
   const source = 'share / read';
   const path = pathFor(source);
   const item = `${path}/reader`;
@@ -126,11 +126,15 @@ export async function exerciseStagingReadGrants({ worker, DB, origin, session, d
   const fileGrant = `${pathFor(download.split('/').at(-1))}/reader`;
   await expectPrivateEmpty(ask('PUT', fileGrant, driveOwner, active), 204, 'Drive owner grants read on its own file');
   const both = { ...active, 'x-test-invite': '1' };
-  await expectPrivateEmpty(ask('GET', download, reader, both), 404, 'file delivery remains own-file only');
+  await expectPrivateEmpty(ask('GET', download, reader, active), 403, 'grant management alone does not admit downloads');
+  const grantedDownload = await ask('GET', download, reader, { 'x-test-invite': '1' });
+  assert.deepEqual([grantedDownload.status, grantedDownload.headers.get('cache-control'), await grantedDownload.text()],
+    [200, 'private, no-store', downloadBytes], 'invite mode delivers the granted file');
   for (const path of ['/shared', '/api/shared-listing']) {
     await expectPrivateEmpty(ask('GET', path, reader, both), 404, 'no Shared with me surface');
   }
   await expectPrivateEmpty(ask('DELETE', fileGrant, driveOwner, active), 204, 'remove file grant');
+  await expectPrivateEmpty(ask('GET', download, reader, both), 404, 'revocation closes file delivery');
   console.log('Generated Worker and direct adapter: default-off read-grant admission and D1 ownership checks passed');
 }
 
