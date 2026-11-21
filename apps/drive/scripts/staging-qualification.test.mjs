@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { assertDispatch, assertQualificationJob, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
 import { qualificationExerciseCases } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
@@ -890,11 +891,30 @@ test('the protected workflow checks pinned settings and builds before the hard s
           test "$(npm config get ignore-scripts)" = true
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
-          test -s .svelte-kit/cloudflare/_worker.js
-          test -n "$(find .svelte-kit/cloudflare/_app/immutable -type f -name '*.js' -size +0c -print -quit)"
+          bash scripts/check-worker-build-output.sh
           git diff --quiet HEAD -- .
       - name: Fail closed until the live runner and cleanup are reviewed
         run: |
           printf '%s\\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
           exit 1`);
+});
+
+test('qualification build output requires a nonempty Worker and client JavaScript', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'drive-worker-build-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const output = join(cwd, '.svelte-kit/cloudflare');
+  const immutable = join(output, '_app/immutable/entry');
+  mkdirSync(immutable, { recursive: true });
+  const check = fileURLToPath(new URL('./check-worker-build-output.sh', import.meta.url));
+  const run = () => execFileSync('bash', [check], { cwd, stdio: 'pipe' });
+
+  const worker = join(output, '_worker.js');
+  writeFileSync(worker, 'export default {};');
+  assert.throws(run, { status: 1 });
+  writeFileSync(join(immutable, 'start.js'), '');
+  assert.throws(run, { status: 1 });
+  writeFileSync(join(immutable, 'start.js'), 'export {};');
+  run();
+  writeFileSync(worker, '');
+  assert.throws(run, { status: 1 });
 });
