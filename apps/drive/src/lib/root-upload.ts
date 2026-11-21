@@ -1,55 +1,78 @@
 import { entryId } from './download-id';
 import { validateName } from './entry-name';
-import { verifyUploadResumePrefix } from './upload-resume-evidence';
+import { hashMultipartFile, isMultipartSize, multipartFileLimit, multipartPartCount, partBytes } from './multipart-upload-plan';
+import { verifyBoundUploadResumePrefix, verifyUploadResumePrefix } from './upload-resume-evidence';
 
-// Match the multipart HTTP contract: 16 MiB per part, at least 5 MiB except for the final part.
-const partBytes = 16 * 1024 * 1024;
-const maxParts = 10_000;
-const multipartFileLimit = 5 * 1024 ** 3;
 const request: RequestInit = { mode: 'same-origin', credentials: 'same-origin', cache: 'no-store', redirect: 'error' };
 const json = { 'content-type': 'application/json' };
 const destinationLimit = 4096;
-// The projection contains at most 320 records at the 5 GiB file limit.
+// Room for at most 320 records plus 20,480 hex characters at the 5 GiB file limit.
 const resumeEvidenceLimit = 64 * 1024;
 
 export type RootUploadResult = { status: 'published'; id: string } | { status: 'name-taken' | 'interrupted' };
+declare const boundCandidate: unique symbol;
+/** Only the application intent ID, never an object key, provider upload ID, or file data. */
+export type UploadResumeCandidate = string & { readonly [boundCandidate]: true };
+type Progress = (acceptedBytes: number) => void;
+type RetainCandidate = (candidate: UploadResumeCandidate) => void;
+const interrupted = Object.freeze({ status: 'interrupted' } as const);
+
+function isCandidate(id: unknown): id is UploadResumeCandidate {
+  return typeof id === 'string' && id.length === 36 && entryId.test(id);
+}
 
 export function uploadToRoot(file: File, partAccepted: () => void, fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
   return upload(file, () => partAccepted(), fetcher, partBytes);
 }
 
-export function uploadMultipartToRoot(file: File, partAccepted: (acceptedBytes: number) => void,
-  fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
+export function uploadMultipartToRoot(file: File, partAccepted: Progress, fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
   return upload(file, partAccepted, fetcher, multipartFileLimit);
 }
 
-/** Continue only the explicit candidate; no allocation, discovery, or replay. */
-export async function resumeMultipartToRoot(intentId: string, file: File, partAccepted: (acceptedBytes: number) => void,
+/** Allocate a bound intent, without changing the existing picker or fixture. */
+export function uploadBoundMultipartToRoot(file: File, partAccepted: Progress, retainCandidate: RetainCandidate,
   fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
-  const interrupted = { status: 'interrupted' } as const;
+  return upload(file, partAccepted, fetcher, multipartFileLimit, { retainCandidate });
+}
+
+/** Legacy fixture: verify an already complete prefix (or the single empty slot). */
+export function resumeMultipartToRoot(intentId: string, file: File, partAccepted: Progress,
+  fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
+  return resume(intentId, file, partAccepted, fetcher, false);
+}
+
+/** Continue only the explicit bound intent; never downgrade to unbound evidence. */
+export function resumeBoundMultipartToRoot(candidate: UploadResumeCandidate, file: File, partAccepted: Progress,
+  fetcher: typeof fetch = fetch): Promise<RootUploadResult> {
+  return resume(candidate, file, partAccepted, fetcher, true);
+}
+
+function rootDestination(file: File): string | null {
+  const name = file.name;
+  validateName(name);
+  const body = JSON.stringify({ parentId: null, name });
+  return new TextEncoder().encode(body).length <= destinationLimit ? body : null;
+}
+
+async function resume(intentId: string, file: File, partAccepted: Progress, fetcher: typeof fetch,
+  bound: boolean): Promise<RootUploadResult> {
   const size = file.size;
-  // The fixture route admits only canonical lowercase UUIDs. Treat the ID as an opaque path segment.
-  if (intentId.length !== 36 || !entryId.test(intentId) ||
-      !Number.isSafeInteger(size) || size < 0 || size > multipartFileLimit) return interrupted;
+  if (!isCandidate(intentId) || !isMultipartSize(size)) return interrupted;
   const path = `/api/uploads/${intentId}`;
 
   try {
     const response = await fetcher(`${path}/resume`, { ...request, method: 'GET' });
     if (response.status !== 200) return interrupted;
-    const prefix = await verifyUploadResumePrefix(file, await readJsonWithin(response, resumeEvidenceLimit));
-    if (!prefix || prefix.bytes !== size) return interrupted;
+    const verify = bound ? verifyBoundUploadResumePrefix : verifyUploadResumePrefix;
+    const prefix = await verify(file, await readJsonWithin(response, resumeEvidenceLimit));
+    // Unbound claims protect individual slots, not file identity. Empty bytes are the only exception.
+    if (!prefix || (!bound && prefix.bytes !== size)) return interrupted;
 
-    // A nonempty suffix cannot be filled safely: claims protect individual slots, not file identity.
-    // With a declared size of zero there are no competing nonempty bytes to admit. Still require
-    // a 204 for the one empty slot if it was not already acknowledged by the evidence.
-    const name = file.name;
-    validateName(name);
-    const destination = JSON.stringify({ parentId: null, name });
-    if (destination.length > destinationLimit || new TextEncoder().encode(destination).length > destinationLimit)
-      return interrupted;
-    if (prefix.parts === 0 && !await putPart(path, 1, file, fetcher)) return interrupted;
-    partAccepted(prefix.bytes);
-    return await completeUpload(path, destination, fetcher, (reply) => readJsonWithin(reply, destinationLimit));
+    const destination = rootDestination(file);
+    if (destination === null) return interrupted;
+    if (prefix.parts > 0) partAccepted(prefix.bytes);
+    if (!await sendParts(path, file, prefix.parts, partAccepted, fetcher)) return interrupted;
+    return await completeUpload(path, destination, fetcher, readCompletion);
   } catch {
     return interrupted;
   }
@@ -94,9 +117,22 @@ async function readJsonWithin(response: Response, limit: number): Promise<unknow
   }
 }
 
-async function putPart(path: string, number: number, body: Blob, fetcher: typeof fetch): Promise<boolean> {
-  return (await fetcher(`${path}/parts/${number}`, { ...request, method: 'PUT', body })).status === 204;
+async function sendParts(path: string, file: File, prefixCount: number, partAccepted: Progress,
+  fetcher: typeof fetch): Promise<boolean> {
+  const size = file.size;
+  const count = multipartPartCount(size);
+  for (let index = prefixCount; index < count; index++) {
+    const offset = index * partBytes;
+    const end = Math.min(offset + partBytes, size);
+    const body = count === 1 ? file : file.slice(offset, end);
+    const reply = await fetcher(`${path}/parts/${index + 1}`, { ...request, method: 'PUT', body });
+    if (reply.status !== 204) return false;
+    partAccepted(end);
+  }
+  return true;
 }
+
+const readCompletion = (response: Response) => readJsonWithin(response, destinationLimit);
 
 async function completeUpload(path: string, body: string, fetcher: typeof fetch,
   readJson: (response: Response) => Promise<unknown> = (response) => response.json()): Promise<RootUploadResult> {
@@ -113,34 +149,33 @@ async function completeUpload(path: string, body: string, fetcher: typeof fetch,
   return { status: 'interrupted' };
 }
 
-async function upload(file: File, partAccepted: (acceptedBytes: number) => void,
-  fetcher: typeof fetch, fileLimit: number): Promise<RootUploadResult> {
-  const interrupted = { status: 'interrupted' } as const;
+async function upload(file: File, partAccepted: Progress, fetcher: typeof fetch, fileLimit: number,
+  bound?: { retainCandidate: RetainCandidate }): Promise<RootUploadResult> {
   const size = file.size;
-  if (!Number.isSafeInteger(size) || size < 0 || size > fileLimit) return interrupted;
-  const partCount = Math.max(1, Math.ceil(size / partBytes));
-  if (partCount > maxParts) return interrupted;
+  if (!isMultipartSize(size) || size > fileLimit) return interrupted;
 
   try {
+    const destination = bound ? rootDestination(file) : undefined;
+    if (destination === null) return interrupted;
+    const body = bound ? { size, expectedPartSha256s: await hashMultipartFile(file) } : { size };
     const intent = await fetcher('/api/uploads', {
-      ...request, method: 'POST', headers: json, body: JSON.stringify({ size }),
+      ...request, method: 'POST', headers: json, body: JSON.stringify(body),
     });
     if (intent.status !== 201) return interrupted;
-    const id: unknown = (await intent.json())?.id;
-    // Keep the opaque intent ID within a single, literal URL path segment.
-    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) return interrupted;
-    const path = `/api/uploads/${id}`;
-
-    let offset = 0;
-    for (let number = 1; number <= partCount; number++) {
-      const end = Math.min(offset + partBytes, size);
-      const body = partCount === 1 ? file : file.slice(offset, end);
-      if (!await putPart(path, number, body, fetcher)) return interrupted;
-      offset = end;
-      partAccepted(offset);
+    const allocation = (bound ? await readJsonWithin(intent, destinationLimit) : await intent.json()) as { id?: unknown } | null;
+    const id = allocation?.id;
+    if (bound) {
+      if (!isCandidate(id)) return interrupted;
+      bound.retainCandidate(id);
+    } else if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) {
+      // Keep the fixture's opaque ID within a single, literal URL path segment.
+      return interrupted;
     }
 
-    return await completeUpload(path, JSON.stringify({ parentId: null, name: file.name }), fetcher);
+    const path = `/api/uploads/${id}`;
+    if (!await sendParts(path, file, 0, partAccepted, fetcher)) return interrupted;
+    return await completeUpload(path, destination ?? JSON.stringify({ parentId: null, name: file.name }),
+      fetcher, bound ? readCompletion : undefined);
   } catch {
     // A failed or missing acknowledgement does not make any step safe to resend.
     return interrupted;
