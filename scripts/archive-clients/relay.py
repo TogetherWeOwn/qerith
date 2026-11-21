@@ -117,9 +117,12 @@ class Relay:
                                     trace[field] += len(data)
                                     with self.lock:
                                         self.total_bytes += len(data)
-                                        over_budget = self.total_bytes > MAX_TOTAL_BYTES
-                                    if trace[field] > MAX_STREAM_BYTES or over_budget:
-                                        raise ValueError("relay byte budget exceeded")
+                                        if (trace[field] > MAX_STREAM_BYTES
+                                                or self.total_bytes > MAX_TOTAL_BYTES):
+                                            # Report before socket teardown can trigger shutdown.
+                                            trace["error"] = "ValueError: relay byte budget exceeded"
+                                            self.errors.append(trace["error"])
+                                            return
                                     output.write(data)
                                     # No header rewriting, URL parsing, dechunking or reserialization.
                                     target.sendall(data)
