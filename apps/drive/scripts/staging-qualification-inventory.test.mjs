@@ -111,12 +111,13 @@ function fixture(t) {
   return { context, create, trace, env, cwd, reads, get state() { return state; } };
 }
 
-for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body read']) test(`lifecycle estate cleanup under a ${mode} fence`,
-  { timeout: 10_000 }, async t => {
+for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body read', 'held with R2 failure']) test(
+  `lifecycle estate cleanup under a ${mode} fence`, { timeout: 30_000 }, async t => {
     const { context, trace, env, cwd, reads, state } = fixture(t);
     const active = { version: uuid('3'), expiresAt: String(Date.now() + 25 * 60_000) };
     const fence = new AbortController();
-    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const entered = Promise.withResolvers(), release = Promise.withResolvers(), r2Failed = Promise.withResolvers();
+    const r2Fails = mode === 'held with R2 failure';
     const ops = createQualificationEstate(env, cwd, { ...reads,
       readWriterFence(source) {
         const { prefix, ...identity } = context;
@@ -133,6 +134,11 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
         if (!url.includes('/d1/database/')) return reads.request(url, init);
         assert.equal(url.split('/database/')[1], `${database}${init.method === 'GET' ? '' : '/query'}`);
         trace.push('d1-cleanup');
+        if (r2Fails && init.method === 'POST') {
+          entered.resolve();
+          await release.promise;
+          trace.push('d1-drained');
+        }
         return Response.json({ success: true, errors: [], result: init.method === 'GET' ?
           { uuid: database, name: worker, version: 'production' } :
           [{ success: true, results: [] }, { success: true, results: [] }] });
@@ -141,6 +147,12 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
         const url = new URL(request.url);
         if (url.searchParams.get('prefix') !== context.prefix) return reads.send(request);
         trace.push('r2-cleanup');
+        if (r2Fails) {
+          await entered.promise;
+          trace.push('r2-failed');
+          r2Failed.resolve();
+          throw new Error('Offline R2 cleanup failed');
+        }
         if (mode === 'lost before headers') {
           entered.resolve(); await release.promise;
           assert.equal(request.signal.aborted, true);
@@ -175,24 +187,25 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
       },
     });
     const rejected = assert.rejects(run, mode === 'held' ? /Offline case failed/ :
-      mode === 'foreign' ? /writer quiescence is unverified/ : { name: 'AbortError' });
+      mode === 'foreign' ? /writer quiescence is unverified/ : r2Fails ? /estate cleanup is unverified/ : { name: 'AbortError' });
     const lost = mode.startsWith('lost ');
-    let restoredBeforeDrain = false;
-    if (lost) {
-      await entered.promise;
-      fence.abort();
+    let recoveryBeforeDrain = [];
+    if (lost || r2Fails) {
+      await (lost ? entered.promise : r2Failed.promise);
+      if (lost) fence.abort();
       await new Promise(resolve => setImmediate(resolve));
-      restoredBeforeDrain = trace.includes('restore');
+      recoveryBeforeDrain = trace.slice(trace.indexOf('fence') + 1).filter(step => step === 'restore' || step === 'estate');
       release.resolve();
     }
     await rejected;
-    assert.equal(restoredBeforeDrain, false);
+    assert.deepEqual(recoveryBeforeDrain, []);
     const cleanupTrace = trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
     assert.deepEqual(trace.filter(step => ['estate', 'cases', 'fence', 'restore'].includes(step)),
       ['estate', 'cases', 'fence', 'restore', 'estate']);
     if (mode === 'held') assert.deepEqual(cleanupTrace.sort(), ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')]);
     if (mode === 'foreign') assert.deepEqual(cleanupTrace, []);
     if (lost) assert.equal(cleanupTrace.at(-1), 'r2-drained');
+    if (r2Fails) assert.deepEqual(cleanupTrace.slice(-2), ['r2-failed', 'd1-drained']);
   });
 
 test('inventory reads only pinned resources and compares the exact attempt baseline', async t => {
