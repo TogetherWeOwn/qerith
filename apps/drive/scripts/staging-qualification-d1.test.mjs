@@ -160,6 +160,23 @@ test('app table census covers the committed fully migrated schema and returns an
   assert.deepEqual(f.calls, ['', '/query', '', '/query']);
 });
 
+test('app table census accepts complete D1 read metadata', async t => {
+  const f = fixture(t, { reviewedCensus: true });
+  f.intercept(async (path, _, run) => {
+    const response = run();
+    if (path !== '/query') return response;
+    const { result } = await response.json();
+    result[0].meta = {
+      served_by: 'fixture', served_by_region: 'ENAM', served_by_colo: 'IAD', served_by_primary: true,
+      timings: { sql_duration_ms: 0.25 }, duration: 0.25,
+      changes: 0, last_row_id: 0, changed_db: false, size_after: 839680,
+      rows_read: 167, rows_written: 0, total_attempts: 1,
+    };
+    return ok(result);
+  });
+  assert.deepEqual(await f.census(), { complete: true, items: [] });
+});
+
 test('app table census rejects expired, unnamed and permanent rows under the real guards', async t => {
   const f = fixture(t, { reviewedCensus: true });
   f.sql("INSERT INTO drive_webauthn_challenges VALUES ('opaque-challenge', 'authentication', 1, 1)");
