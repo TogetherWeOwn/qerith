@@ -139,7 +139,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept) {
         page.waitForResponse(r => r.request().isNavigationRequest() && r.url() === continuation), recovery.press('Enter'),
       ]);
       assert.deepEqual([document.request().method(), document.status(), requests.length], ['GET', 200, attempts + 1]);
-      await page.getByText(nameAfterFailure, { exact: true }).filter({ visible: true }).waitFor();
+      await page.getByRole(width === 1280 ? 'table' : 'list').getByText(nameAfterFailure, { exact: true }).waitFor();
     }
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `${owner ? 'owner' : 'member'}-new-folder.json`), JSON.stringify({
       testedSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), viewports: widths, posts: requests,
