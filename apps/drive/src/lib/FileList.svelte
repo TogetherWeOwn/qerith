@@ -18,16 +18,23 @@
   const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
   const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  export function focusName(id: string) { findRowPart(visibleView(), 'data-focus-name', id)?.focus(); }
   export function focusCreatedRow(id: string) {
     findRowPart(visibleView(), 'data-created-row', id)?.focus();
   }
   const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
+  export function focusActions(id: string) {
+    const trigger = triggerFor(visibleView(), id);
+    trigger?.focus();
+    return !!trigger;
+  }
 
   $: if (detailsId !== null && ((onAction && !inlineDetails) || !items.some(item => item.id === detailsId))) {
     if (onAction && findRowPart(visibleView(), 'data-details-id', detailsId)?.contains(document.activeElement)) triggerFor(visibleView(), detailsId)?.focus();
     detailsId = null;
   }
   async function selectAction(source: HTMLElement, id: string, action: RowAction) {
+    if (preview && action === 'Rename') { onRename?.(id); return; }
     if (action !== 'Details' || (onAction && !inlineDetails)) { onAction?.(id, action); return; }
     const sourceTrigger = triggerFor(source, id);
     detailsId = id;
@@ -50,7 +57,7 @@
 
   function contextMenu(event: MouseEvent, action: typeof desktopActions[string]) {
     const controlClick = event.button === 0 && event.ctrlKey && event instanceof PointerEvent && event.pointerType === 'mouse';
-    if (onAction && (event.button === 2 || controlClick) && !(event.target instanceof Element && event.target.closest('[data-details-id]'))) action?.openFromContextMenu(event);
+    if ((onAction || (preview && onRename && action)) && (event.button === 2 || controlClick) && !(event.target instanceof Element && event.target.closest('[data-details-id]'))) action?.openFromContextMenu(event);
   }
 
   onMount(() => {
@@ -58,7 +65,7 @@
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row], [data-details-id], [data-created-row]')))) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && target.closest('a, [data-action-row], [data-details-id], [data-created-row], [data-focus-name]'))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (!lastFocused || event.target !== lastFocused) return;
@@ -96,7 +103,9 @@
       if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
       const facts = focused.closest<HTMLElement>('[data-details-id]');
-      if (focused instanceof HTMLAnchorElement) {
+      if (focused.dataset.focusName !== undefined) {
+        target = findRowPart(to, 'data-focus-name', focused.dataset.focusName);
+      } else if (focused instanceof HTMLAnchorElement) {
         target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
       } else if (focused.hasAttribute('data-created-row')) {
         target = findRowPart(to, 'data-created-row', focused.getAttribute('data-created-row'));
@@ -152,9 +161,10 @@
   $: nameOrder = preview ? 'in binary order' : `${orderDescription} (binary order)`;
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${!preview && timeZone ? ` Times in ${timeZone}.` : ''}`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
+  export let onRename: ((id: string) => void) | undefined = undefined;
   export let inlineDetails = false;
   export let createdId: string | undefined = undefined;
-  export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
+  export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; renamable?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
 </script>
 
 {#snippet entryName(item: (typeof items)[number])}
@@ -162,9 +172,10 @@
   <span class="name">
     <KindGlyph kind={item.glyph} />
     {#if item.href}
-      <a href={item.href} data-sveltekit-reload={item.reload ? '' : undefined} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class="entry-name" class:folder>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>
+      <a href={item.href} data-sveltekit-reload={item.reload ? '' : undefined} dir="auto" data-item-id={item.id} data-focus-name={onRename ? item.id : undefined} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class="entry-name" class:folder>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>
     {:else}
-      <span dir="auto" class="entry-name" class:folder>{item.name}{#if !item.name.trim()} (Whitespace-only name){/if}</span>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, after a row leaves the page) -->
+      <span dir="auto" data-focus-name={onRename ? item.id : undefined} tabindex={onRename ? -1 : undefined} class="entry-name" class:folder>{item.name}{#if !item.name.trim()} (Whitespace-only name){/if}</span>
     {/if}
     {#if item.shared}<span class="tag">Shared</span>{/if}
   </span>
@@ -181,14 +192,14 @@
 {/if}
 <table class="desktop" bind:this={desktop}>
   <caption>{description}</caption>
-  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
+  <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview || onRename}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
       <tr data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td>{@render entryName(item)}</td>
         {#if !preview}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
-        {#if !preview}
-          <td data-action-row={item.id}><RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} /></td>
+        {#if !preview || onRename}
+          <td data-action-row={item.id}>{#if !preview || (item.renamable && !item.shared)}<RowActions bind:this={desktopActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(desktop, item.id, action)} onTab={() => false} renameOnly={preview} />{/if}</td>
         {/if}
       </tr>
       {#if !preview && detailsId === item.id}<tr><td colspan="5"><FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(desktop, item.id)} /></td></tr>{/if}
@@ -198,9 +209,9 @@
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus after creation) -->
-    <li class:with-actions={!preview} data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
-      {#if !preview}
-        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
+    <li class:with-actions={!preview || !!(onRename && item.renamable && !item.shared)} data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
+      {#if !preview || (onRename && item.renamable && !item.shared)}
+        <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} renameOnly={preview} /></div>
       {/if}
       {#if !preview && detailsId === item.id}<FileDetails id={item.id} name={item.name} size={item.size} bytes={item.bytes} kind={item.kind} modifiedFull={item.details?.modifiedFull || item.modified} uploaded={item.details?.uploaded} sharedWith={item.owned && item.shared ? item.details?.sharedWith : undefined} onClose={() => closeDetails(mobile, item.id)} />{/if}
     </li>
@@ -230,7 +241,7 @@
   .preview a { text-decoration: underline; }
   th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
-  a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } :is(a, [data-focus-name]):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
   .name :global(svg) { margin-top: var(--drive-space-2); }
   .entry-name { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; unicode-bidi: plaintext; }
