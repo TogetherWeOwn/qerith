@@ -24,6 +24,9 @@ const target = document.getElementById('app');
 if (params.has('delete-file')) {
   const { default: DeleteFileFixture } = await import('./DeleteFileFixture.svelte');
   mount(DeleteFileFixture, { target });
+} else if (params.has('share-recipient')) {
+  const { default: ShareRecipientFixture } = await import('./ShareRecipientFixture.svelte');
+  mount(ShareRecipientFixture, { target });
 } else if (params.has('root-upload')) {
   mount(RootUploadFixture, { target, props: window.fixtureRootUpload });
 } else {

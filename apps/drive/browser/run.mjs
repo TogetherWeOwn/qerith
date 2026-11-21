@@ -14,6 +14,7 @@ import { exerciseInviteAcceptance } from './invite-acceptance.mjs';
 import { exerciseOwnerInvite } from './owner-invite.mjs';
 import { exerciseRootUploadContinuation } from './root-upload-continuation.mjs';
 import { exerciseDeleteFile } from './delete-file.mjs';
+import { exerciseShareRecipient } from './share-recipient.mjs';
 
 const filenameCases = [
   ['unicode', 'áááááááááááá👩‍👩‍👧‍👦.txt'],
@@ -268,6 +269,7 @@ try {
   await exerciseOwnerInvite(browser, origin, axe, output);
   await exerciseRootUploadContinuation(browser, origin, axe, output);
   await exerciseDeleteFile(browser, origin, axe, output);
+  await exerciseShareRecipient(browser, origin, axe, output);
   for (const [width, height] of [[1280, 800], [390, 844], [320, 844]]) {
     const size = `${width}x${height}`;
     const context = await browser.newContext({ viewport: { width, height }, locale: 'en-US', serviceWorkers: 'block' });
