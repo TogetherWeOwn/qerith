@@ -39,8 +39,9 @@ export async function captureFolderView(page, origin, db, { owner = 'fixture-own
       return [el.textContent, getComputedStyle(el).outlineStyle, top >= 0 && bottom <= innerHeight];
     }), [name, 'solid', true]);
   };
-  const activate = async name => {
-    await tab(name);
+  const activate = async (name, paginated = false) => {
+    if (paginated) await main.getByRole('link', { name, exact: true }).focus();
+    else await tab(name);
     const [response] = await Promise.all([page.waitForNavigation(), page.keyboard.press('Enter')]);
     assert.equal(response?.status(), 200, `${name}: full document navigation`);
   };
@@ -79,7 +80,7 @@ export async function captureFolderView(page, origin, db, { owner = 'fixture-own
     await visit(path);
     assert.equal(await main.getByRole('listitem').count(), 100);
     await tab('Child folder');
-    await activate('Next page');
+    await activate('Next page', scope === 'staging-folder');
     assert.match(new URL(page.url()).searchParams.get('page'), /^[A-Za-z0-9_-]{378}$/);
     assert.equal(await main.getByRole('listitem').count(), 1);
     await evidence('continued', width, 'Receipts', ['link "Z last"', 'link "First page"']);

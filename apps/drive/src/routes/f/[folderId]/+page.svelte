@@ -1,28 +1,97 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
+  import { onMount, tick } from 'svelte';
   import EmptyFolder from '../../../lib/EmptyFolder.svelte';
   import KindGlyph from '../../../lib/KindGlyph.svelte';
+  import MoveDialog from '../../../lib/MoveDialog.svelte';
+  import RowActions from '../../../lib/RowActions.svelte';
+  import { openFolderMove, type MoveReload } from './move-action';
   import { isLinkableFolderId } from '../../../lib/drive-navigation';
   import type { FolderPage } from '../../../lib/server/folder-page';
 
   export let data: { result: FolderPage };
   const label = (name: string) => name.trim() ? name : `${name} (Whitespace-only name)`;
+
+  let mounted = false, movedId: string | undefined;
+  let main: HTMLElement, heading: HTMLHeadingElement;
+  let picker: ReturnType<typeof MoveDialog>;
+  type Destination = { id: string | null; name: string };
+  let receipt: Destination | null | undefined;
+  const shallow = { shallow: true, replace: true } as const;
+  const row = (id: string) => main.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
+  const restoreTrigger = (id: string) => row(id)?.querySelector('button')?.focus();
+
+  onMount(() => {
+    mounted = true;
+    if (page.state.folderMove) void restore(page.state.folderMove);
+  });
+
+  async function restore(saved: MoveReload) {
+    await goto(location.href, shallow).catch(() => {}); // Consume the one-shot history state.
+    if (data.result.status !== 'ok' || !data.result.folder.canMove || saved.until < Date.now()) return;
+    const entries = data.result.folder.entries;
+    const neighbor = entries[Math.min(saved.index, entries.length - 1)];
+    if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
+    else (neighbor && row(neighbor.id)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
+    // Keep names out of history; only show a destination the live picker still admits.
+    try {
+      const params = new URLSearchParams({ entry: saved.source });
+      if (saved.target !== null) params.set('folder', saved.target);
+      const response = await fetch(`/api/move-destinations?${params}`, { redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      if (response.ok) { receipt = { id: saved.target, name: (await response.json()).folderName }; return; }
+    } catch { /* The move succeeded even if the destination no longer loads. */ }
+    receipt = null;
+  }
+
+  async function moved(id: string, target: Destination, close: () => void) {
+    if (data.result.status !== 'ok') return;
+    const index = data.result.folder.entries.findIndex(entry => entry.id === id);
+    try {
+      await goto(location.href, { ...shallow, persistState: true,
+        state: { folderMove: { source: id, target: target.id, index, until: Date.now() + 60_000 } } });
+      // The nested listing is admitted as a document, never as __data.json.
+      location.reload();
+    } catch {
+      close();
+      movedId = id; receipt = target;
+      await tick(); heading.focus();
+    }
+  }
 </script>
 
 <svelte:head><title>{data.result.status === 'ok' ? `${label(data.result.folder.name)} · Drive` : 'Folder unavailable · Drive'}</title></svelte:head>
 
-<main data-sveltekit-reload>
+<main bind:this={main} data-sveltekit-reload>
   {#if data.result.status === 'ok'}
     {@const folder = data.result.folder}
-    <h1 dir="auto">{label(folder.name)}</h1>
-    {#if folder.entries.length}
+    {@const entries = movedId === undefined ? folder.entries : folder.entries.filter(entry => entry.id !== movedId)}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
+    <h1 dir="auto" bind:this={heading} tabindex={folder.canMove ? -1 : undefined}>{label(folder.name)}</h1>
+    {#if folder.canMove}
+      <MoveDialog bind:this={picker} onrootcreated={async () => {}} onmoved={moved} onreturn={restoreTrigger} />
+      <div class:move-notice={receipt !== undefined}>
+        <p role="status" class:status={receipt === undefined}>{#if receipt}Moved to <bdi>{label(receipt.name)}</bdi>{:else if receipt === null}Item moved.{/if}</p>
+        {#if receipt}<a href={receipt.id === null ? '/' : `/f/${receipt.id}`}>Open <bdi>{label(receipt.name)}</bdi></a>{/if}
+        {#if movedId}<a href={page.url.pathname + page.url.search}>Refresh this folder</a>{/if}
+      </div>
+    {/if}
+    {#if entries.length}
       <ul role="list">
-        {#each folder.entries as entry (entry.id)}
-          <li>
+        {#each entries as entry (entry.id)}
+          <li data-row={folder.canMove ? entry.id : undefined}>
             <KindGlyph kind={entry.kind} />
-            {#if entry.kind === 'folder' && isLinkableFolderId(entry.id)}<a href={'/f/' + entry.id} dir="auto">{label(entry.name)}</a>
-            {:else if entry.downloadable}<a href={'/api/download/' + entry.id} dir="auto">{label(entry.name)}</a>
-            {:else}<span dir="auto">{label(entry.name)}</span>{/if}
+            {#if entry.kind === 'folder' && isLinkableFolderId(entry.id)}<a href={'/f/' + entry.id} dir="auto" data-name>{label(entry.name)}</a>
+            {:else if entry.downloadable}<a href={'/api/download/' + entry.id} dir="auto" data-name>{label(entry.name)}</a>
+            {:else}
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
+              <span dir="auto" data-name tabindex={folder.canMove ? -1 : undefined}>{label(entry.name)}</span>
+            {/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
+            {#if mounted && entry.movable && movedId === undefined}
+              <RowActions name={entry.name} moveOnly onAction={() => openFolderMove(data.result, entry.id, source => picker?.open(source))}
+                onTab={() => false} />
+            {/if}
           </li>
         {/each}
       </ul>
@@ -50,6 +119,9 @@
   a { display: inline-block; box-sizing: border-box; min-height: var(--drive-size-control-sm); padding-block: var(--drive-space-2); color: inherit; }
   .ghost { min-height: var(--drive-size-control-md); padding-inline: var(--drive-space-5); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-pill); text-decoration: none; }
   .ghost:hover { background: var(--drive-color-bg-raised); }
-  a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  .move-notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--drive-space-2); padding: var(--drive-space-4); border-radius: var(--drive-radius-m); background: var(--drive-color-state-ok-bg); }
+  .move-notice p { margin: 0; }
+  .status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  :is(a, h1, [data-name]):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   @media (max-width: 820px) { main { padding: var(--drive-layout-gutter-compact); } li { min-height: var(--drive-size-row-dense); } }
 </style>

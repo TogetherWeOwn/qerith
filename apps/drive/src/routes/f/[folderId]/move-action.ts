@@ -7,3 +7,7 @@ export function openFolderMove(page: FolderPage, id: string, open: (source: Read
   const entry = page.folder.entries.find(row => row.id === id && row.movable === true);
   if (entry) open({ id: entry.id, name: entry.name, kind: entry.kind });
 }
+
+export type MoveReload = { source: string; target: string | null; index: number; until: number };
+
+declare global { namespace App { interface PageState { folderMove?: MoveReload } } }

@@ -8,6 +8,7 @@ import { proveSharedListing } from './shared-listing.mjs';
 import { proveNewFolder } from './new-folder.mjs';
 import { proveRename } from './rename.mjs';
 import { proveMove } from './move.mjs';
+import { proveNestedMove } from './nested-move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -309,6 +310,7 @@ try {
   await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
   page.setDefaultTimeout(10_000);
   await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
+  await proveNestedMove(page, origin, DB, intercept);
 
   console.log('Staging-origin: checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();

@@ -132,6 +132,7 @@ test('nested loader enables Move for owners and members only in invite mode', as
         locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
       });
       assert.equal(result.status, 'ok');
+      assert.equal(result.folder.canMove, invite ? true : undefined);
       assert.deepEqual(result.folder.entries, [invite ? { ...child, movable: true } : child], `${role}, invite=${invite}`);
     }
   }
@@ -149,6 +150,7 @@ test('dispatches Move only for addressable rows in an owned folder with writes e
     const page = await folderPage(request(), 'private', { authorize, readAccess: { get, list }, metadataWriteAllowed });
     assert.equal(page.status, 'ok');
     const enabled = metadataWriteAllowed === true && ownsFolder;
+    assert.equal(page.folder.canMove, enabled ? true : undefined);
     assert.deepEqual(page.folder.entries, enabled ? [{ ...downloadable, movable: true }, { ...folder, movable: true }, invalid] :
       [downloadable, folder, invalid]);
     const open = test.mock.fn<Parameters<typeof openFolderMove>[2]>();

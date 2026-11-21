@@ -11,7 +11,7 @@ interface Dependencies {
 }
 
 type FolderEntry = ReadEntry & { downloadable?: true; movable?: true };
-export type FolderPage = BrowseResult<{ name: string; entries: FolderEntry[]; nextPage: string | null; paged: boolean }>;
+export type FolderPage = BrowseResult<{ name: string; entries: FolderEntry[]; nextPage: string | null; paged: boolean; canMove?: true }>;
 // 12-byte nonce + 255-byte zero-padded name + 16-byte GCM tag, encoded unpadded.
 const pagePattern = /^[A-Za-z0-9_-]{378}$/;
 const utf8 = new TextEncoder();
@@ -54,7 +54,7 @@ export async function folderPage(request: Request, id: string, dependencies?: De
         const sealed = await crypto.subtle.encrypt({ ...algorithm, iv }, key ?? await cursorKey(token), name);
         nextPage = btoa(String.fromCharCode(...iv, ...new Uint8Array(sealed))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
       }
-      return { name: folder.name, entries, nextPage, paged: after !== null };
+      return { name: folder.name, entries, nextPage, paged: after !== null, ...(canMove ? { canMove: true as const } : {}) };
     }
   });
 }
