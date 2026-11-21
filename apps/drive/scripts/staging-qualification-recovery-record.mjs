@@ -1,7 +1,9 @@
+import { types } from 'node:util';
 import { qualificationPrefix } from './staging-qualification.mjs';
 
 const schema = 'drive-staging-recovery.v1';
 const maxRecordBytes = 2048;
+const byteLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'byteLength').get;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const matches = (value, pattern) => typeof value === 'string' && pattern.test(value);
 const invalid = () => new Error('Staging qualification recovery record is unverified.');
@@ -29,10 +31,25 @@ function serialize(identity, input) {
   return JSON.stringify({ ...identity, version, expiresAt, previousVersion, previousDeployment });
 }
 
+function storeMethod(store, name) {
+  try {
+    const method = store?.[name];
+    if (typeof method === 'function') return (...args) => Reflect.apply(method, store, args);
+  } catch {
+    throw invalid();
+  }
+  throw invalid();
+}
+
 async function readBytes(read, key, signal) {
   const bytes = await read(key, { maxBytes: maxRecordBytes, signal });
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength > maxRecordBytes) throw invalid();
-  return Buffer.from(bytes);
+  if (!types.isUint8Array(bytes)) throw invalid();
+  const size = byteLength.call(bytes);
+  if (size === 0 || size > maxRecordBytes) throw invalid();
+  // Typed-array set copies the actual view without invoking conversion hooks.
+  const snapshot = Buffer.alloc(size);
+  snapshot.set(bytes);
+  return snapshot;
 }
 
 // Unwired. The caller supplies a private, durable create-only store and bounds
@@ -40,8 +57,9 @@ async function readBytes(read, key, signal) {
 // returns fresh raw Uint8Array bytes without decoding or normalization, not a
 // local write echo. The transport must limit bytes before buffering. Do not log
 // record contents.
-export function qualificationRecoveryWriter(source, { create, read } = {}) {
-  if (typeof create !== 'function' || typeof read !== 'function') throw invalid();
+export function qualificationRecoveryWriter(source, store) {
+  const create = storeMethod(store, 'create');
+  const read = storeMethod(store, 'read');
   const { sha, runId, attempt } = scope(source, 'd1');
   const prefix = qualificationPrefix({ runId, attempt });
   return async (record, signal) => {
@@ -55,7 +73,9 @@ export function qualificationRecoveryWriter(source, { create, read } = {}) {
       const body = Buffer.from(serialize(identity, record));
       // An ambiguous create must fail this attempt, not be retried or treated
       // as success based on a coincidentally matching existing record.
-      if (await create(key, Uint8Array.from(body), signal) !== true) throw invalid();
+      const writeBody = Uint8Array.from(body);
+      signal?.throwIfAborted();
+      if (await create(key, writeBody, signal) !== true) throw invalid();
       signal?.throwIfAborted();
       if (!body.equals(await readBytes(read, key, signal))) throw invalid();
       signal?.throwIfAborted();
@@ -68,9 +88,10 @@ export function qualificationRecoveryWriter(source, { create, read } = {}) {
 
 // Source identity must come from the authenticated completed workflow attempt,
 // never from the storage response. The record cannot itself authorize recovery.
-export async function readQualificationRecoveryRecord(source, kind, { read }, signal) {
+export async function readQualificationRecoveryRecord(source, kind, store, signal) {
   try {
     const identity = scope(source, kind);
+    const read = storeMethod(store, 'read');
     signal?.throwIfAborted();
     const body = await readBytes(read, name(identity), signal);
     const record = JSON.parse(body.toString('utf8'));

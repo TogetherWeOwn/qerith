@@ -67,6 +67,37 @@ test('recovery writer requires fresh readback of a create-only record before ack
   assert.equal(stored.size, 2);
 });
 
+test('recovery writer never creates after cancellation during serialization', async () => {
+  const controller = new AbortController();
+  let creates = 0;
+  const write = qualificationRecoveryWriter(recoverySource, {
+    create() { creates++; return true; },
+    read() { return Buffer.from(canonicalD1); },
+  });
+  await assert.rejects(write({ ...d1Record, get bookmark() {
+    controller.abort();
+    return d1Record.bookmark;
+  } }, controller.signal), invalidRecord);
+  assert.equal(creates, 0);
+});
+
+test('recovery store methods retain their receiver and setup errors are sanitized', async () => {
+  const store = {
+    records: new Map(),
+    create(key, value) { this.records.set(key, Uint8Array.from(value)); return true; },
+    read(key) { return this.records.get(key); },
+  };
+  assert.equal(await qualificationRecoveryWriter(recoverySource, store)(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  for (const malformed of [undefined, null, { read: true }, { get read() { throw new Error('store setup failed'); } }]) {
+    assert.throws(() => qualificationRecoveryWriter(recoverySource, malformed), invalidRecord);
+    await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', malformed), invalidRecord);
+  }
+  assert.throws(() => qualificationRecoveryWriter(recoverySource, {
+    ...store, get create() { throw new Error('store setup failed'); },
+  }), invalidRecord);
+});
+
 test('recovery writer refuses invalid scope, ambiguous creation, readback drift and cancellation', async () => {
   const calls = [];
   assert.throws(() => qualificationRecoveryWriter(recoverySource, { create: () => true }), invalidRecord);
@@ -115,6 +146,22 @@ test('recovery writer validates and stores the same bookmark', async () => {
   } }), true);
   assert.equal(reads, 1);
   assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+});
+
+test('recovery writer and reader compare the actual byte view without conversion', async () => {
+  const canonical = Buffer.from(canonicalD1);
+  const backing = new Uint8Array(canonical.length + 2).fill(0xff);
+  backing.set(canonical, 1);
+  const view = backing.subarray(1, -1);
+  const unused = () => assert.fail('Byte validation must not call object hooks');
+  Object.defineProperties(view, { byteLength: { get: unused }, valueOf: { value: unused } });
+  const store = { create: () => true, read: () => view };
+  const write = qualificationRecoveryWriter(recoverySource, store);
+  assert.equal(await write(d1Record), true);
+  assert.equal((await readQualificationRecoveryRecord(recoverySource, 'd1', store)).bookmark, d1Record.bookmark);
+  view[0] = 0xff;
+  await assert.rejects(write(d1Record), invalidRecord);
+  await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', store), invalidRecord);
 });
 
 test('recovery writer and reader reject a BOM prefix and normalized text', async () => {
