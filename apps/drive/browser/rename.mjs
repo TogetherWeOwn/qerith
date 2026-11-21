@@ -13,7 +13,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
   await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes)
     VALUES (?, ?, ?, 'file', ?, 1), (?, ?, ?, 'file', ?, 1)`)
     .bind(file, principal, stored, file, `${file}-taken`, principal, taken, `${file}-taken`).run();
-  await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Rename.me', 'folder')`).bind(folder, principal).run();
+  await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Folder 095.me', 'folder')`).bind(folder, principal).run();
   const isPatch = r => r.method() === 'PATCH' && r.url().startsWith(`${origin}/api/entries/`);
   const writes = [];
   const track = request => { if (isPatch(request)) writes.push([new URL(request.url()).pathname, request.postDataJSON()]); };
@@ -44,9 +44,8 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await page.setViewportSize({ width, height });
       await page.goto(location, { waitUntil: 'networkidle' });
       await open(starting, 'Taxes 2025');
-      const snapshot = await dialog.ariaSnapshot();
-      assert.match(snapshot, /textbox "Name": Taxes 2025\.pdf/);
-      keyboard[width] = snapshot;
+      keyboard[width] = await dialog.ariaSnapshot();
+      assert.match(keyboard[width], /textbox "Name": Taxes 2025\.pdf/);
       await evidence('open');
       const before = writes.length;
       for (const [key, label] of [['Shift+Tab', 'Close'], ['Shift+Tab', 'Cancel'], ['Tab', 'Close']]) {
@@ -67,8 +66,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await dialog.getByRole('alert').filter({ hasText: 'That name is too long.' }).waitFor();
       assert.equal(writes.length, before, 'invalid names never write');
       await submit(taken, file, 409);
-      await conflict.waitFor();
-      await field.and(active).waitFor();
+      await Promise.all([conflict.waitFor(), field.and(active).waitFor()]);
       assert.equal(await field.inputValue(), taken);
       await evidence('duplicate');
       if (intercept) {
@@ -80,7 +78,6 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
         assert.equal(writes.length, before + 2, 'no automatic retry');
         assert.deepEqual(await state(file), { name: stored, parent_id: null });
         await page.keyboard.press('Escape');
-        await trigger(starting).and(active).waitFor();
         await open(starting, 'Taxes 2025');
       }
       const held = Promise.withResolvers();
@@ -90,7 +87,6 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       try {
         if (intercept) {
           const pending = dialog.getByRole('button', { name: 'Renaming…' });
-          await pending.waitFor();
           assert.equal(await pending.getAttribute('aria-busy'), 'true');
           assert.equal(await field.getAttribute('readonly'), '');
           await page.keyboard.press('Escape');
@@ -127,11 +123,21 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await DB.prepare('UPDATE drive_entries SET name = ? WHERE id = ?').bind(stored, file).run();
     }
     if (intercept) {
-      // The root row can move in another tab after we open Rename.
       await page.reload({ waitUntil: 'networkidle' });
-      await open('Rename.me');
-      await submit('Renamed folder', folder, 200);
-      await trigger('Renamed folder').and(active).waitFor();
+      await open('Folder 095.me');
+      await submit('A Renamed folder', folder, 200); // Sorts before the current cursor.
+      const neighbor = page.locator('span[data-focus-name]').filter({ hasText: /^Folder 096$/ }).and(active);
+      for (const [width, height] of [widths.at(-1), ...widths]) {
+        await page.setViewportSize({ width, height });
+        await neighbor.and(page.locator(width > 820 ? 'table :focus' : 'ul :focus')).waitFor();
+      }
+      await open(starting, 'Taxes 2025');
+      const before = writes.length;
+      await field.fill(''); // Explicitly retype the displayed name, removing the stored line break.
+      await submit(starting, file, 200);
+      await trigger(starting).and(active).waitFor();
+      assert.equal(writes.length, before + 1);
+      assert.deepEqual(await state(file), { name: starting, parent_id: null });
       await open(starting, 'Taxes 2025');
       await DB.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(folder, file).run();
       await DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES (?, ?, ?, ?, 'folder')")
@@ -139,9 +145,8 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await submit(taken, file, 409);
       await conflict.waitFor();
       await submit('Moved elsewhere.pdf', file, 200);
-      await page.locator('[data-focus-name]').and(active).waitFor();
       assert.deepEqual(await state(file), { name: 'Moved elsewhere.pdf', parent_id: folder });
-      await page.getByRole('status').filter({ hasText: 'It isn’t on this page.' }).waitFor();
+      await page.getByRole('status').filter({ hasText: 'Renamed to “Moved elsewhere.pdf”. It isn’t on this page.' }).waitFor();
     }
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `${role}-rename-accessibility.json`), JSON.stringify({
       viewports: widths, snapshots: keyboard, writes,

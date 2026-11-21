@@ -16,7 +16,7 @@
   let dialog: HTMLDialogElement, field: HTMLInputElement;
   let first: HTMLButtonElement, last: HTMLButtonElement;
   let opener = $state<HTMLButtonElement>(), notice = $state<HTMLParagraphElement>();
-  let backdrop = false, originalDisplayName = '';
+  let backdrop = false;
   let name = $state(''), checking = $state(false), pending = $state(false), refreshing = $state(false);
   let clash = $state(''), failure = $state('');
   let target = $state<{ id: string; name: string; kind: string; path: string }>();
@@ -35,9 +35,9 @@
   export function open(entry?: NonNullable<typeof target>) {
     if (dialog.open) return;
     flushSync(() => { target = entry; name = entry?.name ?? ''; clash = failure = ''; checking = false; });
-    originalDisplayName = field.value; // Text inputs strip line breaks in stored names.
-    const dot = entry?.kind === 'File' ? originalDisplayName.lastIndexOf('.') : -1;
-    const end = dot > 0 && dot < originalDisplayName.length - 1 ? dot : originalDisplayName.length;
+    // Selection uses the displayed text; the binding retains stored line breaks until edit.
+    const dot = entry?.kind === 'File' ? field.value.lastIndexOf('.') : -1;
+    const end = dot > 0 && dot < field.value.length - 1 ? dot : field.value.length;
     dialog.showModal(); field.focus(); field.setSelectionRange(0, end);
   }
   function close() { dialog.close(); }
@@ -57,7 +57,7 @@
     event.preventDefault();
     if (pending) return;
     const entry = target;
-    if (entry && field.value === originalDisplayName) { dismiss(); return; }
+    if (entry && name === entry.name) { dismiss(); return; }
     checking = true; failure = '';
     if (invalid) { await tick(); field.focus(); return; }
     pending = true;

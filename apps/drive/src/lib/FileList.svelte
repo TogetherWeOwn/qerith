@@ -18,9 +18,7 @@
   const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
   const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
-  export function focusName(id: string) {
-    findRowPart(visibleView(), 'data-focus-name', id)?.focus();
-  }
+  export function focusName(id: string) { findRowPart(visibleView(), 'data-focus-name', id)?.focus(); }
   export function focusCreatedRow(id: string) {
     findRowPart(visibleView(), 'data-created-row', id)?.focus();
   }
@@ -67,7 +65,7 @@
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row], [data-details-id], [data-created-row]')))) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && target.closest('a, [data-action-row], [data-details-id], [data-created-row], [data-focus-name]'))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (!lastFocused || event.target !== lastFocused) return;
@@ -105,7 +103,9 @@
       if (!(focused instanceof HTMLElement) || !from.contains(focused)) return;
       let target: HTMLElement | null | undefined;
       const facts = focused.closest<HTMLElement>('[data-details-id]');
-      if (focused instanceof HTMLAnchorElement) {
+      if (focused.dataset.focusName !== undefined) {
+        target = findRowPart(to, 'data-focus-name', focused.dataset.focusName);
+      } else if (focused instanceof HTMLAnchorElement) {
         target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
       } else if (focused.hasAttribute('data-created-row')) {
         target = findRowPart(to, 'data-created-row', focused.getAttribute('data-created-row'));
