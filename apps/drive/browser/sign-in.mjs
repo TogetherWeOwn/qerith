@@ -182,7 +182,7 @@ try {
   assert.equal(signedIn.headers.get('location'), null);
   const tokenHash = createHash('sha256').update(session.value).digest('hex');
   assert.equal((await DB.prepare('SELECT principal_id FROM drive_sessions WHERE token_hash = ?').bind(tokenHash).first()).principal_id, 'fixture-owner');
-  const privateStatus = () => first.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
+  const privateStatus = (page = first) => page.evaluate(async () => (await fetch('/', { method: 'HEAD' })).status);
   assert.equal(await privateStatus(), 200);
   assert.equal(await first.evaluate(() => sessionStorage.getItem('fixture-interrupted-upload')), 'present');
   await captureFolderView(first, origin, DB);
@@ -210,10 +210,10 @@ try {
     response.url() === origin + target && response.request().isNavigationRequest()), next.click()]);
   assert.equal(expiredPage.status(), 303);
   assert.equal((await expiredPage.allHeaders()).location, `/sign-in?${new URLSearchParams({ next: target })}`);
-  await signInFrom(first, target);
+  await signInFrom(second, target); // The first tab may still be following the redirect.
   await DB.prepare('UPDATE drive_sessions SET expires_at = ? WHERE token_hash = ?').bind(Date.now() + 60_000, tokenHash).run();
   await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture-owner'").run();
-  assert.equal(await privateStatus(), 401);
+  assert.equal(await privateStatus(second), 401);
   await signInFrom(second, '/?revoked=1');
   await primary(second).click();
   await second.getByRole('heading', { name: 'Your access is turned off' }).waitFor();

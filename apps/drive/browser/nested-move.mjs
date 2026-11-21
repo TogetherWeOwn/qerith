@@ -2,17 +2,15 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
-
 export async function proveNestedMove(page, origin, db, intercept) {
   for (const [width, height] of widths) {
     const parent = `nested-parent-${width}`, source = `nested-source-${width}`, path = `/f/${parent}`;
     const name = '01 Résumé', destination = `! Nested destination ${width}`, removed = `! Nested removed ${width}`, home = `! Nested source ${width}`;
-    const nested = width === 1280, target = nested ? destination : 'My Drive';
-    const insert = 'INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES';
-    const seedSourceFolder = () => db.prepare(`${insert} (?1, 'owner', NULL, ?2, 'folder'),
-      (?1 || '-next', 'owner', ?1, '02 Next', 'folder')`).bind(parent, home).run();
+    const nested = width === 1280, target = nested ? destination : 'My Drive', primary = `Move to ${target}`;
+    const seed = rows => db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ${rows}`);
+    const seedSourceFolder = () => seed(`(?1, 'owner', NULL, ?2, 'folder'), (?1 || '-next', 'owner', ?1, '02 Next', 'folder')`).bind(parent, home).run();
     await seedSourceFolder();
-    await db.prepare(`${insert} (?2, 'owner', ?1, ?3, 'folder'), (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'),
+    await seed(`(?2, 'owner', ?1, ?3, 'folder'), (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'),
       ('nested-target', 'owner', NULL, ?4, 'folder'), ('nested-clash', 'owner', 'nested-target', ?3, 'folder'),
       ('nested-gone', 'owner', NULL, ?5, 'folder')`).bind(parent, source, name, destination, removed).run();
     await page.setViewportSize({ width, height });
@@ -20,8 +18,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const trigger = page.getByRole('button', { name: `Actions for ${name}` });
     const dialog = page.getByRole('dialog', { name: /^Move “/ });
     const button = name => dialog.getByRole('button', { name, exact: true });
-    const focused = page.locator(':focus');
-    const evidence = state => capture(page, state, width, true, 'nested-move');
+    const focused = page.locator(':focus'), evidence = state => capture(page, state, width, true, 'nested-move');
     const open = async () => {
       await trigger.press('ArrowDown');
       await page.getByRole('menuitem', { name: 'Move' }).press('Enter');
@@ -49,9 +46,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     assert.equal(await submit(`Move to ${removed}`), 404);
     await dialog.getByRole('alert').and(focused).waitFor();
     assert.equal(await button(`Move to ${removed}`).getAttribute('aria-disabled'), 'true');
-    await evidence('gone');
-    await button('Up to My Drive').press('Enter');
-    const primary = `Move to ${target}`;
+    await evidence('gone'); await button('Up to My Drive').press('Enter');
     if (nested) {
       await button(target).press('Enter');
       intercept(patch, route => route.abort());
@@ -70,8 +65,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     intercept(patch, async (_, forward) => { await held.promise; return forward(); });
     const pending = submit(primary);
     try {
-      await button('Moving…').waitFor();
-      await page.keyboard.press('Escape');
+      await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
     } finally { held.resolve(); }
     assert.equal(await pending, 200);
