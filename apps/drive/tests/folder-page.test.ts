@@ -3,7 +3,20 @@ import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
 import { stagingOrigin } from '../src/lib/server/request-auth';
 import { loadFolder } from '../src/routes/f/[folderId]/load-folder';
-import { openFolderMove } from '../src/routes/f/[folderId]/move-action';
+import { moveNeighbor, openFolderMove, readMoveReceipt } from '../src/routes/f/[folderId]/move-action';
+
+const savedMove = { source: 'B', target: null, rows: ['A', 'B', 'C', 'D'], until: 0 };
+test('Move focus prefers the next surviving original row and falls back to the heading', () => {
+  for (const [live, expected] of [['CD', 'C'], ['AC', 'C'], ['A', 'A'], ['', undefined], ['Z', undefined]] as const)
+    assert.equal(moveNeighbor(savedMove, [...live].map(id => ({ id }))), expected, live);
+});
+test('Move receipt links only to the current parent, including My Drive', async t => {
+  let currentParentId: string | null = 'other';
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ folderName: 'My Drive', currentParentId }));
+  assert.equal(await readMoveReceipt(savedMove), null);
+  currentParentId = null;
+  assert.deepEqual(await readMoveReceipt(savedMove), { id: null, name: 'My Drive' });
+});
 
 const request = (query = '') => new Request(`https://example.test/f/private?${query}`);
 const unavailable = { status: 'unavailable' };
@@ -22,7 +35,7 @@ test('does not read without authorization or with a malformed page', async () =>
 test('rejects invalid folder IDs before authorization or metadata reads', async () => {
   const auth = test.mock.fn(authorize);
   const readFolder = test.mock.fn(get);
-  const list = test.mock.fn(async () => ({ entries: [], nextCursor: null, ownsFolder: false }));
+  const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
   const deps = { authorize: auth, readAccess: { get: readFolder, list } };
   for (const [label, id] of [['empty', ''], ['dot', '.'], ['dot-dot', '..'], ['129 characters', 'x'.repeat(129)]]) {
     assert.deepEqual(await folderPage(request(), id, deps), unavailable, label);
@@ -44,7 +57,7 @@ test('rejects invalid folder IDs before authorization or metadata reads', async 
 test('stops before listing when the folder lookup is denied or returns a file', async () => {
   for (const folder of [null, { ...await get('', 'private'), kind: 'file' as const }]) {
     const readFolder = test.mock.fn(async () => folder);
-    const list = test.mock.fn(async () => ({ entries: [], nextCursor: null, ownsFolder: false }));
+    const list = test.mock.fn(async () => ({ entries: [], nextCursor: null }));
     assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get: readFolder, list } }), unavailable);
     assert.equal(readFolder.mock.callCount(), 1);
     assert.equal(list.mock.callCount(), 0);
@@ -57,7 +70,7 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
   const last = { id: 'last', name: 'ZZ', kind: 'file' as const };
   for (const anchor of [cursor, { ...cursor, name: 'A' }]) {
     const item = { ...anchor, kind: 'file' as const };
-    const readAccess = { get, list: async () => ({ entries: [{ ...item, object_key: 'private-key' }], nextCursor: anchor, ownsFolder: false }) };
+    const readAccess = { get, list: async () => ({ entries: [{ ...item, object_key: 'private-key' }], nextCursor: anchor }) };
     const page = await folderPage(request(), 'private', { authorize, readAccess });
     assert(page.status === 'ok' && page.folder.nextPage);
     assert.deepEqual(page.folder.entries, [item]);
@@ -66,8 +79,7 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
     // An entry that takes the boundary name is behind the cursor too.
     for (const entries of [[later], [{ ...item, id: 'replacement', name: anchor.name }, later], null]) {
       const list = test.mock.fn(async (_token: string, _id: string, after?: typeof cursor | null) =>
-        after?.name === later.name ? { entries: [last], nextCursor: null, ownsFolder: false } :
-          entries && { entries, nextCursor: later, ownsFolder: false });
+        after?.name === later.name ? { entries: [last], nextCursor: null } : entries && { entries, nextCursor: later });
       const deps = { authorize, readAccess: { get, list } };
       const continuation = await folderPage(next, 'private', deps);
       assert.deepEqual(list.mock.calls.map(call => call.arguments), [[await authorize(), 'private', { name: anchor.name, id: '' }]]);
@@ -100,7 +112,7 @@ test('only projects a positive download hint on a canonical file ID', async () =
     { ...file, id: 'legacy-file', downloadable: 1 as const },
     { ...file, id: 'folder', kind: 'folder' as const, downloadable: 1 as const },
   ];
-  const readAccess = { get, list: async () => ({ entries, nextCursor: null, ownsFolder: false }) };
+  const readAccess = { get, list: async () => ({ entries, nextCursor: null }) };
   const page = await folderPage(request(), 'private', { authorize, readAccess });
   assert.equal(page.status, 'ok');
   assert.deepEqual(page.folder.entries, [
@@ -146,7 +158,7 @@ test('dispatches Move only for addressable rows in an owned folder with writes e
   const downloadable = { ...file, downloadable: true };
   for (const [metadataWriteAllowed, ownsFolder] of [[undefined, true], [true, false], [true, true]] as const) {
     const entries = [{ ...file, downloadable: 1 as const, movable: true, object_key: 'private-key' }, folder, { ...invalid, movable: true }];
-    const list = async () => ({ entries, nextCursor: null, ownsFolder });
+    const list = async () => ({ entries, nextCursor: null, ownsFolder: ownsFolder ? true as const : undefined });
     const page = await folderPage(request(), 'private', { authorize, readAccess: { get, list }, metadataWriteAllowed });
     assert.equal(page.status, 'ok');
     const enabled = metadataWriteAllowed === true && ownsFolder;
@@ -161,6 +173,6 @@ test('dispatches Move only for addressable rows in an owned folder with writes e
 });
 
 test('does not disclose the title if live listing is denied, fails or exceeds the bound', async () => {
-  for (const list of [async () => null, async () => { throw new Error('storage failed'); }, async () => ({ entries: Array(101).fill(await get('', 'private')), nextCursor: null, ownsFolder: false })])
+  for (const list of [async () => null, async () => { throw new Error('storage failed'); }, async () => ({ entries: Array(101).fill(await get('', 'private')), nextCursor: null })])
     assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get, list } }), unavailable);
 });

@@ -15,7 +15,7 @@ interface Database { prepare(sql: string): Statement }
 export interface ReadEntry { id: string; name: string; kind: 'file' | 'folder' }
 export interface ReadCursor { name: string; id: string }
 type ListedReadEntry = ReadEntry & { downloadable?: 0 | 1 };
-export interface ReadPage { entries: ListedReadEntry[]; nextCursor: ReadCursor | null; ownsFolder: boolean }
+export interface ReadPage { entries: ListedReadEntry[]; nextCursor: ReadCursor | null; ownsFolder?: true }
 export interface FolderPage {
   entries: ReadEntry[];
   total: number;
@@ -186,7 +186,7 @@ export class ReadAccess {
     // Compute a hint on the same authorized, bounded page. The download route reauthorizes.
     const availability = this.downloadScope ? `, EXISTS (SELECT 1 FROM drive_entries e ${publishedGenerationJoins}
       WHERE e.id = children.id AND ${publishedGenerationFilter}) AS downloadable` : '';
-    const sentinelAvailability = this.downloadScope ? ', 0' : '';
+    const sentinel = this.downloadScope ? ', 0' : '';
     const rows = (await this.db.prepare(`${folderAccess}, folder AS (
       SELECT e.owner_id, p.owned FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
@@ -194,16 +194,15 @@ export class ReadAccess {
         JOIN folder f ON e.owner_id = f.owner_id
       WHERE COALESCE(e.parent_id, '') = ? ${boundary} ORDER BY e.name, e.id LIMIT 101
     ) SELECT id, name, kind, NULL AS owned${availability} FROM children UNION ALL
-      SELECT NULL, NULL, NULL, owned${sentinelAvailability} FROM folder ORDER BY name, id`)
+      SELECT NULL, NULL, NULL, owned${sentinel} FROM folder ORDER BY name, id`)
       .bind(folderId, hash, folderId, folderId, ...(cursor ? [cursor.name, cursor.id] : []), ...(this.downloadScope ?? []))
       .all<(ListedReadEntry & { owned: null }) | { id: null; name: null; kind: null; owned: 0 | 1 }>()).results;
-    const sentinel = rows.find(row => row.id === null);
-    if (!sentinel) return null;
+    const folder = rows.find(row => row.id === null);
+    if (!folder) return null;
     const items = rows.filter(row => row.id !== null);
-    const entries = items.slice(0, 100).map(({ id, name, kind, downloadable }) =>
-      downloadable === undefined ? { id, name, kind } : { id, name, kind, downloadable });
+    const entries = items.slice(0, 100).map(({ owned: _, ...entry }) => entry);
     const last = entries[entries.length - 1];
-    return { entries, ownsFolder: sentinel.owned === 1, nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
+    return { entries, ...(folder.owned === 1 ? { ownsFolder: true } : {}), nextCursor: items.length > 100 ? { name: last.name, id: last.id } : null };
   }
 
   async listPage(token: string, folderId: string, cursor: string | null = null, direction: ListingDirection = 'asc'): Promise<FolderPage | null> {

@@ -6,7 +6,7 @@
   import KindGlyph from '../../../lib/KindGlyph.svelte';
   import MoveDialog from '../../../lib/MoveDialog.svelte';
   import RowActions from '../../../lib/RowActions.svelte';
-  import { openFolderMove, type MoveReload } from './move-action';
+  import { moveNeighbor, openFolderMove, readMoveReceipt, type MoveReload } from './move-action';
   import { isLinkableFolderId } from '../../../lib/drive-navigation';
   import type { FolderPage } from '../../../lib/server/folder-page';
 
@@ -16,8 +16,7 @@
   let mounted = false, movedId: string | undefined;
   let main: HTMLElement, heading: HTMLHeadingElement;
   let picker: ReturnType<typeof MoveDialog>;
-  type Destination = { id: string | null; name: string };
-  let receipt: Destination | null | undefined;
+  let receipt: Awaited<ReturnType<typeof readMoveReceipt>> | undefined;
   const shallow = { shallow: true, replace: true } as const;
   const row = (id: string) => main.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
   const restoreTrigger = (id: string) => row(id)?.querySelector('button')?.focus();
@@ -31,31 +30,24 @@
     await goto(location.href, shallow).catch(() => {}); // Consume the one-shot history state.
     if (data.result.status !== 'ok' || !data.result.folder.canMove || saved.until < Date.now()) return;
     const entries = data.result.folder.entries;
-    const neighbor = entries[Math.min(saved.index, entries.length - 1)];
+    const neighbor = moveNeighbor(saved, entries);
     if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
-    else (neighbor && row(neighbor.id)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
-    // Keep names out of history; only show a destination the live picker still admits.
-    try {
-      const params = new URLSearchParams({ entry: saved.source });
-      if (saved.target !== null) params.set('folder', saved.target);
-      const response = await fetch(`/api/move-destinations?${params}`, { redirect: 'error', signal: AbortSignal.timeout(10_000) });
-      if (response.ok) { receipt = { id: saved.target, name: (await response.json()).folderName }; return; }
-    } catch { /* The move succeeded even if the destination no longer loads. */ }
-    receipt = null;
+    else (neighbor && row(neighbor)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
+    receipt = await readMoveReceipt(saved);
   }
 
-  async function moved(id: string, target: Destination, close: () => void) {
+  async function moved(id: string, { id: target }: { id: string | null }, close: () => void) {
     if (data.result.status !== 'ok') return;
-    const index = data.result.folder.entries.findIndex(entry => entry.id === id);
+    const saved = { source: id, target, rows: data.result.folder.entries.map(entry => entry.id), until: Date.now() + 60_000 };
     try {
-      await goto(location.href, { ...shallow, persistState: true,
-        state: { folderMove: { source: id, target: target.id, index, until: Date.now() + 60_000 } } });
+      await goto(location.href, { ...shallow, persistState: true, state: { folderMove: saved } });
       // The nested listing is admitted as a document, never as __data.json.
       location.reload();
     } catch {
       close();
-      movedId = id; receipt = target;
+      movedId = id; receipt = null;
       await tick(); heading.focus();
+      receipt = await readMoveReceipt(saved);
     }
   }
 </script>

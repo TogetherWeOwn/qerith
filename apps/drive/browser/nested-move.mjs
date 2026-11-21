@@ -64,7 +64,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     assert.equal(await trigger.count(), 0);
     await evidence('success');
     await page.getByRole('link', { name: 'Open My Drive' }).press('Enter');
-    await page.getByRole('link', { name, exact: true }).waitFor();
+    await page.getByRole(width === 1280 ? 'table' : 'list').getByRole('link', { name, exact: true }).waitFor();
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `keyboard-nested-move-${width}x${height}.json`),
       JSON.stringify({ focus: ['trigger', 'current path', 'conflict alert', 'gone alert', 'next row'], submission: [409, 404, 200], documentReload: true }));
     page.off('request', track);

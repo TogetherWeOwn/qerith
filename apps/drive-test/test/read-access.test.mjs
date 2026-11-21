@@ -98,9 +98,8 @@ it('authorizes direct and inherited reads and lists without disclosing parents o
   expect(await reads.get(eve, 'file')).toBeNull();
   expect(await grants.create(alice, 'root', 'bob')).toBe(true);
   expect(await reads.get(bob, 'file')).toEqual({ id: 'file', name: 'file', kind: 'file' });
-  const nested = { entries: [{ id: 'file', name: 'file', kind: 'file' }], nextCursor: null };
-  expect(await reads.list(alice, 'nested')).toEqual({ ...nested, ownsFolder: true });
-  expect(await reads.list(bob, 'nested')).toEqual({ ...nested, ownsFolder: false });
+  expect((await reads.list(alice, 'nested')).ownsFolder).toBe(true);
+  expect(await reads.list(bob, 'nested')).toEqual({ entries: [{ id: 'file', name: 'file', kind: 'file' }], nextCursor: null });
   expect(await reads.listPage(bob, 'nested')).toEqual({
     entries: [{ id: 'file', name: 'file', kind: 'file' }], total: 1, order: 'binary-name', direction: 'asc', nextCursor: null,
   });
@@ -119,7 +118,7 @@ it('re-evaluates inheritance on additions, moves, session and membership changes
   const { sessions, grants, reads, alice, bob } = await setup();
   await grants.create(alice, 'root', 'bob');
   await env.DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ('new', 'alice', 'root', 'new', 'folder')").run();
-  expect(await reads.list(bob, 'new')).toEqual({ entries: [], nextCursor: null, ownsFolder: false });
+  expect(await reads.list(bob, 'new')).toEqual({ entries: [], nextCursor: null });
   expect(await reads.listPage(bob, 'new')).toEqual({ entries: [], total: 0, order: 'binary-name', direction: 'asc', nextCursor: null });
   await env.DB.prepare("UPDATE drive_entries SET parent_id = 'elsewhere' WHERE id = 'nested'").run();
   expect(await reads.get(bob, 'file')).toBeNull();
