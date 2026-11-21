@@ -146,6 +146,23 @@ export default { fetch(request, env, ctx) {
   if (request.headers.has('x-test-invite')) {
     const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
+    // Expose unexpected D1 errors in this synthetic fixture, not in HTTP responses.
+    if (new URL(request.url).pathname === '/api/move-destinations') {
+      const db = bindings.DB;
+      bindings.DB = {
+        prepare: db.prepare.bind(db),
+        batch: db.batch.bind(db),
+        withSession: constraint => ({ prepare: sql => ({ bind: (...args) => ({ async all() {
+          try { return await db.withSession(constraint).prepare(sql).bind(...args).all(); }
+          catch (error) {
+            const message = String(error?.cause?.message ?? error?.message ?? 'unknown error')
+              .replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]');
+            console.error('Move destinations fixture D1:', message);
+            throw error;
+          }
+        } }) }) })
+      };
+    }
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
