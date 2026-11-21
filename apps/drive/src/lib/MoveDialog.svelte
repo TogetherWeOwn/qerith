@@ -164,7 +164,7 @@
       {#if reading}<p>Opening <bdi>{label(folder.name)}</bdi>…</p>{/if}
     </section>
     <footer>
-      <button class="create" type="button" aria-disabled={unavailable || tooDeepToCreate} aria-description={tooDeepToCreate ? "Can’t make a folder at this depth" : undefined} onclick={event => {
+      <button class="create" type="button" aria-disabled={unavailable || tooDeepToCreate} title={tooDeepToCreate ? "Can’t make a folder at this depth" : undefined} onclick={event => {
         if (!unavailable && !tooDeepToCreate) nameDialog?.open(undefined, event.currentTarget);
       }}>New folder</button>
       <div class="confirm">
