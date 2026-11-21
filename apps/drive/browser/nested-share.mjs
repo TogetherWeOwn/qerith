@@ -186,13 +186,14 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         await evidence('confirm');
         const [revoked] = await Promise.all([responseFor(grant(id), 'DELETE'), confirm.press('Enter')]);
         assert.equal(revoked.status(), 204);
-        const status = dialog.getByRole('status').filter({ hasText: `Removed direct access for ${reader}. Access through ${parentName} remains.` });
+        const status = dialog.getByRole('status').filter({ hasText: `Removed direct access for ${reader}.` });
         await status.waitFor();
         await focused(dialog.getByRole('heading', { name: 'People with access' }));
         assert.equal(await remove.count(), 0);
         await readback(id, false);
+        await through.getByText(`Through ${parentName}`).waitFor();
         const revokedTree = await dialog.ariaSnapshot();
-        assert.match(revokedTree, /status: Removed direct access for Folder Reader\. Access through Shared project remains\./);
+        assert.match(revokedTree, /status: Removed direct access for Folder Reader\.[\s\S]*Folder Reader[\s\S]*Through Shared project/);
         await evidence('revoked');
         await page.screenshot({ path: resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-greyscale-${width}.png`),
           style: 'dialog { filter: grayscale(1); }' });
@@ -255,8 +256,12 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         await remove.press('Enter');
         // The ancestor grant disappears while the direct-revoke confirmation is open.
         assert.equal((await ask(grant(parent), ownerToken, 'DELETE')).status, 204);
-        const [raceRevoke] = await Promise.all([responseFor(grant(id), 'DELETE'), confirm.press('Enter')]);
-        assert.equal(raceRevoke.status(), 204);
+        const [raceRevoke, freshRoster] = await Promise.all([
+          responseFor(grant(id), 'DELETE'), responseFor(roster(id)), confirm.press('Enter'),
+        ]);
+        assert.deepEqual([raceRevoke.status(), freshRoster.status()], [204, 200]);
+        assert.deepEqual((await freshRoster.json()).recipients.find(row => row.displayName === reader),
+          { recipientId: 'member', displayName: reader, direct: false, inheritedFrom: null });
         const raceStatus = dialog.getByRole('status').filter({ hasText: `Removed direct access for ${reader}.` });
         await raceStatus.waitFor();
         assert.doesNotMatch(await raceStatus.textContent(), /Access through/);
@@ -268,7 +273,7 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
           'RowActions exposes the named menu and Share and Move menu items. The trigger’s aria-controls references the open menu.',
           'ShareDialog names the entry and exposes the owner, access heading, folder-derived access, and the confirmation controls for direct access.',
           'ShareRecipientPicker exposes the labelled combobox and listbox. A reader who already has inherited access is absent from the choices.',
-          'The status region announces that direct access was removed and access through the folder remains. Focus returns to the access heading and then the originating row.',
+          'The status region announces that direct access was removed. The refreshed list describes access through the folder. Focus returns to the access heading and then the originating row.',
           menuTree, inheritedTree, pickerTree, confirmedTree, revokedTree,
         ].join('\n\n'));
       } finally { await context.close(); }
