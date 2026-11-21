@@ -248,6 +248,20 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         const [memberRead] = await Promise.all([responseFor(roster(memberChild)), openShare(memberChildName)]);
         assert.equal(memberRead.status(), 200);
         await dialogFor(memberChildName).getByRole('option', { name: candidate }).waitFor();
+        await context.addCookies([{ ...cookie(ownerToken), url: origin }]);
+        await visit();
+        assert.equal((await ask(grant(id), ownerToken, 'PUT')).status, 204);
+        await openShare();
+        await remove.press('Enter');
+        // The ancestor grant disappears while the direct-revoke confirmation is open.
+        assert.equal((await ask(grant(parent), ownerToken, 'DELETE')).status, 204);
+        const [raceRevoke] = await Promise.all([responseFor(grant(id), 'DELETE'), confirm.press('Enter')]);
+        assert.equal(raceRevoke.status(), 204);
+        const raceStatus = dialog.getByRole('status').filter({ hasText: `Removed direct access for ${reader}.` });
+        await raceStatus.waitFor();
+        assert.doesNotMatch(await raceStatus.textContent(), /Access through/);
+        await through.waitFor({ state: 'hidden' });
+        assert.equal((await ask(grant(parent), ownerToken, 'PUT')).status, 204);
         assert.deepEqual(errors, []);
         assert(![inheritedTree, pickerTree, confirmedTree, revokedTree].some(tree => tree.includes(candidateId) || tree.includes(id)));
         await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-aria-review-${width}.txt`), [

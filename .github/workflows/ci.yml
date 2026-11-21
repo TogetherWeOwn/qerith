@@ -557,6 +557,12 @@ jobs:
         run: |
           timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs
           [[ ! -f root-share.mjs ]] || timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs --root-share-only
+      - name: Exercise generated nested Share in Chromium with local D1
+        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/nested-share.mjs') != ''
+        working-directory: tested/apps/drive/browser
+        env:
+          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+        run: timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs --nested-share-only
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
