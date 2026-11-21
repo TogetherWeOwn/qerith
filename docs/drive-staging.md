@@ -230,11 +230,13 @@ compute mode, writer exclusion or historical restore attribution. It does not
 replace the separate estate and app-fixture readers.
 
 Both passes also check the native R2 bucket roster in the account from the
-reviewed storage binding. The account list is not filtered by name or
-jurisdiction and must return one bounded page with no continuation cursor,
-containing only the bound default-jurisdiction bucket. This checks what the
-existing credential can list in that account; it does not replace the estate
-reader, lifecycle policy readback, or direct object and multipart listings.
+reviewed storage binding. The headerless list and the explicit `default` list
+must each contain only the bound bucket; the `eu` and `fedramp` lists must be
+empty. None are filtered by name. Each read must return one bounded page with
+an exact total count and no continuation; denied reads do not count as empty.
+This checks what the existing credential can list in the documented R2
+jurisdictions. It does not replace the estate reader, lifecycle policy readback,
+or direct object and multipart listings.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation

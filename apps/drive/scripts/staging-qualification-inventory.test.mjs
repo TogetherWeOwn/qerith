@@ -22,9 +22,10 @@ const storageAccount = 'a'.repeat(32), bucket = 'fixture-bucket';
 const worker = 'qerith-drive-staging', namespace = 'drive-qualification/full-v0/';
 const endpoint = `https://${storageAccount}.r2.cloudflarestorage.com`;
 const pinnedBucket = { name: bucket, jurisdiction: 'default' };
-const bucketPage = { per_page: 10 };
-const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [],
+const bucketPage = { total_count: 1, per_page: 10 };
+const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
+const r2RosterOrder = ['r2-roster', 'r2-roster-default', 'r2-roster-eu', 'r2-roster-fedramp'];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
 const scan = (items = []) => ({ complete: true, items });
 const error = { message: 'Qualification estate inventory is unverified.' };
@@ -92,10 +93,16 @@ function fixture(t) {
       }
       if (url === d1) return json({ uuid: database, name: worker, version: 'production' });
       if (url === `${root}${storageAccount}/r2/buckets?per_page=10`) {
-        trace.push('r2-roster');
-        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
-        return state.bucketList ?? bucketRoster({}, state.partial === 'r2-roster' ?
-          { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined);
+        const jurisdiction = init.headers['cf-r2-jurisdiction'];
+        const kind = jurisdiction ? `r2-roster-${jurisdiction}` : 'r2-roster';
+        assert.ok(r2RosterOrder.includes(kind));
+        trace.push(kind);
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token',
+          ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) });
+        const empty = jurisdiction === 'eu' || jurisdiction === 'fedramp';
+        return (jurisdiction ? state.scopedBucketLists?.[jurisdiction] : state.bucketList) ??
+          bucketRoster(empty ? { result: { buckets: [] }, result_info: { total_count: 0 } } : {},
+            state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined);
       }
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
@@ -105,6 +112,7 @@ function fixture(t) {
         ...(state.recordRetention ? [{ enabled: true, conditions: { prefix: 'drive-qualification/recovery/' },
           deleteObjectsTransition: age(3 * 86400) }] : [])] }, state.expiryPage);
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
+        if (state.expiryLink) response.headers.set('Link', '</schema>; rel="describedby"');
         return response;
       }
       const scripts = `${root}${account}/workers/scripts`;
@@ -402,23 +410,28 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   assert.equal(await run('before'), true);
   f.state.deployment = uuid('3');
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
-  f.state.bucketList = bucketRoster({ result_info: { ...bucketPage, cursor: '' } });
+  f.state.bucketList = bucketRoster({ result_info: { total_count: 1, cursor: '' }, messages: ['ok'] });
+  f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'r2-roster', 'expiry', 'uploads', 'objects',
+  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
     'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
 
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
   const f = fixture(t);
-  for (const phase of ['before', 'after']) {
-    const run = f.create();
-    if (phase === 'after') assert.equal(await run('before'), true);
-    f.trace.length = 0;
-    f.state.bucketList = bucketRoster({ result: { buckets: [pinnedBucket, { name: 'extra', jurisdiction: 'eu' }] } });
-    await assert.rejects(run(phase), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'r2-roster']);
+  for (const [index, jurisdiction] of ['default', 'eu', 'fedramp'].entries()) {
+    for (const phase of ['before', 'after']) {
+      const run = f.create();
+      if (phase === 'after') assert.equal(await run('before'), true);
+      f.trace.length = 0;
+      const buckets = [...(jurisdiction === 'default' ? [pinnedBucket] : []), { name: 'extra', jurisdiction }];
+      f.state.scopedBucketLists = { [jurisdiction]: bucketRoster({ result: { buckets },
+        result_info: { total_count: buckets.length } }) };
+      await assert.rejects(run(phase), error);
+      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder.slice(0, index + 2)]);
+    }
   }
 });
 
@@ -427,7 +440,10 @@ test('inventory requires a complete bounded native R2 bucket roster', async t =>
   const invalid = [bucketRoster({ result: { buckets: [] } }),
     bucketRoster({ result: { buckets: [{ ...pinnedBucket, jurisdiction: 'eu' }] } }),
     bucketRoster({ result: { buckets: [{ ...pinnedBucket, name: 'wrong' }] } }),
-    bucketRoster({ result_info: undefined }), bucketRoster({ result_info: { per_page: 1 } }),
+    bucketRoster({ result_info: undefined }), bucketRoster({ result_info: { per_page: 10 } }),
+    bucketRoster({ result_info: { ...bucketPage, per_page: 1 } }),
+    bucketRoster({ result_info: { ...bucketPage, total_count: 2 } }),
+    bucketRoster({ messages: [42] }),
     bucketRoster({ result_info: { ...bucketPage, is_truncated: true } }),
     bucketRoster({ result_info: { ...bucketPage, cursor: 'next' } }),
     bucketRoster({ result: { buckets: [pinnedBucket], cursor: 'next' } }),
@@ -442,6 +458,10 @@ test('inventory requires a complete bounded native R2 bucket roster', async t =>
     await assert.rejects(run('before'), error);
     assert.equal(f.trace.at(-1), 'r2-roster');
   }
+  const run = f.create();
+  f.state.scopedBucketLists = { fedramp: new Response(null, { status: 403 }) };
+  await assert.rejects(run('before'), error);
+  assert.equal(f.trace.at(-1), 'r2-roster-fedramp');
 });
 
 test('inventory rejects an extra native Worker before and after the attempt', async t => {
@@ -522,7 +542,7 @@ test('inventory rejects incomplete reads, extra resources, fixtures and unverifi
   }
 });
 
-const r2ReadOrder = ['r2-roster', 'expiry', 'uploads', 'objects'];
+const r2ReadOrder = [...r2RosterOrder, 'expiry', 'uploads', 'objects'];
 for (const [index, kind] of r2ReadOrder.entries()) {
   test(`inventory rejects HTTP 200 with Content-Range on R2 ${kind}`, async t => {
     const f = fixture(t), run = f.create();

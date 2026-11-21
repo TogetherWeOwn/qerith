@@ -18,7 +18,7 @@ function matchScan(scan, expected) {
 }
 
 async function boundedR2Document(response) {
-  if (response.status !== 200 || response.headers.has('content-range') || response.headers.has('link') || !response.body) {
+  if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
   }
@@ -45,18 +45,28 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   if (!token?.trim()) throw unverified();
   const pageSize = 10;
   await runQualificationPhase(async (_, active) => {
-    // Do not filter by bucket name or jurisdiction: either could hide an extra bucket.
     const url = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets?per_page=${pageSize}`;
-    const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
-      headers: { authorization: `Bearer ${token}` } });
-    const { parsed } = await boundedR2Document(response);
-    const { success, errors, result, result_info: page } = parsed;
-    if (success !== true || !Array.isArray(errors) || errors.length ||
-        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
-        !Array.isArray(result?.buckets) || Object.keys(result).length !== 1 || result.buckets.length !== 1 ||
-        result.buckets[0]?.name !== bucket || result.buckets[0]?.jurisdiction !== 'default' ||
-        page?.per_page !== pageSize || (Object.hasOwn(page, 'cursor') && page.cursor !== '') ||
-        Object.keys(page).some(key => !['per_page', 'cursor'].includes(key))) throw unverified();
+    // Keep the headerless, name-unfiltered read, but don't rely on it for jurisdiction coverage.
+    for (const jurisdiction of [null, 'default', 'eu', 'fedramp']) {
+      active.throwIfAborted();
+      const expected = !jurisdiction || jurisdiction === 'default' ? 1 : 0;
+      const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+        headers: { authorization: `Bearer ${token}`, ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) } });
+      if (response.headers.has('link')) {
+        await response.body?.cancel();
+        throw unverified();
+      }
+      const { parsed } = await boundedR2Document(response);
+      const { success, errors, messages, result, result_info: page } = parsed;
+      if (success !== true || !Array.isArray(errors) || errors.length ||
+          (messages !== undefined && (!Array.isArray(messages) || messages.some(message => typeof message !== 'string'))) ||
+          Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+          !Array.isArray(result?.buckets) || Object.keys(result).length !== 1 || result.buckets.length !== expected ||
+          (expected && (result.buckets[0]?.name !== bucket || result.buckets[0]?.jurisdiction !== 'default')) ||
+          page?.total_count !== expected || (Object.hasOwn(page, 'per_page') && page.per_page !== pageSize) ||
+          (Object.hasOwn(page, 'cursor') && page.cursor !== '') ||
+          Object.keys(page).some(key => !['total_count', 'per_page', 'cursor'].includes(key))) throw unverified();
+    }
   }, null, signal, 15_000);
 }
 
