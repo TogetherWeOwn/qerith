@@ -41,11 +41,12 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
       const page = await context.newPage();
       page.setDefaultTimeout(10_000);
       const requests = [], evidence = {};
-      let projection;
+      let projection, bound = false, interruptSuffix = false;
       await page.exposeFunction('fixtureUploadRequest', (method, path, body) => {
         requests.push([method, path, body]);
         if (method === 'GET' && path === resume) return [200, projection];
-        if (method === 'POST' && path === allocate) return [201, { id: freshId }];
+        if (method === 'POST' && path === allocate) return [201, { id: bound ? intentId : freshId }];
+        if (method === 'PUT' && bound && path === part(intentId, 2)) return [interruptSuffix ? 503 : 204];
         if (method === 'PUT' && [part(intentId), part(freshId), part(freshId, 2)].includes(path)) return [204];
         if (method === 'POST' && [complete(intentId), complete(freshId)].includes(path)) return [201, { id: entryId }];
         throw new Error('Unexpected fixture upload request');
@@ -57,6 +58,9 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
             const [status, json] = await window.fixtureUploadRequest(method, path, body instanceof Blob ? body.size : body ?? null);
             if (window.holdFixtureEvidence && path === `/api/uploads/${candidate}/resume`) {
               await new Promise(release => { window.releaseFixtureEvidence = release; });
+            }
+            if (status === 204 && path === `/api/uploads/${candidate}/parts/2`) {
+              await new Promise(release => { window.releaseFixtureSuffix = release; });
             }
             if (path === `/api/uploads/${candidate}/complete`) {
               await new Promise(release => { window.releaseFixtureCompletion = release; });
@@ -169,6 +173,69 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
         ['PUT', part(freshId, 2), 1],
         ['POST', complete(freshId), destination],
       ]);
+      requests.length = 0;
+      bound = interruptSuffix = true;
+      const bytes = repicked.length;
+      const sha256 = data => createHash('sha256').update(data).digest('hex');
+      const expectedPartSha256s = sha256(prefix) + sha256(repicked.subarray(partBytes));
+      projection = { declaredSize: bytes, parts: [{ partNumber: 1, sizeBytes: partBytes, sha256: sha256(prefix) }], expectedPartSha256s };
+      const captureBound = async state => {
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        await page.screenshot({ path: resolve(output, `root-bound-${state}-${width}.png`) });
+        const report = await page.evaluate(() => window.axe.run(document, {
+          runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] },
+        }));
+        await writeFile(resolve(output, `axe-root-bound-${state}-${width}.json`), JSON.stringify(report, null, 2));
+        assert.deepEqual(report.violations, []);
+      };
+      // The normal multipart picker starts with no injected candidate.
+      await page.goto(`${url}&no-candidate`);
+      await fresh.waitFor();
+      assert.equal(await continuation.count(), 0);
+      await page.evaluate(axe);
+      await pick(fresh, file(repicked));
+      const stopped = await assertState('Upload interrupted.', partBytes, bytes, partBytes, 0);
+      assert.deepEqual(requests.splice(0), [
+        ['POST', allocate, JSON.stringify({ size: bytes, expectedPartSha256s })],
+        ['PUT', part(intentId), partBytes], ['PUT', part(intentId, 2), 1],
+      ]);
+      await captureBound('interrupted');
+      await pick(continuation, null);
+      assert.deepEqual(requests, []);
+      assert.equal(await status.textContent(), `${name}: Upload interrupted.`);
+
+      const wrong = Buffer.from(repicked);
+      wrong[partBytes] ^= 1;
+      await page.evaluate(() => { window.holdFixtureEvidence = true; });
+      await pick(continuation, file(wrong));
+      await page.waitForFunction(() => typeof window.releaseFixtureEvidence === 'function');
+      await assertState('Continuing upload…', 0, bytes, 0, 0);
+      await page.evaluate(() => { window.holdFixtureEvidence = false; window.releaseFixtureEvidence(); });
+      const refused = await assertState('Upload interrupted.', 0, bytes, 0, 0);
+      assert.deepEqual(requests.splice(0), [['GET', resume, null]]);
+      await captureBound('mismatch');
+
+      interruptSuffix = false;
+      await pick(continuation, file(repicked));
+      await page.waitForFunction(() => typeof window.releaseFixtureSuffix === 'function');
+      const pending = await assertState('Continuing upload…', partBytes, bytes, partBytes, 0);
+      assert.equal(await continuation.getAttribute('aria-disabled'), 'true');
+      assert.deepEqual(requests, [['GET', resume, null], ['PUT', part(intentId, 2), 1]]);
+      await captureBound('continuing');
+      await page.evaluate(() => window.releaseFixtureSuffix());
+      await page.waitForFunction(() => typeof window.releaseFixtureCompletion === 'function');
+      const finishing = await assertState('Finishing upload…', bytes, bytes, bytes, 0);
+      await captureBound('finishing');
+      await page.evaluate(() => window.releaseFixtureCompletion());
+      const published = await assertState('Uploaded.', bytes, bytes, bytes, 1);
+      assert.equal(await continuation.count(), 0);
+      assert.equal(await fresh.evaluate(el => el === document.activeElement), true);
+      assert.equal(await status.textContent(), `${name}: Uploaded.`);
+      assert.deepEqual(requests.splice(0), [
+        ['GET', resume, null], ['PUT', part(intentId, 2), 1], ['POST', complete(intentId), destination],
+      ]);
+      await captureBound('uploaded');
+      evidence.bound = { stopped, refused, pending, finishing, published };
       assert.deepEqual(unexpected, []);
       await writeFile(resolve(output, `root-continuation-${width}.json`), JSON.stringify(evidence, null, 2));
     } finally {
