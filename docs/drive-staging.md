@@ -229,6 +229,12 @@ completed source attempt and its durable pre-activation record, hold the shared
 lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
 or R2 cleanup or authorization to issue a receipt.
 
+The offline recovery coordinator can authenticate a historical source through
+bounded GitHub Actions reads: the exact attempt, its successful source job and
+exact-dispatch check, and the latest run metadata. It rejects superseded or
+ambiguous sources before record access. This is not a fence against a later rerun.
+The protected workflow does not invoke recovery.
+
 The unwired recovery store uses the source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
 attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
