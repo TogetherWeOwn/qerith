@@ -55,9 +55,11 @@ The owned-file K7/K10 fixture (`?delete-file`) uses only synthetic rows. Playwri
 intercepts `POST /api/entries/:id/delete` and asserts the exact JSON bytes. It
 never forwards the mutation to a Worker; mocked `202` means request acceptance,
 not proof of physical removal. `delete-file-*-keyboard.json` records the request
-trace, keyboard focus and Chromium accessibility tree; `delete-file-*.png` and
+trace, keyboard focus and Playwright ARIA snapshots; `delete-file-*.png` and
 `axe-delete-file-*.json` cover open, saving, error and accepted states at 1280×800
-and 390×844. No live listing, admission, folder deletes or storage are exercised.
+and 390×844. The CI artifact validator requires both viewports when the tested
+checkout includes the scenario. No live listing, admission, folder deletes or
+storage are exercised.
 
 To integrate another Svelte component, replace `fixture/Fixture.svelte` and
 `scenario.mjs` in the consuming change. The scenario must wait for the intended

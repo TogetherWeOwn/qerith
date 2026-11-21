@@ -86,6 +86,12 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       png.writeUInt32BE(crc32(png.subarray(4, -4)), png.length - 4);
       return png;
     };
+    const verifyDeletion = () => verifyEvidence(dir, head, false, false, false, false, false, false, true);
+    await assert.rejects(verifyDeletion(), /delete-file-390-keyboard\.json/);
+    const deleteStages = ['open', 'saving', 'error', 'accepted'];
+    const writes = [[1, 400], [1, 401], [1, 403], [1, 404], [1, 200], [1, 0], [1, 503], [1, 202], [3, 202], [2, 202]]
+      .map(([id, status]) => ['POST', `/api/entries/00000000-0000-4000-8000-00000000000${id}/delete`,
+        'application/json', '{"confirm":"permanent-delete"}', status]);
     for (const [width, height] of [[390, 844], [1280, 800]]) {
       await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
       await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
@@ -98,7 +104,23 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
         await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
       }
+      const deletionPath = join(dir, `delete-file-${width}-keyboard.json`);
+      const captures = Object.fromEntries(deleteStages.map(stage => [stage, { focus: 'Focused control', tree: '- button' }]));
+      const deletion = { width, height, writes, captures };
+      await writeFile(deletionPath, JSON.stringify(deletion));
+      for (const stage of deleteStages) {
+        await writeFile(join(dir, `delete-file-${width}-${stage}.png`), png);
+        await writeFile(join(dir, `axe-delete-file-${width}-${stage}.json`), '{"violations":[]}');
+      }
       if (width === 1280) {
+        await verifyDeletion();
+        await writeFile(deletionPath, JSON.stringify({ ...deletion, writes: writes.slice(1) }));
+        await assert.rejects(verifyDeletion(), /Invalid deletion trace: 1280/);
+        await writeFile(deletionPath, JSON.stringify(deletion));
+        const axePath = join(dir, 'axe-delete-file-1280-saving.json');
+        await writeFile(axePath, '{"violations":[{}]}');
+        await assert.rejects(verifyDeletion(), /Invalid deletion evidence: delete-file-1280-saving/);
+        await writeFile(axePath, '{"violations":[]}');
         const screenshot = join(dir, 'root-continuation-uploaded-1280.png');
         const headerOnly = Buffer.concat([png.subarray(0, 33), png.subarray(-12)]);
         const wrongHeight = Buffer.from(png), overrun = Buffer.from(png);

@@ -26,7 +26,30 @@ function hasViewportImageData(png, width, height) {
   return false;
 }
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false, shared = false) {
+async function verifyDeletionEvidence(dir) {
+  const writes = [[1, 400], [1, 401], [1, 403], [1, 404], [1, 200], [1, 0], [1, 503], [1, 202], [3, 202], [2, 202]]
+    .map(([id, status]) => ['POST', `/api/entries/00000000-0000-4000-8000-00000000000${id}/delete`,
+      'application/json', '{"confirm":"permanent-delete"}', status]);
+  for (const [width, height] of [[390, 844], [1280, 800]]) {
+    const proof = JSON.parse(await readFile(join(dir, `delete-file-${width}-keyboard.json`), 'utf8'));
+    if (proof?.width !== width || proof.height !== height || !isDeepStrictEqual(proof.writes, writes)) {
+      throw new Error(`Invalid deletion trace: ${width}`);
+    }
+    for (const stage of ['open', 'saving', 'error', 'accepted']) {
+      const label = `delete-file-${width}-${stage}`;
+      const png = await readFile(join(dir, `${label}.png`));
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      const capture = proof.captures?.[stage];
+      if (!hasViewportImageData(png, width, height) || !Array.isArray(axe?.violations) || axe.violations.length ||
+          ![capture?.focus, capture?.tree].every(value => typeof value === 'string' && value.trim())) {
+        throw new Error(`Invalid deletion evidence: ${label}`);
+      }
+    }
+  }
+}
+
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false,
+  continuation = false, shared = false, deletion = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -105,6 +128,7 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid folder evidence: ${label}`);
     }
   }
+  if (deletion) await verifyDeletionEvidence(dir);
   if (shared) for (const [width, height] of [[390, 844], [1280, 800]]) {
     const keyboard = JSON.parse(await readFile(join(dir, `staging-shared-keyboard-${width}.json`), 'utf8'));
     if (!isDeepStrictEqual(keyboard, { viewport: [width, height], visibleFocus: true, skipToMain: true, keyboardDownload: true }))
@@ -142,7 +166,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const root = process.env.ROOT_EVIDENCE === 'true';
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
   await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
-    folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true');
+    folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true',
+    process.env.DELETE_FILE_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
