@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
@@ -337,8 +337,33 @@ export default { fetch(request, env, ctx) {
           assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [404, 'private, no-store', '']);
         }
       }
-      const resume = await get(uploadResumePath('00000000-0000-4000-8000-000000000001'), memberHeaders);
-      assert.deepEqual([resume.status, resume.headers.get('cache-control'), await resume.text()], [404, 'private, no-store', '']);
+      const missingResume = await get(uploadResumePath('00000000-0000-4000-8000-000000000001'), memberHeaders);
+      assert.deepEqual([missingResume.status, missingResume.headers.get('cache-control'), await missingResume.text()],
+        [404, 'private, no-store', '']);
+      // Seed the journal rather than starting an upload: only slot 1 has an acknowledgement.
+      const resumeId = randomUUID(), storageKey = 'private-resume-key', uploadId = 'private-resume-upload';
+      const partBytes = 16 * 1024 * 1024, declaredSize = partBytes + 3;
+      const sha256 = '080acf35a507ac9849cfcba47dc2ad83e01b75663a516279c8b9d243b719643e';
+      const expectedPartSha256s = sha256 + createHash('sha256').update('abc').digest('hex');
+      await DB.batch([
+        DB.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size, expected_part_sha256s)
+          VALUES (?, 'member', ?, 'created', ?, ?)`).bind(resumeId, storageKey, declaredSize, expectedPartSha256s),
+        DB.prepare('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)')
+          .bind(resumeId, vars.DRIVE_S3_ENDPOINT, vars.DRIVE_S3_BUCKET, vars.DRIVE_S3_STORAGE_EPOCH),
+        DB.prepare("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?")
+          .bind(uploadId, resumeId),
+        DB.prepare("INSERT INTO drive_upload_part_operations VALUES ('staging-resume-part', ?, 'member', ?, ?, ?, 2, 1, ?)")
+          .bind(resumeId, storageKey, vars.DRIVE_S3_STORAGE_EPOCH, uploadId, partBytes),
+        DB.prepare("INSERT INTO drive_upload_part_byte_evidence VALUES ('staging-resume-part', ?, ?)")
+          .bind(Uint8Array.fromHex(sha256).buffer, new TextEncoder().encode('"part"').buffer),
+      ]);
+      const resume = await get(uploadResumePath(resumeId), memberHeaders);
+      assert.deepEqual([resume.status, resume.headers.get('cache-control'), resume.headers.get('content-type')],
+        [200, 'private, no-store', 'application/json'], 'the generated staging route serves bound resume evidence');
+      assert.deepEqual(await resume.json(), { declaredSize, parts: [{ partNumber: 1, sizeBytes: partBytes, sha256 }], expectedPartSha256s });
+      const closedResume = await get(uploadResumePath(resumeId), { cookie: member });
+      assert.deepEqual([closedResume.status, closedResume.headers.get('cache-control'), await closedResume.text()],
+        [404, 'private, no-store', ''], 'the same allocation is hidden when invite mode is off');
       await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart');
       const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
       assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
