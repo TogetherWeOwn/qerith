@@ -17,10 +17,18 @@ test('exact staging deletion is closed without explicit request admission and a 
   assert.equal((await dispatchStagingDeletion(request(), enabled, qualification))?.status, 503);
 });
 
-test('staging deletion does not dispatch aliases or other methods', () => {
+test('staging deletion does not dispatch aliases', () => {
   for (const alias of [url + '?', url + '/', url + '/x', url.replace('/delete', '/%64elete'),
     url.replace('/00000000', '/%300000000'), url.replace(stagingOrigin, 'https://drive.example.test')]) {
     assert.equal(dispatchStagingDeletion(request(alias), enabled, qualification), undefined);
   }
-  assert.equal(dispatchStagingDeletion(request(url, 'GET'), enabled, qualification), undefined);
+});
+
+test('only qualified staging deletion advertises the POST method', async () => {
+  const closed = await dispatchStagingDeletion(request(url, 'GET'), enabled);
+  assert.equal(closed?.status, 404);
+  assert.equal(closed?.headers.get('allow'), null);
+  const admitted = await dispatchStagingDeletion(request(url, 'GET'), enabled, qualification);
+  assert.equal(admitted?.status, 405);
+  assert.equal(admitted?.headers.get('allow'), 'POST');
 });

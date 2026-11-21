@@ -212,11 +212,6 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
-      const deletion = await worker.fetch(`${origin}/api/entries/00000000-0000-4000-8000-000000000001/delete`, {
-        method: 'POST', headers: { origin, cookie, 'content-type': 'application/json' }, body: '{"confirm":"permanent-delete"}'
-      });
-      assert.deepEqual([deletion.status, deletion.headers.get('cache-control'), await deletion.text()], [404, 'private, no-store', ''],
-        'generated staging POST stays closed without server-held deletion qualification');
       const nonce = randomBytes(16).toString('hex');
       const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
         headers: { [readinessHeaders.nonce]: nonce, ...headers } });
@@ -372,7 +367,19 @@ export default { fetch(request, env, ctx) {
       const publication = await send(`${upload}/complete`, 'POST', json, JSON.stringify({ parentId: null, name }));
       assert.equal(publication.status, 201, 'owner can publish');
       assert.match(await (await get('/', { cookie })).text(), /staging-fixture\.txt/);
-      const file = `/api/download/${(await publication.json()).id}`;
+      const { id } = await publication.json();
+      const generation = await DB.prepare('SELECT owner_id, etag FROM drive_published_generations WHERE entry_id = ?').bind(id).first();
+      assert.deepEqual(generation, { owner_id: 'fixture', etag: '"object"' }, 'the deletion probe targets an owned, pinned generation');
+      const deletionState = async () => (await DB.batch([
+        DB.prepare('SELECT * FROM drive_deleted_entries WHERE entry_id = ?').bind(id),
+        DB.prepare('SELECT * FROM drive_object_deletion_jobs WHERE entry_id = ?').bind(id)
+      ])).map(({ results }) => results);
+      assert.deepEqual(await deletionState(), [[], []]);
+      const deletion = await send(`/api/entries/${id}/delete`, 'POST', json, '{"confirm":"permanent-delete"}');
+      assert.deepEqual([deletion.status, deletion.headers.get('cache-control'), await deletion.text()], [404, 'private, no-store', ''],
+        'generated staging POST stays closed with upload-only qualification');
+      assert.deepEqual(await deletionState(), [[], []], 'a closed deletion starts neither a journal nor a job');
+      const file = `/api/download/${id}`;
       const full = await get(file, { cookie });
       assert.deepEqual([full.status, await full.text()], [200, data]);
       const range = await get(file, { cookie, range: 'bytes=1-2' });

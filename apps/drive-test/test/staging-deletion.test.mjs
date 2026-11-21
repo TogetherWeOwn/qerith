@@ -5,7 +5,7 @@ import { bindings, job, qualification, removal, sentRequest, snapshot } from './
 import { config, sessions, sql } from './fixtures/upload-completion.mjs';
 import { seedBoundPublication } from './fixtures/upload-publication-generation.mjs';
 
-const enabled = { ...bindings, DRIVE_STAGING_DELETE_REQUESTS: '1' };
+const enabled = { ...bindings, DRIVE_STAGING_DELETE_REQUESTS: '1', DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
 const canonical = '{"confirm":"permanent-delete"}';
 const path = (id) => `/api/entries/${id}/delete`;
 const request = ({ id, token }, { suffix = '', method = 'POST', body = canonical, headers = {} } = {}) =>
@@ -36,7 +36,9 @@ it('leaves entries, usage, journals and storage untouched unless exact staging a
     [enabled, { ...qualification, confirmsRemoval: undefined }, 503],
     [enabled, qualification, undefined, { suffix: '?' }],
     [enabled, qualification, undefined, { suffix: '/' }],
-    [enabled, qualification, undefined, { method: 'GET' }],
+    [{ ...enabled, DRIVE_STAGING_INVITE_ACCEPTANCE: undefined }, qualification, 403],
+    [enabled, qualification, 405, { method: 'GET' }],
+    [enabled, qualification, 400, {}, { ...file, id: 'not-a-uuid' }],
     [enabled, qualification, 403, { headers: { origin: 'https://other.example.test' } }],
     [enabled, qualification, 403, { headers: { 'sec-fetch-site': 'cross-site' } }],
     [enabled, qualification, 400, { body: '{"confirm":"permanent-delete","confirm":"no"}' }],
@@ -53,19 +55,22 @@ it('leaves entries, usage, journals and storage untouched unless exact staging a
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it('commits the whole tree before dispatch and reports acceptance even without removal proof', async () => {
-  const file = await seedBoundPublication('staging-accepted');
+it.each([['ambiguous', false], ['confirmed', true]])('journals the whole tree before dispatch with %s removal evidence', async (scenario, proven) => {
+  const file = await seedBoundPublication(`staging-${scenario}`);
   const owner = await sql('SELECT owner_id FROM drive_entries WHERE id = ?', file.id).first('owner_id');
   const folder = crypto.randomUUID();
   await sql("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'folder', 'folder')", folder, owner).run();
   await sql('UPDATE drive_entries SET parent_id = ? WHERE id = ?', folder, file.id).run();
+  let lease;
   const fetch = vi.fn(async () => {
     const { results } = await sql('SELECT entry_id, deletion_id FROM drive_deleted_entries WHERE owner_id = ?', owner).all();
     // Capture evidence in the mock result; transport catches thrown assertions.
     expect(results.map(row => row.entry_id).sort()).toEqual([folder, file.id].sort());
     expect(new Set(results.map(row => row.deletion_id)).size).toBe(1);
     expect(await sql('SELECT count(*) AS n FROM drive_entries WHERE owner_id = ?', owner).first('n')).toBe(0);
-    return removal(false);
+    lease = (await job(file.id)).lease_token;
+    expect(lease).toBeTruthy();
+    return removal(proven);
   });
   vi.stubGlobal('fetch', fetch);
 
@@ -73,5 +78,8 @@ it('commits the whole tree before dispatch and reports acceptance even without r
   expect([response.status, response.headers.get('cache-control'), await response.text()]).toEqual([202, 'private, no-store', '']);
   expect(fetch.mock.settledResults).toEqual([{ type: 'fulfilled', value: expect.any(Response) }]);
   expect(fetch.mock.calls.map(([req]) => sentRequest(req))).toEqual([['DELETE', `${config.endpoint}/${config.bucket}/${file.key}`, true]]);
-  expect(await job(file.id)).toMatchObject({ completed_at: null, completion_token: null, lease_token: null });
+  const settled = await job(file.id);
+  expect(settled).toMatchObject({ completion_token: proven ? lease : null, lease_token: null });
+  if (proven) expect(settled.completed_at).toBeGreaterThan(0);
+  else expect(settled.completed_at).toBeNull();
 });
