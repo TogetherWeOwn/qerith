@@ -177,7 +177,13 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
-The offline composer requires every case to pass and binds evidence to the exact invocation.
+The offline entry point rechecks the committed staging target and reviewed R2
+binding, then binds the case runner, estate checks, and signed recovery writer
+to a single SHA/run/attempt. It verifies recovery record retention before the
+candidate upload and again before each record write. It requires explicit
+admission, app fixture, estate and writer-fence adapters; it has no passing
+admission default. The case runner requires every case to pass and binds
+its evidence to the exact invocation.
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. It checks exact-attempt writer quiescence and a held, abortable fence
 before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
@@ -249,7 +255,8 @@ completed. An interruption after D1 restore requires reconciliation; rerunning
 is not an R2-only resume. The protected workflow supplies neither proof provider
 and does not invoke recovery.
 
-The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+The offline lifecycle and recovery entry points use the recovery store at the
+source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
 attempt under `drive-qualification/recovery/`, outside attempt fixture cleanup.
 A signed `If-None-Match: *` PUT must be acknowledged before a fresh signed GET.
