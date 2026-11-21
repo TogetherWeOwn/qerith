@@ -50,7 +50,7 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
       assert(await button('Done').evaluate(el => el === document.activeElement));
       const announced = value => dialog.getByRole('status').filter({ hasText: value }).waitFor({ state: 'attached' });
       await input.focus(); await key('ArrowDown'); await key('Enter'); await announced('Lee Ray selected. 1 selected.');
-      await button('Next page of people to add').click();
+      await button('Next page of people to add').click(); await announced('Showing page 2 of people to add.');
       await dialog.getByRole('list', { name: 'Selected people' }).getByText('Lee Ray').waitFor();
       await input.fill('not on this page'); await announced('No matching people available on this page.');
       await input.fill(''); await key('ArrowDown'); await key('Enter');

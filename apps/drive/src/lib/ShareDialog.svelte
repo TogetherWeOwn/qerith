@@ -3,7 +3,7 @@
   export type ShareAccess = ShareRecipient & { direct: boolean; inheritedFrom: string | null };
   export type SharePage<T> = {
     // Rows are one bounded page. Only complete effective access may establish emptiness.
-    complete?: boolean;
+    complete?: boolean; pageNumber: number | null; // One-based; null for unpaged results.
     state: 'loading' | 'failed' | 'ready'; rows: readonly T[];
     previous?: () => void; next?: () => void; retry?: () => void;
   };
@@ -98,7 +98,7 @@
 
 {#snippet pager(page: SharePage<ShareRecipient>, subject: string)}
   <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
-    <p role="status">{#if page.state === 'loading'}Loading {subject}…{:else if page.state === 'ready' && (page.previous || page.next)}Showing one page of {subject}.{/if}</p>
+    <p role="status">{#if page.state === 'loading'}Loading {subject}…{:else if page.state === 'ready' && page.pageNumber !== null}Showing page {page.pageNumber} of {subject}.{/if}</p>
     {#if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
       {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.retry!)}>Retry</button>{/if}
     {:else if page.state === 'ready'}
