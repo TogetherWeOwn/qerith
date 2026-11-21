@@ -117,8 +117,15 @@ globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletio
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 ${preview ? expectedPartsWorker : ''}
-if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
-export default { fetch(request, env, ctx) {
+export default {
+  scheduled(event, env) {
+    // Shadow D1 without reading the real binding, even if it becomes a getter.
+    return app.scheduled(event, Object.create(env, {
+      DRIVE_STAGING_DELETE_DRAIN: { value: '1', enumerable: true },
+      DB: { enumerable: true, get() { throw new Error('Unqualified scheduled deletion must not access D1'); } }
+    }));
+  },
+  fetch(request, env, ctx) {
   ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
   if (boundary !== null) {
     const bindings = { ...env,
@@ -212,6 +219,8 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
+      assert.equal((await worker.scheduled({ cron: '*/15 * * * *' })).outcome, 'ok',
+        'generated staging schedule stays inert without server-held deletion qualification');
       const nonce = randomBytes(16).toString('hex');
       const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
         headers: { [readinessHeaders.nonce]: nonce, ...headers } });
