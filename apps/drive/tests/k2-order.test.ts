@@ -21,6 +21,13 @@ test('English numeric collation handles Unicode digits, long numbers and NFC wit
   assert.notEqual(compareK2Names('file-2', 'file 2'), 0);
 });
 
+test('orders multiple numeric runs and uses stable IDs for equivalent spellings', () => {
+  const rows = [file('b', 'café ０２ item ٢'), file('first', 'café 1 item 99'), file('last', 'café 10 item 1'),
+    file('next', 'café 2 item 10'), file('a', 'café 2 item 02')];
+  assert.deepEqual(ids(rows, 'name', 'asc'), ['first', 'a', 'b', 'next', 'last']);
+  assert.deepEqual(ids(rows.reverse(), 'name', 'desc'), ['last', 'next', 'a', 'b', 'first']);
+});
+
 test('uses ascending binary IDs for collation ties, even in descending order', () => {
   const rows = [file('𐀀', 'café 002'), file('later', 'café 10'), file('', 'café 2'),
     file('a\0b', 'café 2'), file('a', 'café 02')];

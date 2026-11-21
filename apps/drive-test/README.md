@@ -64,8 +64,11 @@ such a conflict through a narrowly reviewed exception, not a global relaxation.
 ## Synthetic K2 seek benchmark
 
 In the prepared `apps/drive-test` project, run `npm test -- test/k2-listing-benchmark.test.mjs`.
-The fixture traverses 5,001 and 10,001 synthetic rows in both name directions
-and reports first-page time and fixture bytes, plus D1 rows read when available.
+The fixture traverses 5,001 and 10,001 synthetic rows in both name directions,
+including a folder-to-file page seam, a name tie spanning pages, and the end of
+results. It reports query time and fixture bytes for the first page, first file
+page, and a deep full page, plus D1 rows read when available. A separate Worker
+assertion checks known numeric and NFC expectations independently of rank generation.
 It measures seeks over precomputed integer ranks, not locale key generation,
 authorized counts, cursor validation, or route rendering. This is not evidence
 for the deployed Worker/D1 CPU or three-second first-render target.

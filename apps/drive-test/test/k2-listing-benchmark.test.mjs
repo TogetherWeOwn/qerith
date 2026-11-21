@@ -3,19 +3,30 @@ import { expect, it } from 'vitest';
 import { compareK2Entries, compareK2Names } from '../../drive/src/lib/server/metadata/k2-order.ts';
 
 const pageSize = 200;
+const tied = ['café 2', 'café 02', 'café ٢', 'café 002'];
 const folderRank = (entry) => entry.kind === 'folder' ? 0 : 1;
 
+it('honors pinned numeric and NFC expectations in the Worker collation runtime', () => {
+  // Rank materialization and the traversal oracle share the comparator. These
+  // independent expectations catch a runtime that falls back to lexical order.
+  expect(['file 10', 'file ２', 'file 1'].sort(compareK2Names)).toEqual(['file 1', 'file ２', 'file 10']);
+  for (const name of tied) expect(compareK2Names(name, tied[0])).toBe(0);
+});
+
 function fixture(count) {
-  const tied = ['café 2', 'café 02', 'café ٢', 'café 002'];
   const prefixes = ['file', 'File', 'café', 'café', '📁 file', 'file-'];
-  return Array.from({ length: count }, (_, i) => ({
-    id: `entry-${String(i).padStart(5, '0')}`,
-    kind: i % 5 === 0 ? 'folder' : 'file',
-    kindLabel: i % 5 === 0 ? 'Folder' : 'File',
-    name: i < 503 ? tied[i % tied.length] : `${prefixes[i % prefixes.length]} ${count - i}`,
-    size: null,
-    modified: null,
-  }));
+  return Array.from({ length: count }, (_, i) => {
+    // The folder/file transition is exactly at a page seam for both counts.
+    const kind = i % 5 === 0 && i < count - 1 ? 'folder' : 'file';
+    return {
+      id: `entry-${String(i).padStart(5, '0')}`,
+      kind,
+      kindLabel: kind === 'folder' ? 'Folder' : 'File',
+      name: i < 503 ? tied[i % tied.length] : `${prefixes[i % prefixes.length]} ${count - i}`,
+      size: null,
+      modified: null,
+    };
+  });
 }
 
 async function seed(db, entries) {
@@ -63,26 +74,37 @@ it.each([5_001, 10_001])('benchmarks indexed K2 name traversal over %i synthetic
 
     let boundary = firstBoundary;
     const expected = [...entries].sort((a, b) => compareK2Entries(a, b, 'name', direction));
-    const metrics = {};
+    const folderCount = (count - 1) / 5;
+    const deepOffset = (Math.floor(count / pageSize) - 1) * pageSize;
+    const metrics = { maxRowsRead: null, pagesWithRowsRead: 0 };
+    let splitNameTie = false;
     for (let offset = 0; offset < count; offset += pageSize) {
       const started = performance.now();
       const { results, meta } = await query.bind(...boundary).all();
+      const queryMs = performance.now() - started;
       const page = results.slice(0, pageSize);
-      const ids = page.map(({ id }) => id);
-      if (offset === 0) {
-        metrics.firstPageMs = performance.now() - started;
-        metrics.firstPageRowsRead = meta.rows_read ?? null;
-        metrics.firstPageFixtureBytes = new TextEncoder().encode(JSON.stringify(page)).length;
+      if (offset === 0 || offset === folderCount || offset === deepOffset) {
+        const sample = offset === 0 ? 'first' : offset === folderCount ? 'firstFile' : 'deep';
+        metrics[sample] = {
+          offset, queryMs, rowsRead: meta.rows_read ?? null,
+          fixtureBytes: new TextEncoder().encode(JSON.stringify(page)).length,
+        };
       }
       if (typeof meta.rows_read === 'number') {
         metrics.maxRowsRead = Math.max(metrics.maxRowsRead ?? 0, meta.rows_read);
+        metrics.pagesWithRowsRead++;
       }
       expect(results).toHaveLength(Math.min(pageSize + 1, count - offset));
-      expect(ids).toEqual(expected.slice(offset, offset + pageSize).map(({ id }) => id));
+      expect(page.map(({ id }) => id)).toEqual(expected.slice(offset, offset + pageSize).map(({ id }) => id));
       const last = page.at(-1);
+      const lookahead = results[pageSize];
+      if (offset === folderCount - pageSize) expect([last.folder_rank, lookahead?.folder_rank]).toEqual([0, 1]);
+      if (lookahead?.folder_rank === last.folder_rank && lookahead.name_rank === last.name_rank) splitNameTie = true;
       boundary = ['target', last.folder_rank, last.name_rank, last.id];
     }
+    expect(splitNameTie).toBe(true);
+    expect((await query.bind(...boundary).all()).results).toEqual([]);
     // Local D1 diagnostics only, not a production latency/CPU assertion.
-    console.info('K2 synthetic D1 benchmark', { count, direction, ...metrics });
+    console.info('K2 synthetic D1 benchmark', { count, direction, pages: Math.ceil(count / pageSize), ...metrics });
   }
 }, 30_000);
