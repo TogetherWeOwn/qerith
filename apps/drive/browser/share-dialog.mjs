@@ -102,7 +102,8 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
             await keyboard.press('Escape'); await button('Next page of people with access').click(); await announced('Loading people with access…');
             await input.focus(); await keyboard.press('ArrowDown'); await keyboard.press('Enter'); await announced('Name unavailable selected. 1 selected.');
             await settle(); await announced('Showing page 2 of people with access.'); await button('Remove Pell Quinn’s access').waitFor();
-            await input.fill('not on this page'); await button('Remove Name unavailable').click(); await announced('Name unavailable removed. 0 selected.');
+            await input.fill('not on this page'); await button('Remove Name unavailable').click();
+            await page.evaluate(() => window.dispatchEvent(new Event('fixture-refresh-access'))); await announced('Name unavailable removed. 0 selected.');
             await input.click(); await announced('No matching people available on this page.'); await keyboard.press('Escape'); assert.equal(await dialog.getByRole('status').textContent(), '');
           }
           assert.equal(await text('Only you can see this.').count(), 0);

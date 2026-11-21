@@ -29,20 +29,18 @@
   let confirm = $state<string | null>(null), pending = $state<'share' | 'remove' | null>(null);
   let error = $state(''), live = $state(''), status = $state('');
   let paging = $state<'access' | 'candidates' | null>(null);
-  const pageText = (page: SharePage<ShareRecipient>, subject: string) => page.state === 'loading' ? `Loading ${subject}…` :
-    page.state === 'ready' && page.pageNumber !== null ? `Showing page ${page.pageNumber} of ${subject}.` : '';
+  const pageText = (page: SharePage<ShareRecipient>, subject: string, unpaged = '') => page.state === 'loading' ? `Loading ${subject}…` :
+    page.state === 'ready' ? page.pageNumber === null ? unpaged : `Showing page ${page.pageNumber} of ${subject}.` : '';
   const allowed = $derived(candidates.rows.filter(person => person.recipientId !== owner.recipientId &&
     !access.rows.some(row => row.recipientId === person.recipientId)));
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
-  $effect(() => {
-    if (!paging) return;
-    const page = paging === 'access' ? access : candidates, subject = paging === 'access' ? 'people with access' : 'people to add';
-    live = pageText(page, subject) || (page.state === 'ready' ? `Loaded ${subject}.` : '');
-    if (paging === 'access' && page.state === 'ready' && !page.previous && !page.next &&
-        document.activeElement?.id === `${id}-access-pager`) accessTitle.focus();
-  });
+  const pageStatus = $derived(paging === 'access' ? pageText(access, 'people with access', 'Loaded people with access.') :
+    paging ? pageText(candidates, 'people to add', 'Loaded people to add.') : '');
+  const accessPagerEmpty = $derived(paging === 'access' && access.state === 'ready' && !access.previous && !access.next);
+  $effect(() => { if (paging) live = pageStatus; });
+  $effect(() => { if (accessPagerEmpty && document.activeElement?.id === `${id}-access-pager`) accessTitle.focus(); });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from: HTMLElement) {
     if (dialog.open) return;

@@ -30,6 +30,7 @@
     grants = grants.flatMap(row => row.recipientId !== id ? [row] : row.inheritedFrom === null ? [] : [{ ...row, direct: false }]);
   }
 </script>
+<svelte:window onfixture-refresh-access={() => { grants = [...grants]; }} />
 <main data-writes={JSON.stringify(writes)}>
   <h1>My Drive</h1>
   <button type="button" onclick={event => { accessState = mode === 'failed' ? 'failed' : 'ready'; dialog.open(event.currentTarget); }}>Open Share</button>
