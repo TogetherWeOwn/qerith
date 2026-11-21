@@ -647,6 +647,20 @@ test('inventory requires a complete, bounded native Workflows roster', async t =
   }
 });
 
+test('inventory rejects rounded native Workflows pagination before and after the attempt', async t => {
+  const f = fixture(t), empty = await emptyPagedRoster().text();
+  for (const phase of ['before', 'after']) {
+    for (const [from, to] of [['"total_count":0', '"total_count":1e-400'], ['"page":1', '"page":1.00000000000000001']]) {
+      f.state.workflowList = undefined;
+      const inspect = f.create();
+      if (phase === 'after') assert.equal(await inspect('before'), true);
+      f.state.workflowList = new Response(empty.replace(from, to));
+      await assert.rejects(inspect(phase), error);
+      assert.equal(f.trace.at(-1), 'workflows');
+    }
+  }
+});
+
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
   const f = fixture(t);
   for (const [index, jurisdiction] of r2Jurisdictions.entries()) {

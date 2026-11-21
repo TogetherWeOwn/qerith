@@ -266,9 +266,11 @@ accounts and does not replace the estate or app-fixture reader.
 Both passes also read the unfiltered native Workflows definition roster in the
 pinned Worker account. The first page must explicitly contain no definitions,
 report `total_count: 0`, and give no evidence of continuation, within five
-seconds and 64 KiB. Any definition fails, even with no active instances. This
-read does not prove instance absence, cover other accounts, or replace the
-estate or app-fixture reader. The response shape is verified only offline.
+seconds and 64 KiB. Workflows and Durable Object page counts must be written
+as canonical JSON integers; rounded numeric values do not prove absence. Any
+Workflows definition fails, even with no active instances. This read does not
+prove instance absence, cover other accounts, or replace the estate or
+app-fixture reader. The response shape is verified only offline.
 
 The native R2 bucket and lifecycle, Durable Objects, Containers, Stream, and
 Workflows inventory reads reject duplicate JSON fields, even when the last

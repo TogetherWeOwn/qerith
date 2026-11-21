@@ -33,7 +33,7 @@ function hasDuplicateMembers(text) {
   return false;
 }
 
-async function boundedProviderDocument(response) {
+async function boundedProviderDocument(response, reviver) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -47,7 +47,7 @@ async function boundedProviderDocument(response) {
   }
   const bytes = buffer.subarray(0, size);
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  const parsed = JSON.parse(text);
+  const parsed = JSON.parse(text, reviver);
   if (hasDuplicateMembers(text)) throw unverified();
   return { bytes, parsed };
 }
@@ -101,7 +101,14 @@ async function assertEmptyNativePage(account, path, token, request, signal) {
       await response.body?.cancel();
       throw unverified();
     }
-    const { parsed } = await boundedProviderDocument(response);
+    const { parsed } = await boundedProviderDocument(response, (_key, value, context) => {
+      // Compare the original token so fractional or underflowed counts cannot
+      // round to an allowed pagination integer.
+      if (typeof value === 'number' && (!Number.isSafeInteger(value) || context?.source !== String(value))) {
+        throw unverified();
+      }
+      return value;
+    });
     const { success, errors, messages, result, result_info: page } = parsed;
     const validPage = { page: [1], per_page: [pageSize], count: [0], total_count: [0], total_pages: [0, 1] };
     if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
