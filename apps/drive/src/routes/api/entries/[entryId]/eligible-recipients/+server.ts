@@ -5,3 +5,4 @@ import type { RequestHandler } from './$types';
 export const trailingSlash = 'ignore';
 
 export const GET: RequestHandler = ({ request, locals }) => getEligibleRecipients(request, env, locals.driveSession?.token ?? null);
+export const fallback: RequestHandler = GET;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getEligibleRecipients } from '../src/lib/server/eligible-recipient-route';
+import { dispatchEligibleRecipients, getEligibleRecipients } from '../src/lib/server/eligible-recipient-route';
 import { eligibleRecipientsRoute, privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
 import { admitStagingRequest } from '../src/lib/server/staging-admission';
 
@@ -41,6 +41,28 @@ test('recipient lookup rejects noncanonical paths and accepts one bounded opaque
     await expectDenial(await ask(`${path}?${query}`), 400);
   }
   await expectDenial(await ask(`${path.replace('source', 'a%2Fb')}?cursor=%C3%A9%26%2B`), 401);
+});
+
+test('fixture dispatch rejects malformed queries and unsupported methods before the adapter', async () => {
+  const unexpected = () => assert.fail('The adapter must not receive invalid requests');
+  for (const url of [`${path}?x-sveltekit-test=1`, `${path}?cursor=a&cursor=b`]) {
+    const response = await dispatchEligibleRecipients(new Request(origin + url), env, unexpected);
+    assert.ok(response);
+    await expectDenial(response, 400);
+  }
+  for (const method of ['HEAD', 'OPTIONS']) {
+    const response = await dispatchEligibleRecipients(new Request(origin + path, { method }), env, unexpected);
+    assert.ok(response);
+    assert.equal(response.headers.get('allow'), 'GET');
+    await expectDenial(response, 405);
+  }
+  const input = new Request(`${origin}${path.replace('source', 'a%2Fb')}?cursor=next`);
+  const forwarded = new Response(null);
+  assert.equal(await dispatchEligibleRecipients(input, env, async request => {
+    assert.equal(request, input);
+    return forwarded;
+  }), forwarded);
+  assert.equal(dispatchEligibleRecipients(new Request(`${origin}/api/entries/source/delete`), env, unexpected), null);
 });
 
 test('recipient lookup fails closed on storage errors', async () => {

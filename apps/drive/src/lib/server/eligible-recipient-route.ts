@@ -3,24 +3,39 @@ import { decodeReadGrantId, readGrantCursor, validReadGrantId } from './read-gra
 import { admitsSignInFixture, allowsOrigin, allowsStagingInviteSite, type DriveAuthEnv } from './request-auth';
 
 type RecipientEnv = DriveAuthEnv & { DB?: ConstructorParameters<typeof EligibleRecipients>[0] };
-const path = /^\/api\/entries\/([^/]{1,1536})\/eligible-recipients$/;
+const path = /^\/api\/entries\/([^/]+)\/eligible-recipients\/?$/;
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers });
 
-// Source-only until explicitly admitted. Only the disposable fixture may serve it.
-export async function getEligibleRecipients(request: Request, env: RecipientEnv, token: string | null): Promise<Response> {
+function admit(request: Request, url: URL, env: DriveAuthEnv) {
   if (!admitsSignInFixture(env)) return reply(404);
   if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } });
   if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || !allowsStagingInviteSite(request)) return reply(403);
-  const url = new URL(request.url);
   const match = path.exec(url.pathname);
-  if (!match || request.url !== url.origin + url.pathname + url.search) return reply(404);
+  if (!match || url.pathname.endsWith('/') || request.url !== url.origin + url.pathname + url.search) return reply(404);
   const entryId = decodeReadGrantId(match[1]);
   if (entryId === null) return reply(404);
   const length = request.headers.get('content-length');
   if (request.headers.has('transfer-encoding') || (length === null ? request.body !== null : length !== '0')) return reply(400);
   const after = readGrantCursor(request.method, url.search);
-  if (after === undefined) return reply(400);
+  return after === undefined ? reply(400) : { entryId, after };
+}
+
+// Reject bad methods and reserved query keys before the adapter can generate its own response.
+export function dispatchEligibleRecipients(request: Request, env: DriveAuthEnv, adapter: (request: Request) => Promise<Response>) {
+  const url = new URL(request.url);
+  let pathname = url.pathname;
+  try { pathname = decodeURI(pathname); } catch { /* Validate the raw path below. */ }
+  if (!path.test(pathname)) return null;
+  const admission = admit(request, url, env);
+  return admission instanceof Response ? admission : adapter(request);
+}
+
+// The adapter hook supplies the session; only the disposable fixture may serve the route.
+export async function getEligibleRecipients(request: Request, env: RecipientEnv, token: string | null): Promise<Response> {
+  const admission = admit(request, new URL(request.url), env);
+  if (admission instanceof Response) return admission;
+  const { entryId, after } = admission;
   if (!token) return reply(401);
   const db = env.DB;
   if (!db || typeof db.withSession !== 'function') return reply(503);
