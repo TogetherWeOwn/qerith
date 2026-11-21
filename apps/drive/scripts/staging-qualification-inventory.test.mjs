@@ -23,6 +23,9 @@ const worker = 'qerith-drive-staging', namespace = 'drive-qualification/full-v0/
 const endpoint = `https://${storageAccount}.r2.cloudflarestorage.com`;
 const pinnedBucket = { name: bucket, jurisdiction: 'default' };
 const bucketPage = { total_count: 1, per_page: 10 };
+const namespacePage = { page: 1, per_page: 10, count: 0, total_count: 0, total_pages: 0 };
+const namespaceRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [], result: [],
+  result_info: namespacePage, ...overrides }, init);
 const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
@@ -116,6 +119,12 @@ function fixture(t) {
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
         if (state.expiryLink) response.headers.set('Link', '</schema>; rel="describedby"');
         return response;
+      }
+      if (url === `${root}${account}/workers/durable_objects/namespaces?page=1&per_page=10`) {
+        trace.push('namespaces');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onNamespaceList?.(init.signal);
+        return state.namespaceList ?? namespaceRoster();
       }
       const scripts = `${root}${account}/workers/scripts`;
       if (url === scripts) {
@@ -416,9 +425,61 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
+  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
     'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
+});
+
+test('inventory rejects a native Durable Object namespace before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.namespaceList = namespaceRoster({ result: [{ name: 'unbound' }],
+      result_info: { ...namespacePage, count: 1, total_count: 1, total_pages: 1 } });
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces']);
+  }
+});
+
+test('inventory requires a complete, bounded native Durable Object namespace roster', async t => {
+  const f = fixture(t);
+  for (const reply of [namespaceRoster({ result_info: { total_count: 0 } }),
+    namespaceRoster({ result_info: { ...namespacePage, total_pages: 1 } })]) {
+    const run = f.create();
+    f.state.namespaceList = reply;
+    assert.equal(await run('before'), true);
+  }
+  for (const reply of [namespaceRoster({ result: {} }), namespaceRoster({ result_info: undefined }),
+    namespaceRoster({ result_info: { page: 1 } }), namespaceRoster({ messages: ['unexpected'] }),
+    ...[{ page: 2 }, { per_page: 1 }, { count: 1 }, { total_count: 1 }, { total_pages: 2 }, { cursor: 'next' }]
+      .map(page => namespaceRoster({ result_info: { ...namespacePage, ...page } })),
+    namespaceRoster({ success: false }), namespaceRoster({}, { status: 403 }),
+    namespaceRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    namespaceRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    new Response((await namespaceRoster().text()).padEnd(65_537, ' ')), new Response('not JSON')]) {
+    const run = f.create();
+    f.trace.length = 0;
+    f.state.namespaceList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'namespaces');
+  }
+});
+
+test('inventory rejects a native Durable Object namespace result after its deadline', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onNamespaceList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'namespaces');
 });
 
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
@@ -432,7 +493,7 @@ test('inventory rejects an extra native R2 bucket before and after the attempt',
       f.state.scopedBucketLists = { [jurisdiction]: bucketRoster({ result: { buckets },
         result_info: { total_count: buckets.length } }) };
       await assert.rejects(run(phase), error);
-      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder.slice(0, index + 2)]);
+      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder.slice(0, index + 2)]);
     }
   }
 });
@@ -494,7 +555,7 @@ test('inventory shares one 15-second deadline across native R2 roster reads', as
     signal.throwIfAborted();
   };
   await assert.rejects(run('before'), error);
-  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2RosterOrder.slice(0, 2)]);
+  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder.slice(0, 2)]);
   assert.deepEqual(beforeDeadline, [false, false]);
   assert.equal(signals[0], signals[1]);
   assert.equal(signals[0].aborted, true);
@@ -584,7 +645,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 

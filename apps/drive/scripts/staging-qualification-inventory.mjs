@@ -17,7 +17,7 @@ function matchScan(scan, expected) {
       scan.items.length !== expected.length || !isDeepStrictEqual(scan.items, expected)) throw unverified();
 }
 
-async function boundedR2Document(response) {
+async function boundedProviderDocument(response) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -35,7 +35,7 @@ async function boundedR2Document(response) {
 
 // The native lifecycle endpoint is a single policy document, not a list API.
 async function singleLifecycleDocument(response) {
-  const { bytes, parsed } = await boundedR2Document(response);
+  const { bytes, parsed } = await boundedProviderDocument(response);
   if (Object.hasOwn(parsed, 'result_info') || !Array.isArray(parsed.result?.rules) ||
       Object.keys(parsed.result).length !== 1) throw unverified();
   return new Response(bytes);
@@ -56,7 +56,7 @@ async function assertR2Roster(account, bucket, token, request, signal) {
         await response.body?.cancel();
         throw unverified();
       }
-      const { parsed } = await boundedR2Document(response);
+      const { parsed } = await boundedProviderDocument(response);
       const { success, errors, messages, result, result_info: page } = parsed;
       if (success !== true || !Array.isArray(errors) || errors.length ||
           (messages !== undefined && (!Array.isArray(messages) || messages.some(message => typeof message !== 'string'))) ||
@@ -68,6 +68,29 @@ async function assertR2Roster(account, bucket, token, request, signal) {
           Object.keys(page).some(key => !['total_count', 'per_page', 'cursor'].includes(key))) throw unverified();
     }
   }, null, signal, 15_000);
+}
+
+async function assertNoDurableObjectNamespaces(account, token, request, signal) {
+  if (!token?.trim()) throw unverified();
+  const pageSize = 10;
+  await runQualificationPhase(async (_, active) => {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/workers/durable_objects/namespaces?page=1&per_page=${pageSize}`;
+    const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+      headers: { authorization: `Bearer ${token}` } });
+    if (response.headers.has('link')) {
+      await response.body?.cancel();
+      throw unverified();
+    }
+    const { parsed } = await boundedProviderDocument(response);
+    const { success, errors, messages, result, result_info: page } = parsed;
+    const validPage = { page: [1], per_page: [pageSize], count: [0], total_count: [0], total_pages: [0, 1] };
+    if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
+        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+        !Array.isArray(result) || result.length || page?.total_count !== 0 ||
+        Object.entries(page).some(([key, value]) => !Object.hasOwn(validPage, key) || !validPage[key].includes(value))) {
+      throw unverified();
+    }
+  }, null, signal, 5_000);
 }
 
 // Unwired. The eventual readers must enumerate the bounded staging estate,
@@ -106,6 +129,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
+        await assertNoDurableObjectNamespaces(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
