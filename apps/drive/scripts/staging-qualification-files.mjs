@@ -10,7 +10,8 @@ const label = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]
 const gap = String.raw`(?:[ \t\r\n\f]|<!--(?:\[!?-?\d*|\])?-->)*`;
 const css = '(?: class="svelte-[a-z0-9]+")?';
 const headAttrs = '(?: [a-z-]+="[^"<>]*")+';
-const headChild = `(?:<(?:meta|link)${headAttrs} */?>|<title>[^<]*</title>)`;
+// Svelte's <svelte:head> marker is a 32-bit filename hash encoded in base 36.
+const headChild = `(?:<(?:meta|link)${headAttrs} */?>|<title>[^<]*</title>|<!--[0-9a-z]{1,7}-->)`;
 const folderDocument = new RegExp(`^${gap}<!doctype html>${gap}<html lang="en">${gap}<head>(?:${gap}${headChild})*${gap}</head>${gap}` +
   `<body>${gap}<div style="display: contents">${gap}<main data-sveltekit-reload(?:="")?${css}>${gap}` +
   `<h1 dir="auto"${css}>([^<]*)</h1>([\\s\\S]*?)</main>${gap}</div>${gap}</body>${gap}</html>${gap}$`);

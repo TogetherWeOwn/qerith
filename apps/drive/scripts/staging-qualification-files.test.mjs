@@ -14,7 +14,8 @@ const json = (status, value) => reply(status, JSON.stringify(value));
 const html = { 'content-type': 'text/html; charset=utf-8' };
 const folderRow = row => `<li class="svelte-proof"><svg viewBox="0 0 24 24" aria-hidden="true"><!--[--><path d="M3 19V5h6l2 2h10v12H3Z"></path><!--]--></svg> <a href="/f/${row.id}" dir="auto" class="svelte-proof">${row.name}</a> <span class="kind svelte-proof">Folder</span></li>`;
 const main = (name, listing) => `<main data-sveltekit-reload class="svelte-proof"><!--[--><h1 dir="auto" class="svelte-proof">${name}</h1> <!--[-->${listing}<!--]--><!--]--></main>`;
-const document = content => `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>Qualification · Drive</title><link href="/_app/immutable/assets/folder.css" rel="stylesheet"></head><body><div style="display: contents"><!--[-->${content}<!--]--></div></body></html>`;
+// Svelte emits a filename hash and an empty comment for the title-only <svelte:head>.
+const document = content => `<!doctype html><html lang="en"><head><meta charset="utf-8" /><!--1a2b3c4--><!----><title>Qualification · Drive</title><link href="/_app/immutable/assets/folder.css" rel="stylesheet"></head><body><div style="display: contents"><!--[-->${content}<!--]--></div></body></html>`;
 const folderPage = (name, listing) => reply(200, document(main(name, listing)), html);
 const entries = rows => `<ul role="list">${rows}</ul>`;
 const empty = '<section class="empty" aria-labelledby="empty-title"><div><h2 id="empty-title">This folder is empty.</h2></div></section>';
@@ -132,6 +133,7 @@ for (const [name, caseName, intercept] of [
   ...[
     ['a template-wrapped populated view', view => reply(200, document(`<template>${view}</template>`), html)],
     ['a hidden ancestor of a populated view', view => reply(200, document(`<div hidden>${view}</div>`), html)],
+    ['a head hash marker in the folder view', view => reply(200, document(`<!--1a2b3c4-->${view}`), html)],
     ['a CSS-hidden row', view => reply(200, document(view.replace('<li ', '<li style="display:none" ')), html)],
     ['a child anchor inside SVG', view => reply(200, document(view.replace('</svg>', '').replace('</a>', '</a></svg>')), html)],
     ['a non-HTML destination after move', view => reply(200, document(view), { 'content-type': 'text/plain' })],
