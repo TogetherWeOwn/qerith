@@ -72,7 +72,12 @@ export function loseAcknowledgement(table, loseBeforeCommit) {
 }
 
 // The migration replay fixtures must drop children before their ledger parents.
-export const dropCompletionReceiptEvidence = `DROP TABLE IF EXISTS drive_upload_part_byte_evidence;
+export const dropCompletionReceiptEvidence = `DROP TRIGGER IF EXISTS drive_upload_bound_manifest_guard_seal;
+  DROP TRIGGER IF EXISTS drive_upload_bound_manifest_guard_legacy_claim;
+  DROP TRIGGER IF EXISTS drive_upload_completion_dispatches_guard_insert;
+  DROP VIEW IF EXISTS drive_upload_sealed_candidates;
+  DROP VIEW IF EXISTS drive_upload_bound_manifest_mismatches;
+  DROP TABLE IF EXISTS drive_upload_part_byte_evidence;
   DROP VIEW IF EXISTS drive_upload_resumable_part_operations;
   DROP TRIGGER IF EXISTS drive_private_object_deletion_enqueue;
   DROP TABLE IF EXISTS drive_object_deletion_jobs;
@@ -93,7 +98,6 @@ export const dropCompletionReceiptEvidence = `DROP TABLE IF EXISTS drive_upload_
   DROP TRIGGER IF EXISTS drive_upload_intents_cleanup_fence;
   DROP TRIGGER IF EXISTS drive_upload_dispatch_cleanup_fence;
   DROP TABLE IF EXISTS drive_upload_cleanup_claims;
-  DROP VIEW IF EXISTS drive_upload_sealed_candidates;
   DROP TABLE IF EXISTS drive_upload_completion_quarantine;
   DROP TABLE IF EXISTS drive_upload_completion_receipts;
   DROP TABLE IF EXISTS drive_upload_completion_dispatches;
