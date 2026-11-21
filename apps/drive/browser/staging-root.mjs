@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { proveNewFolder } from './new-folder.mjs';
+import { proveRename } from './rename.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -144,6 +145,7 @@ try {
     ['GET', 200, 'private, no-store']);
   const row = page.getByRole('link', { name: file.name, exact: true });
   await row.waitFor();
+  assert.equal(await page.getByRole('button', { name: `Actions for ${file.name}` }).count(), 0); // Owner default off.
   page.off('request', countNavigation);
   assert.equal(navigations, 0, 'upload refreshed the row without navigation');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
@@ -285,7 +287,9 @@ try {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
-  await proveNewFolder(page, origin, DB, 'owner', (path, handler) => overrides.set(path, handler), index);
+  const intercept = (path, handler) => overrides.set(path, handler);
+  await proveNewFolder(page, origin, DB, 'owner', intercept, index);
+  await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });

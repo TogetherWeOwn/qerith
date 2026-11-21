@@ -3,18 +3,23 @@
   import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
-  import NewFolderDialog from './NewFolderDialog.svelte';
+  import NameDialog from './NameDialog.svelte';
+  import { entryChangePath } from './metadata-id';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
   import type { DriveUploadMode } from './server/request-auth';
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadMode, staging, downloadAllowed, createFolderAllowed }: {
-    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; createFolderAllowed: boolean;
+  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed }: {
+    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; metadataWriteAllowed: boolean;
   } = $props();
   let status = $state('');
   let receipt = $state<{ id: string; name: string; loaded: boolean }>();
+  let nameDialog = $state<ReturnType<typeof NameDialog>>();
+  let heading: HTMLHeadingElement;
+  let renameStatus = $state('');
+  let renameRefreshFailed = $state(false);
   let list = $state<ReturnType<typeof FileList>>();
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
@@ -39,13 +44,13 @@
   }
 
   async function refresh(forFolder = false) {
-    if (staging && !createFolderAllowed) {
+    if (staging && !metadataWriteAllowed) {
       await invalidate('drive:root-listing');
       await tick();
       if (initial.status !== 'ok') throw new Error('Root listing unavailable');
       return;
     }
-    // In opt-in staging both mutations read the same cursor without updating route data.
+    // In opt-in staging all mutations read the same cursor without updating route data.
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
     const next = staging ? await readStagingPage() : await fetch(`/api/root-listing${query}`, { redirect: 'error' })
@@ -74,39 +79,70 @@
     else recovery?.focus();
   }
 
-  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
-    id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
-    href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
-    reload: true, size: '', bytes: null, modified: '', shared: false
-  })) : []);
+  function returnToRow(id: string) {
+    if (!list?.focusActions(id)) (recovery ?? heading).focus();
+  }
+
+  function openRename(id: string) {
+    const item = items.find(item => item.id === id && !item.shared);
+    if (!item?.path || !metadataWriteAllowed) return;
+    renameStatus = ''; renameRefreshFailed = false;
+    nameDialog?.open({ id, name: item.name, kind: item.kind, path: item.path });
+  }
+
+  async function renamed(id: string, name: string, close: () => void) {
+    try { await refresh(); }
+    catch { renameRefreshFailed = result.status !== 'invalid-page'; }
+    const item = items.find(item => item.id === id);
+    const detail = renameRefreshFailed ? ' Refresh My Drive to see it.' : !item ? ' It isn’t on this page.' :
+      item.name !== name ? ' My Drive now shows a different name.' : '';
+    // Reopen the live region's accessibility subtree before publishing its text.
+    await tick();
+    close();
+    if (renameRefreshFailed) (recovery ?? heading).focus();
+    else returnToRow(id);
+    renameStatus = `Renamed to “${name}”.${detail}`;
+  }
+
+  // loadRootListing returns only this session's owned entries at parent_id IS NULL.
+  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => {
+    const path = metadataWriteAllowed ? entryChangePath(id) : undefined;
+    return {
+      id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
+      href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
+      reload: true, size: '', bytes: null, modified: '', shared: false, path, renamable: !!path
+    };
+  }) : []);
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
   const needsRefresh = $derived(receipt && (result.status === 'unavailable' || (result.status === 'ok' && !receipt.loaded && !createdVisible)));
 </script>
 
-<header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
-  <h1>My Drive</h1>
+<header bind:this={header} class:can-create={metadataWriteAllowed && result.status === 'ok'}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
+  <h1 bind:this={heading} tabindex={metadataWriteAllowed ? -1 : undefined}>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
     <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
-  {#if createFolderAllowed}
-    <NewFolderDialog available={result.status === 'ok'} {items} oncreated={folderCreated} />
+  {#if metadataWriteAllowed}
+    <NameDialog bind:this={nameDialog} available={result.status === 'ok'} {items} oncreated={folderCreated} onrenamed={renamed} onreturn={returnToRow} />
   {/if}
 </header>
 <p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
-{#if createFolderAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
+{#if metadataWriteAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
+{#if metadataWriteAllowed}<p class:status={!renameStatus || !renameRefreshFailed} role="status">{renameStatus}</p>{/if}
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
 {/if}
-{#if needsRefresh || result.status === 'unavailable'}
-  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>{needsRefresh ? 'Refresh My Drive' : 'Try again'}</a>
+{#if needsRefresh || renameRefreshFailed || result.status === 'unavailable'}
+  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>{needsRefresh || renameRefreshFailed ? 'Refresh My Drive' : 'Try again'}</a>
 {:else if result.status === 'invalid-page'}
   <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {/if}
 {#if result.status === 'ok'}
   {#if items.length}
-    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} createdId={receipt?.id} />
+    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} onRename={metadataWriteAllowed ? openRename : undefined} createdId={receipt?.id} />
   {:else if page}
     <p>No more items.</p>
   {:else}

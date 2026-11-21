@@ -1,12 +1,8 @@
+export { isMetadataId } from '../metadata-id';
+
 const bodyLimit = 5 * 1024;
 const readMs = 2_000;
 const encoder = new TextEncoder();
-
-// Stored IDs are opaque, not paths or necessarily UUIDs. Reject malformed text, never normalize it.
-export function isMetadataId(id: unknown): id is string {
-  return typeof id === 'string' && id.length > 0 && id.length <= 512 &&
-    !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(id) && encoder.encode(id).length <= 512;
-}
 
 // In valid JSON, each colon outside a string at depth one is an object field separator.
 function topLevelFieldCount(json: string): number {
