@@ -2,6 +2,7 @@ import { bindPrivateDeletionStorage, type PrivateDeletionQualification } from '.
 import { deletePrivateEntry } from './private-deletion-route';
 import { allowsQualificationTraffic, stagingOrigin, type QualificationReadinessEnv } from './qualification-readiness';
 import { allowsOrigin, allowsStagingInviteSite } from './request-auth';
+import { storageIdentity } from './storage-runtime';
 
 type StagingDeletionEnv = Parameters<typeof deletePrivateEntry>[2] & QualificationReadinessEnv & {
   DRIVE_STAGING_DELETE_REQUESTS?: string;
@@ -10,6 +11,25 @@ type StagingDeletionEnv = Parameters<typeof deletePrivateEntry>[2] & Qualificati
 
 function isStagingDeletionRuntime(env: QualificationReadinessEnv): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_SIGN_IN_FIXTURE !== '1' && allowsQualificationTraffic(env);
+}
+
+/** Held by the Worker composer, independently of the active runtime bindings. */
+export type WorkerDeletionCapability = PrivateDeletionQualification & Readonly<{
+  sourceSha: string;
+  workerVersion: string;
+  expiresAt: string;
+}>;
+
+export function resolveWorkerDeletionQualification(env: StagingDeletionEnv,
+  capability?: WorkerDeletionCapability): PrivateDeletionQualification | undefined {
+  if (!capability || env.DRIVE_QUALIFICATION_SHA === undefined || !isStagingDeletionRuntime(env) ||
+      capability.sourceSha !== env.DRIVE_QUALIFICATION_SHA ||
+      capability.workerVersion !== env.DRIVE_QUALIFICATION_VERSION?.id ||
+      capability.expiresAt !== env.DRIVE_QUALIFICATION_EXPIRES_AT ||
+      typeof capability.confirmsRemoval !== 'function') return;
+  const identity = storageIdentity(env);
+  if (identity && capability.storageConfigId === identity.storageConfigId &&
+      capability.region === identity.settings.region) return capability;
 }
 
 const denied = (status: number) => Promise.resolve(new Response(null, {

@@ -16,7 +16,7 @@ export interface MemberDirectoryPage { members: DirectoryMember[]; nextCursor: s
 
 const pageSize = 100;
 
-// Server-only projection. Display names and last sign-in aren't persisted on accounts.
+// Server-only projection. It does not include member display names or last sign-in.
 export class MemberDirectory {
   constructor(private readonly db: Database) {}
 
