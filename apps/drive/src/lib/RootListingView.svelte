@@ -127,6 +127,7 @@
     const neighbors = index < 0 ? [] : [...items.slice(index + 1), ...items.slice(0, index).reverse()];
     try { await refresh('move'); }
     catch { if (result.status === 'ok') movedButNotRefreshed = [...movedButNotRefreshed, id]; }
+    moveReceipt = undefined; // Announce repeated moves to the same destination.
     await tick();
     close();
     const neighbor = neighbors.find(({ id }) => items.some(item => item.id === id)) ?? items.find(item => item.id !== id);
