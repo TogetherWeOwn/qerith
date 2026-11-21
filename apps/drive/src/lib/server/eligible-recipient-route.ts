@@ -47,6 +47,9 @@ export async function getEligibleRecipients(request: Request, env: RecipientEnv,
     if (!page) return reply(404);
     const { recipients, nextCursor } = page;
     if (nextCursor !== null && !validReadGrantId(nextCursor)) return reply(503);
-    return Response.json({ recipients: recipients.map(({ recipientId, displayName }) => ({ recipientId, displayName })), nextCursor }, { headers });
+    return Response.json({
+      recipients: recipients.map(({ recipientId, displayName, direct, inheritedFrom }) => ({ recipientId, displayName, direct, inheritedFrom })),
+      nextCursor,
+    }, { headers });
   } catch { return reply(503); }
 }

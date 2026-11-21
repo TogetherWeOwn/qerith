@@ -24,16 +24,22 @@ async function setup() {
     alice: await sessions.issue('alice'), admin: await sessions.issue('admin'), bob: await sessions.issue('bob') };
 }
 
-it('returns only active member IDs and names to the entry owner in one primary statement', async () => {
+const row = (recipientId, { displayName = null, direct = false, inheritedFrom = null } = {}) =>
+  ({ recipientId, displayName, direct, inheritedFrom });
+
+it('returns eligible names and root access to the entry owner in one primary statement', async () => {
   const { read, alice, admin, bob } = await setup();
-  await env.DB.prepare("UPDATE drive_principals SET display_name = 'Bob' WHERE id = 'bob'").run();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE drive_principals SET display_name = 'Bob' WHERE id = 'bob'"),
+    env.DB.prepare("INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES ('folder', 'bob')"),
+  ]);
   const all = vi.fn(statement => statement.all());
   const withSession = vi.fn(constraint => {
     const db = env.DB.withSession(constraint);
     return { prepare: sql => ({ bind: (...values) => ({ all: () => all(db.prepare(sql).bind(...values)) }) }) };
   });
   expect(await new EligibleRecipients({ withSession }).listPage(alice.token, 'folder')).toEqual({
-    recipients: [{ recipientId: 'bob', displayName: 'Bob' }], nextCursor: null,
+    recipients: [row('bob', { displayName: 'Bob', direct: true })], nextCursor: null,
   });
   expect(withSession.mock.calls).toEqual([['first-primary']]);
   expect(all).toHaveBeenCalledTimes(1);
@@ -45,12 +51,40 @@ it('returns only active member IDs and names to the entry owner in one primary s
   await expect(read.listPage(alice.token, 'folder', 'a'.repeat(513))).rejects.toThrow('Invalid recipient cursor');
 });
 
+it('reports direct and current same-owner folder grants independently on a nested entry', async () => {
+  const { read, alice, bob } = await setup();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO drive_principals (id, role, status) VALUES
+      ('carol', 'member', 'active'), ('dave', 'member', 'active'), ('eve', 'member', 'active')`),
+    env.DB.prepare("UPDATE drive_entries SET name = '<Shared root>' WHERE id = 'folder'"),
+    env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES
+      ('a-middle', 'alice', 'folder', 'Shared middle', 'folder'),
+      ('inner', 'alice', 'a-middle', 'Shared parent', 'folder'),
+      ('child', 'alice', 'inner', 'Nested target', 'folder'),
+      ('unrelated', 'bob', NULL, 'Unrelated folder', 'folder')`),
+    env.DB.prepare(`INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES
+      ('child', 'bob'), ('folder', 'carol'), ('child', 'dave'),
+      ('folder', 'dave'), ('a-middle', 'dave'), ('inner', 'dave'), ('unrelated', 'eve')`),
+  ]);
+  const list = () => read.listPage(alice.token, 'child');
+  // The lowest granting folder ID is neither the root nor the nearest ancestor.
+  const expected = [row('bob', { direct: true }), row('carol', { inheritedFrom: '<Shared root>' }),
+    row('dave', { direct: true, inheritedFrom: 'Shared middle' }), row('eve')];
+  expect(await list()).toEqual({ recipients: expected, nextCursor: null });
+  expect(await read.listPage(bob.token, 'child')).toBeNull(); // Read access is not ownership.
+  await env.DB.prepare("DELETE FROM drive_read_grants WHERE entry_id = 'a-middle' AND recipient_id = 'dave'").run();
+  expect(await list()).toEqual({ recipients: [expected[0], expected[1],
+    row('dave', { direct: true, inheritedFrom: '<Shared root>' }), expected[3]], nextCursor: null });
+  await env.DB.prepare("UPDATE drive_entries SET parent_id = NULL WHERE id = 'child'").run();
+  expect(await list()).toEqual({ recipients: [expected[0], row('carol'), row('dave', { direct: true }), expected[3]], nextCursor: null });
+});
+
 it('pages by ID and rechecks membership and session on every request', async () => {
   const { read, sessions, alice } = await setup();
   const ids = Array.from({ length: 101 }, (_, i) => `recipient-${String(i).padStart(3, '0')}`);
   await env.DB.prepare("INSERT INTO drive_principals (id, role, status) SELECT value, 'member', 'active' FROM json_each(?)")
     .bind(JSON.stringify(ids)).run();
-  const expected = ['bob', ...ids].map(recipientId => ({ recipientId, displayName: null }));
+  const expected = ['bob', ...ids].map(recipientId => row(recipientId));
   const first = await read.listPage(alice.token, 'folder');
   expect(first).toEqual({ recipients: expected.slice(0, 100), nextCursor: expected[99].recipientId });
   const last = { recipients: expected.slice(100), nextCursor: null };
@@ -103,15 +137,18 @@ it('serves owned recipient pages as private JSON and denies stale or nonowner se
 
   const displayName = '<b>Bob & friends</b>';
   const ids = Array.from({ length: 100 }, (_, i) => `recipient / ${String(i).padStart(3, '0')}`);
+  const inheritedFrom = 'Shared parent';
   await env.DB.batch([
     env.DB.prepare("UPDATE drive_principals SET display_name = ? WHERE id = 'bob'").bind(displayName),
     env.DB.prepare("INSERT INTO drive_principals (id, role, status) SELECT value, 'member', 'active' FROM json_each(?)").bind(JSON.stringify(ids)),
+    env.DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('parent', 'alice', ?, 'folder')").bind(inheritedFrom),
+    env.DB.prepare("UPDATE drive_entries SET parent_id = 'parent' WHERE id = 'folder'"),
+    env.DB.prepare("INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES ('folder', 'bob'), ('parent', ?)").bind(ids[99]),
   ]);
-  const recipients = ids.map(recipientId => ({ recipientId, displayName: null }));
   const nextCursor = ids[98];
-  expect(await list()).toEqual({ recipients: [{ recipientId: 'bob', displayName }, ...recipients.slice(0, 99)], nextCursor });
+  expect(await list()).toEqual({ recipients: [row('bob', { displayName, direct: true }), ...ids.slice(0, 99).map(id => row(id))], nextCursor });
   const next = `${path}?cursor=${encodeURIComponent(nextCursor)}`;
-  expect(await list(next)).toEqual({ recipients: recipients.slice(99), nextCursor: null });
+  expect(await list(next)).toEqual({ recipients: [row(ids[99], { inheritedFrom })], nextCursor: null });
   await deny(ask(alice, next, () => sessions.revoke(alice.token)), 404); // Revoked after the hook lookup.
   await deny(ask(alice, next), 401);
 });
