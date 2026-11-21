@@ -116,9 +116,14 @@ Worker version or its absence; Worker rollback is separate from D1 recovery.
 ancestor of fetched `origin/main`. A dispatch of today's head with yesterday's
 SHA as input cannot qualify yesterday's head. Only after source validation does
 the protected `staging` job enter the shared `drive-staging-lifecycle` queue.
-That job intentionally fails: it has no live runner, secrets or upload step. Do not
-dispatch this increment. Required CI uses local Git history, synthetic evidence
-and a fake Wrangler; none is live qualification.
+The protected job independently checks out the dispatch commit, requires the
+workflow definition's own SHA to match, and compares its existing staging
+settings with the target config and reviewed native R2 binding in that commit.
+This check is local: it neither authenticates to a provider nor establishes app
+admission, writer scope, or native expiry. The job still intentionally fails
+and has no receipt step. Do not dispatch this increment. Required `ci-ok` now
+includes all qualification adapter and policy tests through `drive-bootstrap`;
+fixture transports, local Git history, and Wrangler local mode are not live proof.
 
 The qualification-only D1 adapter is not called by either staging workflow.
 It snapshots verified SQL and D1 config from the tested commit outside the checkout.

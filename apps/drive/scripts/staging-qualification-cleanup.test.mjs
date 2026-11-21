@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,6 +9,7 @@ import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mj
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 
 const bucket = 'fixture-bucket';
@@ -25,6 +26,7 @@ function job(t, target = endpoint) {
   git('init', '-q', '--initial-branch=main', '--template=');
   const dir = join(cwd, 'apps/drive/scripts');
   mkdirSync(dir, { recursive: true });
+  copyFileSync(new URL('../wrangler.staging.json', import.meta.url), join(dir, '../wrangler.staging.json'));
   const identitySha256 = createHash('sha256').update(JSON.stringify([JSON.stringify([target, bucket, 'fixture-epoch']),
     'auto', 'fixture-key'])).digest('hex');
   writeFileSync(join(dir, 'staging-storage-qualification.json'), JSON.stringify({ version: 1, passed: true, failures: [],
@@ -36,12 +38,29 @@ function job(t, target = endpoint) {
   git('update-ref', 'refs/remotes/origin/main', sha);
   const env = { GITHUB_REPOSITORY: 'TogetherWeOwn/qerith', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main',
     TESTED_SHA: sha, GITHUB_SHA: sha, GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
+    GITHUB_WORKFLOW_SHA: sha,
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main',
-    GITHUB_RUN_ID: '182', GITHUB_RUN_ATTEMPT: '3', QERITH_S3_ENDPOINT: target, QERITH_S3_BUCKET: bucket,
+    GITHUB_RUN_ID: '182', GITHUB_RUN_ATTEMPT: '3', CLOUDFLARE_ACCOUNT_ID: '209cf7dd678adfb683947dd7874d05af',
+    QERITH_S3_ENDPOINT: target, QERITH_S3_BUCKET: bucket,
     QERITH_S3_REGION: 'auto', QERITH_S3_STORAGE_EPOCH: 'fixture-epoch',
     QERITH_S3_ACCESS_KEY_ID: 'fixture-key', QERITH_S3_SECRET_ACCESS_KEY: 'fixture-secret' };
   return { cwd, git, env, context: { sha, prefix, runId: '182', attempt: '3' } };
 }
+
+test('protected settings must match the committed staging target and reviewed R2 identity', async t => {
+  const { cwd, env } = job(t);
+  // The gate must read both files from the committed SHA, not the working tree.
+  writeFileSync(join(cwd, 'apps/drive/wrangler.staging.json'), '{}');
+  writeFileSync(join(cwd, 'apps/drive/scripts/staging-storage-qualification.json'), '{}');
+  await assertQualificationSettings(env, cwd);
+  for (const override of [{ CLOUDFLARE_ACCOUNT_ID: '' }, { CLOUDFLARE_ACCOUNT_ID: '0'.repeat(32) },
+    { QERITH_S3_STORAGE_EPOCH: 'other' }, { QERITH_S3_BUCKET: 'other-bucket' }, { QERITH_S3_ACCESS_KEY_ID: 'other-key' },
+    { QERITH_S3_SECRET_ACCESS_KEY: '' }]) {
+    await assert.rejects(assertQualificationSettings({ ...env, ...override }, cwd), /reviewed storage binding is unverified/);
+  }
+  const nonR2 = job(t, 'https://storage.example.test');
+  await assert.rejects(assertQualificationSettings(nonR2.env, nonR2.cwd), /reviewed storage binding is unverified/);
+});
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];
 const objectAge = 3 * 86400;
