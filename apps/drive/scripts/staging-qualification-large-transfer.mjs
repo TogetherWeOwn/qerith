@@ -48,7 +48,7 @@ export async function verifyQualificationDownload(response, expectedBytes, uploa
   } finally {
     signal?.removeEventListener('abort', cancel);
     if (!ended) cancel();
-    await cancellation;
+    // Cancellation closes pending reads without waiting for transport cleanup.
     reader.releaseLock();
   }
 }

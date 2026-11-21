@@ -10,12 +10,12 @@ const uploads = '/api/uploads';
 const isUuid = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const unverified = () => new Error('Qualification app transfer is unverified.');
 const json = { 'content-type': 'application/json' };
-const discard = async response => { await response?.body?.cancel().catch(() => {}); };
+const discard = response => { void response?.body?.cancel().catch(() => {}); };
 
 async function readReply(response, status, signal, limit = 4096) {
   if (signal.aborted || response?.status !== status || response.redirected || !response.body ||
       response.headers.has('content-encoding') || response.headers.get('content-type')?.split(';', 1)[0] !== json['content-type']) {
-    await discard(response);
+    discard(response);
     throw unverified();
   }
   const reader = response.body.getReader(), bytes = new Uint8Array(limit);
@@ -35,7 +35,7 @@ async function readReply(response, status, signal, limit = 4096) {
   } finally {
     signal.removeEventListener('abort', cancel);
     if (!ended) cancel();
-    await cancellation;
+    // Release the reader even while the transport's cleanup is pending.
     reader.releaseLock();
   }
 }
@@ -69,7 +69,7 @@ async function sendParts(client, signal, path, size, seed, first, accepted = () 
   const buffer = Buffer.allocUnsafe(partBytes);
   for (let n = first; n <= Math.ceil(size / partBytes); n++) {
     const response = await send(client, signal, `${path}/parts/${n}`, 'PUT', fixturePart(size, n, seed, buffer));
-    await discard(response);
+    discard(response);
     signal.throwIfAborted();
     if (response?.status !== 204 || response.redirected || response.body !== null) throw unverified();
     accepted(n);
