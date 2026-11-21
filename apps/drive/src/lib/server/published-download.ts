@@ -11,11 +11,11 @@ export interface DownloadEnv extends StorageBindings, Pick<DriveAuthEnv, 'DRIVE_
 const timeoutMs = 15_000;
 const streamBudget = { idleMs: 30_000, totalMs: 4 * 60 * 60 * 1000 };
 
-export function downloadStorage(env: DownloadEnv) {
+export function downloadStorage(env: DownloadEnv, inviteMode: 'own-file' | 'grant-aware' = 'own-file') {
   const identity = storageIdentity(env);
   if (!env.DB || !identity) return null;
   const { settings: config, epoch } = identity;
-  const mode = admitsStagingInvite(env) ? 'own-file' : env.DRIVE_ORIGIN === stagingOrigin;
+  const mode = admitsStagingInvite(env) ? inviteMode : env.DRIVE_ORIGIN === stagingOrigin;
   return { ...createPublishedReadAccess(env.DB, epoch, config, mode), config };
 }
 
@@ -65,7 +65,7 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number, sig
 
 export async function publishedDownload(request: Request, id: string, token: string,
   env: DownloadEnv, onReadError: () => void, transport: typeof fetch = fetch) {
-  const storage = downloadStorage(env);
+  const storage = downloadStorage(env, 'grant-aware');
   if (!storage) return downloadFile(request, id);
   const { config, storageConfigId, resolveGeneration } = storage;
   const staging = env.DRIVE_ORIGIN === stagingOrigin;
@@ -96,16 +96,19 @@ export async function publishedDownload(request: Request, id: string, token: str
       fetch: transport, timeoutMs, streamBudget, beforeSend: staging ? stillAuthorized : undefined
     }));
   } catch { return downloadFile(request, id); }
+  let readError = false;
   const response = await downloadFile(new Request(request, { signal }), id, {
     authorize: async () => token,
     resolveGeneration: async () => generation = await resolveCurrent(),
     readerFor: (id) => id === storageConfigId ? reader : null,
-    onReadError,
+    onReadError: () => { readError = true; },
     fixedLength: (body, length) => fixedLength(body, length, signal)
   });
-  if (staging && generation && response.status !== 404 && !await stillAuthorized()) {
+  // A retry notice also identifies a file, so suppress it if access was lost.
+  if (staging && generation && (response.status !== 404 || readError) && !await stillAuthorized()) {
     void response.body?.cancel().catch(() => {});
     return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } });
   }
+  if (readError) onReadError();
   return response;
 }

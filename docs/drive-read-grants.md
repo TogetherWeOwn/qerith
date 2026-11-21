@@ -1,5 +1,7 @@
 # Drive read-grant HTTP contract
 
+## Grant management
+
 The generated Worker and the SvelteKit auth hook admit these endpoints only at
 Drive's configured staging origin with `DRIVE_STAGING_READ_GRANTS=1`. The flag
 is unset in normal publishes (off). Invite and sign-in fixture flags do not
@@ -27,9 +29,8 @@ statement that reads or changes the grant. Owning the entry, not having the
 Drive-wide owner role, is what permits management. A folder grant gives read
 access to descendants but does not create descendant grant rows or permit a
 recipient to write or re-share. Removing a grant does not affect independent
-grants that still permit access. This flag does not admit Shared with me
-navigation or file delivery to grantees, and adds no sharing UI. The existing
-folder document and its authorization remain unchanged.
+grants that still permit access. This management flag alone does not admit file
+delivery to grantees or add sharing UI.
 
 Responses are `private, no-store`. Errors have empty bodies: `401` for missing
 or stale sessions observed at lookup, `403` for a wrong origin or site, `404`
@@ -38,3 +39,13 @@ grant (including an ineligible recipient or a duplicate insert), `400` for
 invalid query or body, and `503` for an unavailable service. The fixture-only
 entry point returns `405` for a wrong method on a matched path. There are no
 invitation details, display names, or public links in the response.
+
+## Shared-file delivery
+
+At the staging origin, the existing default-off `DRIVE_STAGING_INVITE_ACCEPTANCE=1`
+gate allows a live session to use `GET /api/download/{fileId}` for a published
+file they own or can read via a direct or inherited grant. With that flag off,
+staging download remains owner-only. Delivery rechecks access and the bound
+published generation before storage dispatch and before returning the response.
+Full and single-range downloads use the stored ETag for the storage request.
+No listing, folder navigation, public or signed link, or write access is added.

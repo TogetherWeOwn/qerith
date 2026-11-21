@@ -380,3 +380,62 @@ it('rechecks an invitee’s live session before storage dispatch and before retu
   expect(transport).toHaveBeenCalledTimes(2);
   expect(transport.mock.calls.map(([request]) => request.headers.get('if-match'))).toEqual([etag, etag]);
 });
+
+it('delivers inherited grants through the invite gate and rechecks them at dispatch and response', async () => {
+  const { id, key, token } = await seedBoundPublication('read-inherited-download');
+  const owner = 'owner-read-inherited-download', member = 'inherited-reader';
+  const metadata = new PrivateMetadata(env.DB);
+  const { id: folder } = await metadata.createFolder(owner, null, 'shared');
+  expect(await metadata.move(owner, id, folder, 'shared-file')).not.toBeNull();
+  await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')", member).run();
+  const { token: reader } = await sessions.issue(member);
+  const grants = new ReadGrants(env.DB);
+  const grant = async () => expect(await grants.create(token, folder, member)).toBe(true);
+  const revoke = async () => expect(await grants.revoke(token, folder, member)).toBe(true);
+  const storage = { DB: env.DB, DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+    DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+    DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey, DRIVE_S3_STORAGE_EPOCH: epoch };
+  const rangeHeaders = { etag, 'content-range': 'bytes 1-2/7', 'content-length': '2' };
+  const transport = vi.fn(async () => new Response('bc', { status: 206, headers: rangeHeaders }));
+  const onReadError = vi.fn();
+  const get = (bindings = storage, headers = { range: 'bytes=1-2' }) => publishedDownload(
+    new Request(`${stagingOrigin}/api/download/${id}`, { headers }), id, reader, bindings, onReadError, transport);
+  const deny = async response => {
+    expect([response.status, await response.text()]).toEqual([404, '']);
+    expect([...response.headers]).toEqual([['cache-control', 'private, no-store']]);
+  };
+  await grant();
+  await deny(await get({ ...storage, DRIVE_STAGING_INVITE_ACCEPTANCE: undefined }));
+  await deny(await get({ ...storage, DRIVE_S3_STORAGE_EPOCH: 'wrong-epoch' }));
+  const DB = { withSession: (mode) => ({ prepare: (query) => ({ bind: (...args) => ({ async first() {
+    const row = await env.DB.withSession(mode).prepare(query).bind(...args).first();
+    if (row) await revoke(); // The initial lookup saw a valid grant; dispatch must read again.
+    return row;
+  } }) }) }) };
+  await deny(await get({ ...storage, DB }));
+  expect(transport).not.toHaveBeenCalled();
+
+  await grant();
+  transport.mockResolvedValueOnce(new Response('abcdefg', { headers: { etag, 'content-length': '7' } }));
+  const full = await get(storage, {});
+  expect([full.status, full.headers.get('content-range'), await full.text()]).toEqual([200, null, 'abcdefg']);
+  const allowed = await get();
+  expect([allowed.status, allowed.headers.get('content-range'), await allowed.text()]).toEqual([206, 'bytes 1-2/7', 'bc']);
+  expect(JSON.stringify([...allowed.headers])).not.toContain(key);
+  transport.mockImplementationOnce(async () => {
+    await revoke();
+    return new Response('bc', { status: 206, headers: rangeHeaders });
+  });
+  await deny(await get());
+
+  await grant();
+  transport.mockImplementationOnce(async () => {
+    await sessions.revoke(reader);
+    return new Response(new ReadableStream({ start(output) { output.close(); } }), { status: 206, headers: rangeHeaders });
+  });
+  await deny(await get());
+  await deny(await get());
+  expect(onReadError).not.toHaveBeenCalled();
+  expect(transport.mock.calls.map(([request]) => [request.headers.get('if-match'), request.headers.get('range')]))
+    .toEqual([[etag, null], ...Array.from({ length: 3 }, () => [etag, 'bytes=1-2'])]);
+});
