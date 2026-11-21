@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { test } from 'node:test';
-import { exerciseQualificationDeletion } from './staging-qualification-deletion.mjs';
+import { test as nodeTest } from 'node:test';
+import { exerciseQualificationDeletion as exerciseDeletion } from './staging-qualification-deletion.mjs';
 import { qualificationPrefix } from './staging-qualification.mjs';
+
+const test = import.meta.main ? nodeTest : () => {};
 
 const run = { runId: '23', attempt: '2' };
 const context = { ...run, prefix: qualificationPrefix(run) };
-const scope = { endpoint: 'https://storage.example.test', bucket: 'fixture-bucket', epoch: 'fixture-epoch' };
+const fixtureScope = { endpoint: 'https://storage.example.test', bucket: 'fixture-bucket', epoch: 'fixture-epoch' };
+const exerciseQualificationDeletion = (attempt, signal, io) => exerciseDeletion(attempt, signal, fixtureScope, io);
 const bytes = Buffer.from([0, 17, 255]);
 const tag = data => `"${createHash('md5').update(data).digest('hex')}"`;
 const etag = tag(bytes), wrongEtag = tag(Buffer.from([1]));
@@ -18,7 +21,7 @@ const response = status => new Response(null, { status, headers: { 'cache-contro
   ...(status === 405 && { allow: 'POST' }) } });
 
 // In-memory doubles only; no app admission, network, credential or provider prerequisite.
-function fixture() {
+export function fixture({ scope = fixtureScope, prefix = context.prefix } = {}) {
   const trees = new Map(), actions = [], probeCalls = [];
   let probePresent = false, now = 42;
   const settle = (state, confirmed) => {
@@ -36,7 +39,7 @@ function fixture() {
     scope,
     seed({ entries, key, scope: targetScope, pinned }) {
       assert.deepEqual(targetScope, scope);
-      assert.ok(key.startsWith(context.prefix) && !trees.has(key));
+      assert.ok(key.startsWith(prefix) && !trees.has(key));
       const revision = pinned ? randomUUID() : null;
       const generation = { ...scope, key, etag, revision, entryId: entries.at(-1).id };
       trees.set(key, { entries, live: entries, key, pinned, generation, journal: [], calls: [],
@@ -86,14 +89,14 @@ function fixture() {
     },
     seedProbe({ key, scope: targetScope }) {
       assert.deepEqual(targetScope, scope);
-      assert.equal(key, `${context.prefix}delete-provider-proof`);
+      assert.equal(key, `${prefix}delete-provider-proof`);
       probePresent = true;
       return { key, scope: targetScope, bytes, etag, wrongEtag, versioning: 'never-enabled', readConsistency: 'authoritative' };
     },
     requestProbe({ method, key, scope: targetScope, headers, cache, signal }) {
       signal.throwIfAborted();
       assert.deepEqual(targetScope, scope);
-      assert.equal(key, `${context.prefix}delete-provider-proof`);
+      assert.equal(key, `${prefix}delete-provider-proof`);
       const match = headers?.['if-match'];
       probeCalls.push([method, match, cache]);
       const result = (status, body, headers = {}) => ({ status, body: Buffer.from(body), headers: new Headers(headers) });
@@ -205,7 +208,7 @@ for (const [name, phase, corrupt] of [
   }],
   ['probe scope mismatch', 'provider-proof', ({ io }) => {
     const seed = io.seedProbe;
-    io.seedProbe = input => ({ ...seed(input), scope: { ...scope, epoch: 'other' } });
+    io.seedProbe = input => ({ ...seed(input), scope: { ...fixtureScope, epoch: 'other' } });
   }],
   ['probe absence names a different key', 'provider-proof', ({ io }) => {
     const send = io.requestProbe;

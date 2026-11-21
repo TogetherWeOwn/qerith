@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
@@ -118,8 +118,15 @@ globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletio
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 ${preview ? expectedPartsWorker : ''}
-if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
-export default { fetch(request, env, ctx) {
+export default {
+  scheduled(event, env) {
+    // Shadow D1 without reading the real binding, even if it becomes a getter.
+    return app.scheduled(event, Object.create(env, {
+      DRIVE_STAGING_DELETE_DRAIN: { value: '1', enumerable: true },
+      DB: { enumerable: true, get() { throw new Error('Unqualified scheduled deletion must not access D1'); } }
+    }));
+  },
+  fetch(request, env, ctx) {
   ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
   if (boundary !== null) {
     const bindings = { ...env,
@@ -167,7 +174,8 @@ export default { fetch(request, env, ctx) {
     DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, region: 'test-1', completionTimeoutMs: 5000,
       storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: release, runId: '1', runAttempt: 1 })
   } : {}), ...(staging ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
-    DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}` } : {}) };
+    DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}`,
+    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}) };
   const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
@@ -212,6 +220,8 @@ export default { fetch(request, env, ctx) {
     const access = (init) => worker.fetch(`${origin}/`, init);
     assert.equal((await access()).status, 401, 'generated app recognizes its configured origin and D1 binding');
     if (staging) {
+      assert.equal((await worker.scheduled({ cron: '*/15 * * * *' })).outcome, 'ok',
+        'generated staging schedule stays inert without server-held deletion qualification');
       const nonce = randomBytes(16).toString('hex');
       const readiness = (headers = {}) => worker.fetch(origin + readinessPath, { method: 'HEAD', redirect: 'manual',
         headers: { [readinessHeaders.nonce]: nonce, ...headers } });
@@ -338,8 +348,33 @@ export default { fetch(request, env, ctx) {
           assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()], [404, 'private, no-store', '']);
         }
       }
-      const resume = await get(uploadResumePath('00000000-0000-4000-8000-000000000001'), memberHeaders);
-      assert.deepEqual([resume.status, resume.headers.get('cache-control'), await resume.text()], [404, 'private, no-store', '']);
+      const missingResume = await get(uploadResumePath('00000000-0000-4000-8000-000000000001'), memberHeaders);
+      assert.deepEqual([missingResume.status, missingResume.headers.get('cache-control'), await missingResume.text()],
+        [404, 'private, no-store', '']);
+      // Seed the journal rather than starting an upload: only slot 1 has an acknowledgement.
+      const resumeId = randomUUID(), storageKey = 'private-resume-key', uploadId = 'private-resume-upload';
+      const partBytes = 16 * 1024 * 1024, declaredSize = partBytes + 3;
+      const sha256 = '080acf35a507ac9849cfcba47dc2ad83e01b75663a516279c8b9d243b719643e';
+      const expectedPartSha256s = sha256 + createHash('sha256').update('abc').digest('hex');
+      await DB.batch([
+        DB.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size, expected_part_sha256s)
+          VALUES (?, 'member', ?, 'created', ?, ?)`).bind(resumeId, storageKey, declaredSize, expectedPartSha256s),
+        DB.prepare('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)')
+          .bind(resumeId, vars.DRIVE_S3_ENDPOINT, vars.DRIVE_S3_BUCKET, vars.DRIVE_S3_STORAGE_EPOCH),
+        DB.prepare("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?")
+          .bind(uploadId, resumeId),
+        DB.prepare("INSERT INTO drive_upload_part_operations VALUES ('staging-resume-part', ?, 'member', ?, ?, ?, 2, 1, ?)")
+          .bind(resumeId, storageKey, vars.DRIVE_S3_STORAGE_EPOCH, uploadId, partBytes),
+        DB.prepare("INSERT INTO drive_upload_part_byte_evidence VALUES ('staging-resume-part', ?, ?)")
+          .bind(Uint8Array.from(Buffer.from(sha256, 'hex')).buffer, new TextEncoder().encode('"part"').buffer),
+      ]);
+      const resume = await get(uploadResumePath(resumeId), memberHeaders);
+      assert.deepEqual([resume.status, resume.headers.get('cache-control'), resume.headers.get('content-type')],
+        [200, 'private, no-store', 'application/json'], 'the generated staging route serves bound resume evidence');
+      assert.deepEqual(await resume.json(), { declaredSize, parts: [{ partNumber: 1, sizeBytes: partBytes, sha256 }], expectedPartSha256s });
+      const closedResume = await get(uploadResumePath(resumeId), { cookie: member });
+      assert.deepEqual([closedResume.status, closedResume.headers.get('cache-control'), await closedResume.text()],
+        [404, 'private, no-store', ''], 'the same allocation is hidden when invite mode is off');
       await assertRootUploadData(await get(rootDataPath, memberHeaders), 'multipart');
       const unqualified = await get(rootDataPath, { ...memberHeaders, 'x-test-unqualified': '1' });
       assert.deepEqual([unqualified.status, unqualified.headers.get('cache-control'), await unqualified.text()],
@@ -367,7 +402,19 @@ export default { fetch(request, env, ctx) {
       const publication = await send(`${upload}/complete`, 'POST', json, JSON.stringify({ parentId: null, name }));
       assert.equal(publication.status, 201, 'owner can publish');
       assert.match(await (await get('/', { cookie })).text(), /staging-fixture\.txt/);
-      const file = `/api/download/${(await publication.json()).id}`;
+      const { id } = await publication.json();
+      const generation = await DB.prepare('SELECT owner_id, etag FROM drive_published_generations WHERE entry_id = ?').bind(id).first();
+      assert.deepEqual(generation, { owner_id: 'fixture', etag: '"object"' }, 'the deletion probe targets an owned, pinned generation');
+      const deletionState = async () => (await DB.batch([
+        DB.prepare('SELECT * FROM drive_deleted_entries WHERE entry_id = ?').bind(id),
+        DB.prepare('SELECT * FROM drive_object_deletion_jobs WHERE entry_id = ?').bind(id)
+      ])).map(({ results }) => results);
+      assert.deepEqual(await deletionState(), [[], []]);
+      const deletion = await send(`/api/entries/${id}/delete`, 'POST', json, '{"confirm":"permanent-delete"}');
+      assert.deepEqual([deletion.status, deletion.headers.get('cache-control'), await deletion.text()], [404, 'private, no-store', ''],
+        'generated staging POST stays closed with upload-only qualification');
+      assert.deepEqual(await deletionState(), [[], []], 'a closed deletion starts neither a journal nor a job');
+      const file = `/api/download/${id}`;
       const full = await get(file, { cookie });
       assert.deepEqual([full.status, await full.text()], [200, data]);
       const range = await get(file, { cookie, range: 'bytes=1-2' });

@@ -29,6 +29,67 @@ async function fixture(requestOrigin = origin, role = 'member') {
   return { db, bindings, request, fetch, create, post, row, owner, revoke: () => sessions.revoke(token) };
 }
 
+const multipart = { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' };
+const partBytes = 16 * 1024 ** 2, ceiling = 320 * partBytes;
+const first = 'ab'.repeat(32), last = 'cd'.repeat(32);
+const empty = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const boundBody = (size, expectedPartSha256s) => JSON.stringify({ size, expectedPartSha256s });
+
+it.each([[0, empty], [partBytes + 1, first + last], [ceiling, first.repeat(319) + last]])(
+  'atomically binds the ordered digest vector for %i bytes before dispatch', async (size, packed) => {
+    const { db, owner, post, row, fetch } = await fixture(stagingOrigin);
+    const body = boundBody(size, packed);
+    let claimed, storage;
+    fetch.mockImplementation(async () => {
+      claimed = await row();
+      storage = await db.prepare('SELECT * FROM drive_upload_storage_bindings WHERE intent_id = ?').bind(claimed.id).first();
+      return new Response(`<InitiateMultipartUploadResult><Key>${claimed.object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
+    });
+    const response = await post(body, { headers: { 'content-length': String(body.length) },
+      overrides: { ...multipart, DRIVE_UPLOAD_S3: { ...config, endpoint: `${config.endpoint}/` } } });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(claimed).toMatchObject({ owner_id: owner, declared_size: size, expected_part_sha256s: packed,
+      state: 'initiating', version: 1, upload_id: null });
+    expect(storage).toEqual({ intent_id: claimed.id, endpoint: config.endpoint, bucket: config.bucket, storage_epoch: 'fixture' });
+    expect(await row()).toMatchObject({ state: 'allocated', expected_part_sha256s: packed, upload_id: 'provider-only' });
+    expect([response.status, response.headers.get('cache-control'), await response.json()])
+      .toEqual([201, 'private, no-store', { id: claimed.id }]);
+  });
+
+it('rejects noncanonical bound requests without claiming or checking storage', async () => {
+  const { post, row, fetch, bindings } = await fixture(stagingOrigin);
+  const valid = boundBody(0, empty);
+  for (const body of [
+    boundBody(0, ''), boundBody(0, first.slice(1)), boundBody(0, `${first}a`), boundBody(0, first.toUpperCase()),
+    boundBody(0, `${first.slice(1)}g`), boundBody(0, first + last), boundBody(partBytes + 1, first),
+    boundBody(ceiling + 1, first.repeat(320)), boundBody(ceiling, first.repeat(321)), boundBody(1, [first]),
+    `{"expectedPartSha256s":"${first}","size":1}`, `{"size":1,"size":1,"expectedPartSha256s":"${first}"}`,
+    `{"size":1,"expectedPartSha256s":"${first}","expectedPartSha256s":"${first}"}`,
+    `{"size":1,"expectedPartSha256s":"${first}","extra":0}`, `{"size":1e0,"expectedPartSha256s":"${first}"}`,
+    `${valid}\n`, valid.slice(0, -1), '{"size":4}'.padEnd(65),
+  ]) expect((await post(body, { overrides: multipart })).status).toBe(400);
+  for (const length of [valid.length - 1, valid.length + 1, boundBody(ceiling, first.repeat(320)).length + 1]) {
+    expect((await post(valid, { headers: { 'content-length': String(length) }, overrides: multipart })).status).toBe(400);
+  }
+  expect(await row()).toBeNull();
+  expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each([[origin, 'member'], [stagingOrigin, 'member'], [stagingOrigin, 'owner']])(
+  'refuses bound requests outside multipart mode (%s, %s)', async (target, role) => {
+    const { post, row, fetch, bindings, db, owner } = await fixture(target, role);
+    try {
+      const flag = target === stagingOrigin && role === 'member' ? '0' : '1';
+      expect((await post(boundBody(0, empty), { overrides: { DRIVE_STAGING_INVITE_ACCEPTANCE: flag } })).status).toBe(400);
+      expect(await row()).toBeNull();
+      expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      if (role === 'owner') await db.prepare("UPDATE drive_principals SET role = 'member' WHERE id = ?").bind(owner).run();
+    }
+  });
+
 it('allocates from a browser JSON body and returns only the intent ID', async () => {
   const { post, row, fetch } = await fixture();
   fetch.mockImplementation(async () => new Response(
@@ -63,7 +124,7 @@ it.each([
       `<InitiateMultipartUploadResult><Key>${(await row()).object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`));
     const accepted = await post(JSON.stringify({ size: limit }), { overrides }), intent = await row();
     expect([accepted.status, await accepted.json()]).toEqual([201, { id: intent.id }]);
-    expect(intent).toMatchObject({ declared_size: limit, state: 'allocated' });
+    expect(intent).toMatchObject({ declared_size: limit, state: 'allocated', expected_part_sha256s: null });
     expect(fetch).toHaveBeenCalledOnce();
   } finally {
     if (role === 'owner') await db.prepare("UPDATE drive_principals SET role = 'member' WHERE id = ?").bind(owner).run();
@@ -132,12 +193,16 @@ it('rejects malformed, oversized and truncated JSON before claiming or dispatchi
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each(['cancellation', 'timeout'])('stops reading on %s without dispatching a parseable prefix', async (stop) => {
-  const { post, row, fetch } = await fixture();
+it.each([
+  ['legacy', 'cancellation'], ['legacy', 'timeout'], ['bound', 'cancellation'], ['bound', 'timeout'],
+])('stops reading a %s request on %s without dispatching a parseable prefix', async (mode, stop) => {
+  const bound = mode === 'bound';
+  const { post, row, fetch } = await fixture(bound ? stagingOrigin : origin);
   const controller = new AbortController();
   const cancel = vi.fn();
-  const body = new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode('{"size":4}')); }, cancel });
-  const response = post(body, { signal: controller.signal });
+  const prefix = bound ? boundBody(0, empty) : '{"size":4}';
+  const body = new ReadableStream({ start(stream) { stream.enqueue(new TextEncoder().encode(prefix)); }, cancel });
+  const response = post(body, { signal: controller.signal, overrides: bound ? multipart : {} });
   if (stop === 'cancellation') controller.abort();
   expect((await response).status).toBe(400);
   expect(cancel).toHaveBeenCalledOnce();
@@ -156,6 +221,35 @@ it('refuses unauthenticated, revoked and unconfigured HTTP requests before dispa
   expect((await post(body)).status).toBe(401);
   expect(await row()).toBeNull();
   expect(fetch).not.toHaveBeenCalled();
+});
+
+it('requires the real session and exact origin for bound requests', async () => {
+  const { post, request, revoke, row, fetch, bindings } = await fixture(stagingOrigin);
+  const body = boundBody(0, empty);
+  expect((await post(body, { req: request(origin), overrides: multipart })).status).toBe(403);
+  expect((await post(body, { req: request(stagingOrigin, ''), overrides: multipart })).status).toBe(401);
+  await revoke();
+  expect((await post(body, { overrides: multipart })).status).toBe(401);
+  expect(await row()).toBeNull();
+  expect(bindings.DRIVE_UPLOAD_VERIFIER.isQualified).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['late revocation', 'uncertain reply'])('keeps the bound journal on %s without returning an ID', async (outcome) => {
+  const { post, revoke, row, fetch } = await fixture(stagingOrigin);
+  const revoked = outcome === 'late revocation';
+  fetch.mockImplementation(async () => {
+    if (!revoked) return new Response('unknown outcome');
+    const { object_key: key } = await row();
+    await revoke();
+    return new Response(`<InitiateMultipartUploadResult><Key>${key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
+  });
+  const response = await post(boundBody(0, empty), { overrides: multipart });
+  expect([response.status, response.headers.get('cache-control'), await response.text()])
+    .toEqual([revoked ? 401 : 409, 'private, no-store', '']);
+  expect(await row()).toMatchObject({ version: 2, expected_part_sha256s: empty,
+    state: revoked ? 'allocated' : 'uncertain', upload_id: revoked ? 'provider-only' : null });
+  expect(fetch).toHaveBeenCalledOnce();
 });
 
 it('does not claim against qualified storage without a usable completion budget', async () => {
@@ -189,17 +283,21 @@ it('requires exact configured target and source origins, a live cookie and quali
 it.each([
   ['fixture', 'mutation', origin], ['fixture', 'dispatch', origin],
   ['staging invite', 'mutation', stagingOrigin], ['staging invite', 'dispatch', stagingOrigin],
-])('%s denies revocation at the %s boundary', async (_mode, boundary, requestOrigin) => {
-  const { db, owner, bindings, create, row, revoke, fetch } = await fixture(requestOrigin);
+  ['bound staging invite', 'mutation', stagingOrigin], ['bound staging invite', 'dispatch', stagingOrigin],
+])('%s denies revocation at the %s boundary', async (mode, boundary, requestOrigin) => {
+  const { db, owner, bindings, create, post, row, revoke, fetch } = await fixture(requestOrigin);
   const check = bindings.DRIVE_UPLOAD_VERIFIER.isQualified;
   check.mockImplementation(async () => {
     if (boundary === 'mutation') await revoke();
     else if (check.mock.calls.length === 2) await db.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = ?").bind(owner).run();
     return true;
   });
-  expect((await create(undefined, 4, { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' })).status).toBe(boundary === 'mutation' ? 401 : 503);
+  const bound = mode === 'bound staging invite';
+  const response = bound ? await post(boundBody(0, empty), { overrides: multipart }) : await create(undefined, 4, multipart);
+  expect(response.status).toBe(boundary === 'mutation' ? 401 : 503);
   expect(fetch).not.toHaveBeenCalled();
-  expect(await row()).toEqual(boundary === 'mutation' ? null : expect.objectContaining({ state: 'created', upload_id: null }));
+  expect(await row()).toEqual(boundary === 'mutation' ? null : expect.objectContaining({ state: 'created', upload_id: null,
+    expected_part_sha256s: bound ? empty : null }));
 });
 
 it('does not dispatch when the last qualification check consumes the deadline', async () => {

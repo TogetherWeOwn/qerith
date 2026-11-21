@@ -23,7 +23,11 @@ export function bindPrivateDeletionStorage(db: Database, env: StorageBindings, q
   const resolve = createS3ObjectDeleter(settings, epoch, {
     fetch: (input, init) => fetch(input, init), confirmsRemoval, timeoutMs: 5000
   });
-  return { settings, epoch, reconcile: (deletionId: string) => reconcilePrivateObjectDeletions(db, resolve, { deletionId }) };
+  return {
+    settings, epoch,
+    reconcile: (deletionId: string) => reconcilePrivateObjectDeletions(db, resolve, { deletionId }),
+    drain: () => reconcilePrivateObjectDeletions(db, resolve)
+  };
 }
 
 /** Fixtures must inject both transport and removal proof. */

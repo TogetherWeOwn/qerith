@@ -15,7 +15,7 @@ interface PrimaryDatabase {
   };
 }
 function hasPrimary(db: DriveAuthEnv['DB']): db is NonNullable<DriveAuthEnv['DB']> & PrimaryDatabase {
-  return !!db && 'withSession' in db && typeof db.withSession === 'function';
+  return typeof (db as Partial<PrimaryDatabase> | undefined)?.withSession === 'function';
 }
 type Row = { folderName: string; currentParentId: string | null; id: string | null; name: string | null };
 export type MoveDestinations = {
@@ -25,37 +25,34 @@ export type MoveDestinations = {
 
 // Use a fresh primary statement to bind the source, destination and cursor to
 // the same live principal. Unlike the folder document, this read honors no grants.
-// The ancestry walk fails closed if it can't prove a path to the root within the bound.
-const sql = `WITH RECURSIVE source AS (
-  SELECT e.owner_id, e.parent_id FROM drive_entries e
+// Carry the listing context through one CTE to stay within D1's subquery nesting limit.
+// Only a walk that reaches the root without crossing the source proves a destination.
+const sql = `WITH RECURSIVE walk(id, parent_id, depth, owner_id, currentParentId, folderName, afterName) AS (
+  SELECT f.id, f.parent_id, CASE WHEN f.id IS NULL THEN 0 ELSE 1 END,
+    e.owner_id, e.parent_id, COALESCE(f.name, 'My Drive'), COALESCE(cursor.name, '')
+  FROM drive_entries e
     JOIN drive_sessions s ON s.principal_id = e.owner_id
     JOIN drive_active_members m ON m.id = s.principal_id
+    LEFT JOIN drive_entries f ON f.id = ?3 AND f.owner_id = e.owner_id AND f.kind = 'folder'
+    LEFT JOIN drive_entries cursor ON cursor.id = ?4 AND cursor.owner_id = e.owner_id
+      AND cursor.parent_id IS ?3 AND cursor.kind = 'folder'
   WHERE e.id = ?2 AND s.token_hash = ?1 AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-), ancestors(id, parent_id, depth) AS (
-  SELECT f.id, f.parent_id, 1 FROM source JOIN drive_entries f
-    ON f.id = ?3 AND f.owner_id = source.owner_id AND f.kind = 'folder'
+    AND (?3 IS NULL OR f.id IS NOT NULL) AND (?4 IS NULL OR cursor.id IS NOT NULL)
   UNION ALL
-  SELECT f.id, f.parent_id, a.depth + 1 FROM ancestors a JOIN drive_entries f ON f.id = a.parent_id
-    JOIN source ON f.owner_id = source.owner_id
-  WHERE a.depth < ${maxDepth} AND f.kind = 'folder'
-), destination AS (
-  SELECT source.owner_id, source.parent_id AS currentParentId, COALESCE(f.name, 'My Drive') AS folderName
-  FROM source LEFT JOIN drive_entries f ON f.id = ?3
-  WHERE ?3 IS NULL OR (EXISTS (SELECT 1 FROM ancestors WHERE parent_id IS NULL)
-    AND NOT EXISTS (SELECT 1 FROM ancestors WHERE id = ?2))
-), boundary AS (
-  SELECT e.name FROM destination d JOIN drive_entries e ON e.id = ?4
-    AND e.owner_id = d.owner_id AND e.parent_id IS ?3 AND e.kind = 'folder'
-), children AS (
-  SELECT id, name FROM drive_entries
-  WHERE owner_id = (SELECT owner_id FROM destination) AND parent_id IS ?3 AND kind = 'folder'
-    AND name > COALESCE((SELECT name FROM boundary), '')
-    AND length(id) <= 128 AND id NOT GLOB '*[^A-Za-z0-9_-]*'
-  ORDER BY name LIMIT ${pageSize + 1}
+  SELECT f.id, f.parent_id, a.depth + 1, a.owner_id, a.currentParentId, a.folderName, a.afterName
+  FROM walk a JOIN drive_entries f ON f.id = a.parent_id AND f.owner_id = a.owner_id AND f.kind = 'folder'
+  WHERE a.depth < ${maxDepth} AND a.id <> ?2
 )
-SELECT d.folderName, d.currentParentId, c.id, c.name FROM destination d LEFT JOIN children c ON TRUE
-WHERE ?4 IS NULL OR EXISTS (SELECT 1 FROM boundary)
-ORDER BY c.name`;
+SELECT a.folderName, a.currentParentId, c.id, c.name
+FROM walk a LEFT JOIN drive_entries c ON c.id IN (
+  SELECT id FROM drive_entries INDEXED BY drive_entries_listing_asc
+  WHERE a.depth < ${maxDepth} AND owner_id = a.owner_id AND parent_id IS ?3 AND kind = 'folder'
+    AND name COLLATE BINARY > a.afterName
+    AND length(id) <= 128 AND id NOT GLOB '*[^A-Za-z0-9_-]*'
+  ORDER BY name COLLATE BINARY LIMIT ${pageSize + 1}
+)
+WHERE a.parent_id IS NULL AND a.id IS NOT ?2 AND (?4 IS NULL OR a.depth < ${maxDepth})
+ORDER BY c.name COLLATE BINARY`;
 
 export async function getMoveDestinations(request: Request, env: DriveAuthEnv): Promise<Response> {
   const url = new URL(request.url);

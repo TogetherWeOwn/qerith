@@ -8,7 +8,7 @@ import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor } from './shared-page';
 import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
-import { uploadAdmissionRoute } from './upload-admission';
+import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
 
 interface PreviewAssets {
   signIn: ReadonlySet<string>;
@@ -21,7 +21,7 @@ interface PreviewAssets {
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
 type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
+type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'upload-resume' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
   { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' } | { kind: 'move-destinations' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
   { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'shared' | 'shared-asset' | 'root'; deadline?: number };
@@ -71,7 +71,9 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
   if (invite && method === 'POST' && resource === 'invite' && action === undefined &&
       (id === 'present' || id === 'challenge' || id === 'enroll')) return { kind: 'invite-ceremony', step: id };
   if (isExactDownloadGet(method, path)) return { kind: 'download' };
-  return uploadAdmissionRoute(request, url) ? { kind: 'upload' } : null;
+  const upload = uploadAdmissionRoute(request, url);
+  if (upload === uploadResumeRoute) return invite ? { kind: 'upload-resume' } : null;
+  return upload ? { kind: 'upload' } : null;
 }
 
 function deny(status: number): Response {
@@ -91,9 +93,12 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const target: Target | null = readGrant ? { kind: 'read-grant' } : invite && ownerLifecycleRoute(request, url)
     ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite, admitsSharedListing(env));
   if (!target) return deny(404);
+  if (target.kind === 'upload-resume') {
+    if (!allowsStagingInviteSite(request)) return deny(403);
+    if (!isBodylessUploadResume(request)) return deny(400);
+  }
   if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant' || target.kind === 'metadata-write' ||
-      target.kind === 'move-destinations') &&
-      !allowsStagingInviteSite(request)) return deny(403);
+      target.kind === 'move-destinations') && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
     if (request.url !== stagingOrigin + pathname) return deny(404);
@@ -121,7 +126,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       if (target.kind === 'shared' || target.kind === 'shared-asset') {
         return session.role === 'member' ? { ...target, deadline } : deny(404);
       }
-      const memberRoute = target.kind === 'upload'
+      const memberRoute = target.kind === 'upload' || target.kind === 'upload-resume'
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
         : target.kind === 'read-grant' || invite && (target.kind === 'root' || target.kind === 'root-data' ||
           target.kind === 'private-asset' || target.kind === 'download' ||
@@ -180,6 +185,7 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
     case 'root':
     case 'download':
     case 'upload':
+    case 'upload-resume':
     case 'owner-lifecycle':
     case 'people':
     case 'folder':
