@@ -177,6 +177,7 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
+The offline composer requires every case to pass and binds evidence to the exact invocation.
 These are ordering checks with offline callbacks, not provider evidence. The
 qualification workflow still has no caller and cannot issue a receipt.
 

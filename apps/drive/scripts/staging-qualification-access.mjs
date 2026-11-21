@@ -8,10 +8,52 @@ const isId = value => typeof value === 'string' && id.test(value);
 const isFile = file => isId(file?.id) && Buffer.isBuffer(file.bytes) && file.bytes.length > 0 && file.bytes.length <= 4096;
 const require = condition => { if (!condition) throw new Error(); };
 
-// Unwired. withFixtures must await one callback inside the exact attempt's scope
-// and drain on abort. It provides three isolated, initially signed-out clients,
-// a seeded owner passkey and two unshared files under that scope (memberFile
-// provisions the invitee's file after sign-in and binds it to that membership).
+async function observeFixtures(withFixtures, identity, signal, observe) {
+  const controller = new AbortController();
+  const active = AbortSignal.any([signal, controller.signal]);
+  let open = true, invoking = true, invocations = 0, settled = false, work, drained;
+  const close = () => {
+    if (!open) return;
+    open = false;
+    drained = settled && invocations === 1;
+    if (!drained) controller.abort();
+  };
+  try {
+    const result = withFixtures(identity, active, fixtures => {
+      const accepted = open && ++invocations === 1;
+      const attempt = (async () => {
+        require(accepted);
+        // Let an already-settled adapter close admission before a queued callback starts I/O.
+        if (!invoking) await Promise.resolve();
+        require(open);
+        active.throwIfAborted();
+        try { await observe(fixtures, active); }
+        finally { settled = true; }
+      })();
+      attempt.catch(() => {}); // A broken adapter may discard the promise.
+      if (accepted) work = attempt;
+      return attempt;
+    });
+    invoking = false;
+    // Subscribe directly so promise assimilation cannot delay closing admission.
+    const completion = Promise.withResolvers();
+    Promise.prototype.then.call(result,
+      () => { close(); completion.resolve(); },
+      error => { close(); completion.reject(error); });
+    await completion.promise;
+  } finally {
+    close();
+    // Do not let lifecycle cleanup race an observation the adapter abandoned.
+    await work?.catch(() => {});
+  }
+  if (drained) await work;
+  return drained;
+}
+
+// Unwired. withFixtures returns a native Promise, awaits one callback inside the
+// exact attempt's scope, and drains on abort. It provides three initially signed-out,
+// isolated clients, a seeded owner passkey and two unshared files under that scope.
+// memberFile provisions the invitee's file after sign-in and binds it to that membership.
 // Browser methods drive normal WebAuthn sign-in/enrollment and return observed
 // HTTP responses as bounded Response snapshots, not verdicts. Preserve redirect
 // and Set-Cookie presence, not cookie values. The signed-out client uses an
@@ -21,9 +63,7 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
   try {
     require(context.prefix === qualificationPrefix(context) && typeof context.sha === 'string' && /^[0-9a-f]{40}$/.test(context.sha));
     return await runQualificationPhase(async (identity, active) => {
-      let invocations = 0, proved = false;
-      await withFixtures(identity, active, async fixtures => {
-        require(++invocations === 1);
+      const drained = await observeFixtures(withFixtures, identity, active, async (fixtures, active) => {
         const { owner, member, signedOut, ownerFile, memberFile } = fixtures;
         require(new Set([owner, member, signedOut]).size === 3 && isFile(ownerFile));
         const expect = (response, status) => {
@@ -95,10 +135,9 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
         await empty(await request(member, filePath(file)), 401);
         await signIn(member, 403, 'revoked');
         await read(owner, ownerFile);
-        proved = true;
       });
       check = 'fixture-scope';
-      require(proved && invocations === 1);
+      require(drained);
       return { 'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
         'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass' };
     }, context, signal, 90_000);

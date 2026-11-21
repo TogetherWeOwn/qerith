@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { exerciseQualificationAccess } from './staging-qualification-access.mjs';
+
+const test = import.meta.main ? nodeTest : () => {};
 
 const context = { sha: 'a'.repeat(40), runId: '4', attempt: '2', prefix: 'drive-qualification/full-v0/4/2/' };
 const token = 'x'.repeat(43);
@@ -16,7 +19,7 @@ const bytes = file => reply(200, file.bytes, { 'content-length': '2' });
 const login = verify => ({ challenge: reply(200), verify });
 const accepted = () => login(reply(204, null, { 'set-cookie': 'present' }));
 
-function fixture(change = () => {}) {
+export function fixture(change = () => {}, expectedContext = context) {
   const transcript = [
     ['owner HEAD /', reply(401)], ['owner sign-in', accepted()],
     ['owner HEAD /', reply(200)], [`owner GET ${first}`, bytes(ownerFile)],
@@ -32,7 +35,7 @@ function fixture(change = () => {}) {
   ];
   let closed = false;
   const withFixtures = async (scope, signal, run) => {
-    assert.deepEqual(scope, context);
+    assert.deepEqual(scope, expectedContext);
     const step = (command, active, input) => {
       assert.equal(active, signal);
       const [expected, observation, args] = transcript.shift();
@@ -61,7 +64,9 @@ function fixture(change = () => {}) {
 
 test('all six access cases require the exact isolated browser transcript', async () => {
   const scope = fixture();
-  assert.deepEqual(await exerciseQualificationAccess(context, undefined, scope), {
+  assert.deepEqual(await exerciseQualificationAccess(context, undefined, {
+    async withFixtures(...args) { await Promise.resolve(); return scope.withFixtures(...args); },
+  }), {
     'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
     'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass',
   });
@@ -104,6 +109,21 @@ test('a settled duplicate callback invalidates a complete transcript', async () 
   assert.equal(scope.transcript.length, 0);
   assert.equal(scope.closed(), true);
 });
+
+const promiseTypes = { native: Promise, subclass: class extends Promise {}, 'cross-realm': runInNewContext('Promise') };
+for (const [kind, PromiseType] of Object.entries(promiseTypes)) for (const outcome of ['resolve', 'reject']) {
+  test(`a queued first callback after ${kind} promise ${outcome} makes no access request`, async () => {
+    const scope = fixture(), late = Promise.withResolvers();
+    await assert.rejects(exerciseQualificationAccess(context, undefined, {
+      withFixtures(...args) {
+        queueMicrotask(() => late.resolve(scope.withFixtures(...args).then(() => false, () => true)));
+        return PromiseType[outcome]();
+      },
+    }), /fixture-scope/);
+    assert.equal(await late.promise, true);
+    assert.equal(scope.transcript[0][0], 'owner HEAD /');
+  });
+}
 
 test('scope mismatch, zero observations, cancellation and adapter errors cannot yield results', async () => {
   const fail = { message: 'Qualification access is unverified (fixture-scope).' };
