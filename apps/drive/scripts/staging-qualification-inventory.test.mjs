@@ -173,7 +173,7 @@ function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
   };
 }
 
-for (const fault of ['admission', 'retention', 'default retention', 'd1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
+for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
   const { context, trace, env, cwd, reads, state } = fixture(t);
   const noRetention = ['retention', 'default retention'].includes(fault);
   state.recordRetention = !noRetention;
@@ -182,7 +182,8 @@ for (const fault of ['admission', 'retention', 'default retention', 'd1', 'worke
     expiresAt: String(Date.now() + 25 * 60_000) };
   const unused = () => assert.fail('Unexpected app adapter');
   const unexpectedNetwork = t.mock.method(globalThis, 'fetch', () => assert.fail('Unexpected network request'));
-  const nativeRequest = fault === 'worker' || !fault ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
+  const reachesWorker = ['retention after D1', 'worker', null].includes(fault);
+  const nativeRequest = reachesWorker ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
   const identity = { sha: context.sha, runId: context.runId, attempt: context.attempt };
   const { expiresAt, version } = candidate;
   const inputs = { ...reads, readFileFixtures: unused, openTransferClient: unused, openDeletion: unused,
@@ -232,9 +233,15 @@ for (const fault of ['admission', 'retention', 'default retention', 'd1', 'worke
     },
   };
   const run = await createQualificationLifecycle(env, cwd, inputs, fault === 'default retention' ? undefined : {
-    upload() { trace.push('upload'); return candidate; },
+    upload() {
+      trace.push('upload');
+      if (fault === 'retention after upload') state.recordRetention = false;
+      return candidate;
+    },
     async migrate({ recordRecovery }) {
-      await recordRecovery({ bookmark: 'offline_bookmark' }); trace.push('migrate');
+      await recordRecovery({ bookmark: 'offline_bookmark' });
+      if (fault === 'retention after D1') state.recordRetention = false;
+      trace.push('migrate');
     },
   });
   assert.deepEqual(trace, []);
@@ -245,8 +252,10 @@ for (const fault of ['admission', 'retention', 'default retention', 'd1', 'worke
     'activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'];
   assert.deepEqual(trace.filter(step => milestones.includes(step)), ['admission',
     ...(fault === 'admission' ? [] : ['estate']),
-    ...(fault === 'admission' || noRetention ? [] : ['upload', 'd1 PUT', 'd1 GET']),
-    ...(!fault || fault === 'worker' ? ['migrate', 'worker PUT', 'worker GET'] : []),
+    ...(fault === 'admission' || noRetention ? [] : ['upload']),
+    ...(fault === 'admission' || noRetention || fault === 'retention after upload' ? [] : ['d1 PUT', 'd1 GET']),
+    ...(reachesWorker ? ['migrate'] : []),
+    ...(reachesWorker && fault !== 'retention after D1' ? ['worker PUT', 'worker GET'] : []),
     ...(!fault ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
     ...(fault === 'admission' ? [] : ['estate'])]);
   const cleanup = fault ? trace : trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
