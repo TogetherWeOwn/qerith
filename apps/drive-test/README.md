@@ -77,3 +77,18 @@ expectations independently of rank generation. This tests a candidate seek
 over precomputed fixture keys, not deployed metadata or locale key generation,
 authorized counts, cursor validation, or route rendering. It is not evidence
 for the deployed Worker/D1 CPU or three-second first-render target.
+
+## K2 metadata backfill fixture
+
+In the prepared project, run `npm test -- test/k2-metadata-backfill.test.mjs`.
+This test installs only a candidate side table; the schema is not in the
+migration set. Backfill uses the primary-key order and visits at most 200
+entries per call. Checkpoint only after the D1 batch commits; repeating a page
+preserves existing rows. Legacy modified time stays null. Legacy display type
+is structural File/Folder, not MIME or a claim based on the filename. Logical
+size is known only if it matches a pinned publication; this is not a storage
+availability or download authorization check.
+
+This is not an online migration. Before activation, establish atomic writer
+maintenance and reconcile entries inserted behind a backfill checkpoint. Old
+readers use only `drive_entries`; the backfill does not rewrite that table.
