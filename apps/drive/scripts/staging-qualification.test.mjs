@@ -103,9 +103,8 @@ const canonicalD1 = JSON.stringify({ schema: 'drive-staging-recovery.v1', kind: 
 test('recovery reader rejects copied, malformed, oversized and cancelled records', async () => {
   for (const body of [undefined, '{', 'x'.repeat(2049), canonicalD1.replace('"3"', '"2"'),
     canonicalD1.replace('"182"', '"183"'), canonicalD1.replace(recoverySource.sha, 'b'.repeat(40)),
-    canonicalD1.replace('recovery.v1', 'recovery.v2'),
-    canonicalD1.replace('"d1"', '"worker"'), canonicalD1.replace('{', '{"unexpected":true,'),
-    canonicalD1.replace('{', '{"kind":"d1",')]) {
+    canonicalD1.replace('recovery.v1', 'recovery.v2'), canonicalD1.replace('"d1"', '"worker"'),
+    `{"unexpected":true,${canonicalD1.slice(1)}`, `{"kind":"d1",${canonicalD1.slice(1)}`]) {
     await assert.rejects(readQualificationRecoveryRecord(recoverySource, 'd1', { read: () => body }), invalidRecord);
   }
   const controller = new AbortController();
@@ -221,7 +220,8 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
   assert.throws(() => name({ ...evidence, results: { ...results, 'fixture-only': 'pass' } }), /must pass/);
 });
 
-function lifecycle(t, failure, controller = new AbortController()) {
+function lifecycle(t, failure, driftKind) {
+  const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
     GITHUB_WORKFLOW_REF: 'TogetherWeOwn/qerith/.github/workflows/drive-staging-qualification.yml@refs/heads/main' });
@@ -232,7 +232,23 @@ function lifecycle(t, failure, controller = new AbortController()) {
     events.push(name);
     return !failures.includes(name);
   };
-  const candidate = { version: 'candidate' };
+  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const candidate = { version, expiresAt, previousVersion, previousDeployment };
+  const stored = new Map();
+  const writeRecovery = qualificationRecoveryWriter({ ...recoverySource, sha: env.TESTED_SHA }, {
+    create(key, body) {
+      step(`create-${JSON.parse(body).kind}`);
+      if (stored.has(key)) return false;
+      stored.set(key, body);
+      return true;
+    },
+    read(key) {
+      const body = stored.get(key);
+      const { kind } = JSON.parse(body);
+      step(`read-${kind}`);
+      return kind === driftKind ? `${body}\n` : body;
+    },
+  });
   const ops = {
     assertFullV0: () => step('full-v0'),
     inventory({ phase, sha }, signal) {
@@ -241,14 +257,11 @@ function lifecycle(t, failure, controller = new AbortController()) {
       if (failure === 'cancel-after-restore' && phase === 'after') controller.abort();
       return step(`inventory-${phase}`);
     },
-    async recordRecovery({ kind, ...data }) {
-      await Promise.resolve();
-      assert.equal(data.prefix, prefix);
-      assert.equal(kind === 'd1' ? data.bookmark : data.previousVersion, kind === 'd1' ? 'bookmark' : 'baseline');
-      return step(`record-${kind}`);
+    recordRecovery(record, signal) {
+      return step(`record-${record.kind}`) && writeRecovery(record, signal);
     },
-    async exercise({ version, prefix: keyPrefix }, signal) {
-      assert.equal(version, 'candidate');
+    async exercise({ version: activeVersion, prefix: keyPrefix }, signal) {
+      assert.equal(activeVersion, version);
       assert.equal(keyPrefix, prefix);
       step('exercise');
       if (failure === 'cancel') controller.abort();
@@ -258,9 +271,9 @@ function lifecycle(t, failure, controller = new AbortController()) {
       if (failure === 'exercise') throw new Error('Case failed');
       return { 'passkey-positive': 'pass' };
     },
-    cleanup({ prefix: keyPrefix, version }, signal) {
+    cleanup({ prefix: keyPrefix, version: activeVersion }, signal) {
       assert.equal(keyPrefix, prefix);
-      assert.equal(version, 'candidate');
+      assert.equal(activeVersion, version);
       assert.equal(signal.aborted, false);
       return step('cleanup');
     },
@@ -278,7 +291,7 @@ function lifecycle(t, failure, controller = new AbortController()) {
     probe: () => step('probe'),
     async worker({ upload, recordRecovery, probe, exercise, cleanup }, _env, _cwd, signal) {
       assert.equal(upload, candidate);
-      await recordRecovery({ previousVersion: 'baseline' });
+      await recordRecovery(candidate);
       step('activate');
       try {
         if (!probe()) throw new Error('Readiness failed');
@@ -297,8 +310,9 @@ function lifecycle(t, failure, controller = new AbortController()) {
   return { events, run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
 }
 
-const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'migrate', 'record-worker',
-  'activate', 'probe', 'exercise', 'exercise-settled', 'cleanup', 'restore', 'inventory-after'];
+const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'create-d1', 'read-d1', 'migrate',
+  'record-worker', 'create-worker', 'read-worker', 'activate', 'probe', 'exercise', 'exercise-settled',
+  'cleanup', 'restore', 'inventory-after'];
 
 test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
   const { run, events } = lifecycle(t);
@@ -322,6 +336,14 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
   }
 });
 
+test('qualification lifecycle blocks D1 apply and Worker activation on exact-record readback drift', async t => {
+  for (const kind of ['d1', 'worker']) {
+    const { run, events } = lifecycle(t, undefined, kind);
+    await assert.rejects(run(), invalidRecord);
+    assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(`read-${kind}`) + 1), 'inventory-after']);
+  }
+});
+
 test('qualification failures and cancellation suppress the result without skipping recovery', async t => {
   for (const [failure, error] of [
     ['exercise', /Case failed/], ['cancel', { name: 'AbortError' }], ['cleanup', /prefix cleanup is unverified/],
@@ -333,7 +355,7 @@ test('qualification failures and cancellation suppress the result without skippi
   }
   const { run, events } = lifecycle(t, 'probe');
   await assert.rejects(run(), /Readiness failed/);
-  assert.deepEqual(events, [...successOrder.slice(0, 8), 'restore', 'inventory-after']);
+  assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf('probe') + 1), 'restore', 'inventory-after']);
 });
 
 test('final inventory failure preserves Worker rollback reconciliation', async t => {
