@@ -263,6 +263,10 @@ against a live account. If the provider omits either count even when requested,
 qualification fails closed. This does not cover recordings, billing, or other
 accounts and does not replace the estate or app-fixture reader.
 
+The native R2 bucket and lifecycle, Durable Objects, Containers, and Stream
+inventory reads reject duplicate JSON fields, even when the last value would
+otherwise satisfy the check.
+
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
 requires more than 20 minutes left for deployment, readiness, cases and cleanup.

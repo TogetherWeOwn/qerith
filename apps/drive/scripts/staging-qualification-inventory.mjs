@@ -33,7 +33,7 @@ function hasDuplicateMembers(text) {
   return false;
 }
 
-async function boundedProviderDocument(response, rejectDuplicates = false) {
+async function boundedProviderDocument(response) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -48,7 +48,7 @@ async function boundedProviderDocument(response, rejectDuplicates = false) {
   const bytes = buffer.subarray(0, size);
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   const parsed = JSON.parse(text);
-  if (rejectDuplicates && hasDuplicateMembers(text)) throw unverified();
+  if (hasDuplicateMembers(text)) throw unverified();
   return { bytes, parsed };
 }
 
@@ -123,7 +123,7 @@ async function assertNoContainerApplications(account, token, request, signal) {
       await response.body?.cancel();
       throw unverified();
     }
-    const { parsed } = await boundedProviderDocument(response, true);
+    const { parsed } = await boundedProviderDocument(response);
     const { success, errors, messages, result, result_info: page } = parsed;
     if (success !== true || !Array.isArray(errors) || errors.length ||
         (Object.hasOwn(parsed, 'messages') && (!Array.isArray(messages) || messages.length)) ||
@@ -145,7 +145,7 @@ async function assertNoStreamInputs(account, token, request, signal) {
       await response.body?.cancel();
       throw unverified();
     }
-    const { parsed } = await boundedProviderDocument(response, true);
+    const { parsed } = await boundedProviderDocument(response);
     const { success, errors, messages, result } = parsed;
     if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
         Object.keys(parsed).length !== 4 || !isDeepStrictEqual(result, { liveInputs: [], range: 0, total: 0 })) {
