@@ -47,7 +47,7 @@
     return response.type === 'loaded' ? response.data.listing : null;
   }
 
-  async function refresh(reason?: 'folder' | 'rename' | 'move') {
+  async function refresh(reason?: 'folder' | 'entry') {
     if (staging && !metadataWriteAllowed) {
       await invalidate('drive:root-listing');
       await tick();
@@ -61,7 +61,7 @@
       .then((response): Promise<RootListingResult> | null => response.ok ? response.json() : null);
     // preloadData cannot be aborted; only a read that wins the deadline may update the list.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const next = reason === 'rename' || reason === 'move' ? await Promise.race([read, new Promise<null>(resolve => {
+    const next = reason ? await Promise.race([read, new Promise<null>(resolve => {
       timer = setTimeout(() => resolve(null), 5_000);
     })]).finally(() => clearTimeout(timer)) : await read;
     if (version < appliedVersion) return;
@@ -79,9 +79,10 @@
     }
   }
 
-  async function folderCreated(id: string, name: string, close: () => void) {
-    await refresh('folder').then(() => { receipt = { id, name, loaded: result.status === 'ok' }; },
-      () => { receipt = { id, name, loaded: false }; });
+  async function folderCreated(id: string, name: string, close?: () => void) {
+    const loaded = await refresh('folder').then(() => result.status === 'ok', () => false);
+    receipt = { id, name, loaded };
+    if (!close) return; // The picker owns focus and dismissal.
     await tick();
     close();
     if (createdVisible) list?.focusCreatedRow(id);
@@ -102,7 +103,7 @@
 
   async function renamed(id: string, name: string, close: () => void) {
     const index = items.findIndex(item => item.id === id);
-    try { await refresh('rename'); renameRefreshFailed = false; }
+    try { await refresh('entry'); renameRefreshFailed = false; }
     catch { renameRefreshFailed = result.status !== 'invalid-page'; }
     const item = items.find(item => item.id === id);
     const detail = renameRefreshFailed ? ' Refresh My Drive to see it.' : !item ? ' It isn’t on this page.' :
@@ -125,7 +126,7 @@
   async function moved(id: string, destination: { id: string | null; name: string }, close: () => void) {
     const index = items.findIndex(item => item.id === id);
     const neighbors = index < 0 ? [] : [...items.slice(index + 1), ...items.slice(0, index).reverse()];
-    try { await refresh('move'); }
+    try { await refresh('entry'); }
     catch { if (result.status === 'ok') movedButNotRefreshed = [...movedButNotRefreshed, id]; }
     moveReceipt = undefined; // Announce repeated moves to the same destination.
     await tick();
@@ -154,7 +155,7 @@
     <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if metadataWriteAllowed}
-    <MoveDialog bind:this={moveDialog} onmoved={moved} onreturn={returnToRow} />
+    <MoveDialog bind:this={moveDialog} onrootcreated={folderCreated} onmoved={moved} onreturn={returnToRow} />
     <NameDialog bind:this={nameDialog} available={result.status === 'ok'} {items} oncreated={folderCreated} onrenamed={renamed} onreturn={returnToRow} />
   {/if}
 </header>

@@ -6,10 +6,10 @@
   import { entryChangePath } from './metadata-id';
   import type { MoveDestinations } from './server/move-destinations';
   import './dialog.css';
-
   type Folder = { id: string | null; name: string };
   type Entry = { id: string; name: string; kind: 'folder' | 'file' };
-  let { onmoved, onreturn }: {
+  let { onrootcreated, onmoved, onreturn }: {
+    onrootcreated: (id: string, name: string) => Promise<void>;
     onmoved: (id: string, folder: Folder, close: () => void) => Promise<void>;
     onreturn: (id: string) => void;
   } = $props();
@@ -91,6 +91,7 @@
   }
 
   async function created(id: string, name: string, close: () => void) {
+    if (folder.id === null) await onrootcreated(id, name);
     close();
     await browse([...trail, { id, name }]);
   }
@@ -111,13 +112,11 @@
         if (row?.id !== entry.id || row.parentId !== destination.id || row.kind !== entry.kind) throw new Error('Unexpected move receipt');
         await onmoved(entry.id, destination, () => dialog.close());
       } else if (response.status === 409) {
-        failure = `There's already ${entry.kind === 'folder' ? 'a folder' : 'a file'} called “${entry.name}” in ${destination.name}. Rename one of them first.`;
-      } else if (response.status === 404) {
+        failure = `There's already an item called “${label(entry.name)}” in ${label(destination.name)}. Rename one of them first.`;
+      } else if ([401, 403, 404].includes(response.status)) {
         invalidated = true;
-        failure = destination.id === null ? 'This item can’t be moved. Refresh My Drive.' : gone;
-      } else if (response.status === 401 || response.status === 403) {
-        invalidated = true;
-        failure = response.status === 401 ? 'Sign in again before moving this item.' : 'This item can’t be moved. Refresh My Drive.';
+        failure = response.status === 401 ? 'Sign in again before moving this item.' :
+          response.status === 404 && destination.id !== null ? gone : 'This item can’t be moved. Refresh My Drive.';
       } else throw new Error('Move unconfirmed');
     } catch { uncertain = true; failure = unknown; }
     finally { saving = false; }

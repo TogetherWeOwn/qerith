@@ -155,6 +155,7 @@ try {
   page.off('request', countNavigation);
   assert.equal(navigations, 0, 'upload refreshed the row without navigation');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
+  assert.equal(await page.getByRole('button', { name: `Actions for ${file.name}` }).count(), 0, 'Move is default-off');
   const [download] = await Promise.all([page.waitForEvent('download'), row.press('Enter')]);
   assert.equal(download.suggestedFilename(), file.name);
   assert.deepEqual(await readFile(await download.path()), file.buffer);
@@ -298,7 +299,10 @@ try {
   const intercept = (path, handler) => overrides.set(path, handler);
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
-  await proveMove(page, { origin, DB, intercept });
+  // Paging evidence is complete; make the published file visible on the first page.
+  await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
+  page.setDefaultTimeout(10_000);
+  await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
