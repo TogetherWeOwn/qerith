@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
+import { stagingOrigin } from '../src/lib/server/request-auth';
+import { loadFolder } from '../src/routes/f/[folderId]/load-folder';
 import { openFolderMove } from '../src/routes/f/[folderId]/move-action';
 
 const request = (query = '') => new Request(`https://example.test/f/private?${query}`);
@@ -105,6 +107,35 @@ test('only projects a positive download hint on a canonical file ID', async () =
     { ...file, downloadable: true },
     ...entries.slice(1).map(({ id, name, kind }) => ({ id, name, kind })),
   ]);
+});
+
+test('nested loader enables Move for owners and members only in invite mode', async () => {
+  const params = { folderId: 'private' };
+  const folder = { id: params.folderId, name: 'Receipts', kind: 'folder' };
+  const child = { id: 'nested', name: 'Nested', kind: 'folder' };
+  const statement = {
+    bind: () => statement,
+    first: async <T>() => folder as T,
+    all: async <T>() => ({ results: [{ id: null, owned: 1 }, child] as T[] }),
+  };
+  const prepare = () => statement;
+  const DB = { prepare, withSession: test.mock.fn((_mode: 'first-primary') => ({ prepare })) };
+  for (const role of ['owner', 'member'] as const) {
+    for (const invite of [false, true]) {
+      const origin = invite ? stagingOrigin : 'https://drive.example.test';
+      const load = loadFolder({
+        DB, DRIVE_ORIGIN: origin,
+        ...(invite ? { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' } : { DRIVE_SIGN_IN_FIXTURE: '1' }),
+      });
+      const { result } = await load({
+        request: new Request(`${origin}/f/private`), params, setHeaders: () => {},
+        locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
+      });
+      assert.equal(result.status, 'ok');
+      assert.deepEqual(result.folder.entries, [invite ? { ...child, movable: true } : child], `${role}, invite=${invite}`);
+    }
+  }
+  assert.deepEqual(DB.withSession.mock.calls.map(call => call.arguments), Array(8).fill(['first-primary']));
 });
 
 test('dispatches Move only for addressable rows in an owned folder with writes enabled', async () => {
