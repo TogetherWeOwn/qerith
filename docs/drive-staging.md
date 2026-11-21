@@ -221,9 +221,12 @@ The generated Worker rejects new requests at or after the deadline before app,
 asset or readiness routing. This bounds candidate request admission without a
 runner, but does not stop in-flight work, revoke issued storage URLs, restore the
 previous deployment, or clean up D1. Neither existing staging workflow uses it.
-Before wiring the protected caller, reconcile its pre-activation budget with
-this window: D1 command timeouts alone can consume the five-minute margin,
-before accounting for upload, readback and recovery recording.
+The offline lifecycle gives D1 only the time left after upload and after
+reserving 21 minutes for Worker checks, recovery recording, activation and
+cases. D1 apply starts only if its full two-minute command budget and a
+45-second post-apply ledger read fit. A timeout stops activation and drains
+the local subprocess; it does not prove that D1 rolled back. Reconcile any
+uncertain D1 mutation before retrying.
 
 The unwired Worker recovery adapter reads the pinned staging config from the
 lost attempt's main-ancestor SHA. It verifies the recorded candidate against

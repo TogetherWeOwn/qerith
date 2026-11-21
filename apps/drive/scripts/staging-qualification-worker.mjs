@@ -18,9 +18,16 @@ const probeBudget = 30_000;
 const caseBudget = 18 * 60_000;
 const cleanupBudget = 60_000;
 
+const activationBudget = 2 * apiTimeout + probeBudget + caseBudget + cleanupBudget;
+
+export function qualificationMigrationTimeLeft(expiresAt, recordBudget) {
+  // After migrations: current deployment, candidate bindings, recovery record,
+  // and final deployment check precede the activation write and readback.
+  return qualificationTimeLeft(expiresAt) - activationBudget - 3 * apiTimeout - recordBudget;
+}
+
 function requireActivationWindow(expiresAt) {
-  // Deployment write and readback also consume part of the immutable window.
-  if (qualificationTimeLeft(expiresAt) <= 2 * apiTimeout + probeBudget + caseBudget + cleanupBudget) {
+  if (qualificationTimeLeft(expiresAt) <= activationBudget) {
     throw new Error('Staging candidate has insufficient time left to activate.');
   }
 }

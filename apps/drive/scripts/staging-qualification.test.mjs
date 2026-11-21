@@ -436,7 +436,10 @@ function lifecycle(t, failure, driftKind) {
     events.push(name);
     return !failures.includes(name);
   };
-  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const { version, previousVersion, previousDeployment } = workerRecord;
+  let now = Date.now();
+  if (failure === 'clock jump') t.mock.method(Date, 'now', () => now);
+  const expiresAt = String(now + (failure === 'short window' ? 20 : 25) * 60_000);
   const candidate = { version, expiresAt, previousVersion, previousDeployment };
   const stored = new Map();
   const writeRecovery = qualificationRecoveryWriter({ ...recoverySource, sha: env.TESTED_SHA }, {
@@ -489,6 +492,7 @@ function lifecycle(t, failure, driftKind) {
     async migrate({ recordRecovery }) {
       await recordRecovery({ bookmark: 'bookmark' });
       step('migrate');
+      if (failure === 'clock jump') now += 5 * 60_000;
       return { bookmark: 'bookmark' };
     },
     probe: () => step('probe'),
@@ -510,7 +514,7 @@ function lifecycle(t, failure, driftKind) {
       }
     },
   };
-  return { events, stored, testedSha: env.TESTED_SHA,
+  return { events, stored, testedSha: env.TESTED_SHA, expiresAt,
     run: () => runQualificationLifecycle(ops, env, cwd, controller.signal, adapters) };
 }
 
@@ -526,12 +530,12 @@ test('qualification lifecycle loads on plain Node without the test loader', () =
 });
 
 test('qualification lifecycle rejects a fabricated pass map after recording recovery', async t => {
-  const { run, events, stored, testedSha } = lifecycle(t);
+  const { run, events, stored, testedSha, expiresAt } = lifecycle(t);
   await assert.rejects(run(), /case evidence/);
   assert.deepEqual(events, successOrder);
   const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
   const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
-  const { version, expiresAt, previousVersion, previousDeployment } = workerRecord;
+  const { version, previousVersion, previousDeployment } = workerRecord;
   assert.deepEqual(payloads, [
     { ...scope, kind: 'd1', bookmark: 'bookmark' },
     { ...scope, kind: 'worker', version, expiresAt, previousVersion, previousDeployment },
@@ -556,6 +560,16 @@ test('qualification lifecycle rejects missing admission, a stale baseline and un
     await assert.rejects(run(), error);
     assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(failure) + 1),
       ...(finalInventory ? ['inventory-after'] : [])]);
+  }
+});
+
+test('qualification preserves the activation window before and after D1', async t => {
+  for (const [failure, lastStep] of [['short window', 'upload'], ['clock jump', 'migrate']]) {
+    await t.test(failure, async t => {
+      const { run, events } = lifecycle(t, failure);
+      await assert.rejects(run(), /insufficient time left/);
+      assert.deepEqual(events, [...successOrder.slice(0, successOrder.indexOf(lastStep) + 1), 'inventory-after']);
+    });
   }
 });
 

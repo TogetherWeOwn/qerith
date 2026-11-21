@@ -66,9 +66,9 @@ esac
   const file = (name, contents) => writeFileSync(join(app, name), contents);
   const calls = () => readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').filter(Boolean);
   const run = ({ overrides, bookmark = '{"bookmark":"bookmark-17"}', before = rows(first),
-    after = rows(first, second), signal, recordRecovery = () => {} } = {}) => {
+    after = rows(first, second), signal, recordRecovery = () => {}, timeLeft = () => 240_000 } = {}) => {
     for (const [name, text] of Object.entries({ calls: '', bookmark, before, after })) writeFileSync(join(root, name), text);
-    return applyQualificationMigrations({ recordRecovery }, { ...env, ...overrides }, relative(process.cwd(), root), signal);
+    return applyQualificationMigrations({ recordRecovery, timeLeft }, { ...env, ...overrides }, relative(process.cwd(), root), signal);
   };
   return { app, sha, file, calls, run, failApply: () => writeFileSync(join(root, 'fail-apply'), ''),
     localList: () => readFileSync(join(root, 'local-list'), 'utf8') };
@@ -104,6 +104,16 @@ test('does not initialize the ledger while the recovery writer is pending or aft
   writer.reject(new Error('recovery write failed'));
   await outcome;
   assert.deepEqual(calls(), [bookmarkCommand]);
+});
+
+test('stops D1 writes if the budget cannot cover the required ledger readback', async t => {
+  const { calls, run } = fixture(t);
+  await assert.rejects(run({ timeLeft: () => calls().length === 1 ? 0 : 60_000 }), /migration time budget/);
+  assert.deepEqual(calls(), [bookmarkCommand]);
+  await assert.rejects(run({ timeLeft: () => calls().length >= 3 ? 164_999 : 240_000 }), /migration time budget/);
+  assert.deepEqual(calls(), [bookmarkCommand, list, ledger]);
+  await run({ timeLeft: () => calls().length >= 3 ? 165_000 : 240_000 });
+  assert.deepEqual(calls(), [bookmarkCommand, list, ledger, apply, ledger]);
 });
 
 test('uses the private SQL and config even if the checkout changes after validation', async t => {
