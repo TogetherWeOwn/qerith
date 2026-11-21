@@ -124,7 +124,7 @@ export default {
     return app.scheduled(event, Object.create(env, {
       DRIVE_STAGING_DELETE_DRAIN: { value: '1', enumerable: true },
       DB: { enumerable: true, get() { throw new Error('Unqualified scheduled deletion must not access D1'); } }
-    }));` : 'return qualifiedWorker.scheduled(event, stagingDeletionBindings(env));'}
+    }));` : 'return scheduledDeletion(event, env);'}
   },
   fetch(request, env, ctx) {
   ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');

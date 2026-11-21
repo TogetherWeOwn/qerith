@@ -6,6 +6,9 @@ import { stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 const endpoint = 'https://storage.example.test', bucket = 'drive-test', epoch = 'smoke', etag = '"fixed-generation"';
 const owner = 'owner-fixture';
 const confirmation = '{"confirm":"permanent-delete"}';
+// Use nearby synthetic timestamps to select fixture bindings without changing the cron under test.
+const scheduledAt = Math.floor(Date.now() / 1000) * 1000;
+const scheduledModes = ['qualified', 'absent', 'wrong-sha', 'wrong-version', 'drain-disabled'];
 
 const deletionStorageBindings = {
   DRIVE_S3_ENDPOINT: `${endpoint.toUpperCase()}:443/`, DRIVE_S3_BUCKET: bucket, DRIVE_S3_REGION: 'auto',
@@ -31,7 +34,8 @@ globalThis.fetch = async (input) => {
 };
 const capability = {
   sourceSha: 'a'.repeat(40), workerVersion: '00000000-0000-4000-8000-000000000002',
-  expiresAt: String(Date.now() + 600_000),
+  // Serialize from the Node harness clock; workerd has no event clock at module startup.
+  expiresAt: '${Date.now() + 600_000}',
   storageConfigId: JSON.stringify(['${endpoint}', '${bucket}', '${epoch}']), region: 'auto',
   confirmsRemoval: ({ headers }) => headers.get('x-fixture-removal') === 'permanent'
 };
@@ -40,11 +44,18 @@ const expired = { ...capability, expiresAt: '1000000000000' };
 const expiredWorker = createDriveWorker(expired);
 function stagingDeletionBindings(env, mode) {
   return { ...env, ...${JSON.stringify(deletionStorageBindings)}, DRIVE_ORIGIN: ${JSON.stringify(stagingOrigin)},
-    DRIVE_STAGING_DELETE_REQUESTS: mode === 'disabled' ? '0' : '1', DRIVE_STAGING_DELETE_DRAIN: '1',
+    DRIVE_STAGING_DELETE_REQUESTS: mode === 'disabled' ? '0' : '1',
+    DRIVE_STAGING_DELETE_DRAIN: mode === 'drain-disabled' ? '0' : '1',
     DRIVE_QUALIFICATION_SHA: mode === 'wrong-sha' ? 'b'.repeat(40) : capability.sourceSha,
     DRIVE_QUALIFICATION_VERSION: { id: mode === 'wrong-version' ? '00000000-0000-4000-8000-000000000003' : capability.workerVersion },
     DRIVE_QUALIFICATION_EXPIRES_AT: mode === 'expired' ? expired.expiresAt : capability.expiresAt,
     DRIVE_S3_STORAGE_EPOCH: mode === 'wrong-storage' ? 'wrong-epoch' : '${epoch}' };
+}
+function scheduledDeletion(event, env) {
+  const mode = ${JSON.stringify(scheduledModes)}[(${scheduledAt} - event.scheduledTime) / 1000];
+  if (!mode) throw new Error('Unexpected deletion fixture schedule');
+  const worker = mode === 'absent' ? app : qualifiedWorker;
+  return worker.scheduled(event, stagingDeletionBindings(env, mode));
 }
 function runtimeDeletion(request, env, ctx) {
   const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete$/.exec(new URL(request.url).pathname)?.[1];
@@ -191,9 +202,17 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   assert.deepEqual(await job(ambiguous.file), { completed_at: null, completion_token: null, lease_token: null });
   assert.deepEqual(await unrelatedJob(), untouched);
   const preDrain = await snapshot();
-  assert.equal((await worker.scheduled({ cron: '* * * * *' })).outcome, 'ok');
+  const tick = async (mode, cron = '*/15 * * * *') => {
+    const scheduledTime = new Date(scheduledAt - 1000 * scheduledModes.indexOf(mode));
+    assert.equal((await worker.scheduled({ cron, scheduledTime })).outcome, 'ok', `Scheduled deletion (${mode})`);
+  };
+  await tick('qualified', '* * * * *');
   assert.deepEqual(await snapshot(), preDrain);
-  assert.equal((await worker.scheduled({ cron: '*/15 * * * *' })).outcome, 'ok');
+  for (const mode of scheduledModes.slice(1)) {
+    await tick(mode);
+    assert.deepEqual(await snapshot(), preDrain, `Scheduled refusal (${mode}) changed state or dispatched`);
+  }
+  await tick('qualified');
   assert.ok((await job(unrelated.file))?.completed_at);
   const { results: calls } = await DB.prepare('SELECT * FROM smoke_deletion_calls ORDER BY key').all();
   assert.deepEqual(calls, ['ambiguous', 'selected', 'unrelated'].map((key) => ({ key: `/${bucket}/${key}`, method: 'DELETE', etag, valid: 1 })));
