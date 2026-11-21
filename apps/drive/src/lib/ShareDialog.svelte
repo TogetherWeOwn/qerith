@@ -8,7 +8,6 @@
     previous?: () => void; next?: () => void; retry?: () => void;
   };
 </script>
-
 <script lang="ts">
   import { tick } from 'svelte';
   import ShareRecipientPicker, { shareAvatar } from './ShareRecipientPicker.svelte';
@@ -31,7 +30,7 @@
   let notice = $state<HTMLElement>();
   let opener: HTMLElement | undefined;
   let backdrop = false;
-  let picked = $state<ShareRecipient[]>([]);
+  let session = $state(0), picked = $state<ShareRecipient[]>([]);
   let confirm = $state<string | null>(null);
   let pending = $state<'share' | 'remove' | null>(null);
   let error = $state(''), status = $state('');
@@ -41,12 +40,11 @@
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
-
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from: HTMLElement) {
     if (dialog.open) return;
     opener = from;
-    picked = []; confirm = null; error = status = ''; added = [];
+    session++; picked = []; confirm = null; error = status = ''; added = [];
     dialog.showModal();
     await tick();
     if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
@@ -69,6 +67,7 @@
   }
   function select(ids: string[]) {
     if (pending) return;
+    status = '';
     picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
   }
   async function apply(person?: ShareAccess) {
@@ -100,7 +99,7 @@
 
 {#snippet pager(page: SharePage<ShareRecipient>, subject: string)}
   <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
-    {#if page.state === 'loading'}<p role="status">Loading {subject}…</p>
+    {#if page.state === 'loading'}<p>Loading {subject}…</p>
     {:else if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
       {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.retry!)}>Retry</button>{/if}
     {:else if page.previous || page.next}
@@ -126,8 +125,10 @@
         {:else if !owner.driveOwner}<p>Ask the owner to invite them.</p>{/if}
       </div>
     {:else}
-      <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
-        onSelectionChange={select} pageOnly locked={!!pending || candidates.state !== 'ready'} />
+      {#key session}
+        <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
+          onSelectionChange={select} {status} pageOnly locked={!!pending || candidates.state !== 'ready'} />
+      {/key}
       {@render pager(candidates, 'people to add')}
     {/if}
     <section aria-labelledby={`${id}-access`}>
@@ -161,7 +162,6 @@
       {#if access.state === 'ready' && access.complete && !access.next && !access.previous && !access.rows.length}<p>Only you can see this.</p>{/if}
       {@render pager(access, 'people with access')}
     </section>
-    <p role="status">{status}</p>
     {#if !picked.length}<p id={`${id}-pick`}>Pick someone to share with</p>{/if}
     <footer>
       <button type="button" class="primary" aria-disabled={shareBlocked} aria-busy={pending === 'share'} aria-describedby={!picked.length ? `${id}-pick` : undefined}
@@ -170,7 +170,6 @@
     </footer>
   </div>
 </dialog>
-
 <style>
   header, footer, li, .paging, .confirmation { display: flex; align-items: center; flex-wrap: wrap; gap: var(--drive-space-2); }
   header { flex-wrap: nowrap; justify-content: space-between; }
@@ -178,21 +177,19 @@
   h2, h3, p, li { overflow-wrap: anywhere; }
   h3, p, ul { margin: 0; }
   h3 { font-size: var(--drive-font-size-ui); }
-  p, small { color: var(--drive-color-text-secondary); }
+  p, small, button { color: var(--drive-color-text-secondary); }
   p { font-size: var(--drive-font-size-small); }
-  li { font-size: var(--drive-font-size-ui); }
-  p[role='status']:empty { position: absolute; clip-path: inset(50%); }
-  ul { padding: 0; list-style: none; }
+  ul { padding: 0; list-style: none; font-size: var(--drive-font-size-ui); }
   li { min-height: var(--drive-size-control-md); border-block-end: var(--drive-size-line) solid var(--drive-color-line-hairline); }
   li.added, .tag, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
-  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm); border-radius: var(--drive-radius-pill); }
-  .person { flex: 1; min-width: 0; }
+  .avatar, .tag, button { border-radius: var(--drive-radius-pill); }
+  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm); }
+  .person { flex: 1 0 10ch; min-width: 0; }
   small { display: block; font-size: var(--drive-font-size-meta); }
   .confirmation { flex-basis: 100%; }
-  .tag { padding-inline: var(--drive-space-3); border-radius: var(--drive-radius-pill); }
-  button { padding-inline: var(--drive-space-inset-room); border-radius: var(--drive-radius-pill); }
+  .tag { padding-inline: var(--drive-space-3); }
   .empty { padding: var(--drive-space-inset-card); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); }
-  button { min-height: var(--drive-size-control-sm); border: var(--drive-size-line) solid transparent; background: transparent; color: var(--drive-color-text-secondary); font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
+  button { min-height: var(--drive-size-control-sm); padding-inline: var(--drive-space-inset-room); border: var(--drive-size-line) solid transparent; background: transparent; font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
   button.close { min-width: var(--drive-size-control-sm); padding: 0; }
   button.danger { color: var(--drive-color-state-danger); }
   button:not(.primary):not([aria-disabled='true']):hover { background: var(--drive-color-bg-raised); }
