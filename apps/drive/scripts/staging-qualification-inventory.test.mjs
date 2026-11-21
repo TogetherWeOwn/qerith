@@ -126,6 +126,12 @@ function fixture(t) {
         state.onNamespaceList?.(init.signal);
         return state.namespaceList ?? namespaceRoster();
       }
+      if (url === `${root}${account}/containers/applications`) {
+        trace.push('containers');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onContainerList?.(init.signal);
+        return state.containerList ?? json([]);
+      }
       const scripts = `${root}${account}/workers/scripts`;
       if (url === scripts) {
         trace.push('scripts');
@@ -425,7 +431,7 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
+  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
     'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
@@ -482,6 +488,71 @@ test('inventory rejects a native Durable Object namespace result after its deadl
   assert.equal(f.trace.at(-1), 'namespaces');
 });
 
+test('inventory rejects any native container application before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.state.containerList = json([{ name: 'unbound', instances: 0 }]);
+    await assert.rejects(run(phase), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory requires a complete, bounded native container roster', async t => {
+  const f = fixture(t);
+  const roster = { success: true, errors: [], messages: [], result: [] };
+  const empty = f.create();
+  f.state.containerList = Response.json({ ...roster, result_info: {} });
+  assert.equal(await empty('before'), true);
+  f.state.containerList = Response.json({ ...roster, result_info: { next_page_token: '' } });
+  assert.equal(await empty('after'), true);
+  for (const reply of [
+    Response.json({ ...roster, success: false }), Response.json({ ...roster, result: undefined }),
+    Response.json({ ...roster, errors: [{ code: 10000 }] }), Response.json({ ...roster, messages: ['partial'] }),
+    ...[null, [], '', { next_page_token: 'more' }, { next_page_token: ' ' }, { next_page_token: null }, { cursor: 'more' }]
+      .map(result_info => Response.json({ ...roster, result_info })),
+    Response.json({ ...roster, result: { applications: [] } }), Response.json(roster, { status: 403 }),
+    Response.json(roster, { headers: { Link: '</next>; rel="next"' } }), Response.json(roster, { status: 206 }),
+    Response.json(roster, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
+    new Response(JSON.stringify(roster).padEnd(65_537, ' ')), new Response('not JSON'),
+  ]) {
+    const run = f.create();
+    f.state.containerList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory rejects duplicate native container roster members', async t => {
+  const f = fixture(t);
+  for (const fields of [
+    '"result":[{}],"result":[]',
+    '"result":[{}],"res\\u0075lt":[]',
+    '"result":[],"result_info":{"next_page_token":"more","next_page_token":""}',
+  ]) {
+    const run = f.create();
+    f.state.containerList = new Response(`{"success":true,"errors":[],${fields}}`);
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory rejects a native container roster returned after its deadline', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onContainerList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'containers');
+});
+
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
   const f = fixture(t);
   for (const [index, jurisdiction] of r2Jurisdictions.entries()) {
@@ -493,7 +564,7 @@ test('inventory rejects an extra native R2 bucket before and after the attempt',
       f.state.scopedBucketLists = { [jurisdiction]: bucketRoster({ result: { buckets },
         result_info: { total_count: buckets.length } }) };
       await assert.rejects(run(phase), error);
-      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder.slice(0, index + 2)]);
+      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, index + 2)]);
     }
   }
 });
@@ -555,7 +626,7 @@ test('inventory shares one 15-second deadline across native R2 roster reads', as
     signal.throwIfAborted();
   };
   await assert.rejects(run('before'), error);
-  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2RosterOrder.slice(0, 2)]);
+  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, 2)]);
   assert.deepEqual(beforeDeadline, [false, false]);
   assert.equal(signals[0], signals[1]);
   assert.equal(signals[0].aborted, true);
@@ -645,7 +716,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 
