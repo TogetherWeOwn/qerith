@@ -146,26 +146,6 @@ export default { fetch(request, env, ctx) {
   if (request.headers.has('x-test-invite')) {
     const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
-    // Expose unexpected D1 errors in this synthetic fixture, not in HTTP responses.
-    if (new URL(request.url).pathname === '/api/move-destinations') {
-      const db = bindings.DB;
-      const traceD1 = async (phase, query) => {
-        try { return await query(); }
-        catch (error) {
-          const message = String(error?.cause?.message ?? error?.message ?? 'unknown error')
-            .replace(/[A-Za-z0-9_-]{43,}/g, '[redacted]');
-          console.error('Move destinations fixture D1 (' + phase + '): ' + message);
-          throw error;
-        }
-      };
-      bindings.DB = {
-        prepare: sql => ({ bind: (...args) => ({ first: () =>
-          traceD1('session lookup', () => db.prepare(sql).bind(...args).first()) }) }),
-        batch: db.batch.bind(db),
-        withSession: constraint => ({ prepare: sql => ({ bind: (...args) => ({ all: () =>
-          traceD1('primary listing', () => db.withSession(constraint).prepare(sql).bind(...args).all()) }) }) })
-      };
-    }
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
   const mode = request.headers.get('x-test-fetch-mode');
@@ -434,15 +414,7 @@ export default { fetch(request, env, ctx) {
       await assertEntryChangeClosed({ worker, DB, origin, owner: cookie, member });
       await exerciseEntryChange({ worker, DB, origin, session, staging });
       await exerciseStagingFolderCreate({ worker, DB, origin, session });
-      try {
-        await exerciseMoveDestinations({ worker, DB, origin, session });
-      } catch (error) {
-        // Wrangler buffers Worker console messages instead of printing them.
-        for (const { message } of harness.getLogs()) {
-          if (message.startsWith('Move destinations fixture D1 (')) console.error(message);
-        }
-        throw error;
-      }
+      await exerciseMoveDestinations({ worker, DB, origin, session });
       await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file, downloadBytes: data });
       await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();

@@ -51,6 +51,9 @@ export async function exerciseMoveDestinations({ worker, DB, origin, session }) 
     folders: Array.from({ length: 50 }, (_, i) => ({ id: `move-dest-${i + 1}`, name: `Folder ${String(i + 1).padStart(3, '0')}` })) });
   assert.deepEqual(await row(get(`${taxes}&after=${first.next}`), 200), { folderName: 'Taxes', currentParentId: null,
     folders: [{ id: 'move-dest-51', name: 'Folder 051' }], next: null });
+  assert.deepEqual(await row(get(`${taxes}&after=move-dest-51`), 200), {
+    folderName: 'Taxes', currentParentId: null, folders: [], next: null,
+  }, 'a valid end cursor still returns the destination');
   for (const after of ['move-cursor-other', 'move-picker-foreign', 'move-file']) await row(get(`${taxes}&after=${after}`), 404);
   assert.deepEqual(await row(get('?entry=move-file&folder=move-dest-51'), 200), {
     folderName: 'Folder 051', currentParentId: 'move-dest', folders: [], next: null,
