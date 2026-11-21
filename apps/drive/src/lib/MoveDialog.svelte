@@ -16,7 +16,7 @@
   const uid = $props.id();
   const root: Folder = { id: null, name: 'My Drive' };
   const gone = 'That folder was deleted. Pick another one.';
-  const unknown = 'We couldn’t confirm the move. Check My Drive before trying again.';
+  const unknown = 'We couldn’t confirm the move. Refresh the source folder and check the selected destination before trying again.';
   const label = (name: string) => name.trim() ? name : `${name} (Whitespace-only name)`;
   let dialog: HTMLDialogElement, heading: HTMLHeadingElement, first: HTMLButtonElement, last: HTMLButtonElement;
   let notice = $state<HTMLParagraphElement>();

@@ -121,54 +121,33 @@ test('only projects a positive download hint on a canonical file ID', async () =
   ]);
 });
 
-test('nested loader enables Move for owners and members only in invite mode', async () => {
-  const params = { folderId: 'private' };
-  const folder = { id: params.folderId, name: 'Receipts', kind: 'folder' };
-  const child = { id: 'nested', name: 'Nested', kind: 'folder' };
-  const statement = {
-    bind: () => statement,
-    first: async <T>() => folder as T,
-    all: async <T>() => ({ results: [{ id: null, owned: 1 }, child] as T[] }),
-  };
-  const prepare = () => statement;
-  const DB = { prepare, withSession: test.mock.fn((_mode: 'first-primary') => ({ prepare })) };
-  for (const role of ['owner', 'member'] as const) {
-    for (const invite of [false, true]) {
-      const origin = invite ? stagingOrigin : 'https://drive.example.test';
-      const load = loadFolder({
-        DB, DRIVE_ORIGIN: origin,
-        ...(invite ? { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' } : { DRIVE_SIGN_IN_FIXTURE: '1' }),
-      });
-      const { result } = await load({
-        request: new Request(`${origin}/f/private`), params, setHeaders: () => {},
-        locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
-      });
-      assert.equal(result.status, 'ok');
-      assert.equal(result.folder.canMove, invite ? true : undefined);
-      assert.deepEqual(result.folder.entries, [invite ? { ...child, movable: true } : child], `${role}, invite=${invite}`);
-    }
-  }
-  assert.deepEqual(DB.withSession.mock.calls.map(call => call.arguments), Array(8).fill(['first-primary']));
-});
-
-test('dispatches Move only for addressable rows in an owned folder with writes enabled', async () => {
-  const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' as const };
-  const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' as const };
+test('nested loader and picker dispatch allow only owned, addressable rows in invite mode', async () => {
+  const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' };
+  const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' };
   const invalid = { ...file, id: '..' };
-  const downloadable = { ...file, downloadable: true };
-  for (const [metadataWriteAllowed, ownsFolder] of [[undefined, true], [true, false], [true, true]] as const) {
-    const entries = [{ ...file, downloadable: 1 as const, movable: true, object_key: 'private-key' }, folder, { ...invalid, movable: true }];
-    const list = async () => ({ entries, nextCursor: null, ownsFolder: ownsFolder ? true as const : undefined });
-    const page = await folderPage(request(), 'private', { authorize, readAccess: { get, list }, metadataWriteAllowed });
-    assert.equal(page.status, 'ok');
-    const enabled = metadataWriteAllowed === true && ownsFolder;
-    assert.equal(page.folder.canMove, enabled ? true : undefined);
-    assert.deepEqual(page.folder.entries, enabled ? [{ ...downloadable, movable: true }, { ...folder, movable: true }, invalid] :
-      [downloadable, folder, invalid]);
+  for (const role of ['owner', 'member'] as const) for (const [invite, owned] of [[false, 1], [true, 0], [true, 1]] as const) {
+    const statement = {
+      bind: () => statement,
+      first: async <T>() => await get('', 'private') as T,
+      all: async <T>() => ({ results: [{ id: null, owned }, { ...file, downloadable: 1, object_key: 'private-key' }, folder, { ...invalid, movable: true }] as T[] }),
+    };
+    const withSession = test.mock.fn((_mode: 'first-primary') => ({ prepare: () => statement }));
+    const origin = invite ? stagingOrigin : 'https://drive.example.test';
+    const { result } = await loadFolder({ DB: { withSession }, DRIVE_ORIGIN: origin,
+      ...(invite ? { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' } : { DRIVE_SIGN_IN_FIXTURE: '1' }),
+    })({
+      request: new Request(`${origin}/f/private`), params: { folderId: 'private' }, setHeaders: () => {},
+      locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
+    });
+    assert.deepEqual(withSession.mock.calls.map(call => call.arguments), [['first-primary'], ['first-primary']]);
+    assert.equal(result.status, 'ok');
+    const flag = invite && owned ? { movable: true } : {};
+    assert.equal(result.folder.canMove, flag.movable);
+    assert.deepEqual(result.folder.entries, [{ ...file, downloadable: true, ...flag }, { ...folder, ...flag }, invalid]);
     const open = test.mock.fn<Parameters<typeof openFolderMove>[2]>();
-    for (const id of [file.id, folder.id, invalid.id, 'not-on-this-page']) openFolderMove(page, id, open);
+    for (const { id } of [...result.folder.entries, { id: 'not-on-this-page' }]) openFolderMove(result, id, open);
     openFolderMove({ status: 'unavailable' }, file.id, open);
-    assert.deepEqual(open.mock.calls.map(({ arguments: args }) => args), enabled ? [[file], [folder]] : []);
+    assert.deepEqual(open.mock.calls.map(call => call.arguments), flag.movable ? [[file], [folder]] : []);
   }
 });
 

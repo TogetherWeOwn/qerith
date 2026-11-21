@@ -39,13 +39,13 @@ const sessionRemainingMs = "s.expires_at - CAST(unixepoch('subsec') * 1000 AS IN
 
 // Anchor at the requested entry, not at a previously authorized ancestor. Each
 // statement rechecks both parties and the session against the current tree.
-const entryAccess = (projection = '') => `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
+const entryAccess = (includeLifetime: boolean) => `WITH RECURSIVE ancestors(id, parent_id, owner_id) AS (
   SELECT id, parent_id, owner_id FROM drive_entries WHERE id = ?
   UNION
   SELECT e.id, e.parent_id, e.owner_id FROM drive_entries e
     JOIN ancestors a ON e.id = a.parent_id AND e.owner_id = a.owner_id
 ), permitted AS (
-  SELECT target.id${projection} FROM drive_entries target
+  SELECT target.id, target.owner_id = reader.id AS owned${includeLifetime ? `, ${sessionRemainingMs} AS remainingMs` : ''} FROM drive_entries target
   JOIN drive_principals owner ON owner.id = target.owner_id AND owner.status = 'active'
   JOIN drive_sessions s ON s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
   JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active'
@@ -55,9 +55,8 @@ const entryAccess = (projection = '') => `WITH RECURSIVE ancestors(id, parent_id
   ))
 )`;
 
-const access = entryAccess();
-const folderAccess = entryAccess(', target.owner_id = reader.id AS owned');
-const publishedGrantAccess = entryAccess(`, ${sessionRemainingMs} AS remainingMs`);
+const access = entryAccess(false);
+const publishedGrantAccess = entryAccess(true);
 
 const ownAccess = (allowMembers: boolean) => `WITH permitted AS (
   SELECT e.id, ${sessionRemainingMs} AS remainingMs FROM drive_entries e
@@ -180,14 +179,14 @@ export class ReadAccess {
     }
     const hash = await sessionHash(token);
     if (!hash) return null;
-    // The sentinel distinguishes a readable empty folder from an inaccessible one.
-    // Ownership comes from the same live check as the same-owner child listing.
+    // A sentinel distinguishes an accessible empty folder from an inaccessible ID
+    // without an authorization query separate from the listing.
     const boundary = cursor ? 'AND (e.name, e.id) > (?, ?)' : '';
     // Compute a hint on the same authorized, bounded page. The download route reauthorizes.
     const availability = this.downloadScope ? `, EXISTS (SELECT 1 FROM drive_entries e ${publishedGenerationJoins}
       WHERE e.id = children.id AND ${publishedGenerationFilter}) AS downloadable` : '';
     const sentinel = this.downloadScope ? ', 0' : '';
-    const rows = (await this.db.prepare(`${folderAccess}, folder AS (
+    const rows = (await this.db.prepare(`${access}, folder AS (
       SELECT e.owner_id, p.owned FROM drive_entries e JOIN permitted p ON p.id = e.id WHERE e.kind = 'folder'
     ), children AS (
       SELECT e.id, e.name, e.kind FROM drive_entries e INDEXED BY drive_entries_sibling_name

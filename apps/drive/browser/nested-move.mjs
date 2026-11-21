@@ -7,11 +7,14 @@ export async function proveNestedMove(page, origin, db, intercept) {
   for (const [width, height] of widths) {
     const parent = `nested-parent-${width}`, source = `nested-source-${width}`, path = `/f/${parent}`;
     const name = '01 Résumé', destination = `! Nested destination ${width}`, removed = `! Nested removed ${width}`, home = `! Nested source ${width}`;
-    await db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES
-      (?1, 'owner', NULL, ?3, 'folder'), (?2, 'owner', ?1, ?4, 'folder'),
-      (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'), (?1 || '-next', 'owner', ?1, '02 Next', 'folder'),
-      ('nested-target', 'owner', NULL, ?5, 'folder'), ('nested-clash', 'owner', 'nested-target', ?4, 'folder'),
-      ('nested-gone', 'owner', NULL, ?6, 'folder')`).bind(parent, source, home, name, destination, removed).run();
+    const nested = width === 1280, target = nested ? destination : 'My Drive';
+    const insert = 'INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES';
+    const seedSourceFolder = () => db.prepare(`${insert} (?1, 'owner', NULL, ?2, 'folder'),
+      (?1 || '-next', 'owner', ?1, '02 Next', 'folder')`).bind(parent, home).run();
+    await seedSourceFolder();
+    await db.prepare(`${insert} (?2, 'owner', ?1, ?3, 'folder'), (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'),
+      ('nested-target', 'owner', NULL, ?4, 'folder'), ('nested-clash', 'owner', 'nested-target', ?3, 'folder'),
+      ('nested-gone', 'owner', NULL, ?5, 'folder')`).bind(parent, source, name, destination, removed).run();
     await page.setViewportSize({ width, height });
     await page.goto(origin + path);
     const trigger = page.getByRole('button', { name: `Actions for ${name}` });
@@ -48,10 +51,27 @@ export async function proveNestedMove(page, origin, db, intercept) {
     assert.equal(await button(`Move to ${removed}`).getAttribute('aria-disabled'), 'true');
     await evidence('gone');
     await button('Up to My Drive').press('Enter');
+    const primary = `Move to ${target}`;
+    if (nested) {
+      await button(target).press('Enter');
+      intercept(patch, route => route.abort());
+      await button(primary).press('Enter');
+      const alert = dialog.getByRole('alert').and(focused);
+      assert.match(await alert.textContent(), /Refresh the source folder and check the selected destination/);
+      assert.equal(await button(primary).getAttribute('aria-disabled'), 'true');
+      await button(primary).press('Enter');
+      await evidence('unconfirmed');
+      await page.reload(); await open(); await button(target).press('Enter');
+      await db.prepare("DELETE FROM drive_entries WHERE id = 'nested-clash'").run();
+      intercept(path, async (_, forward) => {
+        await db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next')").bind(parent).run();
+        return forward();
+      });
+    }
     const reload = page.waitForResponse(r => r.url() === origin + path && r.request().isNavigationRequest());
     const held = Promise.withResolvers();
     intercept(patch, async (_, forward) => { await held.promise; return forward(); });
-    const pending = submit('Move to My Drive');
+    const pending = submit(primary);
     try {
       await button('Moving…').waitFor();
       await page.keyboard.press('Escape');
@@ -59,16 +79,23 @@ export async function proveNestedMove(page, origin, db, intercept) {
     } finally { held.resolve(); }
     assert.equal(await pending, 200);
     assert.equal((await reload).status(), 200);
+    if (nested) {
+      await page.getByRole('heading', { name: "This folder isn't available." }).waitFor();
+      await page.getByRole('status').filter({ hasText: 'Item moved. Refresh this page' }).waitFor();
+      await evidence('unavailable');
+      await seedSourceFolder(); await page.reload();
+    }
     await page.getByRole('link', { name: '02 Next' }).and(focused).waitFor();
-    await page.getByRole('status').filter({ hasText: 'Moved to My Drive' }).waitFor();
+    await page.getByRole('status').filter({ hasText: `Moved to ${target}` }).waitFor();
     assert.equal(await trigger.count(), 0);
     await evidence('success');
-    await page.getByRole('link', { name: 'Open My Drive' }).press('Enter');
-    await page.getByRole(width === 1280 ? 'table' : 'list').getByRole('link', { name, exact: true }).waitFor();
+    await page.getByRole('link', { name: `Open ${target}` }).press('Enter');
+    await page.getByRole('list').getByRole('link', { name, exact: true }).waitFor();
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `keyboard-nested-move-${width}x${height}.json`),
-      JSON.stringify({ focus: ['trigger', 'current path', 'conflict alert', 'gone alert', 'next row'], submission: [409, 404, 200], documentReload: true }));
+      JSON.stringify({ focus: ['trigger', 'current path', 'conflict alert', 'gone alert', ...(nested ? ['unconfirmed alert'] : []), 'next row'],
+        submission: [409, 404, ...(nested ? ['aborted'] : []), 200], documentReload: true, destination: target, unavailableReload: nested }));
     page.off('request', track);
-    assert.deepEqual(requests, Array(3).fill(origin + patch));
+    assert.deepEqual(requests, Array(nested ? 4 : 3).fill(origin + patch));
     await db.prepare("DELETE FROM drive_entries WHERE id IN (?, ?, 'nested-clash', 'nested-target')").bind(source, `${source}-child`).run();
   }
 }

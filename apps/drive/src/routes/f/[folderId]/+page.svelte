@@ -27,8 +27,13 @@
   });
 
   async function restore(saved: MoveReload) {
-    await goto(location.href, shallow).catch(() => {}); // Consume the one-shot history state.
-    if (data.result.status !== 'ok' || !data.result.folder.canMove || saved.until < Date.now()) return;
+    const expired = saved.until <= Date.now();
+    if (!expired && data.result.status === 'unavailable') {
+      receipt = null; // Keep the saved IDs for the next document refresh.
+      return;
+    }
+    await goto(location.href, shallow).catch(() => {});
+    if (expired || data.result.status !== 'ok' || !data.result.folder.canMove) return;
     const entries = data.result.folder.entries;
     const neighbor = moveNeighbor(saved, entries);
     if (entries.some(entry => entry.id === saved.source && entry.movable)) restoreTrigger(saved.source);
@@ -97,6 +102,7 @@
   {:else}
     <h1>This folder isn't available.</h1>
     <p>It may have been deleted or moved, or it isn't shared with you.</p>
+    {#if receipt === null}<p role="status">Item moved. Refresh this page to reload the source folder.</p>{/if}
     <a class="ghost" href="/">Go to My Drive</a>
   {/if}
 </main>
