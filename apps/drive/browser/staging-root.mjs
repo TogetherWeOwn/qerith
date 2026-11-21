@@ -273,11 +273,11 @@ try {
   await deny('/f/fixture-parent', 404, { cookie });
   await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
-  await proveNewFolder(page, origin, DB, 'owner', worker);
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
+  await proveNewFolder(page, origin, DB, 'owner', worker);
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });

@@ -35,10 +35,9 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       const evidence = state => capture(page, state, width, true, owner ? 'new-folder' : 'member-new-folder');
       await page.setViewportSize({ width, height });
       await page.goto(`${origin}/`, { waitUntil: 'networkidle' });
-      const name = `Receipts ${width} 🗂️`;
+      const name = `A Receipts ${width} 🗂️`; // Before the existing Folder NNN fixtures.
       await open();
       if (owner) {
-        assert.match(await dialog.ariaSnapshot(), /textbox "Folder name"/);
         await evidence('open');
         await page.keyboard.press('Shift+Tab');
         await dialog.getByRole('button', { name: 'Close' }).and(active).waitFor();
@@ -54,18 +53,14 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
         await field.press('Enter');
         await dialog.getByRole('alert').filter({ hasText: 'Type a name.' }).waitFor();
         await evidence('validation');
-        await field.fill(' . ');
-        await dialog.getByText(/only dots or spaces/).waitFor();
-        await field.fill('a/b');
-        await dialog.getByText(/only dots or spaces/).waitFor();
-        await field.fill('📁'.repeat(64));
-        await dialog.getByText(/That name is too long/).waitFor();
+        for (const [invalid, text] of [[' . ', /only dots or spaces/], ['a/b', /only dots or spaces/], ['📁'.repeat(64), /That name is too long/]]) {
+          await field.fill(invalid);
+          await dialog.getByText(text).waitFor();
+        }
         assert.equal(requests.length, before);
       }
-
       const held = Promise.withResolvers(), before = requests.length;
-      const hold = async route => { await held.promise; await route.fallback(); };
-      if (owner) await page.route('**/api/folders', hold);
+      if (owner) await page.route('**/api/folders', async route => { await held.promise; await route.fallback(); }, { times: 1 });
       const base = page.url(), refresh = page.waitForResponse(data);
       const saved = submit(name, 201);
       try {
@@ -81,7 +76,6 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       } finally { held.resolve(); }
       await saved;
       assert.equal((await refresh).headers()['cache-control'], 'private, no-store');
-      if (owner) await page.unroute('**/api/folders', hold);
       assert.equal(requests.length, before + 1);
       const rowId = await checkInsert(name);
       const row = page.locator(`[data-created-row="${rowId}"]`).and(active);
@@ -90,6 +84,10 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       await page.getByRole('status').filter({ hasText: `Created “${name}”.` }).waitFor();
       assert.equal(page.url(), base);
       await evidence('success');
+      if (width === 1280) {
+        await row.evaluate(el => { el.closest('.listing').style.width = '390px'; el.blur(); });
+        await row.and(page.locator('li')).waitFor();
+      }
       await page.reload({ waitUntil: 'networkidle' });
       await page.getByText(name, { exact: true }).filter({ visible: true }).waitFor();
       if (!owner) continue;
@@ -102,44 +100,55 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       await evidence('collision');
       await cancel();
 
-      const off = async route => {
-        const request = route.request();
-        const response = await defaultWorker.fetch(request.url(), { method: request.method(),
-          headers: await request.allHeaders(), body: request.postDataBuffer(), redirect: 'manual' });
-        await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
-      };
-      await page.route('**/api/folders', off);
-      try {
+      const assertFailure = async (name, status, state) => {
         await open();
-        await submit(`Denied ${width}`, 404);
+        const before = requests.length;
+        await submit(name, status);
         await dialog.getByRole('alert').and(active).waitFor();
-        await evidence('denied');
+        await evidence(state);
+        assert.equal(requests.length, before + 1);
         await cancel();
-      } finally { await page.unroute('**/api/folders', off); }
-
+      };
+      await page.route('**/api/folders', async route => {
+        const request = route.request();
+        const response = await defaultWorker.fetch(request.url(), { method: request.method(), headers: await request.allHeaders(), body: request.postDataBuffer(), redirect: 'manual' });
+        await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
+      }, { times: 1 });
+      await assertFailure(`Denied ${width}`, 404, 'denied');
       await DB.prepare(`CREATE TRIGGER fixture_new_folder_error BEFORE INSERT ON drive_entries
         WHEN NEW.name LIKE 'Unavailable %' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END`).run();
-      try {
-        await open();
-        const failed = requests.length;
-        await submit(`Unavailable ${width}`, 503);
-        await dialog.getByRole('alert').and(active).waitFor();
-        await evidence('failure');
-        assert.equal(requests.length, failed + 1);
-        await cancel();
-      } finally { await DB.prepare('DROP TRIGGER fixture_new_folder_error').run(); }
+      try { await assertFailure(`Unavailable ${width}`, 503, 'failure'); }
+      finally { await DB.prepare('DROP TRIGGER fixture_new_folder_error').run(); }
+      const assertRecovery = async name => {
+        const before = requests.length;
+        await submit(name, 201);
+        await page.getByRole('link', { name: 'Refresh My Drive' }).and(active).waitFor();
+        await page.getByRole('status').filter({ hasText: `Created “${name}”. Refresh My Drive to see it.` }).waitFor();
+        await checkInsert(name);
+        assert.equal(requests.length, before + 1);
+        assert.equal(page.url(), base);
+      };
       const index = await DB.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first('sql');
       await open();
       await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
-      try {
-        await submit(`Refresh failed ${width}`, 201);
-        await page.getByRole('link', { name: 'Try again' }).and(active).waitFor();
-        await page.getByRole('status').filter({ hasText: 'Refresh My Drive to see it.' }).waitFor();
-        await checkInsert(`Refresh failed ${width}`);
-        await evidence('refresh-failed');
-      } finally { await DB.prepare(index).run(); }
+      try { await assertRecovery(`Listing unavailable ${width}`); }
+      finally { await DB.prepare(index).run(); }
+      await open();
+      await page.route('**/__data.json?*', route => width === 390 ? route.abort() : route.fulfill({ status: 503 }), { times: 1 });
+      await assertRecovery(`Refresh failed ${width}`);
+      await evidence('refresh-failed');
+
+      // The staging fixture already has 99 Folder NNN rows plus the named folders.
+      await page.getByRole('link', { name: 'Next page' }).click();
+      await open();
+      const continuation = page.url(), earlier = `B Earlier ${width}`;
+      await submit(earlier, 201);
+      await opener.and(active).waitFor();
+      await page.getByText('It isn’t on this page.', { exact: false }).waitFor();
+      assert.equal(page.url(), continuation);
+      assert.equal(await page.locator(`[data-created-row="${await checkInsert(earlier)}"]`).count(), 0);
+      await evidence('off-page');
     }
-    if (owner) await proveOutsidePage(page, DB, origin, { open, submit, checkInsert, opener, active });
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `${owner ? 'owner' : 'member'}-new-folder.json`), JSON.stringify({
       testedSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), session: 'signed in with passkey', viewports: widths,
       posts: requests, persistedInD1: true, authenticatedRootRefresh: true, stayedInMyDrive: true,
@@ -147,27 +156,4 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       screenReaderEvidence: 'Chromium accessibility tree checked on focused row; not a native screen reader run',
     }, null, 2));
   } finally { page.off('request', observe); }
-}
-
-async function proveOutsidePage(page, DB, origin, { open, submit, checkInsert, opener, active }) {
-  await DB.prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i + 1 FROM n WHERE i < 101)
-    INSERT INTO drive_entries(id, owner_id, name, kind)
-    SELECT printf('12345678-0000-4000-8000-%012d', i), 'owner', printf('ZZ Fixture %03d', i), 'folder' FROM n`).run();
-  try {
-    for (const [width, height] of widths) {
-      await page.setViewportSize({ width, height });
-      await page.goto(`${origin}/`, { waitUntil: 'networkidle' });
-      const url = new URL(await page.getByRole('link', { name: 'Next page' }).getAttribute('href'), origin).href;
-      await page.goto(url, { waitUntil: 'networkidle' });
-      await open();
-      const name = `Earlier in order ${width}`;
-      await submit(name, 201);
-      await opener.and(active).waitFor();
-      const id = await checkInsert(name);
-      await page.getByText('It isn’t on this page.', { exact: false }).waitFor();
-      assert.equal(page.url(), url);
-      assert.equal(await page.locator(`[data-created-row="${id}"]`).count(), 0);
-      await capture(page, 'off-page', width, true, 'new-folder');
-    }
-  } finally { await DB.prepare("DELETE FROM drive_entries WHERE id LIKE '12345678-0000-4000-8000-%'").run(); }
 }

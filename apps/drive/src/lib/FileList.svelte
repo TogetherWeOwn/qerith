@@ -58,7 +58,7 @@
     let lastFocused: HTMLElement | null = null;
     const rememberFocus = (event: FocusEvent) => {
       const target = event.target;
-      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row], [data-details-id]')))) ? target : null;
+      lastFocused = target instanceof HTMLElement && (target === compactSort || target === desktopSort || ((desktop.contains(target) || mobile.contains(target)) && (target instanceof HTMLAnchorElement || target.closest('[data-action-row], [data-details-id], [data-created-row]')))) ? target : null;
     };
     const forgetFocus = (event: FocusEvent) => {
       if (!lastFocused || event.target !== lastFocused) return;

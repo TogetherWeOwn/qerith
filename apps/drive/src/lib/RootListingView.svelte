@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invalidate } from '$app/navigation';
+  import { invalidate, preloadData } from '$app/navigation';
   import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
@@ -14,16 +14,12 @@
     result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; createFolderAllowed: boolean;
   } = $props();
   let status = $state('');
-  let showStatus = $state(false);
+  let receipt = $state<'hidden' | 'visible' | 'refresh'>('hidden');
   let createdId = $state<string>();
   let list = $state<ReturnType<typeof FileList>>();
-
-  function announce(message: string, visible = false) {
-    status = message;
-    showStatus = visible;
-  }
-  let refreshed = $state<RootListingResult>();
-  let result = $derived(refreshed ?? initial);
+  function announce(message: string, style: typeof receipt = 'hidden') { status = message; receipt = style; }
+  let refreshed = $state.raw<{ from: RootListingResult; listing: RootListingResult }>();
+  let result = $derived(refreshed?.from === initial ? refreshed.listing : initial);
   let busy = $state(false);
   let header: HTMLElement;
   let recovery = $state<HTMLAnchorElement>();
@@ -52,7 +48,7 @@
     if (version < appliedVersion) return;
     appliedVersion = version;
     const focused = document.activeElement;
-    flushSync(() => { refreshed = next; });
+    flushSync(() => { refreshed = { from: initial, listing: next }; });
     restoreFocus(focused);
   }
 
@@ -63,21 +59,25 @@
   }
 
   async function folderCreated(id: string, name: string, close: () => void) {
-    try {
-      await refresh();
-    } catch {
+    // Read the same authenticated cursor without committing a route update on failure.
+    const from = initial, url = new URL(location.href);
+    url.searchParams.set('folder-refresh', crypto.randomUUID());
+    const next = await preloadData(url.href).catch(() => null);
+    if (next?.type !== 'loaded' || next.data.listing?.status !== 'ok' || initial !== from) {
       close();
-      if (!header?.contains(document.activeElement)) (recovery ?? header?.querySelector('h1'))?.focus();
-      announce(`Created “${name}”. Refresh My Drive to see it.`, true);
+      announce(`Created “${name}”. Refresh My Drive to see it.`, 'refresh');
+      await tick();
+      recovery?.focus();
       return;
     }
+    refreshed = { from, listing: next.data.listing };
     createdId = id;
     await tick();
     close();
     if (items.some(item => item.id === id)) {
       list?.focusCreatedRow(id);
       announce(`Created “${name}”.`);
-    } else announce(`Created “${name}”. It isn’t on this page.`, true);
+    } else announce(`Created “${name}”. It isn’t on this page.`, 'visible');
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
@@ -88,15 +88,15 @@
 </script>
 
 <header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
-  <h1 tabindex="-1">My Drive</h1>
+  <h1>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
-    <RootUpload mode={uploadMode} announce={(message) => announce(message)} {refresh} paginated={page !== null} bind:busy />
+    <RootUpload mode={uploadMode} {announce} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if createFolderAllowed}
     <NewFolderDialog available={result.status === 'ok'} {items} oncreated={folderCreated} />
   {/if}
 </header>
-<p class:status={!status || (!showStatus && (!staging || result.status === 'ok'))} role="status">{status}</p>
+<p class:status={!status || (receipt === 'hidden' && (!staging || result.status === 'ok'))} role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
   <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
@@ -104,6 +104,7 @@
   <p class="error">This page is no longer available.</p>
   <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {:else}
+  {#if receipt === 'refresh'}<a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Refresh My Drive</a>{/if}
   {#if items.length}
     <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} {createdId} />
   {:else if page}

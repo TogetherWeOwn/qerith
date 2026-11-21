@@ -26,7 +26,11 @@ export const load: PageServerLoad = async (event) => {
   const fixture = admitsSignInFixture(env);
   const staging = env.DRIVE_ORIGIN === stagingOrigin;
   const preview = fixture || staging;
-  if (staging) event.depends('drive:root-listing');
+  if (staging) {
+    event.depends('drive:root-listing');
+    // Track folder-only preloads without using the nonce to select data.
+    event.url.searchParams.get('folder-refresh');
+  }
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
   const role = event.locals.driveSession?.principal.role;
