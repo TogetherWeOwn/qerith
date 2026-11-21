@@ -78,11 +78,11 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await press('Move to My Drive');
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
-      // Arm each response deadline only when its gate is about to open.
-      const [saved] = await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]);
-      assert.equal(saved.status(), 200);
-      if (nested) await Promise.all([dialog.waitFor({ state: 'hidden' }), next.waitFor(), generic.waitFor(),
-        page.locator(`[data-row="${source}"]`).waitFor({ state: 'detached' })]);
+      assert.equal((await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]))[0].status(), 200);
+      if (nested) assert.deepEqual(await page.evaluate(([source, next]) => [
+        !document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
+        document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), document.querySelector('.move-notice [role="status"]')?.textContent
+      ], [source, `${parent}-next`]), [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
       assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
     } finally { held.resolve(); reloadGate.resolve(); }
     if (nested) {
