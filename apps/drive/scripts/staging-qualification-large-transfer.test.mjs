@@ -71,10 +71,10 @@ test('cancellation settles a pending body read without returning transfer eviden
   const abort = new AbortController();
   const pulling = Promise.withResolvers();
   const release = Promise.withResolvers();
-  let cleaned = false;
+  let cancelled = false;
   const stream = new ReadableStream({
     pull() { pulling.resolve(); },
-    async cancel() { await release.promise; cleaned = true; },
+    cancel() { cancelled = true; return release.promise; },
   }, { highWaterMark: 0 });
   let settled = false;
   const result = assert.rejects(verifyQualificationLargeDownload(new Response(stream, { headers }), digest, abort.signal),
@@ -83,11 +83,11 @@ test('cancellation settles a pending body read without returning transfer eviden
   abort.abort();
   try {
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(settled, false);
+    assert.equal(cancelled, true);
+    assert.equal(settled, true);
+    assert.equal(stream.locked, false);
   } finally {
     release.resolve();
     await result;
   }
-  assert.equal(cleaned, true);
-  assert.equal(stream.locked, false);
 });
