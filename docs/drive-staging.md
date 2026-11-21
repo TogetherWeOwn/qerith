@@ -247,6 +247,13 @@ Denied or partial reads are not evidence of absence. This check covers only
 namespaces visible to the existing credential in that account; it does not
 replace the estate or app-fixture reader or independently prove alarm absence.
 
+Both passes also read the unfiltered native Containers application list in the
+pinned Worker account. The unpaginated result must be an explicit empty array
+within five seconds and 64 KiB. An existing application fails even if it has
+zero instances. A denied, partial, or paginated response is not an empty list.
+This covers only applications visible to the existing credential in that
+account; it does not replace the separate estate or app-fixture readers.
+
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
 requires more than 20 minutes left for deployment, readiness, cases and cleanup.

@@ -93,6 +93,26 @@ async function assertNoDurableObjectNamespaces(account, token, request, signal) 
   }, null, signal, 5_000);
 }
 
+// The native list used by Wrangler deployment is an unfiltered, unpaginated array.
+async function assertNoContainerApplications(account, token, request, signal) {
+  if (!token?.trim()) throw unverified();
+  await runQualificationPhase(async (_, active) => {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/containers/applications`;
+    const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+      headers: { authorization: `Bearer ${token}` } });
+    if (response.headers.has('link')) {
+      await response.body?.cancel();
+      throw unverified();
+    }
+    const { parsed } = await boundedProviderDocument(response);
+    const { success, errors, messages, result } = parsed;
+    if (success !== true || !Array.isArray(errors) || errors.length ||
+        (Object.hasOwn(parsed, 'messages') && (!Array.isArray(messages) || messages.length)) ||
+        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result'].includes(key)) ||
+        !Array.isArray(result) || result.length) throw unverified();
+  }, null, signal, 5_000);
+}
+
 // Unwired. The eventual readers must enumerate the bounded staging estate,
 // not filter discovery to expected IDs, and verify D1 is natively on-demand
 // (no provisioned compute). readFixtures must cover all staging fixture tags
@@ -130,6 +150,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
         await assertNoDurableObjectNamespaces(account, env.CLOUDFLARE_API_TOKEN, request, active);
+        await assertNoContainerApplications(account, env.CLOUDFLARE_API_TOKEN, request, active);
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
