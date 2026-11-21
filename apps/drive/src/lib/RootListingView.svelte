@@ -4,6 +4,7 @@
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
   import NameDialog from './NameDialog.svelte';
+  import MoveDialog from './MoveDialog.svelte';
   import { entryChangePath } from './metadata-id';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
@@ -17,6 +18,9 @@
   let status = $state('');
   let receipt = $state<{ id: string; name: string; loaded: boolean }>();
   let nameDialog = $state<ReturnType<typeof NameDialog>>();
+  let moveDialog = $state<ReturnType<typeof MoveDialog>>();
+  let moveReceipt = $state<{ id: string | null; name: string }>();
+  let movedButNotRefreshed = $state<string[]>([]);
   let heading: HTMLHeadingElement;
   let renameStatus = $state('');
   let renameRefreshFailed = $state(false);
@@ -43,7 +47,7 @@
     return response.type === 'loaded' ? response.data.listing : null;
   }
 
-  async function refresh(reason?: 'folder' | 'rename') {
+  async function refresh(reason?: 'folder' | 'rename' | 'move') {
     if (staging && !metadataWriteAllowed) {
       await invalidate('drive:root-listing');
       await tick();
@@ -57,14 +61,14 @@
       .then((response): Promise<RootListingResult> | null => response.ok ? response.json() : null);
     // preloadData cannot be aborted; only a read that wins the deadline may update the list.
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const next = reason === 'rename' ? await Promise.race([read, new Promise<null>(resolve => {
+    const next = reason === 'rename' || reason === 'move' ? await Promise.race([read, new Promise<null>(resolve => {
       timer = setTimeout(() => resolve(null), 5_000);
     })]).finally(() => clearTimeout(timer)) : await read;
     if (version < appliedVersion) return;
     if (!next || (next.status !== 'ok' && (reason === 'folder' || !staging))) throw new Error('Root listing unavailable');
     appliedVersion = version;
     const focused = document.activeElement;
-    flushSync(() => { refreshed = next; });
+    flushSync(() => { refreshed = next; movedButNotRefreshed = []; });
     restoreFocus(focused, next.status);
     if (next.status !== 'ok') throw new Error('Root listing unavailable');
   }
@@ -113,8 +117,27 @@
     renameStatus = `Renamed to “${name}”.${detail}`;
   }
 
+  function openMove(id: string) {
+    const item = items.find(item => item.id === id && !item.shared);
+    if (item?.renamable && metadataWriteAllowed) moveDialog?.open({ id, name: item.name, kind: item.glyph });
+  }
+
+  async function moved(id: string, destination: { id: string | null; name: string }, close: () => void) {
+    const index = items.findIndex(item => item.id === id);
+    const neighbors = index < 0 ? [] : [...items.slice(index + 1), ...items.slice(0, index).reverse()];
+    try { await refresh('move'); }
+    catch { if (result.status === 'ok') movedButNotRefreshed = [...movedButNotRefreshed, id]; }
+    await tick();
+    close();
+    const neighbor = neighbors.find(({ id }) => items.some(item => item.id === id)) ?? items.find(item => item.id !== id);
+    if (items.some(item => item.id === id)) returnToRow(id);
+    else if (neighbor) list?.focusName(neighbor.id);
+    else (recovery ?? heading).focus();
+    moveReceipt = destination;
+  }
+
   // loadRootListing returns only this session's owned entries at parent_id IS NULL.
-  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
+  const items = $derived(result.status === 'ok' ? result.folder.entries.filter(({ id }) => !movedButNotRefreshed.includes(id)).map(({ id, name, kind, downloadable }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
     href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
     reload: true, size: '', bytes: null, modified: '', shared: false, renamable: metadataWriteAllowed && !!entryChangePath(id)
@@ -130,12 +153,22 @@
     <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if metadataWriteAllowed}
+    <MoveDialog bind:this={moveDialog} onmoved={moved} onreturn={returnToRow} />
     <NameDialog bind:this={nameDialog} available={result.status === 'ok'} {items} oncreated={folderCreated} onrenamed={renamed} onreturn={returnToRow} />
   {/if}
 </header>
 <p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
 {#if metadataWriteAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
 {#if metadataWriteAllowed}<p class:status={!renameStatus || !renameRefreshFailed} role="status">{renameStatus}</p>{/if}
+{#if metadataWriteAllowed}
+  <div class:move-notice={!!moveReceipt}>
+    <p role="status" class:status={!moveReceipt}>{#if moveReceipt}<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg> Moved to <bdi>{moveReceipt.name}</bdi>{/if}</p>
+    {#if moveReceipt}
+      <a href={moveReceipt.id === null ? '/' : `/f/${moveReceipt.id}`} data-sveltekit-reload>Open <bdi>{moveReceipt.name}</bdi></a>
+      {#if movedButNotRefreshed.length}<a href={page ? `/?page=${page}` : '/'} data-sveltekit-reload>Refresh My Drive</a>{/if}
+    {/if}
+  </div>
+{/if}
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
 {:else if result.status === 'invalid-page'}
@@ -148,7 +181,7 @@
 {/if}
 {#if result.status === 'ok'}
   {#if items.length}
-    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} onRename={metadataWriteAllowed ? openRename : undefined} createdId={receipt?.id} />
+    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} onRename={metadataWriteAllowed ? openRename : undefined} onMove={metadataWriteAllowed ? openMove : undefined} createdId={receipt?.id} />
   {:else if page}
     <p>No more items.</p>
   {:else}
@@ -178,5 +211,8 @@
   nav { display: flex; flex-wrap: wrap; gap: var(--drive-space-4); }
   a { display: inline-block; padding-block: var(--drive-space-2); color: inherit; }
   a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  .move-notice { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--drive-space-2); padding: var(--drive-space-4); margin-bottom: var(--drive-space-4); border-radius: var(--drive-radius-m); background: var(--drive-color-state-ok-bg); }
+  .move-notice p { margin: 0; }
+  .move-notice svg { width: var(--drive-size-icon-sm); height: var(--drive-size-icon-sm); vertical-align: text-bottom; color: var(--drive-color-state-ok); }
   .error { color: var(--drive-color-state-danger); }
 </style>

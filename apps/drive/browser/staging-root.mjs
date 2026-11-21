@@ -7,6 +7,7 @@ import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { proveSharedListing } from './shared-listing.mjs';
 import { proveNewFolder } from './new-folder.mjs';
 import { proveRename } from './rename.mjs';
+import { proveMove } from './move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -297,6 +298,7 @@ try {
   const intercept = (path, handler) => overrides.set(path, handler);
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
+  await proveMove(page, { origin, DB, intercept });
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
