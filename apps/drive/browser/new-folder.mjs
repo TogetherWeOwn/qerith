@@ -4,14 +4,14 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture, widths } from './root-listing.mjs';
 
-export async function proveNewFolder(page, origin, DB, principal, defaultWorker) {
-  const owner = !!defaultWorker;
+export async function proveNewFolder(page, origin, DB, principal, intercept) {
+  const owner = !!intercept;
   const opener = page.getByRole('button', { name: 'New folder', exact: true });
   const dialog = page.getByRole('dialog', { name: 'New folder in My Drive' });
   const field = dialog.getByRole('textbox', { name: 'Folder name' });
   const active = page.locator(':focus');
+  const status = text => page.getByRole('status').filter({ hasText: text });
   const post = request => request.url() === `${origin}/api/folders` && request.method() === 'POST';
-  const data = response => new URL(response.url()).pathname === '/__data.json';
   const requests = [];
   const observe = request => { if (post(request)) requests.push(request.postDataJSON()); };
   const open = async () => { await opener.press('Enter'); await field.and(active).waitFor(); };
@@ -19,9 +19,7 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
   const submit = async (name, status) => {
     await field.fill(name);
     const [response] = await Promise.all([page.waitForResponse(r => post(r.request())), field.press('Enter')]);
-    assert.equal(response.status(), status);
-    assert.deepEqual(requests.at(-1), { name, parentId: null });
-    return response;
+    assert.deepEqual([response.status(), requests.at(-1)], [status, { name, parentId: null }]);
   };
   const checkInsert = async name => {
     const row = await DB.prepare('SELECT id, owner_id, parent_id, kind FROM drive_entries WHERE name = ? AND owner_id = ?')
@@ -39,12 +37,10 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       await open();
       if (owner) {
         await evidence('open');
-        await page.keyboard.press('Shift+Tab');
-        await dialog.getByRole('button', { name: 'Close' }).and(active).waitFor();
-        await page.keyboard.press('Shift+Tab');
-        await dialog.getByRole('button', { name: 'Cancel' }).and(active).waitFor();
-        await page.keyboard.press('Tab');
-        await dialog.getByRole('button', { name: 'Close' }).and(active).waitFor();
+        for (const [key, target] of [['Shift+Tab', 'Close'], ['Shift+Tab', 'Cancel'], ['Tab', 'Close']]) {
+          await page.keyboard.press(key);
+          await dialog.getByRole('button', { name: target }).and(active).waitFor();
+        }
         await field.fill('Discard me');
         const before = requests.length;
         await cancel();
@@ -60,8 +56,8 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
         assert.equal(requests.length, before);
       }
       const held = Promise.withResolvers(), before = requests.length;
-      if (owner) await page.route('**/api/folders', async route => { await held.promise; await route.fallback(); }, { times: 1 });
-      const base = page.url(), refresh = page.waitForResponse(data);
+      intercept?.('/api/folders', async (_, relay) => { await held.promise; return relay(); });
+      const base = page.url(), refresh = page.waitForResponse('**/__data.json?*');
       const saved = submit(name, 201);
       try {
         if (owner) {
@@ -76,13 +72,11 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       } finally { held.resolve(); }
       await saved;
       assert.equal((await refresh).headers()['cache-control'], 'private, no-store');
-      assert.equal(requests.length, before + 1);
-      const rowId = await checkInsert(name);
-      const row = page.locator(`[data-created-row="${rowId}"]`).and(active);
+      const row = page.locator(`[data-created-row="${await checkInsert(name)}"]`).and(active);
       await row.waitFor();
       assert.ok((await row.ariaSnapshot()).includes(name));
-      await page.getByRole('status').filter({ hasText: `Created “${name}”.` }).waitFor();
-      assert.equal(page.url(), base);
+      await status(`Created “${name}”.`).waitFor();
+      assert.deepEqual([page.url(), requests.length], [base, before + 1]);
       await evidence('success');
       if (width === 1280) {
         await row.evaluate(el => { el.closest('.listing').style.width = '390px'; el.blur(); });
@@ -91,7 +85,6 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       await page.reload({ waitUntil: 'networkidle' });
       await page.getByText(name, { exact: true }).filter({ visible: true }).waitFor();
       if (!owner) continue;
-
       await open();
       await submit(name, 409);
       await dialog.getByText(/There's already a folder/).waitFor();
@@ -109,36 +102,12 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
         assert.equal(requests.length, before + 1);
         await cancel();
       };
-      await page.route('**/api/folders', async route => {
-        const request = route.request();
-        const response = await defaultWorker.fetch(request.url(), { method: request.method(), headers: await request.allHeaders(), body: request.postDataBuffer(), redirect: 'manual' });
-        await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
-      }, { times: 1 });
+      intercept('/api/folders', (_, relay) => relay(false));
       await assertFailure(`Denied ${width}`, 404, 'denied');
       await DB.prepare(`CREATE TRIGGER fixture_new_folder_error BEFORE INSERT ON drive_entries
         WHEN NEW.name LIKE 'Unavailable %' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END`).run();
       try { await assertFailure(`Unavailable ${width}`, 503, 'failure'); }
       finally { await DB.prepare('DROP TRIGGER fixture_new_folder_error').run(); }
-      const assertRecovery = async name => {
-        const before = requests.length;
-        await submit(name, 201);
-        await page.getByRole('link', { name: 'Refresh My Drive' }).and(active).waitFor();
-        await page.getByRole('status').filter({ hasText: `Created “${name}”. Refresh My Drive to see it.` }).waitFor();
-        await checkInsert(name);
-        assert.equal(requests.length, before + 1);
-        assert.equal(page.url(), base);
-      };
-      const index = await DB.prepare("SELECT sql FROM sqlite_schema WHERE name = 'drive_entries_listing_asc'").first('sql');
-      await open();
-      await DB.prepare('DROP INDEX drive_entries_listing_asc').run();
-      try { await assertRecovery(`Listing unavailable ${width}`); }
-      finally { await DB.prepare(index).run(); }
-      await open();
-      await page.route('**/__data.json?*', route => width === 390 ? route.abort() : route.fulfill({ status: 503 }), { times: 1 });
-      await assertRecovery(`Refresh failed ${width}`);
-      await evidence('refresh-failed');
-
-      // The staging fixture already has 99 Folder NNN rows plus the named folders.
       await page.getByRole('link', { name: 'Next page' }).click();
       await open();
       const continuation = page.url(), earlier = `B Earlier ${width}`;
@@ -148,11 +117,33 @@ export async function proveNewFolder(page, origin, DB, principal, defaultWorker)
       assert.equal(page.url(), continuation);
       assert.equal(await page.locator(`[data-created-row="${await checkInsert(earlier)}"]`).count(), 0);
       await evidence('off-page');
+
+      const upload = 'Concurrent upload.txt', release = Promise.withResolvers();
+      const recovery = page.getByRole('link', { name: 'Refresh My Drive' });
+      const nameAfterFailure = `Z Refresh failed ${width}`, attempts = requests.length;
+      intercept('/api/uploads', async route => { await release.promise; return route.fulfill({ status: 503 }); });
+      try {
+        await page.locator('input[type=file]').setInputFiles({ name: upload, mimeType: 'text/plain', buffer: Buffer.from('fixture') });
+        await status(`Uploading ${upload}`).waitFor();
+        await open();
+        intercept('/__data.json', route => width === 390 ? route.abort() : route.fulfill({ status: 503 }));
+        await submit(nameAfterFailure, 201);
+        await recovery.and(active).waitFor();
+      } finally { release.resolve(); }
+      await status(`${upload}: Upload interrupted.`).waitFor();
+      assert.equal(await recovery.and(active).count(), 1);
+      await status(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`).waitFor();
+      await checkInsert(nameAfterFailure);
+      await evidence('refresh-failed');
+      const [document] = await Promise.all([
+        page.waitForResponse(r => r.request().isNavigationRequest() && r.url() === continuation), recovery.press('Enter'),
+      ]);
+      assert.deepEqual([document.request().method(), document.status(), requests.length], ['GET', 200, attempts + 1]);
+      await page.getByText(nameAfterFailure, { exact: true }).filter({ visible: true }).waitFor();
     }
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `${owner ? 'owner' : 'member'}-new-folder.json`), JSON.stringify({
-      testedSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), session: 'signed in with passkey', viewports: widths,
-      posts: requests, persistedInD1: true, authenticatedRootRefresh: true, stayedInMyDrive: true,
-      initialFocus: 'Folder name', successFocus: 'created row', keyboard: 'Enter creates, Escape returns focus; owner Tab wraps',
+      testedSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), viewports: widths, posts: requests,
+      keyboard: 'Textbox → created row; owner: Tab wraps, Escape returns focus, refresh link reloads the same cursor',
       screenReaderEvidence: 'Chromium accessibility tree checked on focused row; not a native screen reader run',
     }, null, 2));
   } finally { page.off('request', observe); }

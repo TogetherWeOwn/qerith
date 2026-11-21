@@ -14,12 +14,12 @@
     result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; createFolderAllowed: boolean;
   } = $props();
   let status = $state('');
-  let receipt = $state<'hidden' | 'visible' | 'refresh'>('hidden');
+  let folderReceipt = $state({ text: '', style: 'hidden' as 'hidden' | 'visible' | 'refresh' });
   let createdId = $state<string>();
   let list = $state<ReturnType<typeof FileList>>();
-  function announce(message: string, style: typeof receipt = 'hidden') { status = message; receipt = style; }
-  let refreshed = $state.raw<{ from: RootListingResult; listing: RootListingResult }>();
-  let result = $derived(refreshed?.from === initial ? refreshed.listing : initial);
+  let refreshed = $state<RootListingResult>();
+  let folderListing = $state.raw<{ from: RootListingResult; listing: RootListingResult }>();
+  let result = $derived(folderListing?.from === initial ? folderListing.listing : refreshed ?? initial);
   let busy = $state(false);
   let header: HTMLElement;
   let recovery = $state<HTMLAnchorElement>();
@@ -48,7 +48,7 @@
     if (version < appliedVersion) return;
     appliedVersion = version;
     const focused = document.activeElement;
-    flushSync(() => { refreshed = { from: initial, listing: next }; });
+    flushSync(() => { refreshed = next; });
     restoreFocus(focused);
   }
 
@@ -65,19 +65,19 @@
     const next = await preloadData(url.href).catch(() => null);
     if (next?.type !== 'loaded' || next.data.listing?.status !== 'ok' || initial !== from) {
       close();
-      announce(`Created “${name}”. Refresh My Drive to see it.`, 'refresh');
+      folderReceipt = { text: `Created “${name}”. Refresh My Drive to see it.`, style: 'refresh' };
       await tick();
       recovery?.focus();
       return;
     }
-    refreshed = { from, listing: next.data.listing };
+    folderListing = { from, listing: next.data.listing };
     createdId = id;
     await tick();
     close();
     if (items.some(item => item.id === id)) {
       list?.focusCreatedRow(id);
-      announce(`Created “${name}”.`);
-    } else announce(`Created “${name}”. It isn’t on this page.`, 'visible');
+      folderReceipt = { text: `Created “${name}”.`, style: 'hidden' };
+    } else folderReceipt = { text: `Created “${name}”. It isn’t on this page.`, style: 'visible' };
   }
 
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
@@ -90,21 +90,25 @@
 <header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
   <h1>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
-    <RootUpload mode={uploadMode} {announce} {refresh} paginated={page !== null} bind:busy />
+    <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if createFolderAllowed}
     <NewFolderDialog available={result.status === 'ok'} {items} oncreated={folderCreated} />
   {/if}
 </header>
-<p class:status={!status || (receipt === 'hidden' && (!staging || result.status === 'ok'))} role="status">{status}</p>
+<p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
+{#if createFolderAllowed}<p class:status={folderReceipt.style === 'hidden'} role="status">{folderReceipt.text}</p>{/if}
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
-  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
 {:else if result.status === 'invalid-page'}
   <p class="error">This page is no longer available.</p>
+{/if}
+{#if folderReceipt.style === 'refresh' || result.status === 'unavailable'}
+  <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>{folderReceipt.style === 'refresh' ? 'Refresh My Drive' : 'Try again'}</a>
+{:else if result.status === 'invalid-page'}
   <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
-{:else}
-  {#if receipt === 'refresh'}<a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Refresh My Drive</a>{/if}
+{/if}
+{#if result.status === 'ok'}
   {#if items.length}
     <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} {createdId} />
   {:else if page}

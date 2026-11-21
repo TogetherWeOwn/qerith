@@ -31,12 +31,9 @@
     name = clash = failure = ''; checking = false;
     dialog.showModal(); field.focus();
   }
-  function close() {
-    dialog?.close(); opener?.focus();
-  }
+  function close() { dialog?.close(); opener?.focus(); }
   function dismiss() { if (!pending) close(); }
   function keys(event: KeyboardEvent) {
-    if (event.key === 'Escape' && pending) event.preventDefault();
     if (event.key !== 'Tab') return;
     const [from, to] = event.shiftKey ? [first, last] : [last, first];
     if (document.activeElement === from) { event.preventDefault(); to.focus(); }

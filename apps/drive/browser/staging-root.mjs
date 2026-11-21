@@ -117,7 +117,8 @@ try {
     if (url.pathname === dataPath) await holdRefresh;
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
   };
-  await context.route('**/*', route => relay(route));
+  let rootRelay = relay;
+  await context.route('**/*', route => rootRelay(route));
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
   const signInAssets = new Set(assets);
   await Promise.all([page.waitForURL(origin + '/'), page.getByRole('button', { name: 'Sign in with a passkey' }).click()]);
@@ -271,13 +272,20 @@ try {
 
   await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES ('fixture-parent', 'owner', 'Receipts', 'folder')").run();
   await deny('/f/fixture-parent', 404, { cookie });
-  await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
+  const overrides = new Map(); // One owner for each Playwright route, including injected failures.
+  rootRelay = route => {
+    const { pathname } = new URL(route.request().url());
+    const forward = (optIn = true) => relay(route, optIn ? inviteWorker : worker, 'same-origin');
+    const override = overrides.get(pathname);
+    overrides.delete(pathname);
+    return override ? override(route, forward) : forward();
+  };
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
-  await proveNewFolder(page, origin, DB, 'owner', worker);
+  await proveNewFolder(page, origin, DB, 'owner', (path, handler) => overrides.set(path, handler));
 
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
