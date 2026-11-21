@@ -14,7 +14,7 @@
 {#snippet nameCell(entry: PageData['entries'][number])}
   <div class="name">
     <KindGlyph kind={entry.kind} />
-    {#if entry.kind === 'file' && entryId.test(entry.id)}
+    {#if entry.downloadable && entryId.test(entry.id)}
       <a href={'/api/download/' + entry.id} dir="auto">{label(entry.name)}</a>
     {:else}
       <span dir="auto">{label(entry.name)}</span>

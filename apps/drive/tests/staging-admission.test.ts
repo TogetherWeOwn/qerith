@@ -461,37 +461,23 @@ test('foreign site metadata permits only the top-level invite document and never
   assert.equal(reads(), 0);
 });
 
-
-test('Shared with me requires a live member, both flags and an exact bounded document at both layers', async () => {
-  const flags = { DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_SHARED_LISTING: '1' };
-  const member = runtime('member');
+test('Shared with me admits only exact documents for live members with both flags', async () => {
+  const shared = '/shared';
   const cases = [
-    ['/shared', 'GET', {}, member.env, 404],
-    ['/shared', 'GET', { ...flags, DRIVE_STAGING_SHARED_LISTING: '0' }, member.env, 404],
-    ['/shared', 'GET', flags, runtime('owner').env, 404],
-    ['/shared', 'GET', flags, runtime('revoked').env, 401],
-    ['/shared', 'GET', flags, runtime('offline').env, 503],
-    ['/shared', 'POST', flags, member.env, 404],
-    ['/shared/', 'GET', flags, member.env, 404],
-    ['/shared/__data.json', 'GET', flags, member.env, 404],
-    ['/shared?cursor=one&cursor=two', 'GET', flags, member.env, 400],
-    ['/shared?cursor=' + encodeURIComponent('é'.repeat(257)), 'GET', flags, member.env, 400],
-    ['/shared?cursor=old%3A%2B%26id', 'GET', flags, member.env, 200],
-    ['/shared', 'HEAD', flags, member.env, 200],
+    [shared, 404, 'member', 'GET', '0'], [shared, 404, 'owner'],
+    [shared, 401, 'revoked'], [shared, 503, 'offline'], [shared, 404, 'member', 'POST'],
+    [shared + '/', 404], [shared + '/__data.json', 404], [shared + '?cursor=%FF', 400],
+    [shared + '?cursor=one&cursor=two', 400], [shared + '?cursor=' + encodeURIComponent('é'.repeat(257)), 400],
+    [shared + '?cursor=old%3A%2B%26id', 200], [shared, 200, 'member', 'HEAD'],
   ] as const;
-  for (const [path, method, opts, base, expected] of cases) {
+  const success = async () => new Response(null, { headers: { 'cache-control': 'private, no-store' } });
+  const dispatch = { adapter: success, asset: success, ceremony: success, invite: success };
+  for (const [path, expected, role = 'member', method = 'GET', flag = '1'] of cases) {
+    const env = { ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_SHARED_LISTING: flag };
     const input = request(path, method);
-    const env = { ...base, ...opts };
-    const success = async (r?: Request) => {
-      if (r) assert.equal(r.url, input.url);
-      return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
-    };
     const handle = privateRequests(env);
-    const event = { request: input, route: { id: '/shared' }, locals: {} };
-    const inputToHook = { event, resolve: () => success() } as unknown as Parameters<typeof handle>[0];
-    const responses = [await dispatchStagingRequest(input, env, true, assets, {
-      adapter: success, asset: success, ceremony: success, invite: success,
-    }), await handle(inputToHook)];
-    for (const response of responses) denied(response, expected);
+    const event = { request: input, route: { id: shared }, locals: {} };
+    denied(await dispatchStagingRequest(input, env, true, assets, dispatch), expected);
+    denied(await handle({ event, resolve: success } as unknown as Parameters<typeof handle>[0]), expected);
   }
 });

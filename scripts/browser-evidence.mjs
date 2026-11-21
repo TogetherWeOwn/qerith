@@ -26,7 +26,7 @@ function hasViewportImageData(png, width, height) {
   return false;
 }
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false) {
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false, shared = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -105,6 +105,18 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid folder evidence: ${label}`);
     }
   }
+  if (shared) for (const [width, height] of [[390, 844], [1280, 800]]) {
+    const keyboard = JSON.parse(await readFile(join(dir, `staging-shared-keyboard-${width}.json`), 'utf8'));
+    if (!isDeepStrictEqual(keyboard, { viewport: [width, height], visibleFocus: true, skipToMain: true, keyboardDownload: true }))
+      throw new Error(`Invalid shared keyboard evidence: ${width}`);
+    for (const state of ['empty', 'listed']) {
+      const label = `staging-shared-${state}-${width}`;
+      const png = await readFile(join(dir, `${label}.png`));
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      if (!hasViewportImageData(png, width, height) || !Array.isArray(axe?.violations) || axe.violations.length)
+        throw new Error(`Invalid shared evidence: ${label}`);
+    }
+  }
   for (const size of ['1280x800', '390x844']) {
     const png = await readFile(join(dir, `${size}.png`));
     if (!png.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
@@ -130,7 +142,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const root = process.env.ROOT_EVIDENCE === 'true';
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
   await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
-    folder, process.env.CONTINUATION_EVIDENCE === 'true');
+    folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,

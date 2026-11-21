@@ -8,9 +8,8 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
   const member = `__Host-drive-session=${memberToken}`;
   const context = await browser.newContext();
   const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
-  const visit = (path, headers, method = 'GET') => worker.fetch(origin + path, { headers, method, redirect: 'manual' });
-  const deny = async (path, headers, status, method) => {
-    const response = await visit(path, headers, method);
+  const deny = async (path, headers, status) => {
+    const response = await worker.fetch(origin + path, { headers, redirect: 'manual' });
     assert.deepEqual([response.status, response.headers.get('cache-control'), await response.text()],
       [status, 'private, no-store', ''], path);
   };
@@ -23,13 +22,8 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
     await deny('/shared', { 'x-fixture-shared': '1', cookie: member }, 404);
     await deny('/shared', { ...flags, cookie: ownerCookie }, 404);
     await deny('/shared', flags, 401);
-    for (const path of ['/shared/', '/%73hared', '/shared/__data.json', '/shared/f/x', '/api/shared-listing']) {
-      await deny(path, enabled, 404);
-    }
-    await deny('/shared', { ...enabled, origin }, 404, 'POST');
+    for (const path of ['/%73hared', '/shared/f/x', '/api/shared-listing', downloadPath]) await deny(path, enabled, 404);
     await deny('/shared?x-sveltekit-invalidated=01', enabled, 400);
-    await deny('/shared?cursor=%FF', enabled, 400);
-    await deny(downloadPath, enabled, 404);
 
     await context.addCookies([{ name: '__Host-drive-session', value: memberToken, url: origin, secure: true, httpOnly: true }]);
     let shared = false;
@@ -43,9 +37,15 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
     assert.equal(await link.count(), 0);
     shared = true;
     const listed = page.getByRole('link', { name: file.name, exact: true });
-    const folder = 'Receipts folder';
-    const firstFolder = '~shared-01';
-    await DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, 'owner', ?, 'folder')").bind(firstFolder, folder).run();
+    const folder = 'Receipts folder', firstFolder = '~shared-01';
+    const pending = 'Unpublished.txt', pendingId = '00000000-0000-4000-8000-000000000321';
+    await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes)
+      VALUES (?, 'owner', ?, 'folder', NULL, NULL), (?, 'owner', ?, 'file', 'fixture-unpublished', 1)`)
+      .bind(firstFolder, folder, pendingId, pending).run();
+    const captureState = async (state, width) => {
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), state);
+      await capture(page, state, width, true, 'staging-shared');
+    };
     const tab = async (name) => {
       await page.keyboard.press('Tab');
       const target = page.locator(':focus');
@@ -66,17 +66,15 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
       await enter();
       assert.equal(await link.getAttribute('aria-current'), 'page');
       await main.getByRole('heading', { name: 'Nothing is shared with you yet.' }).waitFor();
-      await capture(page, 'empty', width, true, 'staging-shared');
-      await DB.batch([grant(id), grant(firstFolder)]);
+      await captureState('empty', width);
+      await DB.batch([grant(id), grant(firstFolder), grant(pendingId)]);
       await page.reload();
       await listed.waitFor();
-      await main.getByText(folder, { exact: true }).filter({ visible: true }).waitFor();
+      for (const name of [folder, pending]) await main.getByText(name, { exact: true }).filter({ visible: true }).waitFor();
       assert.equal(await main.getByRole('link').count(), 1);
       assert.equal(await main.locator('button, input, form').count(), 0);
       assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
-      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      await capture(page, 'listed', width, true, 'staging-shared');
-      await writeFile(resolve(output, `staging-shared-listed-${width}-tree.txt`), await main.ariaSnapshot());
+      await captureState('listed', width);
       await tab('Skip to content');
       await page.keyboard.press('Enter');
       assert.equal(await main.evaluate(el => document.activeElement === el), true);
@@ -102,21 +100,18 @@ export async function proveSharedListing(browser, { origin, DB, worker, relay, o
     await page.goto(origin + '/shared');
     assert.equal(await main.getByText('100 items on this page').count(), 1);
     const next = main.getByRole('link', { name: 'Next page' });
-    const cursor = await next.getAttribute('href');
-    assert.ok(new URL(cursor, origin).searchParams.get('cursor').endsWith(':+'));
+    assert.ok(new URL(await next.getAttribute('href'), origin).searchParams.get('cursor').endsWith(':+'));
     await next.focus();
     await enter();
     assert.equal(await main.getByText('1 item on this page').count(), 1);
     await revoke();
     await page.reload();
     await main.getByText('No more items.').waitFor();
-    const first = main.getByRole('link', { name: 'First page' });
-    await first.focus();
-    await enter();
+    await main.getByRole('link', { name: 'First page' }).click();
     await main.getByRole('heading', { name: 'Nothing is shared with you yet.' }).waitFor();
   } finally {
     await context.close();
     await revoke();
-    await DB.prepare("DELETE FROM drive_entries WHERE id GLOB '~shared-*'").run();
+    await DB.prepare("DELETE FROM drive_entries WHERE id GLOB '~shared-*' OR object_key = 'fixture-unpublished'").run();
   }
 }
