@@ -1,6 +1,6 @@
 import { createAuthorizedPrivateDeletion } from './metadata/private-deletion';
 import { bindPrivateDeletionStorage, type PrivateDeletionQualification } from './private-deletion-reconciliation';
-import { allowsOrigin, authOrigin, readSession, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { StorageBindings } from './storage-runtime';
 import { readUploadBody, uploadIdPattern } from './upload-part';
 
@@ -35,6 +35,7 @@ export async function deletePrivateEntry(request: Request, entryId: string, env:
     const session = await readSession(request, db);
     if (!session) return reply(401);
     if (!qualification) return reply(404);
+    if (origin.origin === stagingOrigin && session.principal.role === 'member' && !admitsStagingInvite(env)) return reply(403);
     if (!uploadIdPattern.test(entryId) || !await confirmed(request)) return reply(400);
     const binding = bindPrivateDeletionStorage(db, env, qualification);
     if (!binding) return reply(503);

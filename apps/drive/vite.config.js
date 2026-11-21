@@ -95,6 +95,7 @@ import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
+import { dispatchStagingDeletion } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
@@ -123,6 +124,9 @@ export default {
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
+      // No qualified rule is installed. Upload readiness does not admit deletion.
+      const deletion = dispatchStagingDeletion(request, env);
+      if (deletion) return deletion;
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
       if (url.pathname === readinessPath) return qualificationReadiness(request, env, ready);

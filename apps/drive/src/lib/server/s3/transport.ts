@@ -12,6 +12,8 @@ const validateView = typedArrayPrototype.values as (this: Uint8Array) => Iterabl
 type TransportOptions = { fetch: typeof fetch; timeoutMs: number; now?: () => Date; beforeSend?: () => Promise<boolean> } & {
   /** For streamed GETs only: timeoutMs then bounds signing and headers, not the body. */
   streamBudget?: { idleMs: number; totalMs: number };
+  /** Buffered requests only. The injected fetch/body must cooperate with abort. */
+  drainBufferedAbort?: boolean;
 };
 type Operation = {
   method: 'GET' | 'HEAD' | 'PUT' | 'POST' | 'DELETE';
@@ -96,6 +98,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     else signal?.addEventListener('abort', forwardAbort, { once: true });
     const timeoutError = new Error('S3 request timed out');
     const budget = streaming ? streamBudget : undefined;
+    const drain = !streaming && options.drainBufferedAbort;
     const start = performance.now();
     const expire = () => controller.abort(timeoutError);
     const totalDeadline = budget ? start + budget.totalMs : Infinity;
@@ -128,7 +131,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       const { beforeSend, fetch: transport } = options;
       if (beforeSend && await abortable(beforeSend(), controller.signal) !== true) throw new Error('S3 send not admitted');
       checkAbort();
-      response = await abortable(transport(signed), controller.signal, cancelResponse);
+      response = await (drain ? transport(signed) : abortable(transport(signed), controller.signal, cancelResponse));
       checkAbort();
       if (response.status >= 300 && response.status < 400 && response.status !== 304) {
         throw new Error('S3 redirects are not allowed');
@@ -241,7 +244,9 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       return { status: response.status, headers: response.headers, body: responseBody };
     } catch (error) {
       controller.abort(error);
-      if (reader) void reader.cancel(error).catch(() => {});
+      if (drain) {
+        await (reader ? reader.cancel(error) : response?.body?.cancel(error))?.catch(() => {});
+      } else if (reader) void reader.cancel(error).catch(() => {});
       else if (response) cancelResponse(response);
       if (streaming) throw new Error('S3 stream request failed');
       throw error;

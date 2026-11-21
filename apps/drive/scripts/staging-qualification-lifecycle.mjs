@@ -1,5 +1,6 @@
 import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
+import { verifyQualificationExercise } from './staging-qualification-exercise.mjs';
 import {
   probeQualificationWorker, runQualificationPhase, uploadQualificationWorker, withQualificationRecovery, withQualificationWorker,
 } from './staging-qualification-worker.mjs';
@@ -43,7 +44,10 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
       upload: candidate,
       recordRecovery: record('worker'),
       probe,
-      exercise: (active, phaseSignal) => exercise({ ...active, ...context }, phaseSignal),
+      exercise: async (active, phaseSignal) => {
+        const invocation = Object.freeze({ ...context, version: active.version });
+        return verifyQualificationExercise(await exercise(invocation, phaseSignal), invocation, phaseSignal);
+      },
       cleanup: (active, phaseSignal) => cleanup({ ...active, ...context }, phaseSignal),
     }, env, cwd, signal);
     return { migrations, deployment };

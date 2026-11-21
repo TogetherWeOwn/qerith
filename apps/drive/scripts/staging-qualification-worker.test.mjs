@@ -514,6 +514,7 @@ test('runs cleanup after cancellation and preserves an unverified cleanup even w
     const cleanupFailure = new Error('Qualification prefix cleanup is unverified.');
     options.cleanup = (identity, signal) => {
       assert.equal(identity.version, candidate);
+      assert.equal(identity.expiresAt, expiresAt);
       assert.equal(signal.aborted, false);
       calls.push('cleanup');
       throw cleanupFailure;
