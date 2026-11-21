@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -47,6 +47,21 @@ test('wrong parent count, head, main ancestry and mutable refs fail closed', () 
   assert.throws(() => selectCheckout({ ...input, head: 'main' }, graph()), /immutable/);
   assert.throws(() => selectCheckout({ ...input, event: 'push' }, graph()), /must match/);
 });
+test('generated browser entrypoints have separate exact-head deadlines', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const job = workflow.split(/^  drive-browser:\n/m)[1]?.split(/^  \S/m)[0];
+  assert.ok(job, 'drive-browser job is missing');
+  const steps = job.split(/^      - /m).slice(1);
+  const deadline = 'timeout --signal=TERM --kill-after=10s 90s node ';
+  const entrypoints = ['sign-in.mjs', 'staging-root.mjs'].map(entry => {
+    const matches = steps.filter(step => step.includes(deadline + entry));
+    assert.equal(matches.length, 1, `${entry} must have one bounded invocation`);
+    assert.match(matches[0], /^        if: steps\.browser-source\.outputs\.tested == env\.REQUESTED_HEAD$/m);
+    return matches[0];
+  });
+  assert.notEqual(...entrypoints, 'the fixtures must run in separate steps');
+});
+
 test('evidence fails when missing, empty or bound to the wrong checkout', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-evidence-test-'));
   try {

@@ -30,11 +30,13 @@ Local runs can include uncommitted changes and must not be treated as commit
 provenance. After a CI change merges, a substantive pull request body edit starts
 a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
-On the matching head, CI also builds the real generated Worker and runs
-`sign-in.mjs` in Chromium. The existing sign-in and root-upload fixture evidence
-is separate from `staging-root-round-trip.json`: the latter uses the exact staging
-origin, a disposable D1, and synthetic storage with no sign-in fixture flag or
-remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
+On the matching head, CI builds the generated Worker once and runs `sign-in.mjs`
+and then `staging-root.mjs` in separate Chromium steps. Each entrypoint, including
+its cleanup, has a 90-second timeout and a 10-second kill grace within the same
+15-minute job. Both steps use the same build and evidence directory. The sign-in
+and root-upload evidence is separate from `staging-root-round-trip.json`: the
+latter uses the exact staging origin, a disposable D1, and synthetic storage
+with no sign-in fixture flag or remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
 without navigation, full and range byte equality, and admission denials. For
 notice recovery, the relay seeds one synthetic Worker document request at a time
 and checks the Worker's expiration header; Chromium checks the rendered notice
