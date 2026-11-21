@@ -141,6 +141,7 @@ export async function recoverQualificationD1(source, record, { proveQuiescence }
         const [rows] = await db.query([{ sql: 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id LIMIT 257' }]);
         if (JSON.stringify(ledger(rows)) !== JSON.stringify(expected)) throw new Error();
       }
+      if (await current() !== restored.bookmark) throw new Error();
       return { status: 'restored' };
     }, identity, signal, 45_000);
   } catch {

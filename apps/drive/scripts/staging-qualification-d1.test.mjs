@@ -16,7 +16,7 @@ const prefix = 'drive-qualification/full-v0/17/2/';
 const invite = p => `${p}d1/migration-invite`;
 const ceremony = p => `${p}d1/migration-ceremony`;
 const other = ['drive-qualification/full-v0/17/1/', 'drive-qualification/full-v0/17/20/',
-  'drive-qualification/full-v0/170/2/', 'unrelated/'];
+  'drive-qualification/full-v0/170/2/', 'unrelated/', `${prefix}decoy/`];
 const restore = '/time_travel/restore?bookmark=01-baseline';
 const ok = result => Response.json({ success: true, errors: [], result });
 const cleanupError = /fixture cleanup is unverified/;
@@ -167,11 +167,27 @@ test('recovery restores the recorded pre-mutation schema and ledger, including a
     f.sql("INSERT INTO d1_migrations VALUES (999, 'interrupted.sql', '2026-11-20 11:00:00')");
     assert.deepEqual(await f.recover(), { status: 'restored' });
     assert.deepEqual(f.calls, ['', '/time_travel/bookmark', restore, '/time_travel/bookmark', '/query',
-      ...(emptyBaseline ? [] : ['/query'])]);
+      ...(emptyBaseline ? [] : ['/query']), '/time_travel/bookmark']);
     assert.deepEqual(f.sql("SELECT name FROM sqlite_schema WHERE name = 'interrupted_migration'"), []);
     if (!emptyBaseline) assert.deepEqual(f.sql('SELECT id, name, applied_at FROM d1_migrations ORDER BY id'), f.historical);
     await assert.rejects(f.recover(), recoveryError);
     assert.deepEqual(f.calls.slice(-2), ['', '/time_travel/bookmark']);
+  }
+});
+
+test('recovery refuses a bookmark advanced during final ledger readback, even if the ledger matches', async t => {
+  for (const emptyBaseline of [false, true]) {
+    const f = fixture(t, { emptyBaseline });
+    const finalQuery = emptyBaseline ? 'FROM sqlite_schema' : 'FROM d1_migrations';
+    let advanced = false;
+    f.intercept((path, init, run) => {
+      if (path === '/time_travel/bookmark' && advanced) return ok({ bookmark: '04-superseding' });
+      const result = run();
+      if (path === '/query' && init.body.includes(finalQuery)) advanced = true;
+      return result;
+    });
+    await assert.rejects(f.recover(), recoveryError, `emptyBaseline=${emptyBaseline}`);
+    assert.deepEqual(f.calls.slice(-2), ['/query', '/time_travel/bookmark']);
   }
 });
 
@@ -201,7 +217,7 @@ test('recovery does not retry a lost response or certify a wrong bookmark or rew
         return ok({ bookmark: '04-superseding' });
       }
       if (path !== restore) return run();
-      if (fault === 'unchanged') return ok({ bookmark: '01-baseline', previous_bookmark: '02-failed' });
+      if (fault === 'unchanged') return ok({ bookmark: f.proof.currentBookmark, previous_bookmark: f.proof.currentBookmark });
       const result = run();
       if (fault === 'lost') throw new Error('synthetic lost response');
       if (fault === 'wrong-prior') return ok({ bookmark: '03-restored', previous_bookmark: '02-foreign' });
