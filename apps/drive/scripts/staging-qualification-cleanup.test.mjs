@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createQualificationR2Cleanup } from './staging-qualification-cleanup.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
@@ -60,6 +61,20 @@ test('protected settings must match the committed staging target and reviewed R2
   }
   const nonR2 = job(t, 'https://storage.example.test');
   await assert.rejects(assertQualificationSettings(nonR2.env, nonR2.cwd), /reviewed storage binding is unverified/);
+
+  // Match the protected workflow's plain Node invocation, without the test loader or credential environment.
+  const cli = fileURLToPath(new URL('./staging-qualification-settings.mjs', import.meta.url));
+  const run = overrides => {
+    const { error, status, stdout, stderr } = spawnSync(process.execPath, [cli], {
+      cwd, env: { PATH: process.env.PATH, ...env, ...overrides }, encoding: 'utf8', timeout: 30_000
+    });
+    assert.ifError(error);
+    return { status, stdout, stderr };
+  };
+  assert.deepEqual(run(), { status: 0, stdout: '', stderr: '' });
+  assert.deepEqual(run({ QERITH_S3_BUCKET: 'other-bucket' }), {
+    status: 1, stdout: '', stderr: 'Protected staging target or reviewed storage binding is unverified.\n'
+  });
 });
 
 const r2Account = new URL(endpoint).hostname.split('.')[0];
