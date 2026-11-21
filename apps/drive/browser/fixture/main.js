@@ -21,7 +21,10 @@ if (params.has('listing') || params.has('owner-invite')) {
 }
 
 const target = document.getElementById('app');
-if (params.has('root-upload')) {
+if (params.has('delete-file')) {
+  const { default: DeleteFileFixture } = await import('./DeleteFileFixture.svelte');
+  mount(DeleteFileFixture, { target });
+} else if (params.has('root-upload')) {
   mount(RootUploadFixture, { target, props: window.fixtureRootUpload });
 } else {
   mount(params.has('owner-invite') ? OwnerInviteFixture : params.has('invite') ? InviteFixture : Fixture, { target });
