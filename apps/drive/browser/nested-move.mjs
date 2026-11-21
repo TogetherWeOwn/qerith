@@ -32,6 +32,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const press = label => button(label).and(page.locator('[aria-disabled="false"]')).press('Enter', { noWaitAfter: true });
     const response = matches => page.waitForResponse(r => matches(r.request()));
     const submit = async label => (await Promise.all([response(writes), press(label)]))[0].status();
+    const snapshot = tag => page.waitForEvent('console', msg => msg.text().startsWith(`${tag}:`)).then(msg => JSON.parse(msg.text().slice(tag.length + 1)));
     if (nested) {
       const reparent = id => db.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(id, source).run();
       await reparent('nested-gone'); await open();
@@ -75,14 +76,16 @@ export async function proveNestedMove(page, origin, db, intercept) {
     try {
       await press('Move to My Drive');
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
-      await evidence('saving');
-      assert.equal((await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]))[0].status(), 200);
-      if (nested) assert.deepEqual(await page.evaluate(([source, next]) => {
+      await evidence('saving'); // Install the snapshot before navigation, not via a command on the held page.
+      if (nested) await page.evaluate(([source, next]) => window.addEventListener('beforeunload', () => {
         const receipt = document.querySelector('.move-notice [role="status"]');
         const unclipped = el => { const css = getComputedStyle(el); return css.clipPath === 'none' && css.clip === 'auto'; };
-        return [!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`), document.activeElement?.matches(`[data-row="${next}"] a[data-name]`),
-          receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && [receipt, receipt.parentElement].every(unclipped) && receipt.textContent];
-      }, [source, `${parent}-next`]), [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
+        console.debug('move-outgoing:' + JSON.stringify([!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
+          document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) &&
+          [receipt, receipt.parentElement].every(unclipped) && receipt.textContent]));
+      }, { once: true }), [source, `${parent}-next`]);
+      const [written, , outgoing] = await Promise.all([response(writes), page.waitForRequest(isReload), nested && snapshot('move-outgoing'), held.resolve()]);
+      assert.equal(written.status(), 200); if (nested) assert.deepEqual(outgoing, [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
       assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
     } finally { held.resolve(); reloadGate.resolve(); }
     if (nested) {
@@ -99,20 +102,17 @@ export async function proveNestedMove(page, origin, db, intercept) {
         const json = Response.prototype.json;
         Response.prototype.json = async function () {
           const body = await json.call(this);
-          if (this.url.endsWith(`?entry=${entry}`)) setTimeout(() => performance.mark('first-receipt-processed'), 0);
+          if (this.url.endsWith(`?entry=${entry}`)) setTimeout(() => console.debug('older-receipt:' + JSON.stringify(document.querySelector('.move-notice [role="status"]')?.textContent ?? null)), 0);
           return body;
         };
       }, source);
       try {
         await open('03 Other'); await button(target).press('Enter');
         intercept(path, (_, forward) => forward(true, () => load.promise));
-        const secondReload = page.waitForRequest(isReload);
-        assert.equal(await submit(primary), 200); await secondReload;
-        deliver.resolve();
-        await page.waitForFunction(() => performance.getEntriesByName('first-receipt-processed').length);
-        assert.equal(await generic.count(), 1, 'the older result cannot replace the second receipt before reload');
-        const secondReceipt = page.waitForRequest(lookup(`${parent}-other`, '&folder=nested-target'));
-        load.resolve(); await secondReceipt;
+        assert.equal((await Promise.all([page.waitForRequest(isReload), submit(primary)]))[1], 200);
+        const [notice] = await Promise.all([snapshot('older-receipt'), deliver.resolve()]);
+        assert.equal(notice, 'Item moved.', 'the older result cannot replace the second receipt before reload');
+        await Promise.all([page.waitForRequest(lookup(`${parent}-other`, '&folder=nested-target')), load.resolve()]);
       } finally { deliver.resolve(); load.resolve(); }
     }
     await page.getByRole('link', { name: '02 Next' }).and(focused).waitFor(); await status(`Moved to ${target}`).waitFor();
