@@ -27,7 +27,7 @@
   let notice = $state<HTMLElement>(), session = $state(0);
   let picked = $state<ShareRecipient[]>([]), added = $state<string[]>([]);
   let confirm = $state<string | null>(null), pending = $state<'share' | 'remove' | null>(null);
-  let error = $state(''), status = $state(''), live = $state('');
+  let error = $state(''), live = $state(''), status = $state('');
   let paging = $state<'access' | 'candidates' | null>(null);
   const pageText = (page: SharePage<ShareRecipient>, subject: string) => page.state === 'loading' ? `Loading ${subject}…` :
     page.state === 'ready' && page.pageNumber !== null ? `Showing page ${page.pageNumber} of ${subject}.` : '';
@@ -36,12 +36,17 @@
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
   const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
-  const pageStatus = $derived(paging === 'access' ? pageText(access, 'people with access') : paging ? pageText(candidates, 'people to add') : '');
-  $effect(() => { if (paging) live = pageStatus; });
+  $effect(() => {
+    if (!paging) return;
+    const page = paging === 'access' ? access : candidates, subject = paging === 'access' ? 'people with access' : 'people to add';
+    live = pageText(page, subject) || (page.state === 'ready' ? `Loaded ${subject}.` : '');
+    if (paging === 'access' && page.state === 'ready' && !page.previous && !page.next &&
+        document.activeElement?.id === `${id}-access-pager`) accessTitle.focus();
+  });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from: HTMLElement) {
     if (dialog.open) return;
-    opener = from; session++; picked = []; confirm = paging = null; error = status = live = ''; added = [];
+    opener = from; session++; picked = []; confirm = paging = null; error = live = status = ''; added = [];
     dialog.showModal(); await tick();
     if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
   }
@@ -54,7 +59,7 @@
   function load(event: MouseEvent, key: NonNullable<typeof paging>, action: () => void) {
     if (pending) return;
     (event.currentTarget as HTMLButtonElement).parentElement?.focus();
-    confirm = null; paging = key; status = live = '';
+    confirm = null; paging = key; live = status = '';
     action();
   }
   function onPageFeedback(message: string, clear?: string) {
@@ -64,17 +69,17 @@
   function select(ids: string[]) { if (!pending) picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []); }
   async function apply(person?: ShareAccess) {
     if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
-    pending = person ? 'remove' : 'share'; paging = null; error = status = live = '';
+    pending = person ? 'remove' : 'share'; paging = null; error = live = status = '';
     try {
       if (person) {
         await onRemove(person.recipientId); confirm = null;
         const inherited = person.inheritedFrom?.trim();
-        live = status = `Removed direct access for ${label(person)}.${inherited ? ` Access through ${person.inheritedFrom} remains.` : ''}`;
+        status = `Removed direct access for ${label(person)}.${inherited ? ` Access through ${person.inheritedFrom} remains.` : ''}`;
       } else {
         const submitted = picked, ids = submitted.map(choice => choice.recipientId);
         await onShare(ids);
         added = [...new Set([...added, ...ids])]; picked = [];
-        live = status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
+        status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
       }
     } catch {
       error = `${person ? 'Couldn’t confirm removal of direct access.' : 'Couldn’t confirm sharing.'} Check who has access before trying again.`;
@@ -82,12 +87,12 @@
       pending = null;
       await tick();
       if (error) notice?.focus();
-      else if (person && dialog.open) accessTitle.focus();
+      else if (dialog.open && !dialog.contains(document.activeElement)) (person ? accessTitle : last).focus();
     }
   }
 </script>
 {#snippet pager(page: SharePage<ShareRecipient>, key: NonNullable<typeof paging>, subject: string)}
-  <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
+  <div class="paging" role="group" id={`${id}-${key}-pager`} aria-label={`Pages of ${subject}`} tabindex="-1">
     <p>{pageText(page, subject)}</p>
     {#if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
       {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, key, page.retry!)}>Retry</button>{/if}
@@ -105,7 +110,6 @@
       <button type="button" class="close" aria-label="Close" aria-disabled={!!pending} bind:this={first} onclick={close}>×</button>
     </header>
     <p id={`${id}-rules`}>People you add can view and download. They can’t change, delete or re-share it.{kind === 'Folder' ? ' They also see anything you add to it later.' : ''}</p>
-    <div class="sr" role="status" aria-live="polite">{live}</div>
     {#if error}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{error}</p>{/if}
     {#if nobody}
       <div class="empty"><strong>There’s nobody else on this drive yet.</strong>
@@ -113,13 +117,13 @@
         {:else if !owner.driveOwner}<p>Ask the owner to invite them.</p>{/if}
       </div>
     {:else}
+      {@render pager(candidates, 'candidates', 'people to add')}
       {#key session}
         <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
           onSelectionChange={select} {onPageFeedback} locked={!!pending || candidates.state !== 'ready'} />
       {/key}
-      {#if status}<p class="feedback">{status}</p>{/if}
-      {@render pager(candidates, 'candidates', 'people to add')}
     {/if}
+    <p class:sr={!status} role="status">{status || live}</p>
     <section aria-labelledby={`${id}-access`}>
       <h3 id={`${id}-access`} tabindex="-1" bind:this={accessTitle}>People with access</h3>
       <ul role="list">
@@ -127,18 +131,17 @@
         {#each access.rows.filter(row => row.recipientId !== owner.recipientId && (row.direct || row.inheritedFrom !== null)) as person (person.recipientId)}
           {@const badge = avatar(person)}
           <li class:added={added.includes(person.recipientId)}>
-            <span class="avatar" style:background-color={badge.colour} aria-hidden="true">{badge.initials}</span>
+            <span class="avatar" style:background-color={badge.colour} style:color="var(--drive-color-avatar-text)" aria-hidden="true">{badge.initials}</span>
             <div class="person"><strong><bdi>{label(person)}</bdi></strong>
               {#if person.inheritedFrom !== null}<small>Through <bdi>{person.inheritedFrom.trim() || 'a folder'}</bdi></small>{/if}
             </div>
             <span class="tag">Can view</span>
             {#if person.direct && access.state === 'ready'}
-              {@const direct = person.inheritedFrom !== null}
-              {@const action = direct ? 'direct access' : 'access'}
+              {@const action = person.inheritedFrom !== null ? 'direct access' : 'access'}
               <button type="button" class="danger" aria-label={`Remove ${label(person)}’s ${action}`} aria-expanded={confirm === person.recipientId}
                 aria-disabled={!!pending} onclick={() => { if (!pending) confirm = confirm === person.recipientId ? null : person.recipientId; }}>Remove</button>
               {#if confirm === person.recipientId}
-                <div class="confirmation"><p>Remove <bdi>{label(person)}</bdi>’s {action}?{direct ? ' They’ll still have access through this folder.' : ''}</p>
+                <div class="confirmation"><p>Remove <bdi>{label(person)}</bdi>’s {action}?{person.inheritedFrom !== null ? ' They’ll still have access through this folder.' : ''}</p>
                   <button type="button" class="danger" aria-label={`${pending === 'remove' ? 'Removing' : 'Confirm removal of'} direct access for ${label(person)}`}
                     aria-busy={pending === 'remove'} aria-disabled={!!pending} onclick={() => apply(person)}>{pending === 'remove' ? 'Removing…' : 'Remove'}</button>
                   <button type="button" aria-disabled={!!pending} onclick={event => { if (!pending) { confirm = null; event.currentTarget.closest('li')?.querySelector('button')?.focus(); } }}>Cancel</button>
@@ -164,7 +167,6 @@
   header { flex-wrap: nowrap; justify-content: space-between; }
   footer { justify-content: flex-end; }
   h2, h3, p, li { overflow-wrap: anywhere; }
-  .feedback { padding: var(--drive-space-3); }
   .sr { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
   h3, ul { margin: 0; font-size: var(--drive-font-size-ui); }
   p, small, button { color: var(--drive-color-text-secondary); }
@@ -173,8 +175,7 @@
   li { min-height: var(--drive-size-control-md); border-block-end: var(--drive-size-line) solid var(--drive-color-line-hairline); }
   li.added, .tag, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
   .avatar, .tag, button { border-radius: var(--drive-radius-pill); }
-  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm);
-    color: var(--drive-color-avatar-text); }
+  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm); }
   .person { flex: 1 0 10ch; min-width: 0; }
   small { display: block; font-size: var(--drive-font-size-meta); }
   .confirmation { flex-basis: 100%; }

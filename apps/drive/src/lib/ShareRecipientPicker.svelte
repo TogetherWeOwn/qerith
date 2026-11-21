@@ -1,6 +1,6 @@
 <script lang="ts">
   import { flushSync, tick } from 'svelte';
-  // The caller supplies unique, eligible choices and owns selection. selectedChoices can retain labels from other pages.
+  // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
   let { choices, selectedIds, selectedChoices = choices, onSelectionChange, locked = false, onPageFeedback }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
@@ -25,6 +25,7 @@
   const noMatch = $derived(!locked && open && !!search && !matches.length);
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
+
   const noMatchMessage = $derived(matchingNames.length ? 'Matching people are already selected.' : 'No matching people available on this page.');
   $effect(() => {
     const message = noMatch && noMatchMessage, report = onPageFeedback;
