@@ -20,7 +20,7 @@ function matchScan(scan, expected) {
 // The native lifecycle endpoint is a single policy document, not a list API.
 // Reject a partial document before handing it to the existing rule validator.
 async function singleLifecycleDocument(response) {
-  if (response.status !== 200 || !response.body) {
+  if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
   }

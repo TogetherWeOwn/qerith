@@ -66,8 +66,10 @@ function fixture(t) {
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
         const age = seconds => ({ condition: { type: 'Age', maxAge: seconds } });
-        return json({ rules: !state.expiry ? [] : [{ enabled: true, conditions: { prefix: namespace },
+        const response = json({ rules: !state.expiry ? [] : [{ enabled: true, conditions: { prefix: namespace },
           deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) }] }, state.expiryPage);
+        if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
+        return response;
       }
       const pinned = `${root}${account}/workers/scripts/${worker}/`;
       assert.ok(url.startsWith(pinned));
@@ -85,14 +87,16 @@ function fixture(t) {
       assert.equal(url.searchParams.get('prefix'), namespace);
       assert.match(request.headers.get('authorization'), /^AWS4-HMAC-SHA256 /);
       const stale = `<Key>${namespace}11/2/stale</Key>`;
-      const uploads = url.searchParams.has('uploads'); trace.push(uploads ? 'uploads' : 'objects');
+      const uploads = url.searchParams.has('uploads'), kind = uploads ? 'uploads' : 'objects';
+      trace.push(kind);
+      const init = state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined;
       const paginated = uploads ? state.uploadPage : state.objectPage;
       const envelope = `<Prefix>${namespace}</Prefix><EncodingType>url</EncodingType><IsTruncated>${!!paginated}</IsTruncated>`;
       if (uploads) return new Response(`<ListMultipartUploadsResult><Bucket>${bucket}</Bucket>${envelope}${state.upload ?
         `<Upload>${stale}<UploadId>pending</UploadId></Upload>` : ''}${paginated ?
-        '<NextKeyMarker>next</NextKeyMarker><NextUploadIdMarker>next</NextUploadIdMarker>' : ''}</ListMultipartUploadsResult>`);
+        '<NextKeyMarker>next</NextKeyMarker><NextUploadIdMarker>next</NextUploadIdMarker>' : ''}</ListMultipartUploadsResult>`, init);
       return new Response(`<ListBucketResult><Name>${bucket}</Name>${envelope}<KeyCount>${state.object ? 1 : 0}</KeyCount>${
-        state.object ? `<Contents>${stale}</Contents>` : ''}${paginated ? '<NextContinuationToken>next</NextContinuationToken>' : ''}</ListBucketResult>`);
+        state.object ? `<Contents>${stale}</Contents>` : ''}${paginated ? '<NextContinuationToken>next</NextContinuationToken>' : ''}</ListBucketResult>`, init);
     },
   };
   const create = () => {
@@ -135,6 +139,16 @@ test('inventory rejects incomplete reads, extra resources, fixtures and unverifi
     await assert.rejects(run('after'), error);
   }
 });
+
+const r2ReadOrder = ['expiry', 'uploads', 'objects'];
+for (const [index, kind] of r2ReadOrder.entries()) {
+  test(`inventory rejects HTTP 200 with Content-Range on R2 ${kind}`, async t => {
+    const f = fixture(t), run = f.create();
+    f.state.partial = kind;
+    await assert.rejects(run('before'), error);
+    assert.deepEqual(f.trace, ['estate', 'fixtures', ...r2ReadOrder.slice(0, index + 1)]);
+  });
+}
 
 test('inventory rejects final drift and does not rebaseline after cancellation', async t => {
   const f = fixture(t);
