@@ -548,6 +548,13 @@ jobs:
           test -f apps/drive/browser/sign-in.mjs
           npm run build --prefix apps/drive
           (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
+      - name: Exercise generated staging-origin fixture in Chromium with local D1
+        # Earlier heads either lack this fixture or already run it from sign-in.mjs.
+        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''
+        working-directory: tested/apps/drive/browser
+        env:
+          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+        run: timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs
       - name: Verify evidence and record both provenance identities
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
