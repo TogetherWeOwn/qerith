@@ -99,6 +99,10 @@ export async function exerciseExpectedParts({ worker, DB, origin, session, owner
     await assert.rejects(query(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size, expected_part_sha256s)
       VALUES (?, ?, ?, 'created', ?, ?)`, randomUUID(), principalId, randomUUID(), declared, packed).run(), /CHECK constraint/);
   }
+  await assert.rejects(query(`INSERT INTO drive_upload_intents
+    (id, owner_id, object_key, state, upload_id, declared_size, expected_part_sha256s)
+    VALUES (?, ?, ?, 'allocated', 'fixture-upload', ?, ?)`, randomUUID(), principalId, randomUUID(), size, a + b).run(),
+  /expected upload parts require a new intent/);
   assert.equal((await ask({}, '')).status, 401);
   assert.equal((await ask({}, member)).status, 401, 'another principal cannot bind an intent for the owner');
   assert.equal((await ask({ principalId: memberId }, member)).status, 401, 'owner-only mode requires the live owner role');
