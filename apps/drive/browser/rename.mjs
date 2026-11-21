@@ -126,7 +126,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await page.reload({ waitUntil: 'networkidle' });
       await open('Folder 095.me');
       await submit('A Renamed folder', folder, 200); // Sorts before the current cursor.
-      const neighbor = page.locator('span[data-focus-name]').filter({ hasText: /^Folder 096$/ }).and(active);
+      const neighbor = page.locator('[data-focus-name]').filter({ hasText: /^Folder 096$/ }).and(active);
       for (const [width, height] of [widths.at(-1), ...widths]) {
         await page.setViewportSize({ width, height });
         await neighbor.and(page.locator(width > 820 ? 'table :focus' : 'ul :focus')).waitFor();
