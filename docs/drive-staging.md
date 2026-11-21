@@ -240,6 +240,13 @@ This checks what the existing credential can list in the documented R2
 jurisdictions. It does not replace the estate reader, lifecycle policy readback,
 or direct object and multipart listings.
 
+Both passes require an empty, unfiltered native Durable Objects namespace list
+in the pinned Worker account. The first page must explicitly report zero total
+namespaces, with no conflicting pagination, within five seconds and 64 KiB.
+Denied or partial reads are not evidence of absence. This check covers only
+namespaces visible to the existing credential in that account; it does not
+replace the estate or app-fixture reader or independently prove alarm absence.
+
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
 requires more than 20 minutes left for deployment, readiness, cases and cleanup.
