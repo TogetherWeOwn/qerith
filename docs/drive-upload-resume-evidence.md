@@ -64,11 +64,36 @@ For a nonempty missing suffix, a slot claim does not bind the rest of the
 intent to the same file. Different writers can supply different slots, and
 Complete validates receipts and aggregate size, not a selected-file manifest.
 Waiting for the client's own PUTs or rereading evidence before Complete cannot
-fence a competing Complete. Before sending nonempty suffixes, the producer needs
-an atomic per-intent continuation claim: compare the current slot set and its
-acknowledged hashes to the verified prefix, pin the full ordered part lengths
-and SHA-256 hashes, and bind the claim to the existing intent version, session
-and storage identity. Every PUT path must enforce that claim and check the body
-against its pinned slot before dispatch. Every Complete path must require an
-exact acknowledged match to the pinned manifest at sealing. Unclaimed or stale
-writers must not bypass either check on a claimed intent.
+fence a competing Complete. The full file expectation must be bound at creation,
+not retrofitted after any part has been dispatched.
+
+## Expected parts producer and claim handoff
+
+The server-only [`UploadIntents`](../apps/drive/src/lib/server/metadata/upload-intents.ts)
+method `claimNewExpectedAllocation(principalId, sessionHash, size, endpoint,
+bucket, epoch, mode, parts): Promise<UploadIntent | null>` takes trusted server
+identity, session hash, normalized storage namespace and mode (`'owner'` or
+`'active'`). Its `parts: readonly ExpectedUploadPart[]` is an ordered proposal of
+`{ partNumber: number; sizeBytes: number; sha256: string }` records following the
+same 16 MiB plan as above. It commits the fresh intent, full vector, storage
+binding and version-1 allocation claim in one D1 batch. It returns no manifest,
+does not contact S3, and is not called by any upload route.
+
+For the subsequent part claim, use the intent row's immutable `declared_size`
+and `expected_part_sha256s: string | null`. For integer slot `n` in
+`1..length(expected_part_sha256s)/64`, the expected digest is
+`substr(expected_part_sha256s, (n - 1) * 64 + 1, 64)` (lowercase hex); the
+expected size is `min(16777216, declared_size - (n - 1) * 16777216)`. Hash the
+exact bounded byte snapshot that will be sent. The fresh D1 slot claim must
+require the computed digest and size to match, **before any S3 side effect**.
+Do not expose the vector or treat a client hash as proof. `NULL` is permanently
+unbound and cannot authorize suffix continuation. No alternate part path may
+bypass the comparison on a bound intent.
+
+Keep existing live-session, owner, storage, intent/version, slot, cleanup,
+publication and uncertainty fences. Reconcile the acknowledged prefix with the
+verified file; never treat an in-flight or uncertain slot as missing. Continue
+recording acknowledged bytes only through the existing trusted receipt and
+provenance path. Require an exact acknowledged match to the full plan at
+sealing; a proposal alone cannot complete an upload. Do not retry an ambiguous
+provider attempt. This slice changes no caller, dispatch or resume permission.

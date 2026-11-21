@@ -12,6 +12,7 @@ import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
 import { exerciseStagingFolderCreate } from '../tests/staging-folder-create-worker-fixture.mjs';
+import { exerciseExpectedParts, expectedPartsWorker } from '../tests/upload-expected-parts-worker-fixture.mjs';
 import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
@@ -115,6 +116,7 @@ ${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudf
 globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
+${preview ? expectedPartsWorker : ''}
 if ('scheduled' in app) throw new Error('Generated preview must not expose a scheduled handler');
 export default { fetch(request, env, ctx) {
   ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
@@ -126,6 +128,7 @@ export default { fetch(request, env, ctx) {
     const target = boundary === 'adapter' ? adapter : app;
     return withEnv(bindings, () => target.fetch(request, bindings, ctx));
   }` : ''}
+  ${preview ? 'const expected = expectedPartsRequest(request, env); if (expected) return expected;' : ''}
   ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
@@ -446,6 +449,7 @@ export default { fetch(request, env, ctx) {
       const body = await nested.json();
       assert.deepEqual(body, { id: body.id, parentId: id, name: 'Created inside', kind: 'folder' });
       await exerciseEntryChange({ worker, DB, origin, session });
+      await exerciseExpectedParts({ worker, DB, origin, session, owner });
       return;
     }
     const closedFolder = await createFolder('Fixture disabled', null);
