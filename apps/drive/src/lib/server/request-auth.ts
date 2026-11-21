@@ -5,12 +5,14 @@ import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { stagingOrigin } from './qualification-readiness';
 import { readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
+import { isExactSharedDocument, sharedPageCursor, sharedRoute } from './shared-page';
 import { uploadAdmissionRoute } from './upload-admission';
 
 export interface DriveAuthEnv {
   DRIVE_SIGN_IN_FIXTURE?: string;
   DRIVE_STAGING_INVITE_ACCEPTANCE?: string;
   DRIVE_STAGING_READ_GRANTS?: string;
+  DRIVE_STAGING_SHARED_LISTING?: string;
   DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
@@ -28,6 +30,10 @@ export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DR
 
 export function admitsStagingReadGrants(env: DriveAuthEnv): boolean {
   return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_READ_GRANTS === '1';
+}
+
+export function admitsSharedListing(env: DriveAuthEnv): boolean {
+  return admitsStagingInvite(env) && env.DRIVE_STAGING_SHARED_LISTING === '1';
 }
 
 export type DriveUploadMode = 'disabled' | 'preview' | 'multipart';
@@ -133,6 +139,8 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const staging = origin.origin === stagingOrigin;
     const peoplePage = routeId === '/people';
     const folderPage = routeId === folderDocumentRoute;
+    const sharedPage = routeId === sharedRoute;
+    if (sharedPage && (!admitsSharedListing(env) || !isExactSharedDocument(request, url))) return deny(404);
     if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
     if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${stagingOrigin}/people` ||
         (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
@@ -159,6 +167,10 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       return new Response(null, { status: session ? 204 : 200,
         headers: { 'cache-control': 'private, no-store', 'referrer-policy': 'no-referrer' } });
     }
+    if (sharedPage) {
+      if (session?.principal.role !== 'member') return deny(session ? 404 : 401);
+      if (sharedPageCursor(url.search) === undefined) return deny(400);
+    }
     if (peoplePage && session?.principal.role !== 'owner') return deny(session ? 404 : 401);
     if (staging && session && session.principal.role !== 'owner') {
       const memberRoot = routeId === '/' &&
@@ -170,7 +182,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       const uploadRoute = uploadAdmissionRoute(request, url);
       const memberUpload = uploadRoute !== null && uploadRoute === routeId && allowsStagingInviteSite(request) &&
         driveUploadMode(env, session.principal.role) === 'multipart';
-      if (!(readGrant || memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage)))) {
+      if (!(readGrant || memberUpload || (admitsStagingInvite(env) && (memberRoot || memberDownload || folderPage || sharedPage)))) {
         return deny(pathname === '/' && request.method === 'HEAD' ? 401 : 403);
       }
     }

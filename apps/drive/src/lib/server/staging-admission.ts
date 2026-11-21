@@ -5,7 +5,8 @@ import { postFolder } from './folder-route';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
-import { admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { isExactSharedDocument, sharedPageCursor } from './shared-page';
+import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import { uploadAdmissionRoute } from './upload-admission';
 
 interface PreviewAssets {
@@ -14,6 +15,7 @@ interface PreviewAssets {
   invite: ReadonlySet<string>;
   people: ReadonlySet<string>;
   folder: ReadonlySet<string>;
+  shared?: ReadonlySet<string>;
 }
 
 type CeremonyStep = 'challenge' | 'restart' | 'verify';
@@ -21,7 +23,7 @@ type InviteStep = 'present' | 'challenge' | 'enroll';
 type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' | 'read-grant' } |
   { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' } |
   { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
-  { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'root'; deadline?: number };
+  { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'shared' | 'shared-asset' | 'root'; deadline?: number };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -30,7 +32,7 @@ interface PreviewDispatch {
   asset(request: Request): Promise<Response>;
 }
 
-function route(request: Request, url: URL, assets: PreviewAssets, invite: boolean): Target | null {
+function route(request: Request, url: URL, assets: PreviewAssets, invite: boolean, shared: boolean): Target | null {
   const { method } = request;
   const { pathname: path } = url;
   if (method === 'GET' || method === 'HEAD') {
@@ -38,6 +40,7 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
     if (invite && path === '/invite') return { kind: 'invite' };
     if (invite && path === '/people') return { kind: 'people' };
     if (invite && isExactFolderDocument(request, url)) return { kind: 'folder' };
+    if (shared && isExactSharedDocument(request, url)) return { kind: 'shared' };
     if (path === '/') return { kind: 'root' };
     if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
     // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
@@ -48,6 +51,7 @@ function route(request: Request, url: URL, assets: PreviewAssets, invite: boolea
       if (invite && assets.people.has(path)) return { kind: 'people-asset' };
       // Preserve prior classifications even if the folder shares a build dependency.
       if (invite && assets.folder.has(path) && request.url === stagingOrigin + path) return { kind: 'folder-asset' };
+      if (shared && assets.shared?.has(path) && request.url === stagingOrigin + path) return { kind: 'shared-asset' };
     }
   }
   if (invite) {
@@ -83,7 +87,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   const invite = admitsStagingInvite(env);
   const readGrant = admitsStagingReadGrants(env) && readGrantAdmissionRoute(request, url);
   const target: Target | null = readGrant ? { kind: 'read-grant' } : invite && ownerLifecycleRoute(request, url)
-    ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite);
+    ? { kind: 'owner-lifecycle' } : route(request, url, assets, invite, admitsSharedListing(env));
   if (!target) return deny(404);
   if ((target.kind === 'owner-lifecycle' || target.kind === 'read-grant' || target.kind === 'metadata-write') &&
       !allowsStagingInviteSite(request)) return deny(403);
@@ -111,6 +115,9 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
+      if (target.kind === 'shared' || target.kind === 'shared-asset') {
+        return session.role === 'member' ? { ...target, deadline } : deny(404);
+      }
       const memberRoute = target.kind === 'upload'
         ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
         : target.kind === 'read-grant' || invite && (target.kind === 'root' || target.kind === 'root-data' ||
@@ -138,7 +145,8 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
   const rootProbe = target.kind === 'root' && request.method === 'HEAD';
-  if (target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' || rootProbe) {
+  if (target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
+      target.kind === 'shared' || target.kind === 'shared-asset' || rootProbe) {
     if (!(performance.now() < (target.deadline ?? 0))) return deny(401);
     // The sign-in probe reports authorization, not whether the listing rendered.
     if (rootProbe) return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
@@ -153,6 +161,7 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
     case 'private-asset':
     case 'people-asset':
     case 'folder-asset':
+    case 'shared-asset':
     case 'root-data': {
       const result = await (target.kind === 'root-data' ? dispatch.adapter(request) : dispatch.asset(request));
       const response = new Response(result.body, result);
@@ -171,6 +180,9 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
     case 'people':
     case 'folder':
       return dispatch.adapter(request);
+    case 'shared':
+      // Reject reserved and malformed query keys before the adapter sees them.
+      return sharedPageCursor(new URL(request.url).search) === undefined ? deny(400) : dispatch.adapter(request);
     case 'metadata-write':
       return target.operation === 'create-folder' ? postFolder(request, env) : entryChangeRequest(request, env) ?? deny(404);
     case 'read-grant': {

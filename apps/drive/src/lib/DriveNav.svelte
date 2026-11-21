@@ -1,14 +1,15 @@
 <script lang="ts">
   import './tokens.css';
 
-  let { current }: { current: 'home' | 'people' } = $props();
+  let { current, shared = false, owner = true }: { current: 'home' | 'people' | 'shared'; shared?: boolean; owner?: boolean } = $props();
 </script>
 
 <a class="skip" href="#main">Skip to content</a>
 <header>
   <nav aria-label="Drive" data-sveltekit-reload>
     <a href="/" aria-current={current === 'home' ? 'page' : undefined}>My Drive</a>
-    <a href="/people" aria-current={current === 'people' ? 'page' : undefined}>Users and invites</a>
+    {#if shared}<a href="/shared" aria-current={current === 'shared' ? 'page' : undefined}>Shared with me</a>{/if}
+    {#if owner}<a href="/people" aria-current={current === 'people' ? 'page' : undefined}>Users and invites</a>{/if}
   </nav>
 </header>
 

@@ -2,7 +2,7 @@ import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
+import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import { wireUploadStorage } from '../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
@@ -42,5 +42,6 @@ export const load: PageServerLoad = async (event) => {
   return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
     metadataWriteAllowed: admitsStagingInvite(env) && (role === 'owner' || role === 'member'),
     ownerInvites: role === 'owner' && admitsStagingInvite(env),
+    sharedListing: role === 'member' && admitsSharedListing(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
 };

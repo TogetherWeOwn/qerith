@@ -557,6 +557,7 @@ jobs:
           CONTINUATION_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/root-upload-continuation.mjs') != '' }}
           STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
           STAGING_FOLDER_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/tests/staging-folder-worker-fixture.mjs') != '' }}
+          STAGING_SHARED_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/shared-listing.mjs') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |

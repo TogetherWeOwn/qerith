@@ -126,11 +126,15 @@ export function createPublishedReadAccess(db: { withSession(constraint: 'first-p
   };
 }
 
-export interface SharedReadPage { entries: ReadEntry[]; nextCursor: string | null }
+type SharedReadEntry = ReadEntry & { downloadable?: 0 | 1 };
+export interface SharedReadPage { entries: SharedReadEntry[]; nextCursor: string | null }
 const sharedPageSize = 100;
 
 /** Server-only. List explicit grant roots in binary ID order, not inherited descendants. */
-export function createSharedReadAccess(db: { withSession(constraint: 'first-primary'): Database }) {
+export function createSharedReadAccess(db: { withSession(constraint: 'first-primary'): Database },
+  downloadScope?: readonly [endpoint: string, bucket: string, epoch: string]) {
+  const availability = downloadScope ? `, EXISTS (SELECT 1 FROM drive_entries e ${publishedGenerationJoins}
+    WHERE e.id = entry.id AND ${publishedGenerationFilter}) AS downloadable` : '';
   return {
     async listShared(token: string, afterId: string | null = null): Promise<SharedReadPage> {
       const hash = await sessionHash(token);
@@ -140,16 +144,16 @@ export function createSharedReadAccess(db: { withSession(constraint: 'first-prim
       // The cursor is only a seek boundary; every page reads live authorization
       // on the primary. The recipient index carries entry_id as its PK suffix.
       const { results } = await db.withSession('first-primary').prepare(`
-        SELECT e.id, e.name, e.kind FROM drive_read_grants g INDEXED BY drive_read_grants_recipient
-        JOIN drive_entries e ON e.id = g.entry_id
-        JOIN drive_principals owner ON owner.id = e.owner_id AND owner.status = 'active'
+        SELECT entry.id, entry.name, entry.kind${availability} FROM drive_read_grants g INDEXED BY drive_read_grants_recipient
+        JOIN drive_entries entry ON entry.id = g.entry_id
+        JOIN drive_principals owner ON owner.id = entry.owner_id AND owner.status = 'active'
         WHERE g.recipient_id = (
           SELECT reader.id FROM drive_sessions s
           JOIN drive_principals reader ON reader.id = s.principal_id AND reader.status = 'active' AND reader.role = 'member'
           WHERE s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
-        ) AND g.entry_id > ? AND e.owner_id != g.recipient_id
+        ) AND g.entry_id > ? AND entry.owner_id != g.recipient_id
         ORDER BY g.entry_id LIMIT ${sharedPageSize + 1}`)
-        .bind(hash, afterId ?? '').all<ReadEntry>();
+        .bind(...(downloadScope ?? []), hash, afterId ?? '').all<SharedReadEntry>();
       const entries = results.slice(0, sharedPageSize);
       return { entries, nextCursor: results.length > sharedPageSize ? entries[sharedPageSize - 1].id : null };
     }
