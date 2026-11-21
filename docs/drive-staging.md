@@ -236,8 +236,10 @@ ambiguous sources before making signed reads of the two records at the source
 SHA's reviewed binding. A later rerun is excluded by the authoritative writer
 fence, not by the GitHub read. The coordinator verifies that fence against the
 recorded candidate and enforces its loss signal and the earlier of wall-clock
-expiry and the original monotonic deadline through the final readback. The v1
-bookmark and a post-list ledger are not independent D1 restore attribution.
+expiry and the original monotonic deadline through the final readback. It checks
+the deadline at I/O boundaries, samples wall time every second during pending
+I/O, and waits for the adapter to drain after abort. The v1 bookmark and a
+post-list ledger are not independent D1 restore attribution.
 Mutation adapters remain unwired; the protected workflow does not invoke recovery.
 
 The unwired recovery store uses the source SHA's reviewed staging R2 binding.

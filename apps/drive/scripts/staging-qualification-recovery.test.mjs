@@ -196,15 +196,17 @@ test('the holder can revoke every mutation phase, including final readback', asy
 test('rejects at fence expiry even when the timeout callback has not run', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: 1_780_000_000_000 });
   const { adapters, calls } = fixture();
-  let until;
+  let until, readbackSignal;
   override(adapters, 'readWriterFence', proof => { until = proof.snapshot.fence.until; return proof; });
   override(adapters, 'cleanupR2', (result, _context, signal, assertHeld) => {
+    readbackSignal = signal;
     t.mock.timers.setTime(until);
     assert.equal(signal.aborted, false);
     assert.throws(assertHeld, /R2 cleanup/);
     return result;
   });
   await assert.rejects(recoverQualification(source, adapters), /\(R2 cleanup\)/);
+  assert.equal(readbackSignal.aborted, true);
   assert.deepEqual(calls, trace);
 });
 
@@ -237,17 +239,24 @@ test('a wall-clock rollback cannot extend the verified fence into a later phase 
   }
 });
 
-test('fence deadline aborts in-flight recovery and waits for it to drain', { timeout: 5000 }, async t => {
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_780_000_000_000 });
-  t.mock.method(performance, 'now', () => Date.now() - 1_780_000_000_000);
-  for (const [name, phase, count] of [['recoverD1', 'D1 recovery', 6], ['cleanupR2', 'R2 cleanup', 7]]) {
+test('clock steps abort in-flight recovery and wait for it to drain', { timeout: 5000 }, async t => {
+  const epoch = 1_780_000_000_000;
+  let wall, elapsed;
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  t.mock.method(Date, 'now', () => wall);
+  t.mock.method(performance, 'now', () => elapsed);
+  for (const [name, phase, count, rollback] of [
+    ['recoverD1', 'D1 recovery', 6, true], ['cleanupR2', 'R2 cleanup', 7, false],
+  ]) {
+    wall = epoch;
+    elapsed = 0;
     const { adapters, calls, fence } = fixture();
     const started = Promise.withResolvers();
     const drained = Promise.withResolvers();
-    const leaseMs = 10_000;
-    override(adapters, 'readWriterFence', proof => {
-      proof.snapshot.fence.until = Date.now() + leaseMs;
-      return proof;
+    if (rollback) override(adapters, 'recoverWorker', result => {
+      elapsed = 40_000;
+      wall += elapsed - 60_000;
+      return result;
     });
     override(adapters, name, async (result, ...args) => {
       const [active, assertHeld] = args.slice(-2);
@@ -260,11 +269,20 @@ test('fence deadline aborts in-flight recovery and waits for it to drain', { tim
       { message: `Staging qualification recovery is unverified (${phase}).` });
     const { active, assertHeld } = await started.promise;
     try {
-      t.mock.timers.tick(leaseMs - 1);
-      assertHeld();
-      t.mock.timers.tick(1);
-      assert.equal(fence.signal.aborted, false); // The lease timer, not revocation, aborted the phase.
-      assert.equal(active.aborted, true);
+      if (rollback) {
+        elapsed = 59_999;
+        t.mock.timers.tick(19_999);
+        assertHeld();
+        elapsed = 60_000;
+        t.mock.timers.tick(1);
+      } else {
+        assertHeld();
+        wall += 60_000; // Expire while readback is pending, before the monotonic deadline.
+        elapsed += 1_000;
+        t.mock.timers.tick(1_000);
+      }
+      assert.equal(fence.signal.aborted, false); // Expiry, not holder revocation, aborted the phase.
+      assert.equal(active.aborted, true, phase);
       assert.throws(assertHeld);
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(settled, false);

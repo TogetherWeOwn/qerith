@@ -38,15 +38,27 @@ export async function recoverQualification(request, { readSource, readRecord, re
       const parent = fence ? AbortSignal.any([signal, fence.signal].filter(Boolean)) : signal;
       const budget = fence ? Math.min(timeout, fenceRemaining(fence)) : timeout;
       if (budget <= 0) throw refused(name);
-      return await runQualificationPhase(async (_, active) => {
+      return await runQualificationPhase(async (_, timed) => {
+        const expiry = fence && new AbortController();
+        const active = expiry ? AbortSignal.any([timed, expiry.signal]) : timed;
+        const expire = () => expiry.abort(refused(name));
         const assertHeld = () => {
+          if (fence && fenceRemaining(fence) <= 0) expire();
           active.throwIfAborted();
-          if (fence && fenceRemaining(fence) <= 0) throw refused(name);
         };
         assertHeld();
-        const value = await task(active, assertHeld);
-        assertHeld();
-        return value;
+        // The phase timer is relative. Sample wall time while I/O is pending
+        // so a forward clock step can abort it before that timer fires.
+        const wallTimer = fence && setInterval(() => {
+          if (Date.now() >= fence.validUntil) expire();
+        }, 1_000);
+        try {
+          const value = await task(active, assertHeld);
+          assertHeld();
+          return value;
+        } finally {
+          if (wallTimer) clearInterval(wallTimer);
+        }
       }, null, parent, budget);
     } catch {
       // Never propagate provider diagnostics, record contents or abort reasons.
