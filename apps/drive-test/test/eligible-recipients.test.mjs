@@ -1,6 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { expect, it, vi } from 'vitest';
+import { entryShare } from '../../drive/src/lib/share-client.ts';
 import { Sessions, tokenHash } from '../../drive/src/lib/server/identity/sessions.ts';
 import { EligibleRecipients } from '../../drive/src/lib/server/metadata/eligible-recipients.ts';
 import { getEligibleRecipients } from '../../drive/src/lib/server/eligible-recipient-route.ts';
@@ -149,6 +150,13 @@ it('serves owned recipient pages as private JSON and denies stale or nonowner se
   expect(await list()).toEqual({ recipients: [row('bob', { displayName, direct: true }), ...ids.slice(0, 99).map(id => row(id))], nextCursor });
   const next = `${path}?cursor=${encodeURIComponent(nextCursor)}`;
   expect(await list(next)).toEqual({ recipients: [row(ids[99], { inheritedFrom })], nextCursor: null });
+  const share = entryShare('folder', url => ask(alice, url));
+  const first = await share.listAccessPage();
+  expect(first).toEqual({ access: [row('bob', { displayName, direct: true })],
+    candidates: ids.slice(0, 99).map(recipientId => ({ recipientId, displayName: null })), nextCursor, complete: false });
+  expect(await share.listAccessPage({ cursor: first.nextCursor })).toEqual({
+    access: [row(ids[99], { inheritedFrom })], candidates: [], nextCursor: null, complete: false,
+  });
   await deny(ask(alice, next, () => sessions.revoke(alice.token)), 404); // Revoked after the hook lookup.
   await deny(ask(alice, next), 401);
 });
