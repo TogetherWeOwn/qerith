@@ -47,9 +47,12 @@ does not replace exact-SHA qualification.
 Use only synthetic fixtures tagged with the originating run ID in D1 and R2.
 Enforce the staging-only absolute deadline, clean up on success and failure and
 via a trusted main-only completion workflow, and sweep older tags before new
-writes. Record leftover rows as cleanup defects, not admission gates. Reported
-R2 expiry covers only `drive-qualification/` (three days); the seven-day
-multipart-abort rule remains. Neither proves that qualification cleanup ran.
+writes. Record leftover rows as cleanup defects, not app-admission gates. The
+full-v0 inventory below still requires its reserved migration keys to be absent;
+reconcile older residue separately before retrying, since exact-attempt cleanup
+will not remove it. Reported R2 expiry covers only `drive-qualification/` (three
+days); the seven-day multipart-abort rule remains. Neither proves that
+qualification cleanup ran.
 
 The manual staging storage proof does not deploy a Worker. Before dispatch,
 review provider evidence that the staging signer is scoped to the Drive
@@ -188,9 +191,13 @@ The estate composer runs the bounded inventory before mutation and after Worker
 restore. It checks exact-attempt writer quiescence and a held, abortable fence
 before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
 before restore. D1 fixture cleanup does not roll back migrations or clean app
-fixtures. The estate, fixture and writer-fence inputs are injected; offline
-passing tests are not provider evidence. The protected job still stops and
-cannot issue a receipt.
+fixtures. Before and after the lifecycle, inventory also queries the pinned D1
+for migration fixture keys across all full-v0 attempts. This read-only check
+returns presence only, including for redeemed or expired fixture rows; missing
+tables or an incomplete result fail closed. It does not replace the injected
+all-app-fixture reader, estate reader, or writer fence. Offline passing tests
+are not provider evidence. The protected job still stops and cannot issue a
+receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects

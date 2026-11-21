@@ -68,10 +68,19 @@ function fixture(t) {
       return state.fixtures;
     },
     async request(url, init) {
-      assert.equal(init.method, 'GET'); assert.equal(init.redirect, 'error'); init.signal.throwIfAborted();
+      assert.equal(init.redirect, 'error'); init.signal.throwIfAborted();
       const root = 'https://api.cloudflare.com/client/v4/accounts/';
       const json = (result, paginated) => Response.json({ success: true, errors: [], result,
         ...(paginated && { result_info: { cursor: 'more' } }) });
+      const d1 = `${root}${account}/d1/database/${database}`;
+      if (url === `${d1}/query`) {
+        assert.equal(init.method, 'POST');
+        assert.match(JSON.parse(init.body).batch[0].sql, /^SELECT EXISTS/);
+        trace.push('d1-fixtures');
+        return json([{ success: true, results: [{ invite_present: state.migrationResidue ? 1 : 0, ceremony_present: 0 }] }]);
+      }
+      assert.equal(init.method, 'GET');
+      if (url === d1) return json({ uuid: database, name: worker, version: 'production' });
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
         const age = seconds => ({ condition: { type: 'Age', maxAge: seconds } });
@@ -163,7 +172,7 @@ function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
       trace.push('restore-readback');
       state.restorePending = false;
     }
-    if (url === d1 || url === `${d1}/query`) {
+    if ((url === d1 || url === `${d1}/query`) && state.cleanup && state.version === version) {
       assert.equal(state.version, version);
       trace.push('d1-cleanup');
       return json(url === d1 ? { uuid: database, name: worker, version: 'production' } :
@@ -284,7 +293,9 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
           storageInFlight: fenced, providerOperations: fenced } };
       },
       async request(url, init) {
-        if (!url.includes('/d1/database/')) return reads.request(url, init);
+        if (!url.includes('/d1/database/') || !trace.includes('fence') || trace.includes('restore')) {
+          return reads.request(url, init);
+        }
         assert.equal(url.split('/database/')[1], `${database}${init.method === 'GET' ? '' : '/query'}`);
         trace.push('d1-cleanup');
         if (r2Fails && init.method === 'POST') {
@@ -371,8 +382,21 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'fixtures', 'expiry', 'uploads', 'objects', 'deployments', 'versions', 'schedules', 'deployments'];
+  const expected = ['estate', 'fixtures', 'd1-fixtures', 'expiry', 'uploads', 'objects', 'deployments', 'versions',
+    'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
+});
+
+test('inventory requires native D1 migration fixture absence before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.migrationResidue = true;
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'fixtures', 'd1-fixtures']);
+  }
 });
 
 test('inventory rejects incomplete reads, extra resources, fixtures and unverified native idle controls', async t => {
@@ -400,7 +424,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'fixtures', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, ['estate', 'fixtures', 'd1-fixtures', ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 
