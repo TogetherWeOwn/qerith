@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 
 const endpoint = 'https://storage.example.test', bucket = 'drive-test', epoch = 'smoke', etag = '"fixed-generation"';
 const owner = 'owner-fixture';
@@ -28,12 +29,34 @@ globalThis.fetch = async (input) => {
   if (!valid) throw new Error('Unexpected deletion dispatch');
   return new Response(null, { status: 204, headers: pathname.endsWith('/ambiguous') ? {} : { 'x-fixture-removal': 'permanent' } });
 };
-function runtimeDeletion(request, env, generated) {
+const capability = {
+  sourceSha: 'a'.repeat(40), workerVersion: '00000000-0000-4000-8000-000000000002',
+  expiresAt: String(Date.now() + 600_000),
+  storageConfigId: JSON.stringify(['${endpoint}', '${bucket}', '${epoch}']), region: 'auto',
+  confirmsRemoval: ({ headers }) => headers.get('x-fixture-removal') === 'permanent'
+};
+const qualifiedWorker = createDriveWorker(capability);
+const expired = { ...capability, expiresAt: '1000000000000' };
+const expiredWorker = createDriveWorker(expired);
+function stagingDeletionBindings(env, mode) {
+  return { ...env, ...${JSON.stringify(deletionStorageBindings)}, DRIVE_ORIGIN: ${JSON.stringify(stagingOrigin)},
+    DRIVE_STAGING_DELETE_REQUESTS: mode === 'disabled' ? '0' : '1', DRIVE_STAGING_DELETE_DRAIN: '1',
+    DRIVE_QUALIFICATION_SHA: mode === 'wrong-sha' ? 'b'.repeat(40) : capability.sourceSha,
+    DRIVE_QUALIFICATION_VERSION: { id: mode === 'wrong-version' ? '00000000-0000-4000-8000-000000000003' : capability.workerVersion },
+    DRIVE_QUALIFICATION_EXPIRES_AT: mode === 'expired' ? expired.expiresAt : capability.expiresAt,
+    DRIVE_S3_STORAGE_EPOCH: mode === 'wrong-storage' ? 'wrong-epoch' : '${epoch}' };
+}
+function runtimeDeletion(request, env, ctx) {
   const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete$/.exec(new URL(request.url).pathname)?.[1];
   if (!entryId) return;
+  const staging = request.headers.get('x-test-staging-deletion');
+  if (staging !== null) {
+    const worker = staging === 'absent' ? app : staging === 'expired' ? expiredWorker : qualifiedWorker;
+    return worker.fetch(request, stagingDeletionBindings(env, staging), ctx);
+  }
   const bindings = { ...env, ...${JSON.stringify(deletionStorageBindings)} };
   const mode = request.headers.get('x-test-deletion');
-  if (mode === null || request.headers.get('x-test-use-generated') === '1') return generated(bindings);
+  if (mode === null || request.headers.get('x-test-use-generated') === '1') return app.fetch(request, bindings, ctx);
   const epoch = mode === 'stale-epoch' ? 'new-epoch' : '${epoch}';
   return deletePrivateEntry(request, entryId, {
     ...bindings,
@@ -69,10 +92,15 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     return { root, child, file };
   }
   async function remove(id, status, headers = {}, body = confirmation) {
-    const actual = new Headers({ cookie, origin, 'content-type': 'application/json', 'x-test-deletion': '1' });
+    const target = headers['x-test-staging-deletion'] ? stagingOrigin : origin;
+    const actual = new Headers({ cookie, origin: target, 'content-type': 'application/json', 'x-test-deletion': '1' });
     for (const [name, value] of Object.entries(headers)) value === null ? actual.delete(name) : actual.set(name, value);
-    const result = await worker.fetch(`${origin}/api/entries/${id}/delete`, { method: 'POST', headers: actual, body, redirect: 'manual' });
-    assert.deepEqual([result.status, result.headers.get('cache-control'), await result.text()], [status, 'private, no-store', '']);
+    const result = await worker.fetch(`${target}/api/entries/${id}/delete`, { method: 'POST', headers: actual, body, redirect: 'manual' });
+    if (headers['x-test-staging-deletion'] === 'expired') {
+      assert.deepEqual([result.status, result.headers.get('cache-control')], [status, 'no-store']);
+    } else {
+      assert.deepEqual([result.status, result.headers.get('cache-control'), await result.text()], [status, 'private, no-store', '']);
+    }
   }
   const snapshot = async () => (await DB.batch([
     DB.prepare('SELECT * FROM drive_entries ORDER BY id'),
@@ -104,6 +132,15 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     await remove(selected.root, status, headers, body);
     assert.deepEqual(await snapshot(), before, `Deletion refusal (${status}) changed state or dispatched`);
   }
+  const staged = { 'x-test-staging-deletion': 'qualified' };
+  for (const mode of ['absent', 'disabled', 'wrong-sha', 'wrong-version', 'wrong-storage', 'expired']) {
+    await remove(selected.root, mode === 'expired' ? 503 : 404, { 'x-test-staging-deletion': mode });
+    assert.deepEqual(await snapshot(), before, `Staging deletion refusal (${mode}) changed state or dispatched`);
+  }
+  await remove(selected.root, 403, { ...staged, origin: 'https://other.example.test' });
+  await remove(selected.root, 401, { ...staged, cookie: revoked });
+  await remove(selected.root, 400, staged, '{}');
+  assert.deepEqual(await snapshot(), before);
   await remove('not-an-opaque-id', 400);
   const wrongMethod = await worker.fetch(`${origin}/api/entries/${selected.root}/delete`, { headers: { cookie } });
   assert.equal(wrongMethod.status, 405);
@@ -145,16 +182,21 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
     assert.equal(new Set(results.map((row) => row.deletion_id)).size, 1);
     assert.equal(await sql('SELECT count(*) AS n FROM drive_entries WHERE id IN (?, ?, ?)', root, child, file).first('n'), 0);
   };
-  await remove(selected.root, 202);
+  await remove(selected.root, 202, staged);
   await checkCapture(selected);
   assert.ok((await job(selected.file))?.completed_at);
   const ambiguous = await tree('ambiguous');
-  await remove(ambiguous.root, 202);
+  await remove(ambiguous.root, 202, staged);
   await checkCapture(ambiguous);
   assert.deepEqual(await job(ambiguous.file), { completed_at: null, completion_token: null, lease_token: null });
   assert.deepEqual(await unrelatedJob(), untouched);
+  const preDrain = await snapshot();
+  assert.equal((await worker.scheduled({ cron: '* * * * *' })).outcome, 'ok');
+  assert.deepEqual(await snapshot(), preDrain);
+  assert.equal((await worker.scheduled({ cron: '*/15 * * * *' })).outcome, 'ok');
+  assert.ok((await job(unrelated.file))?.completed_at);
   const { results: calls } = await DB.prepare('SELECT * FROM smoke_deletion_calls ORDER BY key').all();
-  assert.deepEqual(calls, ['ambiguous', 'selected'].map((key) => ({ key: `/${bucket}/${key}`, method: 'DELETE', etag, valid: 1 })));
+  assert.deepEqual(calls, ['ambiguous', 'selected', 'unrelated'].map((key) => ({ key: `/${bucket}/${key}`, method: 'DELETE', etag, valid: 1 })));
 
   const rollback = await tree('rollback');
   await sql('DELETE FROM drive_owner_usage WHERE owner_id = ?', owner).run();

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { stagingOrigin } from '../src/lib/server/qualification-readiness';
-import { deletionDrainCron, dispatchStagingDeletion, runStagingDeletionDrain } from '../src/lib/server/staging-deletion';
+import { deletionDrainCron, dispatchStagingDeletion, resolveWorkerDeletionQualification,
+  runStagingDeletionDrain, type WorkerDeletionCapability } from '../src/lib/server/staging-deletion';
 
 const url = `${stagingOrigin}/api/entries/00000000-0000-4000-8000-000000000000/delete`;
 const enabled = { DRIVE_ORIGIN: stagingOrigin, DRIVE_STAGING_DELETE_REQUESTS: '1' };
@@ -41,4 +42,35 @@ test('scheduled admission is separate from HTTP admission and scoped to one trig
   assert.equal(await runStagingDeletionDrain(tick, scheduled), 0);
   assert.equal(await runStagingDeletionDrain({ cron: '* * * * *' }, scheduled, qualification), 0);
   assert.equal((await dispatchStagingDeletion(request(), scheduled, qualification))?.status, 404);
+});
+
+test('the Worker resolves deletion only for its independently scoped capability', async () => {
+  const expiresAt = String(Date.now() + 60_000);
+  const storage = { DRIVE_S3_ENDPOINT: 'https://storage.example.test', DRIVE_S3_BUCKET: 'fixture',
+    DRIVE_S3_REGION: 'auto', DRIVE_S3_STORAGE_EPOCH: 'test', DRIVE_S3_ACCESS_KEY_ID: 'fixture',
+    DRIVE_S3_SECRET_ACCESS_KEY: 'fixture' };
+  const capability: WorkerDeletionCapability = { ...qualification, sourceSha: 'a'.repeat(40),
+    workerVersion: '00000000-0000-4000-8000-000000000001', expiresAt,
+    storageConfigId: '["https://storage.example.test","fixture","test"]' };
+  const env = { ...enabled, ...storage, DRIVE_STAGING_DELETE_DRAIN: '1',
+    DRIVE_QUALIFICATION_SHA: capability.sourceSha, DRIVE_QUALIFICATION_VERSION: { id: capability.workerVersion },
+    DRIVE_QUALIFICATION_EXPIRES_AT: expiresAt };
+  assert.equal(resolveWorkerDeletionQualification(env, capability), capability);
+  const expired = '1000000000000';
+  const cases = [
+    [env, undefined],
+    [{ ...enabled, ...storage }, capability],
+    [{ ...env, DRIVE_SIGN_IN_FIXTURE: '1' }, capability],
+    [{ ...env, DRIVE_S3_REGION: 'us-east-1' }, capability],
+    [{ ...env, DRIVE_S3_BUCKET: 'different' }, capability],
+    [{ ...env, DRIVE_QUALIFICATION_EXPIRES_AT: String(Number(expiresAt) + 1) }, capability],
+    [{ ...env, DRIVE_QUALIFICATION_EXPIRES_AT: expired }, { ...capability, expiresAt: expired }],
+  ] as const;
+  for (const [bindings, rule] of cases) {
+    const denied = { ...bindings, get DB(): never { throw new Error('Denied admission must not access D1'); } };
+    const resolved = resolveWorkerDeletionQualification(denied, rule);
+    assert.equal(resolved, undefined);
+    assert.equal((await dispatchStagingDeletion(request(), denied, resolved))?.status, 404);
+    assert.equal(await runStagingDeletionDrain({ cron: deletionDrainCron }, denied, resolved), 0);
+  }
 });

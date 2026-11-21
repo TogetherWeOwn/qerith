@@ -112,7 +112,7 @@ async function exercisePrivateBoundary(main, { preview = false, staging = false,
   const entry = resolve(join(fixture.path, 'navigation.mjs'));
   // Undici overwrites Sec-Fetch-Mode. Restore synthetic navigation metadata only in this fixture.
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
-import app from ${JSON.stringify(resolve(main))};
+import app, { createDriveWorker } from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js'))};
 globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
@@ -120,11 +120,11 @@ ${preview ? uploadResumeWorker : ''}
 ${preview ? expectedPartsWorker : ''}
 export default {
   scheduled(event, env) {
-    // Shadow D1 without reading the real binding, even if it becomes a getter.
+    ${rawStorage || preview ? `// Shadow D1 without reading the real binding, even if it becomes a getter.
     return app.scheduled(event, Object.create(env, {
       DRIVE_STAGING_DELETE_DRAIN: { value: '1', enumerable: true },
       DB: { enumerable: true, get() { throw new Error('Unqualified scheduled deletion must not access D1'); } }
-    }));
+    }));` : 'return qualifiedWorker.scheduled(event, stagingDeletionBindings(env));'}
   },
   fetch(request, env, ctx) {
   ${rawStorage ? `const boundary = request.headers.get('x-test-grant-boundary');
@@ -139,7 +139,7 @@ export default {
   ${preview ? 'const expected = expectedPartsRequest(request, env); if (expected) return expected;' : ''}
   ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
-  ${rawStorage || preview ? '' : 'const deletion = runtimeDeletion(request, env, bindings => app.fetch(request, bindings, ctx)); if (deletion) return deletion;'}
+  ${rawStorage || preview ? '' : 'const deletion = runtimeDeletion(request, env, ctx); if (deletion) return deletion;'}
   ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };

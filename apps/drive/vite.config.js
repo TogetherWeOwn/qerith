@@ -95,7 +95,7 @@ import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
-import { dispatchStagingDeletion, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
+import { dispatchStagingDeletion, resolveWorkerDeletionQualification, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
@@ -117,19 +117,18 @@ const unavailable = () => new Response('Service unavailable', {
 });
 const unavailableAssets = { fetch: unavailable };
 
-export default {
-  async scheduled(event, env) {
-    // There is no configured trigger or server-held deletion qualification.
-    await runStagingDeletionDrain(event, env);
+const handlers = {
+  async scheduled(event, env, capability) {
+    await runStagingDeletionDrain(event, env, resolveWorkerDeletionQualification(env, capability));
   },
-  async fetch(request, env, ctx) {
+  async fetch(request, env, ctx, capability) {
     if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
     const url = new URL(request.url);
     if (env.DRIVE_ORIGIN === stagingOrigin) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
-      // No qualified rule is installed. Upload readiness does not admit deletion.
-      const deletion = dispatchStagingDeletion(request, env);
+      // Upload readiness does not admit deletion.
+      const deletion = dispatchStagingDeletion(request, env, resolveWorkerDeletionQualification(env, capability));
       if (deletion) return deletion;
       const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
         typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
@@ -174,6 +173,17 @@ export default {
     return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
   }
 };
+
+/** @param {import('../../src/lib/server/staging-deletion.ts').WorkerDeletionCapability} [deletionCapability] */
+export function createDriveWorker(deletionCapability) {
+  const capability = deletionCapability && Object.freeze({ ...deletionCapability });
+  return {
+    fetch: (request, env, ctx) => handlers.fetch(request, env, ctx, capability),
+    scheduled: (event, env) => handlers.scheduled(event, env, capability)
+  };
+}
+
+export default createDriveWorker();
 `);
     } finally {
       rmSync(configPath, { force: true });
