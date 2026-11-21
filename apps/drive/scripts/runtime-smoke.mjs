@@ -498,6 +498,8 @@ export default {
       const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie }, redirect: 'manual' });
       for (const [path, method, status, allow] of [
         [`${recipients}?x-sveltekit-test=1`, 'GET', 400, null],
+        [`${recipients}/__data.json`, 'GET', 404, null],
+        [`${recipients}/__route.js`, 'GET', 404, null],
         [recipients, 'OPTIONS', 405, 'GET'],
         [recipients, 'HEAD', 405, 'GET'],
       ]) {

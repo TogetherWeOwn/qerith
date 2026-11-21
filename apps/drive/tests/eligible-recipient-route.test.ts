@@ -65,6 +65,16 @@ test('fixture dispatch rejects malformed queries and unsupported methods before 
   assert.equal(dispatchEligibleRecipients(new Request(`${origin}/api/entries/source/delete`), env, unexpected), null);
 });
 
+test('fixture dispatch owns the recipient path and rejects descendants before the adapter', async () => {
+  const unexpected = () => assert.fail('The adapter must not receive recipient descendants');
+  for (const suffix of ['/', '/__data.json', '/__route.js', '/%5F_route.js', '/unexpected']) {
+    const response = await dispatchEligibleRecipients(new Request(origin + path + suffix), env, unexpected);
+    assert.ok(response, suffix);
+    await expectDenial(response, 404);
+  }
+  assert.equal(dispatchEligibleRecipients(new Request(`${origin}${path}-other`), env, unexpected), null);
+});
+
 test('recipient lookup fails closed on storage errors', async () => {
   const request = new Request(origin + path);
   let calls = 0;

@@ -3,7 +3,7 @@ import { decodeReadGrantId, readGrantCursor, validReadGrantId } from './read-gra
 import { admitsSignInFixture, allowsOrigin, allowsStagingInviteSite, type DriveAuthEnv } from './request-auth';
 
 type RecipientEnv = DriveAuthEnv & { DB?: ConstructorParameters<typeof EligibleRecipients>[0] };
-const path = /^\/api\/entries\/([^/]+)\/eligible-recipients\/?$/;
+const path = /^\/api\/entries\/([^/]+)\/eligible-recipients(?=\/|$)/;
 const headers = { 'cache-control': 'private, no-store' };
 const reply = (status: number) => new Response(null, { status, headers });
 
@@ -12,7 +12,7 @@ function admit(request: Request, url: URL, env: DriveAuthEnv) {
   if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...headers, allow: 'GET' } });
   if (!allowsOrigin(request, env.DRIVE_ORIGIN ?? '') || !allowsStagingInviteSite(request)) return reply(403);
   const match = path.exec(url.pathname);
-  if (!match || url.pathname.endsWith('/') || request.url !== url.origin + url.pathname + url.search) return reply(404);
+  if (!match || match[0] !== url.pathname || request.url !== url.origin + url.pathname + url.search) return reply(404);
   const entryId = decodeReadGrantId(match[1]);
   if (entryId === null) return reply(404);
   const length = request.headers.get('content-length');
@@ -21,12 +21,14 @@ function admit(request: Request, url: URL, env: DriveAuthEnv) {
   return after === undefined ? reply(400) : { entryId, after };
 }
 
-// Reject bad methods and reserved query keys before the adapter can generate its own response.
+// Own the recipient path and its descendants before SvelteKit processes its internal suffixes or query keys.
 export function dispatchEligibleRecipients(request: Request, env: DriveAuthEnv, adapter: (request: Request) => Promise<Response>) {
   const url = new URL(request.url);
   let pathname = url.pathname;
   try { pathname = decodeURI(pathname); } catch { /* Validate the raw path below. */ }
-  if (!path.test(pathname)) return null;
+  const match = path.exec(pathname);
+  if (!match) return null;
+  if (match[0] !== pathname) return reply(404);
   const admission = admit(request, url, env);
   return admission instanceof Response ? admission : adapter(request);
 }
