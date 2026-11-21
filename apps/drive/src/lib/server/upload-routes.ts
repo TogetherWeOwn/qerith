@@ -129,13 +129,18 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
             const intent = await db.withSession('first-primary').prepare(`SELECT i.version ${allocated}`)
               .bind(...bindings).first<{ version: number }>();
             if (!intent) return null;
-            return { async claim(partNumber, sizeBytes) {
+            return { async claim(partNumber, sizeBytes, sha256) {
               if (await isQualified(storageConfigId) !== true) return null;
               const operationId = crypto.randomUUID();
-              // Unused slots are optional; only the highest present part may be short.
+              // Bound slots must match the stored plan. For legacy uploads, unused slots
+              // remain optional; only the highest present part may be short.
               const claim = await db.prepare(`INSERT INTO drive_upload_part_operations
                 SELECT ?, i.id, i.owner_id, i.object_key, b.storage_epoch, i.upload_id, i.version, ?, ? ${allocated}
-                  AND i.version = ? AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
+                  AND i.version = ? AND (i.expected_part_sha256s IS NULL OR (
+                    ? BETWEEN 1 AND length(i.expected_part_sha256s) / 64
+                    AND ? = min(${MAX_PART_BYTES}, i.declared_size - (? - 1) * ${MAX_PART_BYTES})
+                    AND ? = substr(i.expected_part_sha256s, (? - 1) * 64 + 1, 64)))
+                  AND NOT EXISTS (SELECT 1 FROM drive_upload_part_operations p
                     LEFT JOIN drive_upload_part_observations r ON r.operation_id = p.operation_id AND r.kind = 'uncertain'
                     WHERE p.intent_id = i.id AND (p.part_number = ? OR r.operation_id IS NOT NULL))
                   AND EXISTS (SELECT sum(size_bytes) FROM (
@@ -147,7 +152,8 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
                       CASE WHEN min(size_bytes) >= ${MIN_PART_BYTES} AND max(part_number) < ${MAX_PARTS} THEN 1 ELSE ${MIN_PART_BYTES} END
                       AND ${MAX_PART_BYTES} * (CASE WHEN min(size_bytes) < ${MIN_PART_BYTES} THEN max(part_number) ELSE ${MAX_PARTS} END - count(*))))
                 RETURNING hex(object_key) AS key_hex, hex(upload_id) AS upload_hex`)
-                .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version, partNumber, partNumber, sizeBytes)
+                .bind(operationId, partNumber, sizeBytes, ...bindings, intent.version,
+                  partNumber, sizeBytes, partNumber, sha256, partNumber, partNumber, partNumber, sizeBytes)
                 .first<{ key_hex: string; upload_hex: string }>();
               if (!claim) return null;
               const objectKey = decodeUploadIdentity(claim.key_hex), uploadId = decodeUploadIdentity(claim.upload_hex);

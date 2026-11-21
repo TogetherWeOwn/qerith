@@ -60,8 +60,8 @@ still uses the existing live authorization, storage and publication checks.
 A competing request can deny or preempt completion, but cannot substitute
 bytes in these cases.
 
-For a nonempty missing suffix, a slot claim does not bind the rest of the
-intent to the same file. Different writers can supply different slots, and
+For a nonempty missing suffix on an unbound intent, a slot claim does not bind
+the rest of the intent to the same file. Different writers can supply different slots, and
 Complete validates receipts and aggregate size, not a selected-file manifest.
 Waiting for the client's own PUTs or rereading evidence before Complete cannot
 fence a competing Complete. The full file expectation must be bound at creation,
@@ -79,21 +79,18 @@ same 16 MiB plan as above. It commits the fresh intent, full vector, storage
 binding and version-1 allocation claim in one D1 batch. It returns no manifest,
 does not contact S3, and is not called by any upload route.
 
-For the subsequent part claim, use the intent row's immutable `declared_size`
+The live part claim uses the intent row's immutable `declared_size`
 and `expected_part_sha256s: string | null`. For integer slot `n` in
 `1..length(expected_part_sha256s)/64`, the expected digest is
 `substr(expected_part_sha256s, (n - 1) * 64 + 1, 64)` (lowercase hex); the
-expected size is `min(16777216, declared_size - (n - 1) * 16777216)`. Hash the
-exact bounded byte snapshot that will be sent. The fresh D1 slot claim must
-require the computed digest and size to match, **before any S3 side effect**.
-Do not expose the vector or treat a client hash as proof. `NULL` is permanently
-unbound and cannot authorize suffix continuation. No alternate part path may
-bypass the comparison on a bound intent.
+expected size is `min(16777216, declared_size - (n - 1) * 16777216)`. The server
+hashes the bounded request snapshot and checks its slot, size and digest in
+the fresh D1 claim **before any S3 dispatch**. It neither exposes the vector nor
+uses client hashes. `NULL` preserves legacy fresh uploads and cannot authorize
+suffix continuation. The same snapshot and digest feed the existing trusted
+receipt path; a lost acknowledgement does not permit another dispatch.
 
-Keep existing live-session, owner, storage, intent/version, slot, cleanup,
-publication and uncertainty fences. Reconcile the acknowledged prefix with the
-verified file; never treat an in-flight or uncertain slot as missing. Continue
-recording acknowledged bytes only through the existing trusted receipt and
-provenance path. Require an exact acknowledged match to the full plan at
-sealing; a proposal alone cannot complete an upload. Do not retry an ambiguous
-provider attempt. This slice changes no caller, dispatch or resume permission.
+No route creates a bound intent yet. Before enabling suffix continuation,
+reconcile the acknowledged prefix with the verified file; never treat an
+in-flight or uncertain slot as missing. Sealing must require an exact
+acknowledged match to the full plan; a proposal alone cannot complete an upload.
