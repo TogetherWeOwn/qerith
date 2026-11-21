@@ -12,6 +12,12 @@ async function observeFixtures(withFixtures, identity, signal, observe) {
   const controller = new AbortController();
   const active = AbortSignal.any([signal, controller.signal]);
   let open = true, invoking = true, invocations = 0, settled = false, work, drained;
+  const close = () => {
+    if (!open) return;
+    open = false;
+    drained = settled && invocations === 1;
+    if (!drained) controller.abort();
+  };
   try {
     const result = withFixtures(identity, active, fixtures => {
       const accepted = open && ++invocations === 1;
@@ -29,11 +35,14 @@ async function observeFixtures(withFixtures, identity, signal, observe) {
       return attempt;
     });
     invoking = false;
-    if (typeof result?.then === 'function') await result;
+    // Subscribe directly so promise assimilation cannot delay closing admission.
+    const completion = Promise.withResolvers();
+    Promise.prototype.then.call(result,
+      () => { close(); completion.resolve(); },
+      error => { close(); completion.reject(error); });
+    await completion.promise;
   } finally {
-    open = false;
-    drained = settled && invocations === 1;
-    if (!drained) controller.abort();
+    close();
     // Do not let lifecycle cleanup race an observation the adapter abandoned.
     await work?.catch(() => {});
   }
@@ -41,10 +50,10 @@ async function observeFixtures(withFixtures, identity, signal, observe) {
   return drained;
 }
 
-// Unwired. withFixtures must await one callback inside the exact attempt's scope
-// and drain on abort. It provides three isolated, initially signed-out clients,
-// a seeded owner passkey and two unshared files under that scope (memberFile
-// provisions the invitee's file after sign-in and binds it to that membership).
+// Unwired. withFixtures returns a native Promise, awaits one callback inside the
+// exact attempt's scope, and drains on abort. It provides three initially signed-out,
+// isolated clients, a seeded owner passkey and two unshared files under that scope.
+// memberFile provisions the invitee's file after sign-in and binds it to that membership.
 // Browser methods drive normal WebAuthn sign-in/enrollment and return observed
 // HTTP responses as bounded Response snapshots, not verdicts. Preserve redirect
 // and Set-Cookie presence, not cookie values. The signed-out client uses an

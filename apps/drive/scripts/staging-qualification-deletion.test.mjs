@@ -4,9 +4,7 @@ import { test as nodeTest } from 'node:test';
 import { exerciseQualificationDeletion as exerciseDeletion } from './staging-qualification-deletion.mjs';
 import { qualificationPrefix } from './staging-qualification.mjs';
 
-// The composition test imports the fixture without re-registering this suite.
 const test = import.meta.main ? nodeTest : () => {};
-export { fixture as deletionFixture };
 
 const run = { runId: '23', attempt: '2' };
 const context = { ...run, prefix: qualificationPrefix(run) };
@@ -23,7 +21,7 @@ const response = status => new Response(null, { status, headers: { 'cache-contro
   ...(status === 405 && { allow: 'POST' }) } });
 
 // In-memory doubles only; no app admission, network, credential or provider prerequisite.
-function fixture({ scope = fixtureScope, prefix = context.prefix } = {}) {
+export function fixture({ scope = fixtureScope, prefix = context.prefix } = {}) {
   const trees = new Map(), actions = [], probeCalls = [];
   let probePresent = false, now = 42;
   const settle = (state, confirmed) => {

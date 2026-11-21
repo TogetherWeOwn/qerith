@@ -12,12 +12,12 @@ import { qualificationRecoveryWriter } from './staging-qualification-recovery-re
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
-import { createQualificationExercise, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
+import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
-import { accessFixture } from './staging-qualification-access.test.mjs';
-import { fileFixture } from './staging-qualification-files.test.mjs';
-import { transferFixture } from './staging-qualification-app-transfer.test.mjs';
-import { deletionFixture } from './staging-qualification-deletion.test.mjs';
+import { fixture as accessFixture } from './staging-qualification-access.test.mjs';
+import { setup as fileFixture } from './staging-qualification-files.test.mjs';
+import { fixture as transferFixture } from './staging-qualification-app-transfer.test.mjs';
+import { fixture as deletionFixture } from './staging-qualification-deletion.test.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -440,7 +440,7 @@ test('lifecycle aborts and drains an escaped access callback before recovery', {
     withAccessFixtures(scope, activeSignal, run) {
       signal = activeSignal;
       callback = fixture.withFixtures(scope, signal, fixtures => { late = () => run(fixtures); return late(); }).catch(() => {});
-      return { 'passkey-positive': 'pass' };
+      return Promise.resolve();
     },
   });
   const result = assert.rejects(composedLifecycle({ cwd, env, active, phases, exercise, signal: new AbortController().signal }), /\(access\)/);
@@ -498,13 +498,7 @@ for (const ending of ['success and replay', 'unverified final inventory', 'cance
   });
   if (ending === 'success and replay') assert.equal((await result).deployment, cases);
   else await assert.rejects(result, ending === 'unverified final inventory' ? /inventory is unverified \(after\)/ : { name: 'AbortError' });
-  const expected = [
-    'passkey-positive', 'passkey-negative', 'invite-acceptance', 'member-revocation', 'cross-user-denial',
-    'unauthenticated-file-denial', 'authenticated-file-access', 'folder-operations', 'share-and-revoke',
-    's3-multipart', 's3-range', 's3-retry', 's3-persistence', 'large-transfer-hash', 'interrupted-transfer-resume',
-    'delete-envelope', 'delete-boundary-and-safe-fallback', 'delete-rollback-and-retry', 'delete-provider-proof',
-  ];
-  assert.deepEqual(cases, Object.fromEntries(expected.map(name => [name, 'pass'])));
+  assert.deepEqual(cases, Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass'])));
   assert.deepEqual(access.transcript, []);
   assert.deepEqual(storage.trace, storageCalls);
   assert.deepEqual([large.clients, resume.clients, scopeReads, trees.size], [1, 2, 1, 8]);

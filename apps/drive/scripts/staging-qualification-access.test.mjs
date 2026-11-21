@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { test as nodeTest } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { exerciseQualificationAccess } from './staging-qualification-access.mjs';
 
-// The composition test imports the fixture without re-registering this suite.
 const test = import.meta.main ? nodeTest : () => {};
-export { fixture as accessFixture };
 
 const context = { sha: 'a'.repeat(40), runId: '4', attempt: '2', prefix: 'drive-qualification/full-v0/4/2/' };
 const token = 'x'.repeat(43);
@@ -20,7 +19,7 @@ const bytes = file => reply(200, file.bytes, { 'content-length': '2' });
 const login = verify => ({ challenge: reply(200), verify });
 const accepted = () => login(reply(204, null, { 'set-cookie': 'present' }));
 
-function fixture(change = () => {}, expectedContext = context) {
+export function fixture(change = () => {}, expectedContext = context) {
   const transcript = [
     ['owner HEAD /', reply(401)], ['owner sign-in', accepted()],
     ['owner HEAD /', reply(200)], [`owner GET ${first}`, bytes(ownerFile)],
@@ -111,25 +110,28 @@ test('a settled duplicate callback invalidates a complete transcript', async () 
   assert.equal(scope.closed(), true);
 });
 
-test('a queued first callback after adapter settlement makes no access request', async () => {
-  const scope = fixture();
-  let late;
-  await assert.rejects(exerciseQualificationAccess(context, undefined, {
-    async withFixtures(...args) { queueMicrotask(() => { late = scope.withFixtures(...args); late.catch(() => {}); }); },
-  }), /fixture-scope/);
-  await assert.rejects(late);
-  assert.equal(scope.transcript[0][0], 'owner HEAD /');
-});
+const promiseTypes = { native: Promise, subclass: class extends Promise {}, 'cross-realm': runInNewContext('Promise') };
+for (const [kind, PromiseType] of Object.entries(promiseTypes)) for (const outcome of ['resolve', 'reject']) {
+  test(`a queued first callback after ${kind} promise ${outcome} makes no access request`, async () => {
+    const scope = fixture(), late = Promise.withResolvers();
+    await assert.rejects(exerciseQualificationAccess(context, undefined, {
+      withFixtures(...args) {
+        queueMicrotask(() => late.resolve(scope.withFixtures(...args).then(() => false, () => true)));
+        return PromiseType[outcome]();
+      },
+    }), /fixture-scope/);
+    assert.equal(await late.promise, true);
+    assert.equal(scope.transcript[0][0], 'owner HEAD /');
+  });
+}
 
 test('scope mismatch, zero observations, cancellation and adapter errors cannot yield results', async () => {
   const fail = { message: 'Qualification access is unverified (fixture-scope).' };
-  let late, observed = false;
-  const withFixtures = (_scope, _signal, run) => { late = run; };
+  let opened = false;
+  const withFixtures = () => { opened = true; };
   await assert.rejects(exerciseQualificationAccess({ ...context, attempt: '3' }, undefined, { withFixtures }), fail);
-  assert.equal(late, undefined);
+  assert.equal(opened, false);
   await assert.rejects(exerciseQualificationAccess(context, undefined, { withFixtures }), fail);
-  await assert.rejects(late({ get owner() { observed = true; } }));
-  assert.equal(observed, false);
   await assert.rejects(exerciseQualificationAccess(context, undefined, { withFixtures: () => { throw new Error(token); } }), fail);
   const controller = new AbortController();
   const scope = fixture(command => { if (command === 'owner sign-in') controller.abort(); });
