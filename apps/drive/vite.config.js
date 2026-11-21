@@ -59,7 +59,12 @@ function generatedAssets(builder) {
   visited.clear();
   // SSR-only: ship styles and their font, not the generated client entry.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
-  return { signIn, root, invite, people, folder: [...assets].filter(path => /\.(?:css|woff2)$/.test(path)) };
+  const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
+  const folder = styles();
+  assets.clear();
+  visited.clear();
+  include(leaf('/src/routes/shared/+page.svelte'));
+  return { signIn, root, invite, people, folder, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -88,6 +93,7 @@ import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/own
 import { allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
 import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
+import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
@@ -99,7 +105,8 @@ const assets = {
   root: new Set(generated.root),
   invite: new Set(generated.invite),
   people: new Set(generated.people),
-  folder: new Set(generated.folder)
+  folder: new Set(generated.folder),
+  shared: new Set(generated.shared)
 };
 const signInStep = /^\\/api\\/sign-in\\/(challenge|restart|verify)$/;
 const inviteStep = /^\\/api\\/invite\\/(present|challenge|enroll)$/;
@@ -136,6 +143,9 @@ export default {
       pathname = decodeURIComponent(url.pathname);
     } catch {
       return unavailable();
+    }
+    if (pathname === sharedRoute || pathname.startsWith(sharedRoute + '/')) {
+      return new Response(null, { status: 404, headers: { 'cache-control': 'private, no-store' } });
     }
     const entryId = /^\\/api\\/entries\\/([^/]+)\\/delete\\/?$/.exec(pathname)?.[1];
     if (entryId) return deletePrivateEntry(request, entryId, env);

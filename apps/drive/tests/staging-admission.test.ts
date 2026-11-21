@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { admitStagingRequest, dispatchStagingRequest } from '../src/lib/server/staging-admission';
-import { stagingOrigin } from '../src/lib/server/request-auth';
+import { privateRequests, stagingOrigin } from '../src/lib/server/request-auth';
 
 const id = '01234567-89ab-cdef-0123-456789abcdef';
 const shared = '/_app/immutable/chunks/runtime.js';
@@ -459,4 +459,39 @@ test('foreign site metadata permits only the top-level invite document and never
   }
   assert.deepEqual(calls, ['document', 'asset', 'present', 'challenge', 'enroll']);
   assert.equal(reads(), 0);
+});
+
+
+test('Shared with me requires a live member, both flags and an exact bounded document at both layers', async () => {
+  const flags = { DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_STAGING_SHARED_LISTING: '1' };
+  const member = runtime('member');
+  const cases = [
+    ['/shared', 'GET', {}, member.env, 404],
+    ['/shared', 'GET', { ...flags, DRIVE_STAGING_SHARED_LISTING: '0' }, member.env, 404],
+    ['/shared', 'GET', flags, runtime('owner').env, 404],
+    ['/shared', 'GET', flags, runtime('revoked').env, 401],
+    ['/shared', 'GET', flags, runtime('offline').env, 503],
+    ['/shared', 'POST', flags, member.env, 404],
+    ['/shared/', 'GET', flags, member.env, 404],
+    ['/shared/__data.json', 'GET', flags, member.env, 404],
+    ['/shared?cursor=one&cursor=two', 'GET', flags, member.env, 400],
+    ['/shared?cursor=' + encodeURIComponent('é'.repeat(257)), 'GET', flags, member.env, 400],
+    ['/shared?cursor=old%3A%2B%26id', 'GET', flags, member.env, 200],
+    ['/shared', 'HEAD', flags, member.env, 200],
+  ] as const;
+  for (const [path, method, opts, base, expected] of cases) {
+    const input = request(path, method);
+    const env = { ...base, ...opts };
+    const success = async (r?: Request) => {
+      if (r) assert.equal(r.url, input.url);
+      return new Response(null, { headers: { 'cache-control': 'private, no-store' } });
+    };
+    const handle = privateRequests(env);
+    const event = { request: input, route: { id: '/shared' }, locals: {} };
+    const inputToHook = { event, resolve: () => success() } as unknown as Parameters<typeof handle>[0];
+    const responses = [await dispatchStagingRequest(input, env, true, assets, {
+      adapter: success, asset: success, ceremony: success, invite: success,
+    }), await handle(inputToHook)];
+    for (const response of responses) denied(response, expected);
+  }
 });
