@@ -458,7 +458,6 @@ function lifecycle(t, failure, driftKind, results = exerciseResults) {
     inventory({ phase, sha }, signal) {
       assert.equal(sha, env.TESTED_SHA);
       assert.equal(signal.aborted, false);
-      if (failure === 'cancel-after-restore' && phase === 'after') controller.abort();
       return step(`inventory-${phase}`);
     },
     recordRecovery(record, signal) {
@@ -519,10 +518,16 @@ const successOrder = ['full-v0', 'inventory-before', 'upload', 'record-d1', 'cre
   'record-worker', 'create-worker', 'read-worker', 'activate', 'probe', 'exercise', 'exercise-settled',
   'cleanup', 'restore', 'inventory-after'];
 
-test('qualification lifecycle keeps cleanup inside the candidate and inventories after restore', async t => {
+test('qualification lifecycle loads on plain Node without the test loader', () => {
+  const lifecycleUrl = new URL('./staging-qualification-lifecycle.mjs', import.meta.url);
+  execFileSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(lifecycleUrl.href)})`], {
+    env: { PATH: process.env.PATH }, timeout: 30_000,
+  });
+});
+
+test('qualification lifecycle rejects a fabricated pass map after recording recovery', async t => {
   const { run, events, stored, testedSha } = lifecycle(t);
-  assert.deepEqual(await run(), { migrations: { bookmark: 'bookmark' },
-    deployment: { cases: exerciseResults, restoredDeployment: 'restored' } });
+  await assert.rejects(run(), /case evidence/);
   assert.deepEqual(events, successOrder);
   const payloads = Array.from(stored.values(), body => JSON.parse(body.toString('utf8')));
   const scope = { schema: 'drive-staging-recovery.v1', ...recoverySource, sha: testedSha };
@@ -578,7 +583,8 @@ test('qualification lifecycle blocks D1 apply and Worker activation on exact-rec
 test('qualification failures and cancellation suppress the result without skipping recovery', async t => {
   for (const [failure, error] of [
     ['exercise', /Case failed/], ['cancel', { name: 'AbortError' }], ['cleanup', /prefix cleanup is unverified/],
-    ['inventory-after', /inventory is unverified/], ['cancel-after-restore', { name: 'AbortError' }],
+    ['inventory-after', error => error instanceof AggregateError &&
+      /inventory is unverified \(after\)/.test(error.errors[1]?.message)],
   ]) {
     const { run, events } = lifecycle(t, failure);
     await assert.rejects(run(), error);

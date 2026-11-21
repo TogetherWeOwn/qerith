@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test as nodeTest } from 'node:test';
 import { exerciseQualificationFiles } from './staging-qualification-files.mjs';
+
+// The composition test imports the fixture without re-registering this suite.
+const test = import.meta.main ? nodeTest : () => {};
+export { setup as fileFixture };
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const context = { runId: '10', attempt: '2', prefix: 'drive-qualification/full-v0/10/2/' };
@@ -20,8 +24,8 @@ const folderPage = (name, listing) => reply(200, document(main(name, listing)), 
 const entries = rows => `<ul role="list">${rows}</ul>`;
 const empty = '<section class="empty" aria-labelledby="empty-title"><div><h2 id="empty-title">This folder is empty.</h2></div></section>';
 
-function setup(intercept = () => undefined) {
-  const fixture = { prefix: context.prefix, fileId: id(1), fileName: 'Test file.bin', fileBytes: Uint8Array.of(1, 128, 255),
+function setup(intercept = () => undefined, prefix = context.prefix) {
+  const fixture = { prefix, fileId: id(1), fileName: 'Test file.bin', fileBytes: Uint8Array.of(1, 128, 255),
     folderId: id(2), folderName: 'Attempt anchor', ownerId: id(3), recipientId: id(4) };
   const folders = [{ id: fixture.folderId, name: fixture.folderName, parentId: null, kind: 'folder' }];
   const calls = [];
@@ -59,7 +63,7 @@ function setup(intercept = () => undefined) {
     const rows = folders.filter(row => row.parentId === selected.id).map(folderRow).join('');
     return folderPage(selected.name, rows ? entries(rows) : empty);
   };
-  return { fixture, provisioning: { prefix: context.prefix, fileId: id(1), folderId: id(2) },
+  return { fixture, provisioning: { prefix, fileId: id(1), folderId: id(2) },
     owner: { principalId: id(3), request: client('owner') },
     recipient: { principalId: id(4), request: client('recipient') }, calls };
 }

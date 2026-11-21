@@ -16,12 +16,12 @@ const rejected = new Map([
 // entries in seed order), authoritative storage, journal fault hits and the complete
 // scoped provider call/outcome trace (from provider replies, not job state).
 // advanceRetryClock advances only the offline clock, not job rows or a live clock.
-export async function exerciseQualificationDeletion(context, signal, io) {
+export async function exerciseQualificationDeletion(context, signal, binding, io) {
   let phase = 'scope';
   try {
     const prefix = qualificationPrefix(context);
     assert.equal(context.prefix, prefix);
-    const { endpoint, bucket, epoch } = io.scope;
+    const { endpoint, bucket, epoch } = binding;
     const url = new URL(endpoint);
     assert.ok(url.protocol === 'https:' && url.origin === endpoint && token(bucket) && token(epoch));
     const scope = Object.freeze({ endpoint, bucket, epoch });

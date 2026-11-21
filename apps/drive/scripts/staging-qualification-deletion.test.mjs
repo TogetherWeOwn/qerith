@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import { exerciseQualificationDeletion } from './staging-qualification-deletion.mjs';
 import { qualificationPrefix } from './staging-qualification.mjs';
 
+// The composition test imports the fixture without re-registering this suite.
+const test = import.meta.main ? nodeTest : () => {};
+export { fixture as deletionFixture };
+
 const run = { runId: '23', attempt: '2' };
 const context = { ...run, prefix: qualificationPrefix(run) };
-const scope = { endpoint: 'https://storage.example.test', bucket: 'fixture-bucket', epoch: 'fixture-epoch' };
+const fixtureScope = { endpoint: 'https://storage.example.test', bucket: 'fixture-bucket', epoch: 'fixture-epoch' };
 const bytes = Buffer.from([0, 17, 255]);
 const tag = data => `"${createHash('md5').update(data).digest('hex')}"`;
 const etag = tag(bytes), wrongEtag = tag(Buffer.from([1]));
@@ -18,7 +22,7 @@ const response = status => new Response(null, { status, headers: { 'cache-contro
   ...(status === 405 && { allow: 'POST' }) } });
 
 // In-memory doubles only; no app admission, network, credential or provider prerequisite.
-function fixture() {
+function fixture({ scope = fixtureScope, prefix = context.prefix } = {}) {
   const trees = new Map(), actions = [], probeCalls = [];
   let probePresent = false, now = 42;
   const settle = (state, confirmed) => {
@@ -36,7 +40,7 @@ function fixture() {
     scope,
     seed({ entries, key, scope: targetScope, pinned }) {
       assert.deepEqual(targetScope, scope);
-      assert.ok(key.startsWith(context.prefix) && !trees.has(key));
+      assert.ok(key.startsWith(prefix) && !trees.has(key));
       const revision = pinned ? randomUUID() : null;
       const generation = { ...scope, key, etag, revision, entryId: entries.at(-1).id };
       trees.set(key, { entries, live: entries, key, pinned, generation, journal: [], calls: [],
@@ -86,14 +90,14 @@ function fixture() {
     },
     seedProbe({ key, scope: targetScope }) {
       assert.deepEqual(targetScope, scope);
-      assert.equal(key, `${context.prefix}delete-provider-proof`);
+      assert.equal(key, `${prefix}delete-provider-proof`);
       probePresent = true;
       return { key, scope: targetScope, bytes, etag, wrongEtag, versioning: 'never-enabled', readConsistency: 'authoritative' };
     },
     requestProbe({ method, key, scope: targetScope, headers, cache, signal }) {
       signal.throwIfAborted();
       assert.deepEqual(targetScope, scope);
-      assert.equal(key, `${context.prefix}delete-provider-proof`);
+      assert.equal(key, `${prefix}delete-provider-proof`);
       const match = headers?.['if-match'];
       probeCalls.push([method, match, cache]);
       const result = (status, body, headers = {}) => ({ status, body: Buffer.from(body), headers: new Headers(headers) });
@@ -109,7 +113,7 @@ function fixture() {
 
 test('verifies all four deletion cases using only owned fixtures and injected clients', async () => {
   const { io, actions, probeCalls } = fixture();
-  assert.deepEqual(await exerciseQualificationDeletion(context, undefined, io), {
+  assert.deepEqual(await exerciseQualificationDeletion(context, undefined, fixtureScope, io), {
     'delete-envelope': 'pass', 'delete-boundary-and-safe-fallback': 'pass',
     'delete-rollback-and-retry': 'pass', 'delete-provider-proof': 'pass',
   });
@@ -126,7 +130,7 @@ test('accepts reordered journal rows before and after scoped retry', async () =>
     if (state.key.endsWith('delete-recovery') && state.job?.completionToken) state.journal.reverse();
     return state;
   };
-  const result = await exerciseQualificationDeletion(context, undefined, io);
+  const result = await exerciseQualificationDeletion(context, undefined, fixtureScope, io);
   assert.equal(result['delete-rollback-and-retry'], 'pass');
 });
 
@@ -135,7 +139,7 @@ test('refuses to invoke retry when the injected clock does not advance', async (
   let retryCalls = 0;
   io.advanceRetryClock = () => {};
   io.retry = () => { retryCalls++; };
-  await assert.rejects(exerciseQualificationDeletion(context, undefined, io), /\(delete-rollback-and-retry\)/);
+  await assert.rejects(exerciseQualificationDeletion(context, undefined, fixtureScope, io), /\(delete-rollback-and-retry\)/);
   assert.equal(retryCalls, 0);
 });
 
@@ -205,7 +209,7 @@ for (const [name, phase, corrupt] of [
   }],
   ['probe scope mismatch', 'provider-proof', ({ io }) => {
     const seed = io.seedProbe;
-    io.seedProbe = input => ({ ...seed(input), scope: { ...scope, epoch: 'other' } });
+    io.seedProbe = input => ({ ...seed(input), scope: { ...fixtureScope, epoch: 'other' } });
   }],
   ['probe absence names a different key', 'provider-proof', ({ io }) => {
     const send = io.requestProbe;
@@ -222,7 +226,7 @@ for (const [name, phase, corrupt] of [
   test(`rejects ${name}`, async () => {
     const setup = fixture();
     corrupt(setup);
-    await assert.rejects(exerciseQualificationDeletion(context, undefined, setup.io), new RegExp(`\\(delete-${phase}\\)`));
+    await assert.rejects(exerciseQualificationDeletion(context, undefined, fixtureScope, setup.io), new RegExp(`\\(delete-${phase}\\)`));
     if (name === 'probe scope mismatch') assert.equal(setup.probeCalls.length, 0);
   });
 }
@@ -231,7 +235,7 @@ test('rejects another attempt prefix and cancellation before fixture work', asyn
   const { io, trees, probeCalls } = fixture();
   const signal = AbortSignal.abort();
   await assert.rejects(exerciseQualificationDeletion({ ...context, prefix: qualificationPrefix({ ...run, attempt: '1' }) },
-    undefined, io), /\(scope\)/);
-  await assert.rejects(exerciseQualificationDeletion(context, signal, io), /\(scope\)/);
+    undefined, fixtureScope, io), /\(scope\)/);
+  await assert.rejects(exerciseQualificationDeletion(context, signal, fixtureScope, io), /\(scope\)/);
   assert.equal(trees.size + probeCalls.length, 0);
 });

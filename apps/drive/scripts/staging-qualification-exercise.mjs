@@ -2,7 +2,6 @@ import { assertQualificationJob, qualificationPrefix } from './staging-qualifica
 import { exerciseQualificationAccess } from './staging-qualification-access.mjs';
 import { exerciseQualificationFiles } from './staging-qualification-files.mjs';
 import { exerciseQualificationLargeTransfer, exerciseQualificationResume } from './staging-qualification-app-transfer.mjs';
-import { exerciseQualificationDeletion } from './staging-qualification-deletion.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 
 const groups = {
@@ -25,7 +24,17 @@ function verifyCases(evidence, names) {
   return Object.freeze(Object.fromEntries(names.map(name => [name, 'pass'])));
 }
 
-export const verifyQualificationExercise = evidence => verifyCases(evidence, qualificationExerciseCases);
+// Only this composer issues evidence, and only the exact lifecycle invocation can consume it.
+const issued = new WeakMap();
+
+export function verifyQualificationExercise(evidence, context, signal) {
+  const invocation = issued.get(evidence);
+  if (!invocation || invocation.context !== context || invocation.signal !== signal || signal.aborted) {
+    throw unverified('case evidence');
+  }
+  issued.delete(evidence);
+  return evidence;
+}
 
 // No workflow caller. App operations must observe the candidate, use isolated
 // fixtures, and drain before settling on abort. The lifecycle owns the overall
@@ -66,10 +75,15 @@ export async function createQualificationExercise(env, cwd, { withAccessFixtures
     await run('large', () => exerciseQualificationLargeTransfer(active, signal, openTransferClient));
     await run('resume', () => exerciseQualificationResume(active, signal, openTransferClient));
     await run('deletion', async () => {
+      const { exerciseQualificationDeletion } = await import('./staging-qualification-deletion.mjs');
+      signal.throwIfAborted();
       const io = await openDeletion(active, storageScope, signal);
-      if (Object.keys(storageScope).some(key => io?.scope?.[key] !== storageScope[key])) throw unverified('deletion scope');
-      return exerciseQualificationDeletion(active, signal, io);
+      const reported = io?.scope;
+      if (Object.keys(storageScope).some(key => reported?.[key] !== storageScope[key])) throw unverified('deletion scope');
+      return exerciseQualificationDeletion(active, signal, storageScope, io);
     });
-    return verifyQualificationExercise(results);
+    const evidence = verifyCases(results, qualificationExerciseCases);
+    issued.set(evidence, { context, signal });
+    return evidence;
   };
 }

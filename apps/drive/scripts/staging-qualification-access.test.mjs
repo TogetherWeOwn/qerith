@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import { exerciseQualificationAccess } from './staging-qualification-access.mjs';
+
+// The composition test imports the fixture without re-registering this suite.
+const test = import.meta.main ? nodeTest : () => {};
+export { fixture as accessFixture };
 
 const context = { sha: 'a'.repeat(40), runId: '4', attempt: '2', prefix: 'drive-qualification/full-v0/4/2/' };
 const token = 'x'.repeat(43);
@@ -16,7 +20,7 @@ const bytes = file => reply(200, file.bytes, { 'content-length': '2' });
 const login = verify => ({ challenge: reply(200), verify });
 const accepted = () => login(reply(204, null, { 'set-cookie': 'present' }));
 
-function fixture(change = () => {}) {
+function fixture(change = () => {}, expectedContext = context) {
   const transcript = [
     ['owner HEAD /', reply(401)], ['owner sign-in', accepted()],
     ['owner HEAD /', reply(200)], [`owner GET ${first}`, bytes(ownerFile)],
@@ -32,7 +36,7 @@ function fixture(change = () => {}) {
   ];
   let closed = false;
   const withFixtures = async (scope, signal, run) => {
-    assert.deepEqual(scope, context);
+    assert.deepEqual(scope, expectedContext);
     const step = (command, active, input) => {
       assert.equal(active, signal);
       const [expected, observation, args] = transcript.shift();

@@ -44,8 +44,10 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
       upload: candidate,
       recordRecovery: record('worker'),
       probe,
-      exercise: async (active, phaseSignal) => verifyQualificationExercise(
-        await exercise({ ...active, ...context }, phaseSignal)),
+      exercise: async (active, phaseSignal) => {
+        const invocation = Object.freeze({ ...context, version: active.version });
+        return verifyQualificationExercise(await exercise(invocation, phaseSignal), invocation, phaseSignal);
+      },
       cleanup: (active, phaseSignal) => cleanup({ ...active, ...context }, phaseSignal),
     }, env, cwd, signal);
     return { migrations, deployment };

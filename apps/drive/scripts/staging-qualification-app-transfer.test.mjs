@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import test from 'node:test';
+import { test as nodeTest } from 'node:test';
 import { exerciseQualificationLargeTransfer, exerciseQualificationResume } from './staging-qualification-app-transfer.mjs';
+
+// The composition test imports the fixture without re-registering this suite.
+const test = import.meta.main ? nodeTest : () => {};
+export { fixture as transferFixture };
 
 const MiB = 1024 ** 2, partBytes = 16 * MiB, resumeBytes = 65 * partBytes + 257;
 const context = { sha: 'a'.repeat(40), version: 'e75999e9-d97b-4ae6-b592-c56580bd2ac3', runId: '123', attempt: '2',
@@ -10,13 +14,13 @@ const intent = 'cb37853a-04d3-462e-98c4-9f55b852880d', file = 'aaf9b9d0-21e4-4a2
 const upload = `/api/uploads/${intent}`;
 const active = () => new AbortController().signal;
 
-function fixture({ resume = false, fault, controller, lostAckPart = 1 } = {}) {
+function fixture({ resume = false, fault, controller, lostAckPart = 1, scope: expected = context } = {}) {
   const size = resume ? resumeBytes : 5 * 1024 ** 3;
   const parts = [], manifest = [], calls = [], scratch = Buffer.allocUnsafe(partBytes);
   let complete = false, clients = 0, firstSignal;
   const check = (signal) => assert.equal(signal.aborted, false);
   function openClient(scope, signal) {
-    assert.deepEqual(scope, context);
+    assert.deepEqual(scope, expected);
     check(signal);
     const client = ++clients;
     return {
@@ -66,7 +70,7 @@ function fixture({ resume = false, fault, controller, lostAckPart = 1 } = {}) {
         if (path === `${upload}/complete`) {
           assert.equal(method, 'POST');
           assert.equal(parts.length, Math.ceil(size / partBytes));
-          assert.deepEqual(JSON.parse(body), { parentId: null, name: `qualification-123-2-${resume ? 'resume' : 'large'}.bin` });
+          assert.deepEqual(JSON.parse(body), { parentId: null, name: `qualification-${scope.runId}-${scope.attempt}-${resume ? 'resume' : 'large'}.bin` });
           complete = true;
           return Response.json({ id: file }, { status: 201 });
         }

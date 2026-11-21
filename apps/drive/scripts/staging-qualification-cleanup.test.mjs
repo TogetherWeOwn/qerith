@@ -12,7 +12,12 @@ import { qualificationRecoveryWriter } from './staging-qualification-recovery-re
 import { createQualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
-import { createQualificationExercise } from './staging-qualification-exercise.mjs';
+import { createQualificationExercise, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
+import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { accessFixture } from './staging-qualification-access.test.mjs';
+import { fileFixture } from './staging-qualification-files.test.mjs';
+import { transferFixture } from './staging-qualification-app-transfer.test.mjs';
+import { deletionFixture } from './staging-qualification-deletion.test.mjs';
 
 const bucket = 'fixture-bucket';
 const endpoint = `https://${'abc01234'.repeat(4)}.r2.cloudflarestorage.com`;
@@ -333,8 +338,7 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
   }
 });
 
-test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
-  const { cwd, env, context } = job(t);
+function storageFixture() {
   const key = `${prefix}provider-multipart-fixture`;
   const split = 5 * 1024 * 1024;
   const whole = Buffer.concat([Buffer.alloc(split, 0x35), Buffer.alloc(257, 0x9a)]);
@@ -387,11 +391,77 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
     return new Response(bytes, { status: ranged ? 206 : 200, headers: { etag: tag, 'content-length': String(bytes.length),
       ...(ranged && { 'content-range': `bytes ${split - 2}-${split + 1}/${whole.length}` }) } });
   };
+  return { send, trace };
+}
+
+const storageCalls = ['HEAD', 'POST', 'PUT', 'GET', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET'];
+
+test('storage cases use signed calls against only the reviewed bucket and attempt key', async t => {
+  const { cwd, env, context } = job(t);
+  const { send, trace } = storageFixture();
   const exercise = await createQualificationStorageCases(env, cwd, { send });
   assert.throws(() => exercise({ ...context, runId: '183' }), /cases are unverified/);
   assert.deepEqual(trace, []);
   assert.deepEqual(await exercise(context), { 's3-multipart': 'pass', 's3-range': 'pass', 's3-retry': 'pass', 's3-persistence': 'pass' });
-  assert.deepEqual(trace, ['HEAD', 'POST', 'PUT', 'GET', 'PUT', 'PUT', 'PUT', 'GET', 'GET', 'POST', 'HEAD', 'GET', 'GET']);
+  assert.deepEqual(trace, storageCalls);
+});
+
+test('lifecycle runs all 19 cases for one candidate and rejects replay of that evidence', { timeout: 90_000 }, async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const binding = { endpoint, bucket, epoch: env.QERITH_S3_STORAGE_EPOCH };
+  const access = accessFixture(undefined, active);
+  const files = fileFixture(undefined, prefix);
+  const storage = storageFixture();
+  const large = transferFixture({ scope: active }), resume = transferFixture({ scope: active, resume: true });
+  const { io, trees } = deletionFixture({ scope: binding, prefix });
+  const phases = [];
+  let scopeReads = 0, clients = 0;
+  Object.defineProperty(io, 'scope', { get: () => ++scopeReads === 1 ? binding : { ...binding, bucket: 'different' } });
+  const compose = await createQualificationExercise(env, cwd, {
+    withAccessFixtures: access.withFixtures,
+    readFileFixtures(scope) { assert.deepEqual(scope, active); return files; },
+    send: storage.send,
+    openTransferClient: (...args) => (++clients === 1 ? large : resume).openClient(...args),
+    openDeletion(scope, reviewed) {
+      assert.deepEqual(scope, active);
+      assert.deepEqual(reviewed, binding);
+      assert.ok(Object.isFrozen(reviewed));
+      return io;
+    },
+  });
+  const signal = new AbortController().signal;
+  const run = exercise => runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
+    inventory({ phase }) { phases.push(phase); return true; },
+    cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
+  }, env, cwd, signal, {
+    upload: () => active, migrate: () => null,
+    async worker({ upload, exercise, cleanup }, _env, _cwd, workerSignal) {
+      try { return await exercise(upload, workerSignal); }
+      finally { await cleanup(upload, workerSignal); phases.push('restore'); }
+    },
+  });
+  const { deployment: cases } = await run(async (invocation, phaseSignal) => {
+    const evidence = await compose(invocation, phaseSignal);
+    assert.throws(() => verifyQualificationExercise(evidence, { ...invocation }, phaseSignal), /case evidence/);
+    assert.throws(() => verifyQualificationExercise(evidence, invocation, new AbortController().signal), /case evidence/);
+    return evidence;
+  });
+  const expected = [
+    'passkey-positive', 'passkey-negative', 'invite-acceptance', 'member-revocation', 'cross-user-denial',
+    'unauthenticated-file-denial', 'authenticated-file-access', 'folder-operations', 'share-and-revoke',
+    's3-multipart', 's3-range', 's3-retry', 's3-persistence', 'large-transfer-hash', 'interrupted-transfer-resume',
+    'delete-envelope', 'delete-boundary-and-safe-fallback', 'delete-rollback-and-retry', 'delete-provider-proof',
+  ];
+  assert.deepEqual(cases, Object.fromEntries(expected.map(name => [name, 'pass'])));
+  assert.deepEqual(access.transcript, []);
+  assert.deepEqual(storage.trace, storageCalls);
+  assert.deepEqual([large.clients, resume.clients, scopeReads, trees.size], [1, 2, 1, 8]);
+  const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
+  assert.deepEqual(phases, lifecycleOrder);
+  // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
+  await assert.rejects(run(() => cases), /case evidence/);
+  assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
 });
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {
