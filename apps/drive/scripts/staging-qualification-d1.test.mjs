@@ -137,8 +137,9 @@ function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus =
     },
     intercept(fn) { intercept = (path, init) => fn(path, init, () => simulatedFetch(path, init)); },
     inspect: (patch = {}, signal) => assertNoQualificationD1MigrationFixtures({ ...env, ...patch }, cwd, signal, send),
-    census: ({ scope = censusScope, patch = {}, signal, transport = send } = {}) =>
-      readQualificationD1AppFixtures(scope, { ...env, ...patch }, cwd, signal, transport),
+    census: ({ scope = censusScope, patch = {}, signal, transport = send, fromDriveDirectory = false } = {}) =>
+      readQualificationD1AppFixtures(scope, { ...env, ...patch },
+        fromDriveDirectory ? join(cwd, 'apps/drive') : cwd, signal, transport),
     clean: (patch = {}, signal) => cleanQualificationD1({ ...source, prefix, ...patch }, env, cwd, signal, send),
     recover: ({ overrides, recordPatch, proveQuiescence = (scope, signal) => {
       assert.deepEqual(scope, { ...source, accountId, databaseId, bookmark: before });
@@ -155,6 +156,8 @@ test('app table census covers the committed fully migrated schema and returns an
   assert.equal(f.sql("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table'")[0].n, 35);
   assert.deepEqual(await f.census(), { complete: true, items: [] });
   assert.deepEqual(f.calls, ['', '/query']);
+  assert.deepEqual(await f.census({ fromDriveDirectory: true }), { complete: true, items: [] });
+  assert.deepEqual(f.calls, ['', '/query', '', '/query']);
 });
 
 test('app table census rejects expired, unnamed and permanent rows under the real guards', async t => {

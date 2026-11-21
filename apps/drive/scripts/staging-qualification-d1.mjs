@@ -122,7 +122,7 @@ export async function readQualificationD1AppFixtures(scope, env, cwd, signal, se
     return await runQualificationPhase(async (_, active) => {
       const tree = `${identity.sha}:apps/drive/migrations`;
       if (git(cwd, 'rev-parse', '--verify', tree).trim() !== reviewedMigrationTree) throw new Error();
-      const names = git(cwd, 'ls-tree', '--name-only', '-z', tree).slice(0, -1).split('\0');
+      const names = git(cwd, 'ls-tree', '--full-tree', '--name-only', '-z', tree).slice(0, -1).split('\0');
       const db = d1(identity, env, cwd, send, active, { strict: true });
       if (scope?.account !== db.accountId || scope.database !== db.databaseId) throw new Error();
       await db.verifyTarget();
