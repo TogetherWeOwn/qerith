@@ -22,6 +22,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
     try { response = await request({ method: 'GET', key, query, signal, maxResponseBytes: 8 * 1024 * 1024 }); }
     catch { throw new Error(signal?.aborted ? 'S3 request cancelled' : 'S3 request failed'); }
     if (response.status !== 200) throw new Error(`S3 request failed with status ${response.status}`);
+    if (response.headers.has('content-range')) throw new Error('Invalid S3 listing response');
     return response.body;
   }
   function verifyListingScope(root: ReturnType<typeof parseListingXml>, bucketField: string, prefix?: string) {
