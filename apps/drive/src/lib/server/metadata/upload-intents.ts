@@ -1,3 +1,5 @@
+import type { LivePrincipalMode } from '../identity/sessions';
+import { MAX_PART_BYTES } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
 
 // Server-only reconciliation records. Authenticate the principal before calling;
@@ -24,6 +26,31 @@ export interface UploadIntent {
   declared_size: number | null;
 }
 
+export interface ExpectedUploadPart {
+  readonly partNumber: number;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+}
+
+const maxExpectedUploadBytes = 5 * 1024 ** 3;
+const partSha256 = /^[0-9a-f]{64}$/;
+
+function packExpectedParts(size: number, parts: readonly ExpectedUploadPart[]): string {
+  if (!Number.isSafeInteger(size) || size < 0 || size > maxExpectedUploadBytes || !Array.isArray(parts) ||
+      parts.length !== Math.max(1, Math.ceil(size / MAX_PART_BYTES))) throw new TypeError('Invalid expected upload plan');
+  let packed = '';
+  for (let offset = 0; offset < parts.length; offset++) {
+    const part = parts[offset];
+    const { partNumber, sizeBytes, sha256 } = part ?? {};
+    if (partNumber !== offset + 1 || sizeBytes !== Math.min(MAX_PART_BYTES, size - offset * MAX_PART_BYTES) ||
+        typeof sha256 !== 'string' || sha256.length !== 64 || !partSha256.test(sha256)) {
+      throw new TypeError('Invalid expected upload slot');
+    }
+    packed += sha256;
+  }
+  return packed;
+}
+
 const columns = 'id, owner_id, object_key, upload_id, completion_acknowledged, state, version, declared_size';
 const active = 'EXISTS (SELECT 1 FROM drive_active_members WHERE id = ?)';
 // Trusted dispatch recovery uses the receipt/quarantine ledger, not legacy journal transitions.
@@ -44,13 +71,31 @@ export class UploadIntents<DB extends Database = Database> {
   async claimNewAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
     size: number, endpoint: string, bucket: string, epoch: string, ownerOnly = false): Promise<UploadIntent | null> {
     if (!Number.isSafeInteger(size) || size < 0) throw new TypeError('Invalid declared upload size');
+    return this.claimAllocation(principalId, sessionHash, size, endpoint, bucket, epoch, ownerOnly, null);
+  }
+
+  // Server-only producer. The caller authenticates and supplies the trusted session
+  // hash, storage namespace and admission mode. A proposal is not acknowledgement.
+  // There is intentionally no API to attach a proposal to an existing intent.
+  async claimNewExpectedAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
+    size: number, endpoint: string, bucket: string, epoch: string, mode: LivePrincipalMode,
+    parts: readonly ExpectedUploadPart[]): Promise<UploadIntent | null> {
+    if (mode !== 'owner' && mode !== 'active') throw new TypeError('Invalid upload admission mode');
+    return this.claimAllocation(principalId, sessionHash, size, endpoint, bucket, epoch, mode === 'owner',
+      packExpectedParts(size, parts));
+  }
+
+  private async claimAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
+    size: number, endpoint: string, bucket: string, epoch: string, ownerOnly: boolean,
+    expected: string | null): Promise<UploadIntent | null> {
     const id = crypto.randomUUID(), key = crypto.randomUUID();
     const [, , claim] = await this.db.batch<UploadIntent>([
-      this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
-        SELECT ?, ?, ?, 'created', ? WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions s
+      this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size${
+        expected === null ? '' : ', expected_part_sha256s'})
+        SELECT ?, ?, ?, 'created', ?${expected === null ? '' : ', ?'} WHERE ${active} AND EXISTS (SELECT 1 FROM drive_sessions s
           WHERE token_hash = ? AND principal_id = ? AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
             ${requireActiveOwner(ownerOnly, 's.principal_id')})`)
-        .bind(id, principalId, key, size, principalId, sessionHash, principalId),
+        .bind(id, principalId, key, size, ...(expected === null ? [] : [expected]), principalId, sessionHash, principalId),
       this.db.prepare(`INSERT INTO drive_upload_storage_bindings (intent_id, endpoint, bucket, storage_epoch)
         SELECT id, ?, ?, ? FROM drive_upload_intents WHERE id = ? AND object_key = ?`)
         .bind(endpoint, bucket, epoch, id, key),
