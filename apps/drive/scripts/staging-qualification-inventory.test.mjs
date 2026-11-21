@@ -28,6 +28,10 @@ const namespaceRoster = (overrides, init) => Response.json({ success: true, erro
   result_info: namespacePage, ...overrides }, init);
 const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
+const streamEmpty = { liveInputs: [], range: 0, total: 0 };
+const streamRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
+  result: streamEmpty, ...overrides }, init);
+const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream'];
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
 const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
@@ -131,6 +135,12 @@ function fixture(t) {
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
         state.onContainerList?.(init.signal);
         return state.containerList ?? json([]);
+      }
+      if (url === `${root}${account}/stream/live_inputs?include_counts=true`) {
+        trace.push('stream');
+        assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token' });
+        state.onStreamList?.(init.signal);
+        return state.streamList ?? streamRoster();
       }
       const scripts = `${root}${account}/workers/scripts`;
       if (url === scripts) {
@@ -431,7 +441,7 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder, 'expiry', 'uploads', 'objects',
+  const expected = [...beforeR2, ...r2RosterOrder, 'expiry', 'uploads', 'objects',
     'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
@@ -553,6 +563,52 @@ test('inventory rejects a native container roster returned after its deadline', 
   assert.equal(f.trace.at(-1), 'containers');
 });
 
+test('inventory rejects any native Stream input before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    // Zero counts must not override a disabled input in the array.
+    f.state.streamList = streamRoster({ result: { ...streamEmpty, liveInputs: [{ enabled: false }] } });
+    await assert.rejects(run(phase), error);
+    assert.equal(f.trace.at(-1), 'stream');
+  }
+});
+
+test('inventory requires a complete, bounded native Stream roster', async t => {
+  const f = fixture(t);
+  for (const reply of [
+    streamRoster({ success: false }), streamRoster({ messages: ['partial'] }), streamRoster({ errors: [{ code: 1 }] }),
+    ...[[], { total: 0, range: 0 }, { liveInputs: [] }, { ...streamEmpty, total: 1 }, { ...streamEmpty, range: 1 },
+      { ...streamEmpty, total: '0' }, { ...streamEmpty, cursor: 'next' }].map(result => streamRoster({ result })),
+    streamRoster({ result_info: { cursor: 'next' } }), streamRoster({}, { headers: { Link: '</next>; rel="next"' } }),
+    streamRoster({}, { status: 403 }), streamRoster({}, { status: 206 }),
+    streamRoster({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }), new Response('not JSON'),
+    new Response((await streamRoster().text()).padEnd(65_537, ' ')),
+    new Response('{"success":true,"errors":[],"messages":[],"result":{"liveInputs":[],"range":0,"total":1,"total":0}}'),
+  ]) {
+    const run = f.create();
+    f.state.streamList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'stream');
+  }
+});
+
+test('inventory rejects a native Stream roster returned after its deadline', async t => {
+  const f = fixture(t), run = f.create();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const aborted = [];
+  f.state.onStreamList = signal => {
+    t.mock.timers.tick(4_999);
+    aborted.push(signal.aborted);
+    t.mock.timers.tick(1);
+    aborted.push(signal.aborted);
+  };
+  await assert.rejects(run('before'), error);
+  assert.deepEqual(aborted, [false, true]);
+  assert.equal(f.trace.at(-1), 'stream');
+});
+
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
   const f = fixture(t);
   for (const [index, jurisdiction] of r2Jurisdictions.entries()) {
@@ -564,7 +620,7 @@ test('inventory rejects an extra native R2 bucket before and after the attempt',
       f.state.scopedBucketLists = { [jurisdiction]: bucketRoster({ result: { buckets },
         result_info: { total_count: buckets.length } }) };
       await assert.rejects(run(phase), error);
-      assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, index + 2)]);
+      assert.deepEqual(f.trace, [...beforeR2, ...r2RosterOrder.slice(0, index + 2)]);
     }
   }
 });
@@ -626,7 +682,7 @@ test('inventory shares one 15-second deadline across native R2 roster reads', as
     signal.throwIfAborted();
   };
   await assert.rejects(run('before'), error);
-  assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2RosterOrder.slice(0, 2)]);
+  assert.deepEqual(f.trace, [...beforeR2, ...r2RosterOrder.slice(0, 2)]);
   assert.deepEqual(beforeDeadline, [false, false]);
   assert.equal(signals[0], signals[1]);
   assert.equal(signals[0].aborted, true);
@@ -716,7 +772,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, [...beforeR2, ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 
