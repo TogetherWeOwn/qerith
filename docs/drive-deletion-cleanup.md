@@ -1,16 +1,21 @@
 # Drive deletion cleanup (closed)
 
-The drain is a fixture-only callback, not a deployed scheduler. The default
-Worker and generated preview do not register a scheduled handler. No request,
-cron configuration, binding or environment setting admits the drain.
+Both paths are off by default. The generated Worker supplies no server-held
+provider rule or qualification, and no Wrangler config adds a trigger or opt-in.
+Neither a flag alone, upload qualification nor an offline probe can enable either path.
 
-The confirmed request handler requires a server-supplied deletion qualification
-for the normalized endpoint, bucket, storage epoch, and signing region. Storage
-settings and upload qualification alone cannot admit deletion. No generated
-Worker supplies this capability. After a committed journal, the handler can
-attempt one bounded pass scoped to that journal; HTTP 202 reports the commit,
-not provider removal. Unconfirmed and unattempted jobs remain in D1 for a
-separately admitted drain.
+The exact staging confirmation POST and the staging scheduled event are
+admitted separately (`DRIVE_STAGING_DELETE_REQUESTS` and
+`DRIVE_STAGING_DELETE_DRAIN`, respectively). Both require a server-supplied
+permanent-removal rule for the actual normalized endpoint, bucket, storage epoch,
+and signing region. The scheduled callback only accepts the designated cron
+expression and has no HTTP entry point.
+
+After a committed journal, HTTP can attempt one bounded pass scoped to that
+journal. HTTP 202 reports the commit, not provider removal. Unconfirmed and
+unattempted jobs remain in D1; a scheduled invocation needs no request state
+or journal ID. It uses the same historical-identity and lease fences. An
+ambiguous reply, including apparent absence after a lost reply, is not a receipt.
 
 ## Proposed cadence and capacity
 

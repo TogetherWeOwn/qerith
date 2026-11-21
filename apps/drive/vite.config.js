@@ -95,7 +95,7 @@ import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
-import { dispatchStagingDeletion } from '../../src/lib/server/staging-deletion.ts';
+import { dispatchStagingDeletion, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
@@ -118,6 +118,10 @@ const unavailable = () => new Response('Service unavailable', {
 const unavailableAssets = { fetch: unavailable };
 
 export default {
+  async scheduled(event, env) {
+    // There is no configured trigger or server-held deletion qualification.
+    await runStagingDeletionDrain(event, env);
+  },
   async fetch(request, env, ctx) {
     if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
     const url = new URL(request.url);

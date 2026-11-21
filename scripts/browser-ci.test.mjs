@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -47,6 +47,27 @@ test('wrong parent count, head, main ancestry and mutable refs fail closed', () 
   assert.throws(() => selectCheckout({ ...input, head: 'main' }, graph()), /immutable/);
   assert.throws(() => selectCheckout({ ...input, event: 'push' }, graph()), /must match/);
 });
+test('generated browser entrypoints have separate exact-head deadlines', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const job = workflow.split(/^  drive-browser:\n/m)[1]?.split(/^  \S/m)[0];
+  assert.ok(job, 'drive-browser job is missing');
+  const steps = job.split(/^      - /m).slice(1);
+  const deadline = 'timeout --signal=TERM --kill-after=10s 90s node ';
+  const exactHead = 'steps.browser-source.outputs.tested == env.REQUESTED_HEAD';
+  const entrypoints = [['sign-in.mjs', exactHead], ['staging-root-standalone.mjs',
+    `${exactHead} && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''`]];
+  const [signInStep, stagingStep] = entrypoints.map(([entry, condition]) => {
+    const matches = steps.filter(step => step.includes(deadline + entry));
+    assert.equal(matches.length, 1, `${entry} must have one bounded invocation`);
+    assert.ok(matches[0].split('\n').includes(`        if: ${condition}`), `${entry} has the wrong CI condition`);
+    return matches[0];
+  });
+  assert.notEqual(signInStep, stagingStep, 'the fixtures must run in separate steps');
+  const browser = new URL('../apps/drive/browser/', import.meta.url);
+  assert.match(await readFile(new URL('staging-root-standalone.mjs', browser), 'utf8'), /^import '\.\/staging-root\.mjs';$/m);
+  assert.doesNotMatch(await readFile(new URL('sign-in.mjs', browser), 'utf8'), /staging-root.*\.mjs/);
+});
+
 test('evidence fails when missing, empty or bound to the wrong checkout', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-evidence-test-'));
   try {
