@@ -218,14 +218,22 @@ completed source attempt and its durable pre-activation record, hold the shared
 lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
 or R2 cleanup or authorization to issue a receipt.
 
-The recovery-record adapter defines separate, versioned D1 and Worker records
-for each exact SHA, run and attempt. It acknowledges a record only after a
-create-only write and exact readback; a missing or ambiguous write, mismatch or
-cancellation fails closed. Its storage interface is still unwired. The protected
-caller must provide private, bounded transport that retains the record through
-recovery and authenticates the source run before any read; an app fixture or a
-file left on the runner is not durable evidence. These records are not success
-receipts.
+The unwired recovery store uses the source SHA's reviewed staging R2 binding.
+It stores separate D1 and Worker records per exact SHA, run and attempt under
+`drive-qualification/recovery/`, outside attempt fixture cleanup. Each create
+uses a signed `If-None-Match: *` PUT followed by a fresh signed GET (2 KiB
+maximum, five seconds per S3 operation). Collision, ambiguous acknowledgment,
+byte mismatch or cancellation fails closed without retry or overwrite.
+
+Before a PUT, the store requires a readback of the existing three-day native
+expiry rule covering the recovery prefix, with no conflicting overlap. A GET
+rejects records at or beyond three days even if physical deletion is delayed.
+This is not a deletion proof, and the store has no delete or list operation.
+Live use still requires a private binding, a signer allowed on this prefix,
+provider-enforced conditional writes, and a protected caller that authenticates
+the exact source attempt and holds the staging lifecycle lock. Offline fixtures
+prove none of those live prerequisites. Recovery records are not success
+receipts or runner-local files.
 
 The unwired large-transfer verifier reads an unencoded, full `200` app download
 as a stream. It requires the five GiB boundary (also the current app maximum),

@@ -9,6 +9,8 @@ import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
 import { qualificationRecoveryWriter, readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
+import { qualificationR2RecoveryStore } from './staging-qualification-recovery-r2.mjs';
+import { verifyRecoveryR2Expiry } from './staging-qualification-expiry.mjs';
 
 const recoverySource = Object.freeze({ sha: 'a'.repeat(40), runId: '182', attempt: '3' });
 const recoveryContext = { ...recoverySource, prefix: 'drive-qualification/full-v0/182/3/' };
@@ -116,6 +118,90 @@ test('recovery reader rejects copied, malformed, oversized and cancelled records
     read() { reads++; return canonicalD1; },
   }), invalidRecord);
   assert.equal(reads, 0);
+});
+
+const recoveryClock = Date.UTC(2026, 10, 20);
+const recoveryObject = (body, modified = recoveryClock) => ({ status: 200, body,
+  headers: new Headers({ 'last-modified': new Date(modified).toUTCString(), 'content-length': body.byteLength }) });
+
+test('R2 recovery creates both exact keys and a fresh store reads them without local state', async () => {
+  const durable = new Map();
+  const calls = [];
+  const signal = new AbortController().signal;
+  const makeStore = () => qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+    verifyRetention: async () => true, request: async ({ method, key, body, headers, maxResponseBytes, signal: sent }) => {
+      assert.equal(sent, signal);
+      calls.push([method, key]);
+      if (method === 'PUT') {
+        assert.equal(headers['if-none-match'], '*');
+        assert.equal(maxResponseBytes, 0);
+        if (durable.has(key)) return { status: 412 };
+        durable.set(key, Uint8Array.from(body));
+        return { status: 200, headers: new Headers({ etag: '"created"' }) };
+      }
+      assert.equal(headers['cache-control'], 'no-cache, no-store');
+      assert.equal(maxResponseBytes, 2048);
+      return recoveryObject(durable.get(key));
+    } });
+  const write = qualificationRecoveryWriter(recoverySource, makeStore());
+  for (const { prefix, ...record } of [d1Record, workerRecord]) {
+    assert.equal(await write({ prefix, ...record }, signal), true);
+    assert.deepEqual(await readQualificationRecoveryRecord(recoverySource, record.kind, makeStore(), signal),
+      { schema: 'drive-staging-recovery.v1', ...record });
+    const key = `drive-qualification/recovery/drive-staging-recovery-${record.kind}-${record.sha}-run-182-attempt-3`;
+    assert.deepEqual(calls.splice(0), [['PUT', key], ['GET', key], ['GET', key]]);
+  }
+  await assert.rejects(write({ ...d1Record, bookmark: 'replacement' }, signal), invalidRecord);
+  assert.deepEqual(calls.splice(0).map(([method]) => method), ['PUT']);
+  for (const source of [{ ...recoverySource, attempt: '4' }, { ...recoverySource, runId: '183' },
+    { ...recoverySource, sha: 'b'.repeat(40) }]) {
+    await assert.rejects(readQualificationRecoveryRecord(source, 'd1', makeStore(), signal), invalidRecord);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('R2 recovery fails closed on a lost PUT acknowledgement and invalid byte readback', async () => {
+  const methods = [];
+  const run = result => {
+    const store = qualificationR2RecoveryStore(recoverySource, { now: () => recoveryClock,
+      verifyRetention: () => true, request({ method, body }) {
+        methods.push(method);
+        if (method === 'GET') return result;
+        assert.equal(body.toString(), canonicalD1);
+        if (!result) throw new Error('response lost after commit');
+        return { status: 200, headers: new Headers({ etag: '"created"' }) };
+      } });
+    return qualificationRecoveryWriter(recoverySource, store)(d1Record);
+  };
+  await assert.rejects(run(), invalidRecord);
+  assert.deepEqual(methods.splice(0), ['PUT']);
+  for (const response of [recoveryObject(Buffer.from(String.fromCodePoint(0xfeff) + canonicalD1)), recoveryObject(Buffer.alloc(2049)),
+    recoveryObject(Buffer.from([0xff])), recoveryObject(Buffer.from(canonicalD1 + '\n')),
+    recoveryObject(Buffer.from(canonicalD1), recoveryClock - 3 * 86_400_000), { status: 404, headers: new Headers() }]) {
+    await assert.rejects(run(response), invalidRecord);
+    assert.deepEqual(methods.splice(0), ['PUT', 'GET']);
+  }
+});
+
+test('R2 recovery retention requires a covering three-day rule and refuses a write without it', async () => {
+  const rule = (prefix, days) => ({ enabled: true, conditions: { prefix },
+    deleteObjectsTransition: { condition: { type: 'Age', maxAge: days * 86_400 } } });
+  const covering = rule('drive-qualification/', 3);
+  const binding = { account: 'offline', settings: { bucket: 'fixture' } };
+  const verify = rules => verifyRecoveryR2Expiry(binding, 'fixture', undefined, async (url, init) => {
+    assert.match(url, /\/accounts\/offline\/r2\/buckets\/fixture\/lifecycle$/);
+    assert.equal(init.method, 'GET');
+    return Response.json({ success: true, errors: [], result: { rules } });
+  });
+  assert.equal(await verify([covering, rule(recoveryContext.prefix, 1)]), true);
+  for (const rules of [[rule(recoveryContext.prefix, 3)], [rule('', 3)],
+    [covering, rule('drive-qualification/recovery/partial', 2)], [covering, rule('drive-qualification/recovery/', 4)]]) {
+    await assert.rejects(verify(rules));
+  }
+  let sends = 0;
+  const store = qualificationR2RecoveryStore(recoverySource, { verifyRetention: () => verify([]), request: () => sends++ });
+  await assert.rejects(qualificationRecoveryWriter(recoverySource, store)(d1Record), invalidRecord);
+  assert.equal(sends, 0);
 });
 
 function history(t) {
