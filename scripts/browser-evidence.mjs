@@ -30,20 +30,30 @@ async function verifyDeletionEvidence(dir) {
   const writes = [[1, 400], [1, 401], [1, 403], [1, 404], [1, 200], [1, 0], [1, 503], [1, 202], [3, 202], [2, 202]]
     .map(([id, status]) => ['POST', `/api/entries/00000000-0000-4000-8000-00000000000${id}/delete`,
       'application/json', '{"confirm":"permanent-delete"}', status]);
+  const uncertain = 'We couldn’t confirm the deletion request. Check My Drive before trying again.';
+  const stages = {
+    open: ['Cancel', 'button "Cancel"'], saving: ['Deleting…', 'status: Deleting…'],
+    error: [uncertain, `alert: ${uncertain}`], accepted: ['Statement.pdf', 'status: Deletion request accepted for “Receipts.pdf”.'],
+  };
   for (const [width, height] of [[390, 844], [1280, 800]]) {
     const proof = JSON.parse(await readFile(join(dir, `delete-file-${width}-keyboard.json`), 'utf8'));
     if (proof?.width !== width || proof.height !== height || !isDeepStrictEqual(proof.writes, writes)) {
       throw new Error(`Invalid deletion trace: ${width}`);
     }
-    for (const stage of ['open', 'saving', 'error', 'accepted']) {
+    for (const [stage, [focus, treeFragment]] of Object.entries(stages)) {
       const label = `delete-file-${width}-${stage}`;
       const png = await readFile(join(dir, `${label}.png`));
       const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
       const capture = proof.captures?.[stage];
       if (!hasViewportImageData(png, width, height) || !Array.isArray(axe?.violations) || axe.violations.length ||
-          ![capture?.focus, capture?.tree].every(value => typeof value === 'string' && value.trim())) {
+          capture?.focus !== focus || typeof capture.tree !== 'string' ||
+          !capture.tree.split('\n').some(line => line.trim() === `- ${treeFragment}`)) {
         throw new Error(`Invalid deletion evidence: ${label}`);
       }
+    }
+    for (const [w, mode] of [[width, 'greyscale'], [width, 'forced-colours'], ...(width === 390 ? [[320, 'reflow']] : [])]) {
+      const label = `delete-file-${w}-${mode}`;
+      if (!hasViewportImageData(await readFile(join(dir, `${label}.png`)), w, height)) throw new Error(`Invalid deletion screenshot: ${label}`);
     }
   }
 }

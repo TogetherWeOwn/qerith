@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -96,26 +96,46 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
       await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
       const header = Buffer.alloc(13);
-      header.writeUInt32BE(width);
-      header.writeUInt32BE(height, 4);
-      header[8] = 8; // 8-bit greyscale, filter 0 on each row.
-      const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
-        chunk('IDAT', deflateSync(Buffer.alloc((width + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+      const pngAt = w => {
+        header.writeUInt32BE(w);
+        header.writeUInt32BE(height, 4);
+        header[8] = 8; // 8-bit greyscale, filter 0 on each row.
+        return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+          chunk('IDAT', deflateSync(Buffer.alloc((w + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+      };
+      const png = pngAt(width);
       for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
         await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
       }
       const deletionPath = join(dir, `delete-file-${width}-keyboard.json`);
-      const captures = Object.fromEntries(deleteStages.map(stage => [stage, { focus: 'Focused control', tree: '- button' }]));
+      const error = 'We couldn’t confirm the deletion request. Check My Drive before trying again.';
+      const captures = {
+        open: { focus: 'Cancel', tree: '- dialog "Delete “Receipts.pdf”?":\n  - button "Cancel"' },
+        saving: { focus: 'Deleting…', tree: '- dialog "Delete “Receipts.pdf”?":\n  - status: Deleting…' },
+        error: { focus: error, tree: `- dialog "Delete “Receipts.pdf”?":\n  - alert: ${error}` },
+        accepted: { focus: 'Statement.pdf', tree: '- main:\n  - status: Deletion request accepted for “Receipts.pdf”.' },
+      };
       const deletion = { width, height, writes, captures };
       await writeFile(deletionPath, JSON.stringify(deletion));
       for (const stage of deleteStages) {
         await writeFile(join(dir, `delete-file-${width}-${stage}.png`), png);
         await writeFile(join(dir, `axe-delete-file-${width}-${stage}.json`), '{"violations":[]}');
       }
+      for (const mode of ['greyscale', 'forced-colours']) await writeFile(join(dir, `delete-file-${width}-${mode}.png`), png);
+      if (width === 390) await writeFile(join(dir, 'delete-file-320-reflow.png'), pngAt(320));
       if (width === 1280) {
         await verifyDeletion();
+        const reflow = join(dir, 'delete-file-320-reflow.png');
+        const reflowImage = await readFile(reflow);
+        await writeFile(reflow, png);
+        await assert.rejects(verifyDeletion(), /Invalid deletion screenshot: delete-file-320-reflow/);
+        await writeFile(reflow, reflowImage);
         await writeFile(deletionPath, JSON.stringify({ ...deletion, writes: writes.slice(1) }));
         await assert.rejects(verifyDeletion(), /Invalid deletion trace: 1280/);
+        for (const accepted of [{ ...captures.accepted, focus: 'Cancel' }, { ...captures.accepted, tree: '- button' }]) {
+          await writeFile(deletionPath, JSON.stringify({ ...deletion, captures: { ...captures, accepted } }));
+          await assert.rejects(verifyDeletion(), /Invalid deletion evidence: delete-file-1280-accepted/);
+        }
         await writeFile(deletionPath, JSON.stringify(deletion));
         const axePath = join(dir, 'axe-delete-file-1280-saving.json');
         await writeFile(axePath, '{"violations":[{}]}');

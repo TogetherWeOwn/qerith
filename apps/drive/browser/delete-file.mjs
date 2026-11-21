@@ -50,7 +50,7 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
         await writeFile(resolve(output, `axe-${stem}.json`), JSON.stringify(result, null, 2));
         assert.equal(result.violations.length, 0, `${stem}: ${JSON.stringify(result.violations)}`);
         await page.screenshot({ path: resolve(output, `${stem}.png`) });
-        captures[stage] = { focus: await focused.innerText(), tree: await (stage === 'accepted' ? page.getByRole('main') : dialog).ariaSnapshot() };
+        captures[stage] = { focus: (await focused.innerText()).trim(), tree: await (stage === 'accepted' ? page.getByRole('main') : dialog).ariaSnapshot() };
       };
       const first = 'Receipts.pdf', next = 'Statement.pdf', last = `${'税'.repeat(80)}.pdf`;
       const backdrop = () => page.mouse.click(4, 4);
@@ -73,6 +73,17 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       if (width < 820) assert(Math.abs(box.y + box.height - height) < 1 && box.width === width, 'mobile bottom sheet');
       else assert(box.y > 4 && box.y + box.height < height, 'desktop modal');
       await capture('open');
+      assert.equal(await dialog.evaluate(el => el.getAnimations({ subtree: true }).length), 0, 'reduced motion');
+      const grayscale = await page.addStyleTag({ content: 'main, dialog, dialog::backdrop { filter: grayscale(1); }' });
+      await page.screenshot({ path: resolve(output, `delete-file-${width}-greyscale.png`) });
+      await grayscale.evaluate(el => el.remove());
+      await page.emulateMedia({ forcedColors: 'active' });
+      assert(await button('Cancel').and(focused).evaluate(el => {
+        const style = getComputedStyle(el);
+        return style.outlineStyle === 'solid' && parseFloat(style.outlineWidth) > 0 && parseFloat(style.borderWidth) > 0;
+      }), 'forced colours preserve the button border and focus ring');
+      await page.screenshot({ path: resolve(output, `delete-file-${width}-forced-colours.png`) });
+      await page.emulateMedia({ forcedColors: null });
 
       const expectedErrors = [[400, 'The deletion request was rejected.'], [401, 'Sign in again before deleting this file.'],
         [403, 'That file isn’t available to delete. Refresh My Drive.'], [404, 'That file isn’t available to delete. Refresh My Drive.'],
@@ -93,6 +104,8 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
         await button('Delete permanently').press('Enter');
         const saving = button('Deleting…');
         assert.equal(await saving.getAttribute('aria-busy'), 'true');
+        await saving.and(focused).waitFor();
+        await capture('saving');
         for (const label of ['Close', 'Cancel', 'Deleting…']) {
           assert.equal(await button(label).getAttribute('aria-disabled'), 'true');
           await button(label).press('Enter');
@@ -101,7 +114,6 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
         await backdrop();
         assert(await dialog.isVisible());
         assert.equal(await page.locator('main li').count(), 3);
-        await capture('saving');
         assert.equal(writes.length, expectedErrors.length + 1, 'a pending request cannot be repeated');
       } finally { held.resolve(); held = undefined; }
 
@@ -114,7 +126,13 @@ export async function exerciseDeleteFile(browser, origin, axe, output) {
       await accept(first, page.getByText(next, { exact: true }));
       await capture('accepted');
       await open(last);
-      assert(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), 'long filename wraps');
+      if (width === 390) await page.setViewportSize({ width: 320, height });
+      assert(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth && document.documentElement.scrollWidth <= innerWidth),
+        'long filename wraps without horizontal scrolling');
+      if (width === 390) {
+        await page.screenshot({ path: resolve(output, 'delete-file-320-reflow.png') });
+        await page.setViewportSize({ width, height });
+      }
       await button('Delete permanently').press('Enter');
       await accept(last, page.getByText(next, { exact: true }));
       await open(next);
