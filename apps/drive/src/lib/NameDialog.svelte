@@ -5,18 +5,19 @@
   import { validateName } from './entry-name';
   import './dialog.css';
 
-  let { available, items, oncreated, onrenamed, onreturn }: {
+  let { available, items, oncreated, onrenamed, onreturn, parent }: {
     available: boolean;
     items: { name: string; kind: string }[];
-    onrenamed: (id: string, name: string, close: () => void) => Promise<void>;
-    onreturn: (id: string) => void;
+    onrenamed?: (id: string, name: string, close: () => void) => Promise<void>;
+    onreturn?: (id: string) => void;
     oncreated: (id: string, name: string, close: () => void) => Promise<void>;
+    parent?: { id: string | null; name: string };
   } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement, field: HTMLInputElement;
   let first: HTMLButtonElement, last: HTMLButtonElement;
   let opener = $state<HTMLButtonElement>(), notice = $state<HTMLParagraphElement>();
-  let backdrop = false;
+  let backdrop = false, nestedOpener: HTMLElement | undefined;
   let name = $state(''), checking = $state(false), pending = $state(false), refreshing = $state(false);
   let clash = $state(''), failure = $state('');
   let target = $state<{ id: string; name: string; kind: string; path: string }>();
@@ -32,8 +33,9 @@
     }
   }
 
-  export function open(entry?: NonNullable<typeof target>) {
+  export function open(entry?: NonNullable<typeof target>, from?: HTMLElement) {
     if (dialog.open) return;
+    nestedOpener = from;
     flushSync(() => { target = entry; name = entry?.name ?? ''; clash = failure = ''; checking = false; });
     // Selection uses the displayed text; the binding retains stored line breaks until edit.
     const dot = entry?.kind === 'File' ? field.value.lastIndexOf('.') : -1;
@@ -44,8 +46,8 @@
   function dismiss() {
     if (pending) return;
     close();
-    if (target) onreturn(target.id);
-    else opener?.focus();
+    if (target) onreturn?.(target.id);
+    else (nestedOpener ?? opener)?.focus();
   }
   function keys(event: KeyboardEvent) {
     if (event.key !== 'Tab') return;
@@ -64,18 +66,19 @@
     const submitted = name;
     const unknown = entry ? 'We couldn’t confirm the rename. Check My Drive before trying again.' :
       'We couldn’t confirm the folder was created. Check My Drive before trying again.';
+    const parentId = parent?.id ?? null;
     let saved: string | undefined;
     try {
       const response = await fetch(entry?.path ?? '/api/folders', {
         method: entry ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, redirect: 'error',
-        body: JSON.stringify(entry ? { kind: 'rename', name: submitted } : { name: submitted, parentId: null }),
-        ...(entry ? { signal: AbortSignal.timeout(15_000) } : {}),
+        body: JSON.stringify(entry ? { kind: 'rename', name: submitted } : { name: submitted, parentId }),
+        ...(entry || parent ? { signal: AbortSignal.timeout(15_000) } : {}),
       });
       if (response.status === (entry ? 200 : 201)) {
         const row = await response.json();
         const expected = entry ? row?.id === entry.id && row.kind === entry.kind.toLowerCase() &&
           (row.parentId === null || isMetadataId(row.parentId)) :
-          typeof row?.id === 'string' && entryId.test(row.id) && row.kind === 'folder' && row.parentId === null;
+          typeof row?.id === 'string' && entryId.test(row.id) && row.kind === 'folder' && row.parentId === parentId;
         if (expected && row.name === submitted) saved = row.id;
         else failure = unknown;
       } else if (response.status === 409) {
@@ -91,8 +94,8 @@
     } catch { failure = unknown; }
 
     try {
-      if (saved && entry) { refreshing = true; await onrenamed(saved, submitted, close); }
-      else if (saved) await oncreated(saved, submitted, () => { close(); opener?.focus(); });
+      if (saved && entry) { refreshing = true; await onrenamed?.(saved, submitted, close); }
+      else if (saved) await oncreated(saved, submitted, () => { close(); (nestedOpener ?? opener)?.focus(); });
     } finally { refreshing = pending = false; }
     if (!saved) { await tick(); (clash ? field : notice)?.focus(); }
   }
@@ -105,7 +108,7 @@
   onclick={event => { if (backdrop && event.target === dialog) dismiss(); }}>
   <form class="panel" onsubmit={save} autocomplete="off">
     <header>
-      <h2 id={`${id}-title`}>{#if target}Rename “<bdi>{target.name}</bdi>”{:else}New folder in My Drive{/if}</h2>
+      <h2 id={`${id}-title`}>{#if target}Rename “<bdi>{target.name}</bdi>”{:else if parent}New folder in <bdi>{parent.name}</bdi>{:else}New folder in My Drive{/if}</h2>
       <button class="close" type="button" aria-label="Close" aria-disabled={pending} bind:this={first} onclick={dismiss}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
