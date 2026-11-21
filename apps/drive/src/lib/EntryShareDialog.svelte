@@ -4,10 +4,10 @@
   import ShareDialog, { type ShareChange, type SharePage } from './ShareDialog.svelte';
   import { entryShare, isShareMutationId } from './share-client';
 
-  let { entryId, name, kind, owner, isCurrent, onreturn }: {
+  let { entryId, name, kind, owner, isCurrent, onreturn, onInvite }: {
     entryId: string; name: string; kind: 'File' | 'Folder';
     owner: { recipientId: string; driveOwner: boolean };
-    isCurrent: () => boolean; onreturn: () => void;
+    isCurrent: () => boolean; onreturn: () => void; onInvite?: () => void;
   } = $props();
 
   // The parent mounts this component for a single dialog session and entry.
@@ -107,7 +107,7 @@
   }
 </script>
 
-<ShareDialog bind:this={dialog} {name} {kind} {owner} {onreturn} {observedIneligible}
+<ShareDialog bind:this={dialog} {name} {kind} {owner} {onreturn} {onInvite} {observedIneligible}
   nobodyElse={!!candidates.data?.complete && !candidates.data.access.length && !candidates.data.candidates.length}
   access={page(access, 'access')} candidates={page(candidates, 'candidates')}
   onShare={ids => change('grant', ids)} onRemove={id => change('revoke', [id])} />

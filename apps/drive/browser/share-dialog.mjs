@@ -111,6 +111,55 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
           await writes();
         }
       }
+      const entry = '/api/entries/browser-fixture', roster = `${entry}/eligible-recipients`;
+      const grant = recipient => `${entry}/read-grants/${recipient}`;
+      const recipients = ['Alpha', 'Bravo', 'Charlie'];
+      const requests = [], releaseRefresh = Promise.withResolvers();
+      let rosterNames = [];
+      await context.route(url => url.origin === origin && url.pathname.startsWith(`${entry}/`), async route => {
+        const { pathname } = new URL(route.request().url());
+        const method = route.request().method();
+        requests.push([method, pathname]);
+        if (method === 'GET' && pathname === roster) {
+          const refreshed = requests.some(([method]) => method === 'PUT');
+          if (refreshed) await releaseRefresh.promise;
+          return route.fulfill({ json: { recipients: rosterNames.map(displayName => ({
+            recipientId: displayName, displayName, direct: refreshed && displayName === 'Alpha', inheritedFrom: null,
+          })), nextCursor: null } });
+        }
+        if (method === 'PUT' && [grant('Alpha'), grant('Bravo')].includes(pathname)) {
+          return route.fulfill({ status: pathname === grant('Alpha') ? 204 : 503 });
+        }
+        blocked.push(`${method} ${pathname}`);
+        return route.abort();
+      });
+      try {
+        await open('entry');
+        await button('Invite someone').waitFor({ timeout: 3000 });
+        await button('Invite someone').press('Enter');
+        await dialog.waitFor({ state: 'hidden' });
+        await page.getByText('Users and invites').waitFor();
+        assert.deepEqual(requests.splice(0), [['GET', roster]]);
+
+        rosterNames = recipients;
+        await open('entry');
+        for (const name of recipients) {
+          await input.fill(name);
+          await keyboard.press('ArrowDown'); await keyboard.press('Enter');
+          await dialog.getByRole('button', { name: `Remove ${name}`, exact: true }).waitFor();
+        }
+        const refresh = page.waitForRequest(request => request.method() === 'GET' && new URL(request.url()).pathname === roster);
+        await button('Share with 3 people').press('Enter');
+        await refresh;
+        const notice = dialog.getByRole('alert').filter({
+          hasText: /Shared with Alpha\..*Couldn’t confirm sharing with Bravo\..*Sharing wasn’t sent for Charlie\./,
+        });
+        await focused(notice);
+        assert.deepEqual(requests, [['GET', roster], ['PUT', grant('Alpha')], ['PUT', grant('Bravo')], ['GET', roster]]);
+        releaseRefresh.resolve();
+        await button('Remove Alpha’s access').waitFor();
+        assert(await notice.isVisible());
+      } finally { releaseRefresh.resolve(); }
       assert.deepEqual(blocked, []);
       await writeFile(resolve(output, `${prefix}-keyboard.txt`), `Verified initial focus, Escape order, Tab and Shift+Tab wrap, and opener focus return. Chromium accessibility tree; not a spoken screen-reader test.\n${tree}\n`);
       console.log(`K7/K13 Share dialog, keyboard and axe passed at ${width}×${height}`);

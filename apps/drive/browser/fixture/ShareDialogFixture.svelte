@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EntryShareDialog from '../../src/lib/EntryShareDialog.svelte';
   import ShareDialog, { type ShareAccess } from '../../src/lib/ShareDialog.svelte';
   import '../../src/lib/tokens.css';
   let { mode }: { mode: string } = $props();
@@ -9,7 +10,7 @@
   let grants = $state<ShareAccess[]>([grant(pell, true), grant(sam, true, 'Projects'), grant(zoe, false, 'Projects')]);
   let accessState = $state<'ready' | 'failed' | 'loading'>('ready');
   let second = $state(false), invited = $state(false), accessPage = $state(1);
-  let dialog: ReturnType<typeof ShareDialog>;
+  let dialog: ReturnType<typeof ShareDialog>, entryOpen = $state(false);
   let attempts = 0;
   let writes = $state<string[]>([]);
   const alone = $derived(mode === 'owner' || mode === 'member');
@@ -33,14 +34,25 @@
 <svelte:window onfixture-refresh-access={() => { grants = [...grants]; }} />
 <main data-writes={JSON.stringify(writes)}>
   <h1>My Drive</h1>
-  <button type="button" onclick={event => { accessState = mode === 'failed' ? 'failed' : 'ready'; dialog.open(event.currentTarget); }}>Open Share</button>
+  <button type="button" onclick={event => {
+    if (mode === 'entry') { entryOpen = true; return; }
+    accessState = mode === 'failed' ? 'failed' : 'ready';
+    dialog.open(event.currentTarget);
+  }}>Open Share</button>
   {#if invited}<p>Users and invites</p>{/if}
-  <ShareDialog bind:this={dialog} name={mode === 'file' ? 'Budget.pdf' : 'Taxes 2025'} kind={mode === 'file' ? 'File' : 'Folder'}
-    owner={{ recipientId: owner.recipientId, driveOwner: mode !== 'member' }} nobodyElse={alone} onInvite={() => invited = true}
-    access={{ state: accessState, rows: alone || accessState !== 'ready' ? [] : mode === 'partial' ? grants.slice(0, accessPage - 1) : grants,
-      complete: mode !== 'partial', ...(mode === 'partial' ? { pageNumber: accessPage, next: accessPage === 1 ? nextAccess : undefined } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
-    candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : eligible.slice(second ? 1 : 0, second ? 2 : 1),
-      ...(!alone && (second ? { previous: () => second = false } : eligible.length > 1 ? { next: () => second = true } : {})) }} onShare={share} onRemove={remove} />
+  {#if mode === 'entry'}
+    {#if entryOpen}
+      <EntryShareDialog entryId="browser-fixture" name="Fixture entry" kind="File" owner={{ recipientId: owner.recipientId, driveOwner: true }}
+        isCurrent={() => entryOpen} onreturn={() => entryOpen = false} onInvite={() => invited = true} />
+    {/if}
+  {:else}
+    <ShareDialog bind:this={dialog} name={mode === 'file' ? 'Budget.pdf' : 'Taxes 2025'} kind={mode === 'file' ? 'File' : 'Folder'}
+      owner={{ recipientId: owner.recipientId, driveOwner: mode !== 'member' }} nobodyElse={alone} onInvite={() => invited = true}
+      access={{ state: accessState, rows: alone || accessState !== 'ready' ? [] : mode === 'partial' ? grants.slice(0, accessPage - 1) : grants,
+        complete: mode !== 'partial', ...(mode === 'partial' ? { pageNumber: accessPage, next: accessPage === 1 ? nextAccess : undefined } : { pageNumber: null, retry: () => accessState = 'ready' }) }}
+      candidates={{ state: 'ready', pageNumber: alone ? null : second ? 2 : 1, rows: alone ? [] : eligible.slice(second ? 1 : 0, second ? 2 : 1),
+        ...(!alone && (second ? { previous: () => second = false } : eligible.length > 1 ? { next: () => second = true } : {})) }} onShare={share} onRemove={remove} />
+  {/if}
 </main>
 <style>
   :global(body) { background: var(--drive-color-bg-canvas); color: var(--drive-color-text-primary); font-family: var(--drive-font-ui); }
