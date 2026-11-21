@@ -20,7 +20,6 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const dialog = page.getByRole('dialog', { name: /^Move “/ });
     const button = name => dialog.getByRole('button', { name, exact: true });
     const focused = page.locator(':focus'), evidence = state => capture(page, state, width, true, 'nested-move');
-    const next = page.getByRole('link', { name: '02 Next' }).and(focused);
     const status = text => page.getByRole('status').filter({ hasText: text }), generic = status(/^Item moved\.$/);
     const open = async (item = name) => {
       await actions(item).press('ArrowDown');
@@ -79,9 +78,10 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await evidence('saving');
       assert.equal((await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]))[0].status(), 200);
       if (nested) assert.deepEqual(await page.evaluate(([source, next]) => {
-        const receipt = document.querySelector('.move-notice [role="status"]:not(.status)');
-        return [!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
-          document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && receipt.textContent];
+        const receipt = document.querySelector('.move-notice [role="status"]');
+        const unclipped = el => { const css = getComputedStyle(el); return css.clipPath === 'none' && css.clip === 'auto'; };
+        return [!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`), document.activeElement?.matches(`[data-row="${next}"] a[data-name]`),
+          receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && [receipt, receipt.parentElement].every(unclipped) && receipt.textContent];
       }, [source, `${parent}-next`]), [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
       assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
     } finally { held.resolve(); reloadGate.resolve(); }
@@ -115,7 +115,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
         load.resolve(); await secondReceipt;
       } finally { deliver.resolve(); load.resolve(); }
     }
-    await next.waitFor(); await status(`Moved to ${target}`).waitFor();
+    await page.getByRole('link', { name: '02 Next' }).and(focused).waitFor(); await status(`Moved to ${target}`).waitFor();
     assert.equal(await trigger.count(), 0);
     await evidence('success');
     await page.getByRole('link', { name: `Open ${target}` }).press('Enter');
