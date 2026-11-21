@@ -94,12 +94,12 @@ export async function exerciseShareDialog(browser, origin, axe, output) {
             for (const name of ['Pell Quinn', 'Sam Mora', 'Zoë Chen']) await dialog.getByRole('listitem').filter({ hasText: name }).waitFor();
           } else {
             await dialog.getByRole('option', { name: 'Lee Ray', exact: true }).waitFor();
-            await button('Next page of people to add').click(); await announced('Showing page 2 of people to add.');
+            await key('Escape'); await button('Next page of people to add').click(); await announced('Showing page 2 of people to add.');
             await input.focus(); await dialog.getByRole('option', { name: 'Name unavailable', exact: true }).waitFor();
             assert.equal(await button('Next page of people to add').count(), 0, 'No pages offer Sam or the owner');
-            await button('Next page of people with access').click(); await announced('Loading people with access…');
+            await key('Escape'); await button('Next page of people with access').click(); await announced('Loading people with access…');
             await input.focus(); await key('ArrowDown'); await key('Enter'); await announced('Name unavailable selected. 1 selected.');
-            await settle(); await announced('Showing page 2 of people with access.');
+            await settle(); await announced('Showing page 2 of people with access.'); await button('Remove Pell Quinn’s access').waitFor();
             await input.fill('not on this page'); await button('Remove Name unavailable').click(); await announced('Name unavailable removed. 0 selected.');
             await input.click(); await announced('No matching people available on this page.'); await key('Escape'); assert.equal(await dialog.getByRole('status').textContent(), '');
           }
