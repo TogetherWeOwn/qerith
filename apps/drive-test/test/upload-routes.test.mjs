@@ -97,6 +97,17 @@ it('claims only the planned slot, size and digest of a bound upload', async () =
   expect(calls).toEqual(['PUT']);
 });
 
+it.each([0, 16 * 1024 * 1024])('dispatches and acknowledges a bound part of %i bytes', async (size) => {
+  const digest = await partDigest(new Uint8Array(size));
+  const { send, key, calls } = await fixture({ size, expectedParts: digest, async onPart(body) {
+    expect(body.byteLength).toBe(size);
+    expect(await partDigest(body)).toBe(digest);
+  } });
+  expect((await send(1, { bytes: size })).status).toBe(204);
+  expect(await partObservation(key)).toMatchObject({ part_number: 1, size_bytes: size, kind: 'reported', etag: tag, digest });
+  expect(calls).toEqual(['PUT']);
+});
+
 it.each(['wrong storage', 'revoked during claim'])('denies a matching bound part with %s', async (scenario) => {
   let qualifiedChecks = 0;
   const { send, intent, calls } = await fixture({ expectedParts: await partDigest(new Uint8Array(7)),
