@@ -218,6 +218,16 @@ completed source attempt and its durable pre-activation record, hold the shared
 lifecycle lock and exclude pending writes. This is Worker recovery only, not D1
 or R2 cleanup or authorization to issue a receipt.
 
+The recovery-record adapter defines separate, versioned D1 and Worker records
+for each exact SHA, run and attempt. It acknowledges a record only after a
+create-only write and byte-for-byte readback of the canonical UTF-8 record; a
+missing or ambiguous write, mismatch or cancellation fails closed. Its storage
+interface is still unwired. The protected caller must provide private transport
+that returns fresh, raw bytes without text decoding, enforces the read limit
+before buffering, and retains records through recovery. Authenticate the source
+run before any read. An app fixture or a file left on the runner is not durable
+evidence, and these records are not success receipts.
+
 The unwired large-transfer verifier reads an unencoded, full `200` app download
 as a stream. It requires the five GiB boundary (also the current app maximum),
 checks the actual byte count through EOF, and compares SHA-256 with the digest
