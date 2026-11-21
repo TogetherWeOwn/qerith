@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { assertDispatch, assertQualificationJob, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
 import { qualificationExerciseCases } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
@@ -814,7 +815,7 @@ test('provider storage cases fail closed on cancellation or a mismatched prefix'
   assert.deepEqual(trace, []);
 });
 
-test('the protected workflow checks pinned settings and still has no provider or receipt path', () => {
+test('the protected workflow checks pinned settings and builds before the hard stop', () => {
   const workflow = readFileSync(new URL('../../../.github/workflows/drive-staging-qualification.yml', import.meta.url), 'utf8');
   const gate = "github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'";
   const [name, trigger, permissions, ...jobs] = workflow.trimEnd().split('\n\n');
@@ -849,7 +850,7 @@ test('the protected workflow checks pinned settings and still has no provider or
       cancel-in-progress: false
     environment: staging
     runs-on: ubuntu-latest
-    timeout-minutes: 5`);
+    timeout-minutes: 10`);
   assert.equal(sourceSteps, `      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: \${{ github.sha }}
@@ -878,8 +879,42 @@ test('the protected workflow checks pinned settings and still has no provider or
           QERITH_S3_ACCESS_KEY_ID: \${{ secrets.QERITH_S3_ACCESS_KEY_ID }}
           QERITH_S3_SECRET_ACCESS_KEY: \${{ secrets.QERITH_S3_SECRET_ACCESS_KEY }}
         run: timeout --signal=TERM --kill-after=5s 30s node apps/drive/scripts/staging-qualification-settings.mjs
+      - name: Build exact qualification source
+        working-directory: apps/drive
+        run: |
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          git diff --quiet HEAD -- .
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          bash scripts/check-worker-build-output.sh
+          git diff --quiet HEAD -- .
       - name: Fail closed until the live runner and cleanup are reviewed
         run: |
           printf '%s\\n' 'Full-v0 staging qualification is not wired; no receipt can be issued.' >&2
           exit 1`);
+});
+
+test('qualification build output requires a nonempty Worker and client JavaScript', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'drive-worker-build-'));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const output = join(cwd, '.svelte-kit/cloudflare');
+  const immutable = join(output, '_app/immutable/entry');
+  mkdirSync(immutable, { recursive: true });
+  const check = fileURLToPath(new URL('./check-worker-build-output.sh', import.meta.url));
+  const run = () => execFileSync('bash', [check], { cwd, stdio: 'pipe' });
+
+  const worker = join(output, '_worker.js');
+  writeFileSync(worker, 'export default {};');
+  assert.throws(run, { status: 1 });
+  writeFileSync(join(immutable, 'start.js'), '');
+  assert.throws(run, { status: 1 });
+  writeFileSync(join(immutable, 'start.js'), 'export {};');
+  run();
+  writeFileSync(worker, '');
+  assert.throws(run, { status: 1 });
 });
