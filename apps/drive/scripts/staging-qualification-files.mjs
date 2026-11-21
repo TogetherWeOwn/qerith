@@ -32,17 +32,23 @@ async function boundedBody(response, signal, limit) {
   }
 }
 
-// Unwired. The protected caller must provision and bind the file and empty
-// anchor to this attempt, keep the owner and active recipient sessions isolated,
-// and tear down the fixture even after ambiguous writes. Clients take relative
-// paths, inject their own session and same-origin Origin on writes, and must
-// honor manual redirects and stop/drain on abort. No retries or shared cookies.
-export async function exerciseQualificationFiles(context, signal, { owner, recipient, fixture } = {}) {
+// Unwired. Use the protected caller's independent provisioning record for the
+// exact attempt's file and empty anchor, not values copied from the fixture.
+// Each client pairs its request function with the principal verified for that
+// isolated session. Functions take relative paths, supply session and same-origin
+// Origin on writes, honor manual redirects, and stop/drain on abort. No retries
+// or shared cookies. The caller tears down even after ambiguous writes.
+export async function exerciseQualificationFiles(context, signal, {
+  owner: ownerSession, recipient: recipientSession, fixture, provisioning,
+} = {}) {
   const prefix = qualificationPrefix(context);
   const { fileId, fileName, fileBytes, folderId, folderName, ownerId, recipientId } = fixture ?? {};
   const ids = [fileId, folderId, ownerId, recipientId];
-  if (context.prefix !== prefix || fixture?.prefix !== prefix || !ids.every(uuid) || new Set(ids).size !== ids.length ||
+  const owner = ownerSession?.request, recipient = recipientSession?.request;
+  if (context.prefix !== prefix || fixture?.prefix !== prefix || provisioning?.prefix !== prefix ||
+      provisioning.fileId !== fileId || provisioning.folderId !== folderId || !ids.every(uuid) || new Set(ids).size !== ids.length ||
       !label(fileName) || !label(folderName) || !(fileBytes instanceof Uint8Array) || !fileBytes.length || fileBytes.length > 4096 ||
+      ownerSession?.principalId !== ownerId || recipientSession?.principalId !== recipientId ||
       typeof owner !== 'function' || typeof recipient !== 'function' || owner === recipient) {
     throw new Error('Authenticated qualification fixture or clients are unverified.');
   }
@@ -94,10 +100,24 @@ export async function exerciseQualificationFiles(context, signal, { owner, recip
     };
     // Staging admits SSR folders, not the disposable fixture JSON listing.
     const list = async (folder, children) => {
-      const html = (await ask(owner, `/f/${folder.id}`, { limit: 65536 })).toString('utf8');
-      equal([...html.matchAll(/<h1\b[^>]*>([^<]*)<\/h1>/g)].map(match => match[1]), [folder.name]);
-      equal(/href="\?page=/.test(html), false);
-      const rows = [...html.matchAll(/<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/g)].map(row => {
+      const html = (await ask(owner, `/f/${folder.id}`, { limit: 65536 })).toString('utf8')
+        .replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+      // Match the bounded SSR template, not arbitrary links or serialized data.
+      const mains = [...html.matchAll(/<main\s[^>]*\bdata-sveltekit-reload\b[^>]*>([\s\S]*?)<\/main>/g)];
+      equal(mains.length, 1);
+      const main = mains[0][1];
+      equal(/<(?:template|script|style|textarea|title|noscript)\b|<[^>]*\s(?:hidden|inert)(?=[\s=>])/i.test(main), false);
+      const [, name, listing] = main.match(/^\s*<h1\b[^>]*>([^<]*)<\/h1>\s*([\s\S]*?)\s*$/) ?? [];
+      equal(name, folder.name);
+      if (!children.length) {
+        equal(/^<section\b[^>]*\saria-labelledby="empty-title"[^>]*>\s*<div\b[^>]*>\s*<h2\s[^>]*\bid="empty-title"[^>]*>This folder is empty\.<\/h2>\s*<\/div>\s*<\/section>$/.test(listing), true);
+        return;
+      }
+      const [, body] = listing.match(/^<ul\b[^>]*\srole="list"[^>]*>([\s\S]*?)<\/ul>$/) ?? [];
+      if (body === undefined) throw new Error('Incomplete folder listing.');
+      const rowPattern = /<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/g;
+      equal(body.replace(rowPattern, '').trim(), '');
+      const rows = [...body.matchAll(rowPattern)].map(row => {
         const links = [...row[1].matchAll(/<a\b[^>]*\shref="([^"]*)"[^>]*>([^<]*)<\/a>/g)];
         equal(links.length, 1);
         return links[0].slice(1);
