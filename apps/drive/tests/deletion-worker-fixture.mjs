@@ -76,6 +76,7 @@ export async function exerciseDeletion({ worker, DB, origin, cookie, revoked, ot
   }
   const snapshot = async () => (await DB.batch([
     DB.prepare('SELECT * FROM drive_entries ORDER BY id'),
+    DB.prepare('SELECT * FROM drive_folder_counts ORDER BY folder_id'),
     DB.prepare('SELECT * FROM drive_owner_usage ORDER BY owner_id'),
     DB.prepare('SELECT * FROM drive_deleted_entries ORDER BY entry_id'),
     DB.prepare('SELECT * FROM drive_object_deletion_jobs ORDER BY entry_id'),
