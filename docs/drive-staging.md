@@ -240,7 +240,14 @@ expiry and the original monotonic deadline through the final readback. It checks
 the deadline at I/O boundaries, samples wall time every second during pending
 I/O, and waits for the adapter to drain after abort. The v1 bookmark and a
 post-list ledger are not independent D1 restore attribution.
-Mutation adapters remain unwired; the protected workflow does not invoke recovery.
+The offline factory binds the native Worker restore, D1 Time Travel and
+exact-prefix R2 cleanup adapters to the historical source SHA. These adapters
+issue requests only under the held fence; source and record reads precede it.
+The factory requires a separate D1 proof provider: unverified attribution stops
+before D1 restoration or R2 cleanup, even if Worker rollback has already
+completed. An interruption after D1 restore requires reconciliation; rerunning
+is not an R2-only resume. The protected workflow supplies neither proof provider
+and does not invoke recovery.
 
 The unwired recovery store uses the source SHA's reviewed staging R2 binding.
 It stores separate, versioned D1 and Worker records per exact SHA, run and
