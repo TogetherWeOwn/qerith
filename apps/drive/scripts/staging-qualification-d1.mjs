@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
+import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
 import { validateStagingConfig } from './staging-publish.mjs';
 
@@ -7,6 +7,8 @@ const matches = (value, pattern) => typeof value === 'string' && pattern.test(va
 const bookmarkToken = value => matches(value, /^[A-Za-z0-9_-]{1,1024}$/);
 const sameAttempt = ({ sha, runId, attempt }, other) =>
   other?.sha === sha && other.runId === runId && other.attempt === attempt;
+const migrationInvite = 'd1/migration-invite';
+const migrationCeremony = 'd1/migration-ceremony';
 
 function d1(source, env, cwd, send, active) {
   const { sha, runId, attempt } = source;
@@ -38,8 +40,10 @@ function d1(source, env, cwd, send, active) {
       text += decoder.decode(chunk, { stream: true });
     }
     signal.throwIfAborted();
-    const { success, errors, result } = JSON.parse(text + decoder.decode());
-    if (success !== true || !Array.isArray(errors) || errors.length || !result) throw new Error();
+    const payload = JSON.parse(text + decoder.decode());
+    const { success, errors, result } = payload;
+    if (success !== true || !Array.isArray(errors) || errors.length || !result ||
+        Object.hasOwn(payload, 'result_info')) throw new Error();
     return result;
   };
   return {
@@ -57,6 +61,30 @@ function d1(source, env, cwd, send, active) {
   };
 }
 
+// A point-in-time read of both migration fixture keys across every full-v0
+// attempt. This neither discovers other app fixtures nor excludes writers.
+export async function assertNoQualificationD1MigrationFixtures(env, cwd, signal, send) {
+  try {
+    const identity = assertQualificationJob(env, cwd);
+    return await runQualificationPhase(async (_, active) => {
+      const db = d1(identity, env, cwd, send, active);
+      await db.verifyTarget();
+      const pattern = suffix => `${qualificationFixtureNamespace}*/${suffix}`;
+      const [rows] = await db.query([{
+        sql: `SELECT EXISTS(SELECT 1 FROM drive_invitations WHERE id GLOB ?) AS invite_present,
+                     EXISTS(SELECT 1 FROM drive_bound_ceremonies WHERE context GLOB ?) AS ceremony_present`,
+        params: [pattern(migrationInvite), pattern(migrationCeremony)],
+      }]);
+      const [row] = rows;
+      if (rows.length !== 1 || row?.invite_present !== 0 || row.ceremony_present !== 0 ||
+          Object.keys(row).length !== 2) throw new Error();
+      return true;
+    }, identity, signal, 20_000);
+  } catch {
+    throw new Error('Staging D1 migration fixture absence is unverified.');
+  }
+}
+
 // Only the synthetic migration fixtures below, not app-created identities or
 // upload evidence. The protected caller must reserve these keys and drain their
 // writers before cleanup. This function never invokes Time Travel.
@@ -68,8 +96,8 @@ export async function cleanQualificationD1(context, env, cwd, signal, send = fet
     return await runQualificationPhase(async (_, active) => {
       const db = d1(identity, env, cwd, send, active);
       await db.verifyTarget();
-      const invite = `${prefix}d1/migration-invite`;
-      const ceremony = `${prefix}d1/migration-ceremony`;
+      const invite = `${prefix}${migrationInvite}`;
+      const ceremony = `${prefix}${migrationCeremony}`;
       const conditions = ['drive_invitations WHERE id = ?', 'drive_bound_ceremonies WHERE context = ?'];
       const fields = ['id, redeemed_at', 'context, purpose'];
       const params = [[invite], [ceremony]];

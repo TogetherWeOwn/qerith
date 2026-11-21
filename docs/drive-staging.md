@@ -188,9 +188,13 @@ The estate composer runs the bounded inventory before mutation and after Worker
 restore. It checks exact-attempt writer quiescence and a held, abortable fence
 before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
 before restore. D1 fixture cleanup does not roll back migrations or clean app
-fixtures. The estate, fixture and writer-fence inputs are injected; offline
-passing tests are not provider evidence. The protected job still stops and
-cannot issue a receipt.
+fixtures. Before and after the lifecycle, inventory also queries the pinned D1
+for migration fixture keys across all full-v0 attempts. This read-only check
+returns presence only, including for redeemed or expired fixture rows; missing
+tables or an incomplete result fail closed. It does not replace the injected
+all-app-fixture reader, estate reader, or writer fence. Offline passing tests
+are not provider evidence. The protected job still stops and cannot issue a
+receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects

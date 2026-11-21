@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { cleanQualificationD1, recoverQualificationD1 } from './staging-qualification-d1.mjs';
+import { assertNoQualificationD1MigrationFixtures, cleanQualificationD1, recoverQualificationD1 } from './staging-qualification-d1.mjs';
 
 const config = new URL('../wrangler.staging.json', import.meta.url);
 const migrations = new URL('../migrations/', import.meta.url);
@@ -95,8 +95,8 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
     return intercept(path, init);
   };
   return { calls, historical, proof, sql: (sql, ...params) => db.prepare(sql).all(...params),
-    seed() {
-      for (const [i, p] of [prefix, ...other].entries()) {
+    seed(prefixes = [prefix, ...other]) {
+      for (const [i, p] of prefixes.entries()) {
         db.prepare(`INSERT INTO drive_invitations (id, token_hash, expires_at, display_name, note, created_at)
           VALUES (?, ?, 10, 'Fixture', 'Migration fixture', 1)`).run(invite(p), String(i).repeat(64));
         for (const purpose of ['registration', 'authentication']) {
@@ -106,6 +106,7 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
       }
     },
     intercept(fn) { intercept = (path, init) => fn(path, init, () => simulatedFetch(path, init)); },
+    inspect: (patch = {}, signal) => assertNoQualificationD1MigrationFixtures({ ...env, ...patch }, cwd, signal, send),
     clean: (patch = {}, signal) => cleanQualificationD1({ ...source, prefix, ...patch }, env, cwd, signal, send),
     recover: ({ overrides, recordPatch, proveQuiescence = (scope, signal) => {
       assert.deepEqual(scope, { ...source, accountId, databaseId, bookmark: before });
@@ -115,6 +116,53 @@ function fixture(t, { emptyBaseline = false, echoTarget = true } = {}) {
       { proveQuiescence }, env, cwd, signal, send),
   };
 }
+
+test('migration fixture census refuses either kind of residue from earlier attempts without exposing rows', async t => {
+  const f = fixture(t);
+  assert.equal(await f.inspect(), true);
+  f.seed([other[0], 'drive-qualification/full-v0-other/17/1/', 'unrelated/']);
+  const censusError = /D1 migration fixture absence is unverified/;
+  f.sql('UPDATE drive_invitations SET redeemed_at = 5 WHERE id = ?', invite(other[0]));
+  // Leave only invitation residue from the previous attempt.
+  f.sql('DELETE FROM drive_bound_ceremonies WHERE context = ?', ceremony(other[0]));
+  await assert.rejects(f.inspect(), censusError);
+  assert.equal(f.sql('SELECT redeemed_at FROM drive_invitations WHERE id = ?', invite(other[0]))[0].redeemed_at, 5);
+  f.sql('DELETE FROM drive_invitations WHERE id = ?', invite(other[0]));
+  assert.equal(await f.inspect(), true); // unrelated and decoy keys remain
+  f.sql(`INSERT INTO drive_bound_ceremonies (context, purpose, challenge, expires_at, principal_id, webauthn_user_handle)
+    VALUES (?, 'registration', 'previous', 10, 'fixture-principal', 'handle')`, ceremony(other[0]));
+  await assert.rejects(f.inspect(), censusError);
+  assert.deepEqual(f.calls, Array.from({ length: 4 }, () => ['', '/query']).flat());
+});
+
+test('migration fixture census requires the protected source, pinned D1 and one complete numeric verdict', async t => {
+  const f = fixture(t);
+  const censusError = /D1 migration fixture absence is unverified/;
+  await assert.rejects(f.inspect({ GITHUB_WORKFLOW_SHA: 'b'.repeat(40) }), censusError);
+  await assert.rejects(f.inspect({}, AbortSignal.abort()), censusError);
+  assert.deepEqual(f.calls, []);
+  f.intercept(() => ok({ uuid: databaseId, name: 'unknown', version: 'production' }));
+  await assert.rejects(f.inspect(), censusError);
+  assert.deepEqual(f.calls.splice(0), ['']);
+  const zero = { invite_present: 0, ceremony_present: 0 };
+  for (const rows of [[], [zero, zero], [{ ...zero, invite_present: '0' }], [{ invite_present: 0 }]]) {
+    f.intercept((path, _, run) => path === '/query' ? ok([{ success: true, results: rows }]) : run());
+    await assert.rejects(f.inspect(), censusError);
+  }
+  f.intercept((path, _, run) => {
+    const response = run();
+    if (path === '/query') response.headers.set('Content-Range', 'bytes 0-79/200');
+    return response;
+  });
+  await assert.rejects(f.inspect(), censusError);
+  f.intercept((path, _, run) => path === '/query' ? Response.json({ success: true, errors: [],
+    result: [{ success: true, results: [zero] }], result_info: { cursor: 'next' } }) : run());
+  await assert.rejects(f.inspect(), censusError);
+  f.intercept((_, __, run) => run());
+  f.sql('DROP TABLE drive_bound_ceremonies');
+  await assert.rejects(f.inspect(), censusError);
+  assert.deepEqual(f.calls, Array.from({ length: 7 }, () => ['', '/query']).flat());
+});
 
 test('teardown removes only exact-attempt migration fixtures and leaves the historical ledger intact', async t => {
   const f = fixture(t);
