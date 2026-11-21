@@ -115,6 +115,7 @@ function fixture(t) {
       }
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
+        if (state.expiryDocument) return state.expiryDocument;
         const age = seconds => ({ condition: { type: 'Age', maxAge: seconds } });
         const response = json({ rules: !state.expiry ? [] : [{ enabled: true, conditions: { prefix: namespace },
           deleteObjectsTransition: age(3 * 86400), abortMultipartUploadsTransition: age(7 * 86400) },
@@ -687,6 +688,32 @@ test('inventory shares one 15-second deadline across native R2 roster reads', as
   assert.equal(signals[0], signals[1]);
   assert.equal(signals[0].aborted, true);
 });
+
+for (const [kind, configure, lastRead] of [
+  ['Durable Object roster result', state => {
+    state.namespaceList = new Response(`{"success":true,"errors":[],"messages":[],
+      "result":[{"id":"extra"}],"result":[],"result_info":{"total_count":0}}`);
+  }, 'namespaces'],
+  ['R2 jurisdiction bucket list', state => {
+    state.scopedBucketLists = { eu: new Response(`{"success":true,"errors":[],
+      "result":{"buckets":[{"name":"extra","jurisdiction":"eu"}],"buckets":[]},"result_info":{"total_count":0}}`) };
+  }, 'r2-roster-eu'],
+  ['R2 lifecycle expiry', state => {
+    state.expiryDocument = new Response(`{"success":true,"errors":[],"result":{"rules":[
+      {"enabled":true,"conditions":{"prefix":"${namespace}"},
+       "deleteObjectsTransition":{"condition":{"type":"Age","maxAge":345600,"maxAge":259200}},
+       "abortMultipartUploadsTransition":{"condition":{"type":"Age","maxAge":604800}}}]}}`);
+  }, 'expiry'],
+]) {
+  test(`inventory rejects duplicate JSON members in the native ${kind}`, async t => {
+    const f = fixture(t);
+    const inspect = f.create();
+    assert.equal(await inspect('before'), true);
+    configure(f.state);
+    await assert.rejects(inspect('after'), error);
+    assert.equal(f.trace.at(-1), lastRead);
+  });
+}
 
 test('inventory rejects an extra native Worker before and after the attempt', async t => {
   const f = fixture(t);
