@@ -86,6 +86,25 @@ test('projects safe fields and resumes a stable opaque boundary for an overlong 
   }
 });
 
+test('only projects a positive download hint on a canonical file ID', async () => {
+  const id = '00000000-0000-4000-8000-000000000611';
+  const file = { id, name: 'Available', kind: 'file' as const };
+  const entries = [
+    { ...file, downloadable: 1 as const, object_key: 'private-key' },
+    { ...file, id: id.slice(0, -1) + '2', downloadable: 0 as const },
+    { ...file, id: id.slice(0, -1) + '3' },
+    { ...file, id: 'legacy-file', downloadable: 1 as const },
+    { ...file, id: 'folder', kind: 'folder' as const, downloadable: 1 as const },
+  ];
+  const readAccess = { get, list: async () => ({ entries, nextCursor: null }) };
+  const page = await folderPage(request(), 'private', { authorize, readAccess });
+  assert.equal(page.status, 'ok');
+  assert.deepEqual(page.folder.entries, [
+    { ...file, downloadable: true },
+    ...entries.slice(1).map(({ id, name, kind }) => ({ id, name, kind })),
+  ]);
+});
+
 test('does not disclose the title if live listing is denied, fails or exceeds the bound', async () => {
   for (const list of [async () => null, async () => { throw new Error('storage failed'); }, async () => ({ entries: Array(101).fill(await get('', 'private')), nextCursor: null })])
     assert.deepEqual(await folderPage(request(), 'private', { authorize, readAccess: { get, list } }), unavailable);

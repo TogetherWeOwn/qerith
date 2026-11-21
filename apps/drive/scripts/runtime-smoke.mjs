@@ -141,6 +141,12 @@ export default {
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
   ${rawStorage || preview ? '' : 'const deletion = runtimeDeletion(request, env, ctx); if (deletion) return deletion;'}
   ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
+  const mode = request.headers.get('x-test-fetch-mode');
+  if (mode !== null) {
+    request = new Request(request);
+    request.headers.delete('x-test-fetch-mode');
+    request.headers.set('sec-fetch-mode', mode);
+  }
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
   if (request.headers.has('x-test-qualification')) {
@@ -155,12 +161,7 @@ export default {
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
-  const mode = request.headers.get('x-test-fetch-mode');
-  if (mode === null) return app.fetch(request, env, ctx);
-  const input = new Request(request);
-  input.headers.delete('x-test-fetch-mode');
-  input.headers.set('sec-fetch-mode', mode);
-  return app.fetch(input, env, ctx);
+  return app.fetch(request, env, ctx);
 } };`);
   await writeFile(configPath, JSON.stringify({
     ...config,
@@ -425,7 +426,7 @@ export default {
       await exerciseStagingFolderCreate({ worker, DB, origin, session });
       await exerciseMoveDestinations({ worker, DB, origin, session });
       await exerciseStagingReadGrants({ worker, DB, origin, session, driveOwner: cookie, download: file, downloadBytes: data });
-      await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member });
+      await exerciseStagingFolder({ worker, DB, origin, owner: cookie, member, fileId: id, downloadBytes: data });
       await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id = 'fixture'").run();
       assert.equal((await worker.fetch(privateAsset, { headers: { cookie } })).status, 401);
       assert.equal((await get(file, { cookie })).status, 401);
