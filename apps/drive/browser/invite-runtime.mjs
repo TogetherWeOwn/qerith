@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { tsImport } from 'tsx/esm/api';
+import { proveNewFolder } from './new-folder.mjs';
 import { proveMemberDownload } from './member-download.mjs';
 import { proveOwnerIssue } from './owner-invite-runtime.mjs';
 import { capture, widths } from './root-listing.mjs';
@@ -224,6 +225,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       memberRoot = await proveMemberRoot(page, context, { origin, worker, DB, id, checkOwner: owner, holdNext, ...stagingRoot }, captureState);
       assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
       for (const path of ownerNodes) await memberRoot.check(path, 'GET', 404);
+      await proveNewFolder(page, origin, DB, id);
     }
     await open();
     await page.getByRole('heading', { name: "You're signed in", exact: true }).waitFor();

@@ -18,6 +18,9 @@
   const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
   const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  export function focusCreatedRow(id: string) {
+    findRowPart(visibleView(), 'data-created-row', id)?.focus();
+  }
   const triggerFor = (view: HTMLElement, id: string) => findRowPart(view, 'data-action-row', id)?.querySelector<HTMLButtonElement>(actionTrigger);
 
   $: if (detailsId !== null && ((onAction && !inlineDetails) || !items.some(item => item.id === detailsId))) {
@@ -95,6 +98,8 @@
       const facts = focused.closest<HTMLElement>('[data-details-id]');
       if (focused instanceof HTMLAnchorElement) {
         target = Array.from(to.querySelectorAll('a')).find(link => link.dataset.itemId === focused.dataset.itemId);
+      } else if (focused.hasAttribute('data-created-row')) {
+        target = findRowPart(to, 'data-created-row', focused.getAttribute('data-created-row'));
       } else if (facts) {
         const next = findRowPart(to, 'data-details-id', facts.dataset.detailsId);
         target = focused === facts ? next : next?.querySelector('button[type="button"]');
@@ -148,6 +153,7 @@
   $: description = `Contents of ${folder}, folders first, then files, each sorted by name, ${nameOrder}.${!preview && timeZone ? ` Times in ${timeZone}.` : ''}`;
   export let onAction: ((id: string, action: RowAction) => void) | undefined = undefined;
   export let inlineDetails = false;
+  export let createdId: string | undefined = undefined;
   export let items: { id: string; name: string; href?: string; reload?: boolean; kind: string; glyph: 'folder' | 'folder-shared' | 'file' | 'image' | 'video' | 'audio' | 'document' | 'archive'; size: string; bytes: number | null; modified: string; modifiedAt?: string; shared: boolean; owned?: boolean; details?: { modifiedFull?: string; uploaded?: string; sharedWith?: string[] } }[];
 </script>
 
@@ -178,7 +184,7 @@
   <thead><tr><th scope="col" aria-sort="other">{#if onSort}<button class="sort-button" bind:this={desktopSort} type="button" on:click={() => onSort?.(direction === 'asc' ? 'desc' : 'asc')}>Name <span aria-hidden="true">{direction === 'asc' ? '↑' : '↓'}</span></button>{:else}Name{/if}</th>{#if !preview}<th scope="col" class="size">Size</th><th scope="col">Modified</th>{/if}<th scope="col" class="kind">Kind</th>{#if !preview}<th scope="col" class="actions">Actions</th>{/if}</tr></thead>
   <tbody>
     {#each items as item (item.id)}
-      <tr on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
+      <tr data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, desktopActions[item.id])}>
         <td>{@render entryName(item)}</td>
         {#if !preview}<td class="size">{#if item.bytes === null}—{:else}<data value={item.bytes}>{item.size}</data>{/if}</td><td><time datetime={item.modifiedAt}>{item.modified}</time></td>{/if}<td>{item.kind}</td>
         {#if !preview}
@@ -191,7 +197,8 @@
 </table>
 <ul class="mobile" role="list" bind:this={mobile} aria-label={description}>
   {#each items as item (item.id)}
-    <li class:with-actions={!preview} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus after creation) -->
+    <li class:with-actions={!preview} data-created-row={createdId === item.id ? item.id : undefined} tabindex={createdId === item.id ? -1 : undefined} on:contextmenu={(event) => contextMenu(event, compactActions[item.id])}><div>{@render entryName(item)}</div><div class="details">{item.kind}{#if !preview}{' · '}{#if item.bytes !== null}<data value={item.bytes}>{item.size}</data>{' · '}{/if}<time datetime={item.modifiedAt}>{item.modified}</time>{/if}</div>
       {#if !preview}
         <div data-action-row={item.id}><RowActions bind:this={compactActions[item.id]} name={item.name} file={item.glyph !== 'folder' && item.glyph !== 'folder-shared'} owned={item.owned ?? false} detailsOnly={!onAction} {checkLayoutOnOpen} onAction={(action) => selectAction(mobile, item.id, action)} onTab={() => false} /></div>
       {/if}
@@ -253,6 +260,8 @@
   li.with-actions > [data-action-row] { grid-column: 2; grid-row: 1 / span 2; align-self: center; margin-inline-start: var(--drive-space-2); }
   li.with-actions > :global([data-details-id]) { grid-column: 1 / -1; }
   tbody tr:has([data-action-row] :global(button[aria-expanded='true'])), li:has([data-action-row] :global(button[aria-expanded='true'])) { background-color: var(--drive-color-bg-raised); }
+  tbody tr[data-created-row], li[data-created-row] { background: var(--drive-color-bg-raised); }
+  [data-created-row]:focus { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: calc(-1 * var(--drive-size-focus-width)); }
   .details { margin-top: var(--drive-space-1); color: var(--drive-color-text-tertiary); font-family: var(--drive-font-data); font-size: var(--drive-font-size-meta); }
   @media (max-width: 820px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }
   @container (max-width: 740px) { .desktop { display: none; } .mobile, .compact-sort { display: block; } }

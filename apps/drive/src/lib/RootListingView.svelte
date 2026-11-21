@@ -3,16 +3,25 @@
   import { flushSync, tick } from 'svelte';
   import EmptyFolder from './EmptyFolder.svelte';
   import FileList from './FileList.svelte';
+  import NewFolderDialog from './NewFolderDialog.svelte';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
   import type { DriveUploadMode } from './server/request-auth';
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadMode, staging, downloadAllowed }: {
-    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean;
+  let { result: initial, page, uploadMode, staging, downloadAllowed, createFolderAllowed }: {
+    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean; createFolderAllowed: boolean;
   } = $props();
   let status = $state('');
+  let showStatus = $state(false);
+  let createdId = $state<string>();
+  let list = $state<ReturnType<typeof FileList>>();
+
+  function announce(message: string, visible = false) {
+    status = message;
+    showStatus = visible;
+  }
   let refreshed = $state<RootListingResult>();
   let result = $derived(refreshed ?? initial);
   let busy = $state(false);
@@ -53,6 +62,24 @@
     }
   }
 
+  async function folderCreated(id: string, name: string, close: () => void) {
+    try {
+      await refresh();
+    } catch {
+      close();
+      if (!header?.contains(document.activeElement)) (recovery ?? header?.querySelector('h1'))?.focus();
+      announce(`Created “${name}”. Refresh My Drive to see it.`, true);
+      return;
+    }
+    createdId = id;
+    await tick();
+    close();
+    if (items.some(item => item.id === id)) {
+      list?.focusCreatedRow(id);
+      announce(`Created “${name}”.`);
+    } else announce(`Created “${name}”. It isn’t on this page.`, true);
+  }
+
   const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
     id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
     href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
@@ -60,13 +87,16 @@
   })) : []);
 </script>
 
-<header bind:this={header}>
-  <h1>My Drive</h1>
+<header bind:this={header} class:can-create={createFolderAllowed && result.status === 'ok'}>
+  <h1 tabindex="-1">My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
-    <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
+    <RootUpload mode={uploadMode} announce={(message) => announce(message)} {refresh} paginated={page !== null} bind:busy />
+  {/if}
+  {#if createFolderAllowed}
+    <NewFolderDialog available={result.status === 'ok'} {items} oncreated={folderCreated} />
   {/if}
 </header>
-<p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
+<p class:status={!status || (!showStatus && (!staging || result.status === 'ok'))} role="status">{status}</p>
 {#if result.status === 'unavailable'}
   <p class="error">This folder didn't load. Check your connection, then try again.</p>
   <a bind:this={recovery} data-sveltekit-reload href={page ? `/?page=${page}` : '/'}>Try again</a>
@@ -75,7 +105,7 @@
   <a bind:this={recovery} data-sveltekit-reload href="/">Back to first page</a>
 {:else}
   {#if items.length}
-    <FileList folder="My Drive" preview announceChanges={false} {items} />
+    <FileList bind:this={list} folder="My Drive" preview announceChanges={false} {items} {createdId} />
   {:else if page}
     <p>No more items.</p>
   {:else}
@@ -93,9 +123,15 @@
 
 <style>
   header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--drive-space-3); margin-bottom: var(--drive-space-4); }
+  header.can-create { grid-template-columns: minmax(0, 1fr) auto auto; }
   h1 { margin: 0; font-family: var(--drive-font-ui); }
+  p[role="status"] { overflow-wrap: anywhere; }
   .status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  @media (max-width: 820px) { header { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 820px) {
+    header { grid-template-columns: minmax(0, 1fr); }
+    header.can-create { grid-template-columns: minmax(0, 1fr) auto; }
+    header.can-create h1 { grid-column: 1 / -1; }
+  }
   nav { display: flex; flex-wrap: wrap; gap: var(--drive-space-4); }
   a { display: inline-block; padding-block: var(--drive-space-2); color: inherit; }
   a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }

@@ -4,6 +4,7 @@ import { mkdtempDisposable, readFile, readdir, writeFile } from 'node:fs/promise
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
+import { proveNewFolder } from './new-folder.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
@@ -127,6 +128,7 @@ try {
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Users and invites' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'New folder', exact: true }).count(), 0);
   await page.keyboard.press('Tab');
   assert.equal(await upload.evaluate(el => document.activeElement === el), true);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
@@ -271,6 +273,7 @@ try {
   await deny('/f/fixture-parent', 404, { cookie });
   await context.route('**/*', route => relay(route, inviteWorker, 'same-origin'));
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
+  await proveNewFolder(page, origin, DB, 'owner', worker);
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
