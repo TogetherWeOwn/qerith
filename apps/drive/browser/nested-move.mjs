@@ -15,8 +15,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     await seed(`(?2, 'owner', ?1, ?3, 'folder'), (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'),
       ('nested-target', 'owner', NULL, ?4, 'folder'), ('nested-clash', 'owner', 'nested-target', ?3, 'folder'),
       ('nested-gone', 'owner', NULL, ?5, 'folder')`).bind(parent, source, name, destination, removed).run();
-    await page.setViewportSize({ width, height });
-    await page.goto(origin + path);
+    await page.setViewportSize({ width, height }); await page.goto(origin + path);
     const actions = item => page.getByRole('button', { name: `Actions for ${item}` }), trigger = actions(name);
     const dialog = page.getByRole('dialog', { name: /^Move “/ });
     const button = name => dialog.getByRole('button', { name, exact: true });
@@ -79,10 +78,11 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
       assert.equal((await Promise.all([response(writes), page.waitForRequest(isReload), held.resolve()]))[0].status(), 200);
-      if (nested) assert.deepEqual(await page.evaluate(([source, next]) => [
-        !document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
-        document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), document.querySelector('.move-notice [role="status"]')?.textContent
-      ], [source, `${parent}-next`]), [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
+      if (nested) assert.deepEqual(await page.evaluate(([source, next]) => {
+        const receipt = document.querySelector('.move-notice [role="status"]:not(.status)');
+        return [!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
+          document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && receipt.textContent];
+      }, [source, `${parent}-next`]), [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
       assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
     } finally { held.resolve(); reloadGate.resolve(); }
     if (nested) {
