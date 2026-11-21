@@ -56,17 +56,14 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await button(target).press('Enter');
       intercept(patch, route => route.abort());
       await button(primary).press('Enter');
-      const alert = dialog.getByRole('alert').and(focused);
-      assert.match(await alert.textContent(), /Refresh the source folder and check the selected destination/);
+      assert.match(await dialog.getByRole('alert').and(focused).textContent(), /Refresh the source folder and check the selected destination/);
       assert.equal(await button(primary).getAttribute('aria-disabled'), 'true');
       await button(primary).press('Enter');
       await evidence('unconfirmed');
       await page.reload(); await open(); await button(target).press('Enter');
       await db.prepare("DELETE FROM drive_entries WHERE id = 'nested-clash'").run();
-      intercept(path, async (_, forward) => {
-        await db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next')").bind(parent).run();
-        return forward();
-      });
+      intercept(path, (_, forward) => db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next')")
+        .bind(parent).run().then(() => forward()));
     }
     const reload = page.waitForResponse(r => r.url() === origin + path && r.request().isNavigationRequest());
     const held = Promise.withResolvers();

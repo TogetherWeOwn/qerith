@@ -124,8 +124,9 @@ try {
         value.startsWith(`${seededNotice.name}=;`) && /(?:^|;\s*)Max-Age=0(?:;|$)/i.test(value));
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
+    const payload = Buffer.from(await response.arrayBuffer()); // Drain the Worker stream before holding browser delivery.
     if (url.pathname === dataPath) await wait();
-    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer()) });
+    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: payload });
   };
   await context.route('**/*', route => relay(route));
   await page.goto(origin + redirect.headers.get('location'), { waitUntil: 'networkidle' });
