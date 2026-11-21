@@ -609,7 +609,9 @@ function recoveryFixture(t) {
         f.calls.push('baseline-version');
         return json(f.state.baselineVersion ?? baselineVersion());
       }
-      return f.request(url, init);
+      const response = await f.request(url, init);
+      f.state.afterRequest?.();
+      return response;
     });
   f.state.current = deployment(active, candidate, f.state.tag);
   return { ...f, recover, source, baselineVersion };
@@ -667,17 +669,28 @@ test('lost-run recovery never writes when the deployment or version evidence has
 });
 
 test('lost-run recovery does not certify or retry an ambiguous restore', async t => {
-  for (const failure of ['restoreLost', 'restoreIgnored', 'wrongReadbackTag', 'cancelReadback']) {
-    const { recover, state, calls, controller } = recoveryFixture(t);
+  for (const failure of ['restoreLost', 'restoreIgnored', 'wrongReadbackTag']) {
+    const { recover, state, calls } = recoveryFixture(t);
     state[failure] = true;
     state.beforeRequest = () => {
-      if (calls.at(-1) !== 'restore') return;
-      if (failure === 'wrongReadbackTag') state.current = deployment(restored, baseline, 'other restore');
-      if (failure === 'cancelReadback') controller.abort();
+      if (calls.at(-1) === 'restore' && failure === 'wrongReadbackTag') {
+        state.current = deployment(restored, baseline, 'other restore');
+      }
     };
     await assert.rejects(recover(), { message: 'Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.' });
     assert.equal(calls.filter(call => call === 'restore').length, 1);
   }
+});
+
+test('lost-run recovery rejects cancellation even when restore readback succeeds', async t => {
+  const { recover, state, calls, controller } = recoveryFixture(t);
+  state.afterRequest = () => {
+    // The stub already accepted an un-aborted signal and produced valid readback evidence.
+    if (calls.at(-2) === 'restore' && calls.at(-1) === 'current') controller.abort();
+  };
+  await assert.rejects(recover(), { message: 'Staging Worker recovery is unverified; reconcile the recorded deployment before retrying.' });
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(calls, ['current', 'baseline-version', 'version', 'current', 'restore', 'current']);
 });
 
 test('rejects oversized, malformed or failed provider responses without mutation or diagnostic leaks', async t => {
