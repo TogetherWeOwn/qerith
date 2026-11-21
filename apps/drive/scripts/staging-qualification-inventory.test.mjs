@@ -80,6 +80,12 @@ function fixture(t) {
         return json([{ success: true, results: [{ invite_present: state.migrationResidue ? 1 : 0, ceremony_present: 0 }] }]);
       }
       assert.equal(init.method, 'GET');
+      if (url === `${root}${account}/d1/database?page=1&per_page=10`) {
+        trace.push('d1-roster');
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        assert.equal(init.headers['x-jurisdiction'], undefined);
+        return state.databaseList ?? json([{ uuid: database, name: worker }]);
+      }
       if (url === d1) return json({ uuid: database, name: worker, version: 'production' });
       if (url === `${root}${storageAccount}/r2/buckets/${bucket}/lifecycle`) {
         trace.push('expiry');
@@ -388,7 +394,7 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'fixtures', 'd1-fixtures', 'expiry', 'uploads', 'objects', 'scripts', 'deployments',
+  const expected = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'expiry', 'uploads', 'objects', 'scripts', 'deployments',
     'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
@@ -405,6 +411,41 @@ test('inventory rejects an extra native Worker before and after the attempt', as
   }
 });
 
+test('inventory rejects an extra native D1 database before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.databaseList = json([{ uuid: database, name: worker }, { uuid: uuid('4'), name: 'unexpected' }]);
+    await assert.rejects(run(phase), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster']);
+  }
+});
+
+test('inventory accepts only a complete bounded native D1 roster', async t => {
+  const f = fixture(t);
+  const pinned = [{ uuid: database, name: worker }];
+  const complete = { page: 1, per_page: 10, count: 1, total_count: 1 };
+  const reply = (overrides, init) => Response.json({ success: true, errors: [], result: pinned,
+    result_info: complete, ...overrides }, init);
+  const run = f.create();
+  f.state.databaseList = reply();
+  assert.equal(await run('before'), true);
+  for (const response of [reply({ result: [] }), reply({ result: [{ ...pinned[0], name: 'wrong' }] }),
+    reply({ result: [{ ...pinned[0], uuid: uuid('4') }] }), reply({ result: pinned[0] }),
+    reply({ result_info: { ...complete, total_count: 2 } }), reply({ result_info: { ...complete, page: 2 } }),
+    reply({ result_info: { cursor: 'next' } }), reply({ success: false }), reply({}, { status: 403 }),
+    reply({}, { headers: { 'Content-Range': 'bytes 0-9/100' } }), reply({}, { headers: { Link: '</next>; rel="next"' } }),
+    reply({ result: [{ ...pinned[0], oversized: 'x'.repeat(65_536) }] }), new Response('not JSON')]) {
+    const inspect = f.create();
+    f.trace.length = 0;
+    f.state.databaseList = response;
+    await assert.rejects(inspect('before'), error);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster']);
+  }
+});
+
 test('inventory requires native D1 migration fixture absence before and after the attempt', async t => {
   const f = fixture(t);
   for (const phase of ['before', 'after']) {
@@ -413,7 +454,7 @@ test('inventory requires native D1 migration fixture absence before and after th
     f.trace.length = 0;
     f.state.migrationResidue = true;
     await assert.rejects(run(phase), error);
-    assert.deepEqual(f.trace, ['estate', 'fixtures', 'd1-fixtures']);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures']);
   }
 });
 
@@ -442,7 +483,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     const f = fixture(t), run = f.create();
     f.state.partial = kind;
     await assert.rejects(run('before'), error);
-    assert.deepEqual(f.trace, ['estate', 'fixtures', 'd1-fixtures', ...r2ReadOrder.slice(0, index + 1)]);
+    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
 

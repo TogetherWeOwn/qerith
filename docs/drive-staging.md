@@ -222,6 +222,13 @@ The script list does not cover other compute surfaces, external invokers, D1
 fixture rows or billing. It cannot satisfy whole-estate zero-idle inventory or
 establish that a lost runner's deployment was restored.
 
+Both offline inventory passes also require the unfiltered Cloudflare D1 account
+list to contain only the database UUID and name pinned in the tested commit.
+The check uses a bounded first page and rejects conflicting pagination or partial
+responses. This checks the roster visible to the existing credential, not D1
+compute mode, writer exclusion or historical restore attribution. It does not
+replace the separate estate and app-fixture readers.
+
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation
 requires more than 20 minutes left for deployment, readiness, cases and cleanup.

@@ -21,14 +21,15 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
   const config = JSON.parse(git('show', `${sha}:apps/drive/wrangler.staging.json`));
   validateStagingConfig(config, accountId);
   const { database_id: databaseId, database_name: name } = config.d1_databases[0];
-  const base = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}`;
-  const call = async (path, method = 'GET', body) => {
+  const collection = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`;
+  const read = async (url, method = 'GET', body, list = false) => {
     const signal = AbortSignal.any([active, AbortSignal.timeout(8000)]);
     signal.throwIfAborted();
-    const response = await send(`${base}${path}`, { method, signal, redirect: 'error',
+    const response = await send(url, { method, signal, redirect: 'error',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body });
     // Readback also uses POST /query; its envelope must still be complete.
-    if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
+    if (signal.aborted || response.status !== 200 || response.headers.has('content-range') || !response.body ||
+        (list && response.headers.has('link'))) {
       await response.body?.cancel();
       throw new Error();
     }
@@ -42,12 +43,30 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
     signal.throwIfAborted();
     const payload = JSON.parse(text + decoder.decode());
     const { success, errors, result } = payload;
-    if (success !== true || !Array.isArray(errors) || errors.length || !result ||
-        (census && Object.hasOwn(payload, 'result_info'))) throw new Error();
-    return result;
+    if (success !== true || !Array.isArray(errors) || errors.length || !result) throw new Error();
+    return payload;
+  };
+  const call = async (path, method, body) => {
+    const payload = await read(`${collection}/${databaseId}${path}`, method, body);
+    if (census && Object.hasOwn(payload, 'result_info')) throw new Error();
+    return payload.result;
   };
   return {
     accountId, databaseId, call,
+    async verifyRoster() {
+      // The pinned Wrangler client ends the unfiltered listing on a short page.
+      const perPage = 10;
+      const payload = await read(`${collection}?page=1&per_page=${perPage}`, 'GET', undefined, true);
+      const { result, result_info: page } = payload;
+      if (Object.keys(payload).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+          (Object.hasOwn(payload, 'messages') && (!Array.isArray(payload.messages) || payload.messages.length)) ||
+          !Array.isArray(result) || result.length !== 1 || result[0]?.uuid !== databaseId || result[0]?.name !== name) throw new Error();
+      if (Object.hasOwn(payload, 'result_info')) {
+        const complete = { page: 1, per_page: perPage, count: 1, total_count: 1, total_pages: 1 };
+        if (!page || typeof page !== 'object' || Array.isArray(page) ||
+            Object.entries(page).some(([key, value]) => !Object.hasOwn(complete, key) || complete[key] !== value)) throw new Error();
+      }
+    },
     async verifyTarget() {
       const actual = await call('');
       if (actual.uuid !== databaseId || actual.name !== name || actual.version !== 'production') throw new Error();
@@ -59,6 +78,17 @@ function d1(source, env, cwd, send, active, { census = false } = {}) {
       return result.map(item => item.results);
     },
   };
+}
+
+// This independently cross-checks the account-visible roster, not compute mode.
+export async function assertQualificationD1Roster(env, cwd, signal, send) {
+  try {
+    signal?.throwIfAborted();
+    const identity = assertQualificationJob(env, cwd);
+    await runQualificationPhase((_, active) => d1(identity, env, cwd, send, active).verifyRoster(), identity, signal, 20_000);
+  } catch {
+    throw new Error('Staging D1 database roster is unverified.');
+  }
 }
 
 // GLOB narrows the index range but '*' can cross slashes. Validate the
