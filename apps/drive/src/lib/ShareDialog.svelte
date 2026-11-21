@@ -14,7 +14,7 @@
   import ShareRecipientPicker, { avatar } from './ShareRecipientPicker.svelte';
   import type { ShareAccess, ShareRecipient } from './share-client';
   import './dialog.css';
-  let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove, onreturn, observedAccess }: {
+  let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove, onreturn, observedIneligible }: {
     name: string; kind: 'File' | 'Folder'; owner: { recipientId: string; driveOwner: boolean };
     access: SharePage<ShareAccess>;
     // The caller must exclude anyone with effective access, including access not on the current page.
@@ -22,7 +22,7 @@
     // A void result confirms every write and refreshes access before resolving.
     onShare: (ids: readonly string[]) => Promise<ShareChange | void>;
     onRemove: (id: string) => Promise<ShareChange | void>;
-    onreturn?: () => void; observedAccess?: (recipientId: string) => boolean;
+    onreturn?: () => void; observedIneligible?: (recipientId: string) => boolean;
   } = $props();
   const id = $props.id();
   const label = (person: ShareRecipient) => person.displayName?.trim() ? person.displayName : 'Name unavailable';
@@ -38,7 +38,7 @@
   const pageText = (page: SharePage<ShareRecipient>, subject: string, unpaged = '') => page.state === 'loading' ? `Loading ${subject}…` :
     page.state === 'ready' ? page.pageNumber === null ? unpaged : `Showing page ${page.pageNumber} of ${subject}.` : '';
   const canSelect = ({ recipientId }: ShareRecipient) => recipientId !== owner.recipientId &&
-    !(observedAccess?.(recipientId) ?? access.rows.some(row => row.recipientId === recipientId));
+    !(observedIneligible?.(recipientId) ?? access.rows.some(row => row.recipientId === recipientId));
   const allowed = $derived(candidates.rows.filter(canSelect));
   const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
     !picked.every(canSelect));
@@ -52,10 +52,13 @@
     const eligible = picked.filter(canSelect);
     if (eligible.length !== picked.length) {
       picked = eligible;
-      selectionNotice = 'People who already have access were removed from the selection.';
+      selectionNotice = 'People who are no longer eligible were removed from the selection.';
     }
   });
   $effect(() => { if (accessPagerEmpty && document.activeElement?.id === `${id}-access-pager`) accessTitle.focus(); });
+  $effect(() => {
+    if (nobody && dialog?.open && (document.activeElement === document.body || document.activeElement === dialog)) last.focus();
+  });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from?: HTMLElement) {
     if (dialog.open) return;

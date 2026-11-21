@@ -24,7 +24,11 @@
   const access = $state<View>({ cursors: [], state: 'loading', data: null, request: 0 });
   const candidates = $state<View>({ cursors: [], state: 'loading', data: null, request: 0 });
   const observed = new SvelteMap<string, { version: number; hasAccess: boolean }>();
-  const observedAccess = (id: string) => observed.get(id)?.hasAccess ?? false;
+  let completeVersion = $state(0);
+  const observedIneligible = (id: string) => {
+    const row = observed.get(id);
+    return (row?.version ?? 0) < completeVersion || row?.hasAccess === true;
+  };
   let client: Client, request = 0;
 
   onMount(() => {
@@ -51,6 +55,8 @@
       view.state = page ? 'ready' : 'failed';
     }
     if (!page) return;
+    // Only a full roster can make absence conclusive.
+    if (page.complete) completeVersion = Math.max(completeVersion, version);
     // Both pagers read the same roster. A later request for an overlapping row takes precedence.
     for (const group of ['access', 'candidates'] as const) {
       for (const { recipientId } of page[group]) {
@@ -101,7 +107,7 @@
   }
 </script>
 
-<ShareDialog bind:this={dialog} {name} {kind} {owner} {onreturn} {observedAccess}
+<ShareDialog bind:this={dialog} {name} {kind} {owner} {onreturn} {observedIneligible}
   nobodyElse={!!candidates.data?.complete && !candidates.data.access.length && !candidates.data.candidates.length}
   access={page(access, 'access')} candidates={page(candidates, 'candidates')}
   onShare={ids => change('grant', ids)} onRemove={id => change('revoke', [id])} />
