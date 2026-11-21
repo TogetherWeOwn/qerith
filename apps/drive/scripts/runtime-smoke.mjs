@@ -131,7 +131,7 @@ export default { fetch(request, env, ctx) {
   ${preview ? 'const expected = expectedPartsRequest(request, env); if (expected) return expected;' : ''}
   ${preview ? 'const resume = resumeRequest(request, env); if (resume) return resume;' : ''}
   ${preview ? 'const grant = readGrantRequest(request, env); if (grant) return grant;' : ''}
-  ${rawStorage || preview ? '' : 'admitDeletion(request, env.DB);'}
+  ${rawStorage || preview ? '' : 'const deletion = runtimeDeletion(request, env, bindings => app.fetch(request, bindings, ctx)); if (deletion) return deletion;'}
   ${preview ? 'const change = entryChangeRequest(request, env); if (change) return change;' : ''}
   ${staging ? `if (!request.headers.has('x-test-bootstrap')) env = { ...env, DRIVE_OWNER_ENROLLMENT: undefined };
   if (request.headers.has('x-test-closed')) env = { ...env, DRIVE_ORIGIN: 'disabled' };
