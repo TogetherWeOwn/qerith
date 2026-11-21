@@ -108,16 +108,16 @@ export async function proveNewFolder(page, origin, DB, principal, intercept) {
         WHEN NEW.name LIKE 'Unavailable %' BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END`).run();
       try { await assertFailure(`Unavailable ${width}`, 503, 'failure'); }
       finally { await DB.prepare('DROP TRIGGER fixture_new_folder_error').run(); }
-      await page.getByRole('link', { name: 'Next page' }).click();
-      await open();
+      await Promise.all([page.waitForURL('**/?page=*'), page.getByRole('link', { name: 'Next page' }).click()]);
+      await page.getByRole('button', { name: 'Upload', exact: true }).and(page.locator('[aria-disabled="false"]')).waitFor();
       const continuation = page.url(), earlier = `B Earlier ${width}`;
+      await open();
       await submit(earlier, 201);
       await opener.and(active).waitFor();
       await page.getByText('It isn’t on this page.', { exact: false }).waitFor();
       assert.equal(page.url(), continuation);
       assert.equal(await page.locator(`[data-created-row="${await checkInsert(earlier)}"]`).count(), 0);
       await evidence('off-page');
-
       const upload = 'Concurrent upload.txt', release = Promise.withResolvers();
       const recovery = page.getByRole('link', { name: 'Refresh My Drive' });
       const nameAfterFailure = `Z Refresh failed ${width}`, attempts = requests.length;
