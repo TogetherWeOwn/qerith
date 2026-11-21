@@ -214,12 +214,13 @@ readback requires existing R2 lifecycle read access. It checks configured age
 thresholds, not actual deletion timing or rollback after runner loss. It never
 changes bucket policy and does not replace direct attempt cleanup.
 
-The unwired Worker inventory reads the deployed version and the native cron
-configuration for the pinned staging script. It requires no schedules, one
-unchanged non-candidate deployment, and no resource bindings beyond the pinned
-D1 database and assets. This does not see external invokers, unbound resources,
-D1 fixture rows, or billing. It cannot satisfy whole-estate zero-idle inventory
-or establish that a lost runner's deployment was restored.
+The unwired Worker inventory uses Cloudflare's unfiltered account script list
+and requires a complete response containing only the Worker named in the tested
+configuration. It also requires no schedules, one unchanged non-candidate
+deployment, and no resource bindings beyond the pinned D1 database and assets.
+The script list does not cover other compute surfaces, external invokers, D1
+fixture rows or billing. It cannot satisfy whole-estate zero-idle inventory or
+establish that a lost runner's deployment was restored.
 
 A qualification candidate carries an immutable 25-minute request window starting
 at version upload. Upload and activation read back the exact deadline; activation

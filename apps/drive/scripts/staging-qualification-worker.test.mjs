@@ -225,6 +225,7 @@ function inventoryFixture(t) {
   const bindings = [{ name: 'DB', type: 'd1', id: config.d1_databases[0].database_id },
     { name: 'ASSETS', type: 'assets' }, { name: 'SECRET', type: 'secret_text' }];
   const replies = {
+    scripts: [{ id: config.name }],
     deployments: { deployments: [deployment(prior, baseline)] },
     [`versions/${baseline}`]: { id: baseline, resources: { bindings } },
     schedules: { schedules: [] },
@@ -238,19 +239,20 @@ function inventoryFixture(t) {
       assert.equal(redirect, 'error');
       assert.equal(headers.authorization, 'Bearer fake-token');
       assert.equal(signal.aborted, false);
-      const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${config.name}/`;
-      assert.ok(url.startsWith(prefix));
-      const path = url.slice(prefix.length);
+      const scripts = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/scripts`;
+      const prefix = `${scripts}/${config.name}/`;
+      assert.ok(url === scripts || url.startsWith(prefix));
+      const path = url === scripts ? 'scripts' : url.slice(prefix.length);
       calls.push(path);
       assert.ok(Object.hasOwn(replies, path));
-      if (calls.length === 4 && state.changed) return json({ deployments: [deployment(active, baseline)] });
-      if (calls.length === 4 && state.cancelled) controller.abort();
+      if (calls.length === 5 && state.changed) return json({ deployments: [deployment(active, baseline)] });
+      if (calls.length === 5 && state.cancelled) controller.abort();
       return replies[path] instanceof Response ? replies[path] : json(replies[path]);
     });
   return { bindings, calls, inspect, replies, state };
 }
 
-test('Worker inventory reads the tested configuration and only the pinned Worker without mutation', async t => {
+test('Worker inventory uses the committed config for an unfiltered roster and pinned readbacks', async t => {
   const { calls, inspect } = inventoryFixture(t);
   for (const override of [{ TESTED_SHA: sha }, { GITHUB_JOB: 'preview' }, { CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32) }]) {
     await assert.rejects(inspect(override), /Cannot verify staging Worker cron and resource bindings/);
@@ -258,7 +260,24 @@ test('Worker inventory reads the tested configuration and only the pinned Worker
   }
   assert.deepEqual(await inspect(), { version: baseline, deployment: prior, schedules: 0, resources: ['DB', 'ASSETS'],
     attemptRestore: false });
-  assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules', 'deployments']);
+  assert.deepEqual(calls, ['scripts', 'deployments', `versions/${baseline}`, 'schedules', 'deployments']);
+});
+
+test('Worker inventory refuses incomplete or invalid account rosters', async t => {
+  const { calls, inspect, replies } = inventoryFixture(t);
+  const roster = replies.scripts;
+  for (const reply of [[], [null], [{ id: 'other' }], [...roster, ...roster], { scripts: roster },
+    new Response('private diagnostic', { status: 403 }), json([{ ...roster[0], detail: 'a'.repeat(65_536) }]),
+    Response.json({ success: true, errors: [], result: roster, result_info: { cursor: 'more' } }),
+    ...[{ status: 206 }, { headers: { 'content-range': 'bytes 0-99/200' } },
+      { headers: { link: '<https://example.test/>; rel="next"' } }].map(init =>
+      Response.json({ success: true, errors: [], result: roster }, init)),
+  ]) {
+    calls.length = 0;
+    replies.scripts = reply;
+    await assert.rejects(inspect(), { message: 'Cannot verify staging Worker cron and resource bindings.' });
+    assert.deepEqual(calls, ['scripts']);
+  }
 });
 
 test('Worker inventory rejects partial schedule readbacks even with an empty result', async t => {
@@ -268,7 +287,7 @@ test('Worker inventory rejects partial schedule readbacks even with an empty res
       const { calls, inspect, replies } = inventoryFixture(sub);
       replies.schedules = Response.json({ success: true, errors: [], result: { schedules: [] } }, init);
       await assert.rejects(inspect(), { message: 'Cannot verify staging Worker cron and resource bindings.' });
-      assert.deepEqual(calls, ['deployments', `versions/${baseline}`, 'schedules']);
+      assert.deepEqual(calls, ['scripts', 'deployments', `versions/${baseline}`, 'schedules']);
     });
   }
 });
@@ -291,7 +310,7 @@ test('Worker inventory rejects cron, unknown bindings, candidates, deployment dr
     replies[versionPath].resources.bindings = binding.name === 'DB' ? [binding, ...bindings.slice(1)] : [...bindings, binding];
     calls.length = 0;
     await assert.rejects(inspect(), error);
-    assert.deepEqual(calls, ['deployments', versionPath]);
+    assert.deepEqual(calls, ['scripts', 'deployments', versionPath]);
   }
   replies[versionPath].resources.bindings = bindings;
   for (const key of ['changed', 'cancelled']) {
@@ -299,7 +318,7 @@ test('Worker inventory rejects cron, unknown bindings, candidates, deployment dr
     state[key] = true;
     calls.length = 0;
     await assert.rejects(inspect(), error);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
   }
 });
 

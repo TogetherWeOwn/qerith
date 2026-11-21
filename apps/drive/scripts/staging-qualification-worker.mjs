@@ -76,7 +76,7 @@ function workerApi(account, name, token, request) {
         body: body && JSON.stringify(body),
       });
       const complete = body ? response.ok : response.status === 200 && !response.headers.has('content-range');
-      if (!complete || !response.body) {
+      if (!complete || !response.body || (path === 'scripts' && response.headers.has('link'))) {
         await response.body?.cancel();
         throw new Error();
       }
@@ -90,7 +90,7 @@ function workerApi(account, name, token, request) {
       }
       const payload = JSON.parse(text + decoder.decode());
       if (payload?.success !== true || !payload.result || !Array.isArray(payload.errors) || payload.errors.length) throw new Error();
-      if (path === `${script}/schedules` && Object.hasOwn(payload, 'result_info')) throw new Error();
+      if ((path === 'scripts' || path === `${script}/schedules`) && Object.hasOwn(payload, 'result_info')) throw new Error();
       return payload.result;
     } catch {
       // Never log provider bodies, headers, or errors.
@@ -100,6 +100,13 @@ function workerApi(account, name, token, request) {
   const version = (id, signal) => call(`${script}/versions/${id}`, signal);
   return {
     version,
+    async assertOnlyStagingScript(signal) {
+      // Account-wide, unfiltered single-page endpoint (also used by the pinned Cloudflare SDK).
+      const scripts = await call('scripts', signal);
+      if (!Array.isArray(scripts) || scripts.length !== 1 || scripts[0]?.id !== name) {
+        throw new Error('Cannot verify the staging Worker roster.');
+      }
+    },
     async assertNoSchedules(signal) {
       const result = await call(`${script}/schedules`, signal);
       if (!Array.isArray(result.schedules) || result.schedules.length || Object.keys(result).length !== 1) {
@@ -223,7 +230,7 @@ export async function recoverQualificationWorker(source, record, env, cwd, signa
   }
 }
 
-// Only Worker cron/binding evidence, not a whole-estate inventory or an atomic fence.
+// Only Worker roster, cron and binding evidence, not whole-estate inventory or an atomic fence.
 export async function inspectQualificationWorker(env, cwd, signal, request = fetch) {
   try {
     const { sha, runId, attempt } = assertQualificationJob(env, cwd);
@@ -235,6 +242,7 @@ export async function inspectQualificationWorker(env, cwd, signal, request = fet
     const deadline = performance.now() + timeout;
     const timer = AbortSignal.timeout(timeout);
     const bounded = signal ? AbortSignal.any([signal, timer]) : timer;
+    await api.assertOnlyStagingScript(bounded);
     const before = await api.current(bounded);
     const deployed = await api.version(before.version, bounded);
     const bindings = checkedBindings(deployed, config, {});
