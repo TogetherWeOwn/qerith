@@ -371,7 +371,7 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
     signal?.throwIfAborted();
     return withQualificationRecovery(() => runQualificationPhase(exercise, identity, signal, caseBudget), async () => {
       // Cleanup must finish before rollback and has its own budget after cancellation.
-      if (await runQualificationPhase(cleanup, identity, undefined, cleanupBudget) !== true) {
+      if (await runQualificationPhase(cleanup, { ...identity, expiresAt }, undefined, cleanupBudget) !== true) {
         throw new Error('Qualification prefix cleanup is unverified.');
       }
     });

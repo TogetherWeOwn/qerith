@@ -178,8 +178,13 @@ must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
 The offline composer requires every case to pass and binds evidence to the exact invocation.
-These are ordering checks with offline callbacks, not provider evidence. The
-qualification workflow still has no caller and cannot issue a receipt.
+The estate composer runs the bounded inventory before mutation and after Worker
+restore. It checks exact-attempt writer quiescence and a held, abortable fence
+before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
+before restore. D1 fixture cleanup does not roll back migrations or clean app
+fixtures. The estate, fixture and writer-fence inputs are injected; offline
+passing tests are not provider evidence. The protected job still stops and
+cannot issue a receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects

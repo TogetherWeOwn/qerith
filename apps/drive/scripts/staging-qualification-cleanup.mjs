@@ -60,7 +60,7 @@ export async function createQualificationR2Cleanup(env, cwd, { send = fetch } = 
   const { settings } = await readQualificationR2Binding(env, cwd, identity.sha).catch(() => { throw unverified(); });
   const { createS3Listing } = await import('../src/lib/server/s3/listing.ts');
   const { createS3Transport } = await import('../src/lib/server/s3/transport.ts');
-  const options = { fetch: send, timeoutMs: 8000 };
+  const options = { fetch: send, timeoutMs: 8000, drainBufferedAbort: true };
   const io = { listing: createS3Listing(settings, options), request: createS3Transport(settings, options) };
   return (context, signal) => {
     if (context.sha !== identity.sha || context.prefix !== qualificationPrefix(identity)) throw unverified();
