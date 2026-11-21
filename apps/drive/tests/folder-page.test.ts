@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
+import { stagingOrigin } from '../src/lib/server/request-auth';
+import { moveNeighbor, readMoveReceipt } from '../src/routes/f/[folderId]/move-action';
+
+const savedMove = { source: 'B', target: null, rows: ['A', 'B', 'C', 'D'], until: 0 };
+test('Move focus prefers the next surviving original row and falls back to the heading', () => {
+  for (const [live, expected] of [['CD', 'C'], ['AC', 'C'], ['A', 'A'], ['', undefined], ['Z', undefined]] as const)
+    assert.equal(moveNeighbor(savedMove, [...live].map(id => ({ id }))), expected, live);
+});
+test('Move receipt links only to the current parent, including My Drive', async t => {
+  let currentParentId: string | null = 'other';
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ folderName: 'My Drive', currentParentId }));
+  assert.equal(await readMoveReceipt(savedMove), null);
+  currentParentId = null;
+  assert.deepEqual(await readMoveReceipt(savedMove), { id: null, name: 'My Drive' });
+});
 
 const request = (query = '') => new Request(`https://example.test/f/private?${query}`);
 const unavailable = { status: 'unavailable' };
@@ -103,6 +119,41 @@ test('only projects a positive download hint on a canonical file ID', async () =
     { ...file, downloadable: true },
     ...entries.slice(1).map(({ id, name, kind }) => ({ id, name, kind })),
   ]);
+});
+
+test('nested loader marks only owned, addressable rows as movable in invite mode', async t => {
+  // Supply the two platform bindings while exercising the real route loader in Node.
+  const sources = new Map([['cloudflare:workers', 'export const env = {}'], ['$app/env', 'export const building = true']]);
+  const hooks = registerHooks({ resolve(specifier, context, next) {
+    const code = sources.get(specifier);
+    return code ? { url: `data:text/javascript,${encodeURIComponent(code)}`, shortCircuit: true } : next(specifier, context);
+  } });
+  t.after(() => hooks.deregister());
+  const { env } = await import('cloudflare:workers');
+  const { load } = await import('../src/routes/f/[folderId]/+page.server');
+  const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' };
+  const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' };
+  const invalid = { ...file, id: '..' };
+  for (const role of ['owner', 'member'] as const) for (const [invite, owned] of [[false, 1], [true, 0], [true, 1]] as const) {
+    const statement = {
+      bind: () => statement,
+      first: async <T>() => await get('', 'private') as T,
+      all: async <T>() => ({ results: [{ id: null, kind: owned }, { ...file, downloadable: 1, object_key: 'private-key' }, folder, { ...invalid, movable: true }] as T[] }),
+    };
+    const withSession = test.mock.fn((_mode: 'first-primary') => ({ prepare: () => statement }));
+    const origin = invite ? stagingOrigin : 'https://drive.example.test';
+    Object.assign(env, { DB: { withSession }, DRIVE_ORIGIN: origin,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: invite ? '1' : undefined, DRIVE_SIGN_IN_FIXTURE: invite ? undefined : '1' });
+    const { result } = await load({
+      request: new Request(`${origin}/f/private`), params: { folderId: 'private' }, setHeaders: () => {},
+      locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
+    } as Parameters<typeof load>[0]);
+    assert.deepEqual(withSession.mock.calls.map(call => call.arguments), [['first-primary'], ['first-primary']]);
+    assert.equal(result.status, 'ok');
+    const flag = invite && owned ? { movable: true } : {};
+    assert.equal(result.folder.canMove, flag.movable);
+    assert.deepEqual(result.folder.entries, [{ ...file, downloadable: true, ...flag }, { ...folder, ...flag }, invalid]);
+  }
 });
 
 test('does not disclose the title if live listing is denied, fails or exceeds the bound', async () => {

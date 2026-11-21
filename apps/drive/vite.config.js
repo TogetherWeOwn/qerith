@@ -57,14 +57,14 @@ function generatedAssets(builder) {
   const people = [...assets];
   assets.clear();
   visited.clear();
-  // SSR-only: ship styles and their font, not the generated client entry.
+  // Staging may hydrate; the read-only sign-in fixture still needs only styles.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
   const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
-  const folder = styles();
+  const folder = [...assets], folderStyles = styles();
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/shared/+page.svelte'));
-  return { signIn, root, invite, people, folder, shared: styles() };
+  return { signIn, root, invite, people, folder, folderStyles, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -85,6 +85,7 @@ const buildAdapter = {
       // The adapter can answer before the hook. Gate preview dispatch here.
       writeFileSync(resolve(config.assets.directory, '_worker.js'), `
 import adapterWorker from '../cloudflare-tmp/adapter-worker.js';
+import { dispatchEligibleRecipients } from '../../src/lib/server/eligible-recipient-route.ts';
 import { postFolder } from '../../src/lib/server/folder-route.ts';
 import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.ts';
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
@@ -100,7 +101,7 @@ import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
-const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folder]);
+const fixtureAssets = new Set([...generated.signIn, ...generated.root, ...generated.invite, ...generated.folderStyles]);
 const assets = {
   signIn: new Set(generated.signIn),
   root: new Set(generated.root),
@@ -140,6 +141,9 @@ const handlers = {
         asset: request => env.ASSETS.fetch(request)
       });
     }
+    const forward = request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    const recipients = dispatchEligibleRecipients(request, env, forward);
+    if (recipients) return recipients;
     if (url.pathname === '/api/folders') return postFolder(request, env);
     // Keep listing denials out of the adapter's query validation.
     const listing = listingRequest(request, env);
@@ -170,7 +174,7 @@ const handlers = {
       }
     }
     if (pathname === appPath || pathname.startsWith(appPath + '/')) return unavailable();
-    return adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx);
+    return forward(request);
   }
 };
 

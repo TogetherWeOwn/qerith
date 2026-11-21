@@ -1,0 +1,130 @@
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { capture, widths } from './root-listing.mjs';
+export async function proveNestedMove(page, origin, db, intercept) {
+  for (const [width, height] of widths) {
+    console.log(`Nested Move (${width}×${height})`);
+    const parent = `nested-parent-${width}`, source = `nested-source-${width}`, path = `/f/${parent}`;
+    const name = '01 Résumé', destination = `! Nested destination ${width}`, removed = `! Nested removed ${width}`, home = `! Nested source ${width}`;
+    const nested = width === 1280, target = nested ? destination : 'My Drive', primary = `Move to ${target}`;
+    const seed = rows => db.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES ${rows}`);
+    const seedSourceFolder = () => seed(`(?1, 'owner', NULL, ?2, 'folder'), (?1 || '-next', 'owner', ?1, '02 Next', 'folder'),
+      (?1 || '-other', 'owner', ?1, '03 Other', 'folder')`).bind(parent, home).run();
+    await seedSourceFolder();
+    await seed(`(?2, 'owner', ?1, ?3, 'folder'), (?2 || '-child', 'owner', ?2, 'Descendant', 'folder'),
+      ('nested-target', 'owner', NULL, ?4, 'folder'), ('nested-clash', 'owner', 'nested-target', ?3, 'folder'),
+      ('nested-gone', 'owner', NULL, ?5, 'folder')`).bind(parent, source, name, destination, removed).run();
+    await page.setViewportSize({ width, height }); await page.goto(origin + path);
+    const actions = item => page.getByRole('button', { name: `Actions for ${item}` }), trigger = actions(name);
+    const dialog = page.getByRole('dialog', { name: /^Move “/ });
+    const button = name => dialog.getByRole('button', { name, exact: true });
+    const focused = page.locator(':focus'), evidence = state => capture(page, state, width, true, 'nested-move');
+    const status = text => page.getByRole('status').filter({ hasText: text }), generic = status(/^Item moved\.$/);
+    const open = async (item = name) => {
+      await actions(item).press('ArrowDown');
+      await page.getByRole('menuitem', { name: 'Move' }).press('Enter');
+    };
+    const patch = `/api/entries/${source}`, secondPatch = `/api/entries/${parent}-other`, requests = [];
+    const writes = r => r.method() === 'PATCH' && [patch, secondPatch].includes(new URL(r.url()).pathname);
+    const track = r => { if (writes(r) || r.url().startsWith(`${origin}${path}/__data.json`)) requests.push(r.url()); };
+    page.on('request', track);
+    const press = label => button(label).and(page.locator('[aria-disabled="false"]')).press('Enter', { noWaitAfter: true });
+    const response = matches => page.waitForResponse(r => matches(r.request()));
+    const submit = async label => (await Promise.all([response(writes), press(label)]))[0].status();
+    const snapshot = tag => page.waitForEvent('console', msg => msg.text().startsWith(`${tag}:`)).then(msg => JSON.parse(msg.text().slice(tag.length + 1)));
+    if (nested) {
+      const reparent = id => db.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(id, source).run();
+      await reparent('nested-gone'); await open();
+      await dialog.getByRole('alert').filter({ hasText: 'Refresh this folder' }).and(focused).waitFor();
+      assert.equal(await button('Move to My Drive').getAttribute('aria-disabled'), 'true');
+      await button('Move to My Drive').press('Enter');
+      await page.keyboard.press('Escape'); await trigger.and(focused).waitFor();
+      await reparent(parent); // The PATCH trace also proves the stale picker never wrote.
+    }
+    await open();
+    await button(home).press('Enter');
+    await dialog.getByRole('heading', { name: `My Drive / ${home}` }).and(focused).waitFor();
+    for (const label of [name, `Move to ${home}`]) assert.equal(await button(label).getAttribute('aria-disabled'), 'true');
+    await evidence('current-and-self');
+    await button('Up to My Drive').press('Enter');
+    await button(destination).press('Enter');
+    assert.equal(await submit(`Move to ${destination}`), 409);
+    await dialog.getByRole('alert').and(focused).waitFor(); await evidence('conflict');
+    await button('Up to My Drive').press('Enter');
+    await button(removed).press('Enter');
+    await dialog.getByRole('heading', { name: `My Drive / ${removed}` }).and(focused).waitFor();
+    await db.prepare("DELETE FROM drive_entries WHERE id = 'nested-gone'").run();
+    assert.equal(await submit(`Move to ${removed}`), 404);
+    await dialog.getByRole('alert').and(focused).waitFor();
+    assert.equal(await button(`Move to ${removed}`).getAttribute('aria-disabled'), 'true');
+    await evidence('gone'); await button('Up to My Drive').press('Enter');
+    const held = Promise.withResolvers(), reloadGate = Promise.withResolvers();
+    if (nested) {
+      await button(target).press('Enter');
+      intercept(patch, route => route.abort());
+      await press(primary);
+      assert.match(await dialog.getByRole('alert').and(focused).textContent(), /Refresh the source folder and check the selected destination/);
+      assert.equal(await button(primary).getAttribute('aria-disabled'), 'true');
+      await button(primary).press('Enter'); await evidence('unconfirmed');
+      await page.reload(); await open(); // Move A goes to My Drive, B to the nested destination.
+    }
+    const isReload = r => r.url() === origin + path && r.isNavigationRequest();
+    intercept(path, (_, forward) => reloadGate.promise.then(() => nested && db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next', ?1 || '-other')")
+      .bind(parent).run()).then(() => forward()));
+    intercept(patch, (_, forward) => held.promise.then(() => forward()));
+    try {
+      await press('Move to My Drive');
+      await button('Moving…').waitFor(); await page.keyboard.press('Escape');
+      await evidence('saving'); // Install the snapshot before navigation, not via a command on the held page.
+      if (nested) await page.evaluate(([source, next]) => window.addEventListener('beforeunload', () => {
+        const receipt = document.querySelector('.move-notice [role="status"]');
+        const unclipped = el => { const css = getComputedStyle(el); return css.clipPath === 'none' && css.clip === 'auto'; };
+        console.debug('move-outgoing:' + JSON.stringify([!document.querySelector('dialog[open]'), !document.querySelector(`[data-row="${source}"]`),
+          document.activeElement?.matches(`[data-row="${next}"] a[data-name]`), receipt?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) &&
+          [receipt, receipt.parentElement].every(unclipped) && receipt.textContent]));
+      }, { once: true }), [source, `${parent}-next`]);
+      const [written, , outgoing] = await Promise.all([response(writes), page.waitForRequest(isReload), nested && snapshot('move-outgoing'), held.resolve()]);
+      assert.equal(written.status(), 200); if (nested) assert.deepEqual(outgoing, [true, true, true, 'Item moved.'], 'outgoing document state while reload is held');
+      assert.equal((await Promise.all([response(isReload), reloadGate.resolve()]))[0].status(), 200);
+    } finally { held.resolve(); reloadGate.resolve(); }
+    if (nested) {
+      await page.getByRole('heading', { name: "This folder isn't available." }).and(focused).waitFor();
+      await status('Item moved. Refresh this page').waitFor();
+      const api = '/api/move-destinations', lookup = (id, query = '') => r => r.url() === `${origin}${api}?entry=${id}${query}`;
+      intercept(api, () => {}); // Interrupt verification with another document reload.
+      await seedSourceFolder(); await Promise.all([page.waitForRequest(lookup(source)), page.reload()]);
+      await generic.waitFor();
+      const deliver = Promise.withResolvers(), load = Promise.withResolvers();
+      intercept(api, (_, forward) => forward(true, () => deliver.promise));
+      await Promise.all([page.waitForRequest(lookup(source)), page.reload()]);
+      await page.evaluate(entry => {
+        const json = Response.prototype.json;
+        Response.prototype.json = async function () {
+          const body = await json.call(this);
+          if (this.url.endsWith(`?entry=${entry}`)) setTimeout(() => console.debug('older-receipt:' + JSON.stringify(document.querySelector('.move-notice [role="status"]')?.textContent ?? null)), 0);
+          return body;
+        };
+      }, source);
+      try {
+        await open('03 Other'); await button(target).press('Enter');
+        intercept(path, (_, forward) => forward(true, () => load.promise));
+        assert.equal((await Promise.all([page.waitForRequest(isReload), submit(primary)]))[1], 200);
+        const [notice] = await Promise.all([snapshot('older-receipt'), deliver.resolve()]);
+        assert.equal(notice, 'Item moved.', 'the older result cannot replace the second receipt before reload');
+        await Promise.all([page.waitForRequest(lookup(`${parent}-other`, '&folder=nested-target')), load.resolve()]);
+      } finally { deliver.resolve(); load.resolve(); }
+    }
+    await page.getByRole('link', { name: '02 Next' }).and(focused).waitFor(); await status(`Moved to ${target}`).waitFor();
+    assert.equal(await trigger.count(), 0);
+    await evidence('success');
+    await page.getByRole('link', { name: `Open ${target}` }).press('Enter');
+    await page.getByRole('list').getByRole('link', { name: nested ? '03 Other' : name, exact: true }).waitFor();
+    await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `keyboard-nested-move-${width}x${height}.json`),
+      JSON.stringify({ focus: ['trigger', 'current path', 'conflict alert', 'gone alert', ...(nested ? ['unconfirmed alert'] : []), 'next row'],
+        submission: nested ? [409, 404, 'aborted', 200, 200] : [409, 404, 200], documentReload: true, destination: target, unavailableReload: nested }));
+    page.off('request', track);
+    assert.deepEqual(requests, [...Array(nested ? 4 : 3).fill(origin + patch), ...(nested ? [origin + secondPatch] : [])]);
+    await db.prepare("DELETE FROM drive_entries WHERE id IN (?, ?, ?, 'nested-clash', 'nested-target')").bind(source, `${source}-child`, `${parent}-other`).run();
+  }
+}

@@ -40,7 +40,8 @@ export async function captureFolderView(page, origin, db, { owner = 'fixture-own
     }), [name, 'solid', true]);
   };
   const activate = async name => {
-    await tab(name);
+    if (scope === 'staging-folder' && name === 'Next page') await main.getByRole('link', { name, exact: true }).focus();
+    else await tab(name);
     const [response] = await Promise.all([page.waitForNavigation(), page.keyboard.press('Enter')]);
     assert.equal(response?.status(), 200, `${name}: full document navigation`);
   };

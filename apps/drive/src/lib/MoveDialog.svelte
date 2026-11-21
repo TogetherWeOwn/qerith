@@ -7,7 +7,7 @@
   import type { MoveDestinations } from './server/move-destinations';
   import './dialog.css';
   type Folder = { id: string | null; name: string };
-  type Entry = { id: string; name: string; kind: 'folder' | 'file' };
+  type Entry = { id: string; name: string; kind: 'folder' | 'file'; expectedParent?: string };
   let { onrootcreated, onmoved, onreturn }: {
     onrootcreated: (id: string, name: string) => Promise<void>;
     onmoved: (id: string, folder: Folder, close: () => void) => Promise<void>;
@@ -16,7 +16,7 @@
   const uid = $props.id();
   const root: Folder = { id: null, name: 'My Drive' };
   const gone = 'That folder was deleted. Pick another one.';
-  const unknown = 'We couldn’t confirm the move. Check My Drive before trying again.';
+  const unknown = 'We couldn’t confirm the move. Refresh the source folder and check the selected destination before trying again.';
   const label = (name: string) => name.trim() ? name : `${name} (Whitespace-only name)`;
   let dialog: HTMLDialogElement, heading: HTMLHeadingElement, first: HTMLButtonElement, last: HTMLButtonElement;
   let notice = $state<HTMLParagraphElement>();
@@ -72,7 +72,10 @@
       });
       const next: MoveDestinations | undefined = response.ok ? await response.json() : undefined;
       if (request !== controller) return;
-      if (next) {
+      if (next && source.expectedParent !== undefined && next.currentParentId !== source.expectedParent) {
+        uncertain = true; data = undefined;
+        failure = 'This item is no longer in this folder. Refresh this folder before moving it.';
+      } else if (next) {
         const folders = after ? [...(data?.folders ?? []), ...next.folders] : next.folders;
         data = { ...next, folders: [...new Map(folders.map(item => [item.id, item])).values()] };
         trail = [...path.slice(0, -1), { id: destination.id, name: next.folderName }];
