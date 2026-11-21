@@ -58,21 +58,23 @@ it('reports direct and current same-owner folder grants independently on a neste
       ('carol', 'member', 'active'), ('dave', 'member', 'active'), ('eve', 'member', 'active')`),
     env.DB.prepare("UPDATE drive_entries SET name = '<Shared root>' WHERE id = 'folder'"),
     env.DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES
-      ('inner', 'alice', 'folder', 'Shared parent', 'folder'),
+      ('a-middle', 'alice', 'folder', 'Shared middle', 'folder'),
+      ('inner', 'alice', 'a-middle', 'Shared parent', 'folder'),
       ('child', 'alice', 'inner', 'Nested target', 'folder'),
       ('unrelated', 'bob', NULL, 'Unrelated folder', 'folder')`),
     env.DB.prepare(`INSERT INTO drive_read_grants (entry_id, recipient_id) VALUES
-      ('child', 'bob'), ('folder', 'carol'), ('child', 'dave'), ('folder', 'dave'), ('inner', 'dave'),
-      ('unrelated', 'eve')`),
+      ('child', 'bob'), ('folder', 'carol'), ('child', 'dave'),
+      ('folder', 'dave'), ('a-middle', 'dave'), ('inner', 'dave'), ('unrelated', 'eve')`),
   ]);
   const list = () => read.listPage(alice.token, 'child');
+  // The lowest granting folder ID is neither the root nor the nearest ancestor.
   const expected = [row('bob', { direct: true }), row('carol', { inheritedFrom: '<Shared root>' }),
-    row('dave', { direct: true, inheritedFrom: '<Shared root>' }), row('eve')];
+    row('dave', { direct: true, inheritedFrom: 'Shared middle' }), row('eve')];
   expect(await list()).toEqual({ recipients: expected, nextCursor: null });
   expect(await read.listPage(bob.token, 'child')).toBeNull(); // Read access is not ownership.
-  await env.DB.prepare("DELETE FROM drive_read_grants WHERE entry_id = 'folder' AND recipient_id = 'dave'").run();
+  await env.DB.prepare("DELETE FROM drive_read_grants WHERE entry_id = 'a-middle' AND recipient_id = 'dave'").run();
   expect(await list()).toEqual({ recipients: [expected[0], expected[1],
-    row('dave', { direct: true, inheritedFrom: 'Shared parent' }), expected[3]], nextCursor: null });
+    row('dave', { direct: true, inheritedFrom: '<Shared root>' }), expected[3]], nextCursor: null });
   await env.DB.prepare("UPDATE drive_entries SET parent_id = NULL WHERE id = 'child'").run();
   expect(await list()).toEqual({ recipients: [expected[0], row('carol'), row('dave', { direct: true }), expected[3]], nextCursor: null });
 });
