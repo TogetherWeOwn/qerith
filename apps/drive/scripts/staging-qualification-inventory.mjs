@@ -1,13 +1,13 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
+import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
 import { readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
+import { assertNoQualificationD1MigrationFixtures } from './staging-qualification-d1.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
 import { inspectQualificationWorker, runQualificationPhase, stagingConfigAt } from './staging-qualification-worker.mjs';
 
 // No such compute is approved by the committed staging config.
 const absent = ['containers', 'durableObjects', 'alarms', 'scheduledWorkers', 'streamInputs', 'otherCompute'];
-const storagePrefix = 'drive-qualification/full-v0/';
 const unverified = () => new Error('Qualification estate inventory is unverified.');
 
 function matchScan(scan, expected) {
@@ -72,10 +72,11 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
 
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
+        await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
         // Check all full-v0 fixture attempts. The separate recovery-record and
         // storage-proof namespaces have their own retention/cleanup policies.
-        const { keys, uploads } = await readQualificationR2Prefix(storagePrefix, active,
+        const { keys, uploads } = await readQualificationR2Prefix(qualificationFixtureNamespace, active,
           createS3Listing(settings, { fetch: send, timeoutMs: 8_000 }));
         if (keys.length || uploads.length) throw unverified();
         return inspectQualificationWorker(env, cwd, active, request);

@@ -542,10 +542,10 @@ function composedLifecycle({ cwd, env, active, phases, exercise, signal, after =
     inventory({ phase }) { phases.push(phase); return phase === 'after' ? after() : true; },
     cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
   }, env, cwd, signal, {
-    upload: () => active, migrate: () => null,
-    async worker({ upload, exercise, cleanup }, _env, _cwd, workerSignal) {
-      try { return await exercise(upload, workerSignal); }
-      finally { await cleanup(upload, workerSignal); phases.push('restore'); }
+    upload: () => ({ ...active, expiresAt: String(Date.now() + 25 * 60_000) }), migrate: () => null,
+    async worker({ exercise, cleanup }, _env, _cwd, workerSignal) {
+      try { return await exercise(active, workerSignal); }
+      finally { await cleanup(active, workerSignal); phases.push('restore'); }
     },
   });
 }
