@@ -1,6 +1,7 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   ...['signed-out', 'empty', 'listed', 'invalid-page', 'exhausted', 'unavailable'].flatMap(state =>
@@ -8,7 +9,24 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false) {
+function hasViewportImageData(png, width, height) {
+  if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
+      png.readUInt32BE(16) !== width || png.readUInt32BE(20) !== height) return false;
+  let hasData = false;
+  for (let offset = 33; offset + 12 <= png.length;) {
+    const length = png.readUInt32BE(offset);
+    const end = offset + length + 12;
+    if (end > png.length) return false;
+    const type = png.toString('latin1', offset + 4, offset + 8); // Preserve the high bit of each byte.
+    if (type === 'IEND') return hasData && end === png.length &&
+      png.subarray(offset).equals(Buffer.from('0000000049454e44ae426082', 'hex'));
+    if (type === 'IDAT' && length > 0) hasData = true;
+    offset = end;
+  }
+  return false;
+}
+
+export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -32,6 +50,34 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
       if (!screenshot.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
           screenshot.length < 45 || screenshot.readUInt32BE(16) !== width || !screenshot.subarray(-8).equals(Buffer.from('49454e44ae426082', 'hex')) ||
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid upload evidence: ${label}`);
+    }
+  }
+  if (continuation) for (const [width, height] of [[390, 844], [1280, 800]]) {
+    const proof = JSON.parse(await readFile(join(dir, `root-continuation-${width}.json`), 'utf8'));
+    const requireTrace = (phase, expected) => {
+      const actual = phase.split('.').reduce((value, key) => value?.[key], proof);
+      if (!isDeepStrictEqual(actual?.requests, expected)) throw new Error(`Invalid continuation trace: ${width} ${phase}`);
+    };
+    const intent = '/api/uploads/00000000-0000-4000-8000-000000000101';
+    const fresh = '/api/uploads/00000000-0000-4000-8000-000000000103';
+    const resume = ['GET', `${intent}/resume`, null];
+    const destination = '{"parentId":null,"name":"Re-picked.txt"}';
+    requireTrace('canceled', []);
+    requireTrace('fresh', [['POST', '/api/uploads', '{"size":16777217}'], ['PUT', `${fresh}/parts/1`, 16777216],
+      ['PUT', `${fresh}/parts/2`, 1], ['POST', `${fresh}/complete`, destination]]);
+    for (const phase of ['pending', 'refused']) requireTrace(`suffix.${phase}`, [resume]);
+    const finishing = ['acknowledged', 'empty', 'empty-acknowledged'];
+    for (const label of finishing) {
+      const expected = [resume, ...(label === 'empty' ? [['PUT', `${intent}/parts/1`, 0]] : []),
+        ['POST', `${intent}/complete`, destination]];
+      for (const phase of ['pending', 'published']) requireTrace(`${label}.${phase}`, expected);
+    }
+    const axe = JSON.parse(await readFile(join(dir, `axe-root-continuation-${width}.json`), 'utf8'));
+    if (!Array.isArray(axe?.violations) || axe.violations.length) throw new Error(`Invalid continuation axe evidence: ${width}`);
+    for (const state of [...finishing.map(label => `${label}-finishing`), 'suffix-interrupted', 'uploaded']) {
+      const label = `${state}-${width}`;
+      const png = await readFile(join(dir, `root-continuation-${label}.png`));
+      if (!hasViewportImageData(png, width, height)) throw new Error(`Invalid continuation screenshot: ${label}`);
     }
   }
   if (staging) {
@@ -83,7 +129,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
   const root = process.env.ROOT_EVIDENCE === 'true';
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
-  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true', folder);
+  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
+    folder, process.env.CONTINUATION_EVIDENCE === 'true');
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
