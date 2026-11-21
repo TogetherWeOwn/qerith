@@ -31,7 +31,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     const writes = r => r.method() === 'PATCH' && [patch, secondPatch].includes(new URL(r.url()).pathname);
     const track = r => { if (writes(r) || r.url().startsWith(`${origin}${path}/__data.json`)) requests.push(r.url()); };
     page.on('request', track);
-    const submit = async label => (await Promise.all([page.waitForResponse(r => writes(r.request())), button(label).press('Enter', { noWaitAfter: true })]))[0].status();
+    const submit = async label => (await Promise.all([page.waitForResponse(r => writes(r.request())), button(label).and(page.locator('[aria-disabled="false"]')).press('Enter', { noWaitAfter: true })]))[0].status();
     if (nested) {
       const reparent = id => db.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(id, source).run();
       await reparent('nested-gone'); await open();
@@ -65,16 +65,15 @@ export async function proveNestedMove(page, origin, db, intercept) {
       await button(primary).press('Enter');
       assert.match(await dialog.getByRole('alert').and(focused).textContent(), /Refresh the source folder and check the selected destination/);
       assert.equal(await button(primary).getAttribute('aria-disabled'), 'true');
-      await button(primary).press('Enter');
-      await page.reload(); await open(); await button(target).press('Enter');
-      await db.prepare("DELETE FROM drive_entries WHERE id = 'nested-clash'").run();
+      await button(primary).press('Enter'); await evidence('unconfirmed');
+      await page.reload(); await open(); // Move A goes to My Drive, B to the nested destination.
       intercept(path, (_, forward) => reloadGate.promise.then(() => db.prepare("DELETE FROM drive_entries WHERE id IN (?1, ?1 || '-next', ?1 || '-other')")
         .bind(parent).run()).then(() => forward()));
     }
     const isReload = r => r.url() === origin + path && r.isNavigationRequest();
     const started = page.waitForRequest(isReload), reload = page.waitForResponse(r => isReload(r.request()));
     intercept(patch, async (_, forward) => { await held.promise; return forward(); });
-    const pending = submit(primary);
+    const pending = submit('Move to My Drive');
     try {
       await button('Moving…').waitFor(); await page.keyboard.press('Escape');
       await evidence('saving');
@@ -89,11 +88,10 @@ export async function proveNestedMove(page, origin, db, intercept) {
       console.log('Nested Move: checking unavailable-document and receipt recovery');
       await page.getByRole('heading', { name: "This folder isn't available." }).and(focused).waitFor();
       await status('Item moved. Refresh this page').waitFor();
-      const api = '/api/move-destinations', lookup = id => r => r.url().startsWith(`${origin}${api}?entry=${id}&`);
+      const api = '/api/move-destinations', lookup = (id, query = '') => r => r.url() === `${origin}${api}?entry=${id}${query}`;
       intercept(api, () => {}); // Interrupt verification with another document reload.
       await seedSourceFolder(); await Promise.all([page.waitForRequest(lookup(source)), page.reload()]);
       await generic.waitFor();
-      console.log('Nested Move: refreshing again and checking the superseding receipt');
       const deliver = Promise.withResolvers(), load = Promise.withResolvers();
       intercept(api, (_, forward) => forward(true, () => deliver.promise));
       await Promise.all([page.waitForRequest(lookup(source)), page.reload()]);
@@ -101,7 +99,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
         const json = Response.prototype.json;
         Response.prototype.json = async function () {
           const body = await json.call(this);
-          if (this.url.includes(`entry=${entry}&`)) setTimeout(() => performance.mark('first-receipt-processed'), 0);
+          if (this.url.endsWith(`?entry=${entry}`)) setTimeout(() => performance.mark('first-receipt-processed'), 0);
           return body;
         };
       }, source);
@@ -113,7 +111,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
         deliver.resolve();
         await page.waitForFunction(() => performance.getEntriesByName('first-receipt-processed').length);
         assert.equal(await generic.count(), 1, 'the older result cannot replace the second receipt before reload');
-        const secondReceipt = page.waitForRequest(lookup(`${parent}-other`));
+        const secondReceipt = page.waitForRequest(lookup(`${parent}-other`, '&folder=nested-target'));
         load.resolve(); await secondReceipt;
       } finally { deliver.resolve(); load.resolve(); }
     }
@@ -121,7 +119,7 @@ export async function proveNestedMove(page, origin, db, intercept) {
     assert.equal(await trigger.count(), 0);
     await evidence('success');
     await page.getByRole('link', { name: `Open ${target}` }).press('Enter');
-    for (const item of nested ? [name, '03 Other'] : [name]) await page.getByRole('list').getByRole('link', { name: item, exact: true }).waitFor();
+    await page.getByRole('list').getByRole('link', { name: nested ? '03 Other' : name, exact: true }).waitFor();
     await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `keyboard-nested-move-${width}x${height}.json`),
       JSON.stringify({ focus: ['trigger', 'current path', 'conflict alert', 'gone alert', ...(nested ? ['unconfirmed alert'] : []), 'next row'],
         submission: nested ? [409, 404, 'aborted', 200, 200] : [409, 404, 200], documentReload: true, destination: target, unavailableReload: nested }));

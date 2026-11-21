@@ -275,6 +275,7 @@ try {
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       otherMemberCookie: `${sessionName}=${memberToken}`,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
+  await page.bringToFront(); // Resume the owner tab before frame-dependent checks.
   console.log('Staging-origin: invite context closed; checking route denials');
   const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
