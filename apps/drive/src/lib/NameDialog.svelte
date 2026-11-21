@@ -16,11 +16,12 @@
   let dialog: HTMLDialogElement, field: HTMLInputElement;
   let first: HTMLButtonElement, last: HTMLButtonElement;
   let opener = $state<HTMLButtonElement>(), notice = $state<HTMLParagraphElement>();
-  let backdrop = false;
-  let name = $state(''), checking = $state(false), pending = $state(false);
+  let backdrop = false, originalDisplayName = '';
+  let name = $state(''), checking = $state(false), pending = $state(false), refreshing = $state(false);
   let clash = $state(''), failure = $state('');
   let target = $state<{ id: string; name: string; kind: string; path: string }>();
   const invalid = $derived(checking ? nameError(name) || clash : '');
+  const pendingText = $derived(refreshing ? 'Refreshing My Drive…' : target ? 'Renaming…' : 'Making folder…');
 
   function nameError(value: string) {
     try { validateName(value); return ''; } catch {
@@ -34,8 +35,9 @@
   export function open(entry?: NonNullable<typeof target>) {
     if (dialog.open) return;
     flushSync(() => { target = entry; name = entry?.name ?? ''; clash = failure = ''; checking = false; });
-    const dot = entry?.kind === 'File' ? name.lastIndexOf('.') : -1;
-    const end = dot > 0 && dot < name.length - 1 ? dot : name.length;
+    originalDisplayName = field.value; // Text inputs strip line breaks in stored names.
+    const dot = entry?.kind === 'File' ? originalDisplayName.lastIndexOf('.') : -1;
+    const end = dot > 0 && dot < originalDisplayName.length - 1 ? dot : originalDisplayName.length;
     dialog.showModal(); field.focus(); field.setSelectionRange(0, end);
   }
   function close() { dialog.close(); }
@@ -55,7 +57,7 @@
     event.preventDefault();
     if (pending) return;
     const entry = target;
-    if (entry?.name === name) { dismiss(); return; }
+    if (entry && field.value === originalDisplayName) { dismiss(); return; }
     checking = true; failure = '';
     if (invalid) { await tick(); field.focus(); return; }
     pending = true;
@@ -77,9 +79,10 @@
         if (expected && row.name === submitted) saved = row.id;
         else failure = unknown;
       } else if (response.status === 409) {
-        // An empty conflict response doesn't disclose the sibling's kind.
-        const kind = items.find(item => item.name === submitted)?.kind.toLowerCase();
-        clash = `There's already ${kind ? `a ${kind}` : 'an item'} called "${submitted}" here. Pick another name.`;
+        // Rename checks the live parent, which need not match this listing.
+        const kind = !entry && items.find(item => item.name === submitted)?.kind.toLowerCase();
+        clash = entry ? `The name "${submitted}" is already in use. Pick another name.` :
+          `There's already ${kind ? `a ${kind}` : 'an item'} called "${submitted}" here. Pick another name.`;
       } else if (response.status === 400) failure = entry ? 'Check the name and try again.' : 'Check the folder name and try again.';
       else if (response.status === 401) failure = entry ? 'Sign in again before renaming this item.' : 'Sign in again before making a folder.';
       else if (response.status === 403 || response.status === 404) failure = entry ?
@@ -88,9 +91,9 @@
     } catch { failure = unknown; }
 
     try {
-      if (saved && entry) await onrenamed(saved, submitted, close);
+      if (saved && entry) { refreshing = true; await onrenamed(saved, submitted, close); }
       else if (saved) await oncreated(saved, submitted, () => { close(); opener?.focus(); });
-    } finally { pending = false; }
+    } finally { refreshing = pending = false; }
     if (!saved) { await tick(); (clash ? field : notice)?.focus(); }
   }
 </script>
@@ -107,7 +110,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
     </header>
-    <p class="status" role="status">{pending ? target ? 'Renaming…' : 'Making folder…' : ''}</p>
+    <p class="status" role="status">{pending ? pendingText : ''}</p>
     {#if failure}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{failure}</p>{/if}
     <div class="field">
       <label for={`${id}-name`}>{target ? 'Name' : 'Folder name'}</label>
@@ -116,7 +119,7 @@
       {#if invalid}<span id={`${id}-error`} role="alert" dir="auto">{invalid}</span>{/if}
     </div>
     <footer>
-      <button class="primary" type="submit" aria-disabled={pending} aria-busy={pending}>{target ? (pending ? 'Renaming…' : 'Rename') : (pending ? 'Making folder…' : 'Make folder')}</button>
+      <button class="primary" type="submit" aria-disabled={pending} aria-busy={pending}>{pending ? pendingText : target ? 'Rename' : 'Make folder'}</button>
       <button type="button" aria-disabled={pending} bind:this={last} onclick={dismiss}>Cancel</button>
     </footer>
   </form>

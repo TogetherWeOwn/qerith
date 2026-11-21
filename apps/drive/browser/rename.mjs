@@ -6,13 +6,13 @@ import { capture, widths } from './root-listing.mjs';
 export async function proveRename(page, { origin, DB, principal, intercept, cursor }) {
   const role = intercept ? 'owner' : 'member';
   const file = crypto.randomUUID(), folder = `rename/${role}'folder`;
-  const starting = 'Taxes 2025.pdf', taken = 'Taken.pdf';
+  const starting = 'Taxes 2025.pdf', stored = 'Taxes \n2025.pdf', taken = 'Taken.pdf';
   const location = `${origin}/${cursor ? `?page=${cursor}` : ''}`;
   const path = id => `/api/entries/${encodeURIComponent(id).replaceAll("'", '%27')}`;
   const state = id => DB.prepare('SELECT name, parent_id FROM drive_entries WHERE id = ?').bind(id).first();
   await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes)
     VALUES (?, ?, ?, 'file', ?, 1), (?, ?, ?, 'file', ?, 1)`)
-    .bind(file, principal, starting, file, `${file}-taken`, principal, taken, `${file}-taken`).run();
+    .bind(file, principal, stored, file, `${file}-taken`, principal, taken, `${file}-taken`).run();
   await DB.prepare(`INSERT INTO drive_entries (id, owner_id, name, kind) VALUES (?, ?, 'Rename.me', 'folder')`).bind(folder, principal).run();
   const isPatch = r => r.method() === 'PATCH' && r.url().startsWith(`${origin}/api/entries/`);
   const writes = [];
@@ -21,6 +21,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
   const trigger = name => page.getByRole('button', { name: `Actions for ${name}`, exact: true });
   const dialog = page.getByRole('dialog', { name: /^Rename / });
   const field = dialog.getByRole('textbox', { name: 'Name', exact: true });
+  const conflict = dialog.getByRole('alert').filter({ hasText: `The name "${taken}" is already in use.` });
   const active = page.locator(':focus');
   const open = async (name, selected = name) => {
     await trigger(name).press('ArrowDown');
@@ -30,8 +31,9 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
     await field.and(active).waitFor();
     assert.equal(await field.evaluate(el => el.value.slice(el.selectionStart, el.selectionEnd)), selected);
   };
-  const submit = async (name, id, status) => {
-    await field.fill(name);
+  const submit = async (name, id, status, typeBasename = false) => {
+    if (typeBasename) await page.keyboard.insertText(name.slice(0, -4));
+    else await field.fill(name);
     const [response] = await Promise.all([page.waitForResponse(r => isPatch(r.request())), field.press('Enter')]);
     assert.deepEqual([response.status(), writes.at(-1)], [status, [path(id), { kind: 'rename', name }]]);
   };
@@ -65,7 +67,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await dialog.getByRole('alert').filter({ hasText: 'That name is too long.' }).waitFor();
       assert.equal(writes.length, before, 'invalid names never write');
       await submit(taken, file, 409);
-      await dialog.getByRole('alert').filter({ hasText: `a file called "${taken}"` }).waitFor();
+      await conflict.waitFor();
       await field.and(active).waitFor();
       assert.equal(await field.inputValue(), taken);
       await evidence('duplicate');
@@ -76,7 +78,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
         assert.equal(await field.inputValue(), 'Unconfirmed.pdf');
         await evidence('failure');
         assert.equal(writes.length, before + 2, 'no automatic retry');
-        assert.deepEqual(await state(file), { name: starting, parent_id: null });
+        assert.deepEqual(await state(file), { name: stored, parent_id: null });
         await page.keyboard.press('Escape');
         await trigger(starting).and(active).waitFor();
         await open(starting, 'Taxes 2025');
@@ -84,7 +86,7 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       const held = Promise.withResolvers();
       intercept?.(path(file), async (_, relay) => { await held.promise; return relay(); });
       const renamed = `Taxes ${width} 📁.pdf`;
-      const saved = submit(renamed, file, 200);
+      const saved = submit(renamed, file, 200, !!intercept);
       try {
         if (intercept) {
           const pending = dialog.getByRole('button', { name: 'Renaming…' });
@@ -105,17 +107,24 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await evidence('success');
       if (intercept) {
         await open(renamed, `Taxes ${width} 📁`);
-        intercept('/__data.json', route => route.abort());
-        await submit('Refresh needed.pdf', file, 200);
+        const read = Promise.withResolvers();
+        intercept('/__data.json', async route => { await read.promise; await route.abort(); });
         const recovery = page.getByRole('link', { name: 'Refresh My Drive', exact: true });
-        await recovery.and(active).waitFor();
+        try {
+          await submit('Refresh needed.pdf', file, 200);
+          await recovery.and(active).waitFor({ timeout: 8_000 });
+        } finally { read.resolve(); }
         await page.getByRole('status').filter({ hasText: 'Renamed to “Refresh needed.pdf”. Refresh My Drive to see it.' }).waitFor();
         await evidence('refresh-failed');
-        await Promise.all([page.waitForURL(location, { waitUntil: 'networkidle' }), recovery.press('Enter')]);
+        await open(renamed, `Taxes ${width} 📁`);
+        await page.keyboard.press('Escape');
+        await Promise.all([page.waitForEvent('framenavigated'), recovery.press('Enter')]);
+        await page.waitForLoadState('networkidle');
         await trigger('Refresh needed.pdf').waitFor();
+        assert.equal(page.url(), location);
         assert.equal(writes.length, before + 4, 'recovery only reads');
       }
-      await DB.prepare('UPDATE drive_entries SET name = ? WHERE id = ?').bind(starting, file).run();
+      await DB.prepare('UPDATE drive_entries SET name = ? WHERE id = ?').bind(stored, file).run();
     }
     if (intercept) {
       // The root row can move in another tab after we open Rename.
@@ -125,8 +134,12 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await trigger('Renamed folder').and(active).waitFor();
       await open(starting, 'Taxes 2025');
       await DB.prepare('UPDATE drive_entries SET parent_id = ? WHERE id = ?').bind(folder, file).run();
+      await DB.prepare("INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES (?, ?, ?, ?, 'folder')")
+        .bind(`${folder}-taken`, principal, folder, taken).run();
+      await submit(taken, file, 409);
+      await conflict.waitFor();
       await submit('Moved elsewhere.pdf', file, 200);
-      await page.getByRole('heading', { name: 'My Drive', exact: true }).and(active).waitFor();
+      await page.locator('[data-focus-name]').and(active).waitFor();
       assert.deepEqual(await state(file), { name: 'Moved elsewhere.pdf', parent_id: folder });
       await page.getByRole('status').filter({ hasText: 'It isn’t on this page.' }).waitFor();
     }

@@ -43,7 +43,7 @@
     return response.type === 'loaded' ? response.data.listing : null;
   }
 
-  async function refresh(forFolder = false) {
+  async function refresh(reason?: 'folder' | 'rename') {
     if (staging && !metadataWriteAllowed) {
       await invalidate('drive:root-listing');
       await tick();
@@ -53,10 +53,15 @@
     // In opt-in staging all mutations read the same cursor without updating route data.
     const version = ++refreshVersion;
     const query = page ? `?${new URLSearchParams({ page })}` : '';
-    const next = staging ? await readStagingPage() : await fetch(`/api/root-listing${query}`, { redirect: 'error' })
+    const read = staging ? readStagingPage() : fetch(`/api/root-listing${query}`, { redirect: 'error' })
       .then((response): Promise<RootListingResult> | null => response.ok ? response.json() : null);
+    // preloadData cannot be aborted; only a read that wins the deadline may update the list.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const next = reason === 'rename' ? await Promise.race([read, new Promise<null>(resolve => {
+      timer = setTimeout(() => resolve(null), 5_000);
+    })]).finally(() => clearTimeout(timer)) : await read;
     if (version < appliedVersion) return;
-    if (!next || (next.status !== 'ok' && (forFolder || !staging))) throw new Error('Root listing unavailable');
+    if (!next || (next.status !== 'ok' && (reason === 'folder' || !staging))) throw new Error('Root listing unavailable');
     appliedVersion = version;
     const focused = document.activeElement;
     flushSync(() => { refreshed = next; });
@@ -71,7 +76,7 @@
   }
 
   async function folderCreated(id: string, name: string, close: () => void) {
-    await refresh(true).then(() => { receipt = { id, name, loaded: result.status === 'ok' }; },
+    await refresh('folder').then(() => { receipt = { id, name, loaded: result.status === 'ok' }; },
       () => { receipt = { id, name, loaded: false }; });
     await tick();
     close();
@@ -85,13 +90,15 @@
 
   function openRename(id: string) {
     const item = items.find(item => item.id === id && !item.shared);
-    if (!item?.path || !metadataWriteAllowed) return;
-    renameStatus = ''; renameRefreshFailed = false;
-    nameDialog?.open({ id, name: item.name, kind: item.kind, path: item.path });
+    const path = entryChangePath(id);
+    if (!item || !path || !metadataWriteAllowed) return;
+    if (!renameRefreshFailed) renameStatus = '';
+    nameDialog?.open({ id, name: item.name, kind: item.kind, path });
   }
 
   async function renamed(id: string, name: string, close: () => void) {
-    try { await refresh(); }
+    const index = items.findIndex(item => item.id === id);
+    try { await refresh('rename'); renameRefreshFailed = false; }
     catch { renameRefreshFailed = result.status !== 'invalid-page'; }
     const item = items.find(item => item.id === id);
     const detail = renameRefreshFailed ? ' Refresh My Drive to see it.' : !item ? ' It isn’t on this page.' :
@@ -99,20 +106,19 @@
     // Reopen the live region's accessibility subtree before publishing its text.
     await tick();
     close();
+    const neighbor = items[Math.min(Math.max(0, index), items.length - 1)];
     if (renameRefreshFailed) (recovery ?? heading).focus();
-    else returnToRow(id);
+    else if (item || !neighbor) returnToRow(id);
+    else list?.focusName(neighbor.id);
     renameStatus = `Renamed to “${name}”.${detail}`;
   }
 
   // loadRootListing returns only this session's owned entries at parent_id IS NULL.
-  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => {
-    const path = metadataWriteAllowed ? entryChangePath(id) : undefined;
-    return {
-      id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
-      href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
-      reload: true, size: '', bytes: null, modified: '', shared: false, path, renamable: !!path
-    };
-  }) : []);
+  const items = $derived(result.status === 'ok' ? result.folder.entries.map(({ id, name, kind, downloadable }) => ({
+    id, name, kind: kind === 'folder' ? 'Folder' : 'File', glyph: kind,
+    href: downloadAllowed && downloadable !== false && kind === 'file' && entryId.test(id) ? `/api/download/${id}` : undefined,
+    reload: true, size: '', bytes: null, modified: '', shared: false, renamable: metadataWriteAllowed && !!entryChangePath(id)
+  })) : []);
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
   const needsRefresh = $derived(receipt && (result.status === 'unavailable' || (result.status === 'ok' && !receipt.loaded && !createdVisible)));
 </script>

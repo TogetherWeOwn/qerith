@@ -18,6 +18,9 @@
   const visibleView = () => desktop.getClientRects().length ? desktop : mobile;
   const findRowPart = (view: HTMLElement, attribute: string, id: string | null | undefined) =>
     Array.from(view.querySelectorAll<HTMLElement>(`[${attribute}]`)).find(el => el.getAttribute(attribute) === id);
+  export function focusName(id: string) {
+    findRowPart(visibleView(), 'data-focus-name', id)?.focus();
+  }
   export function focusCreatedRow(id: string) {
     findRowPart(visibleView(), 'data-created-row', id)?.focus();
   }
@@ -169,9 +172,10 @@
   <span class="name">
     <KindGlyph kind={item.glyph} />
     {#if item.href}
-      <a href={item.href} data-sveltekit-reload={item.reload ? '' : undefined} dir="auto" data-item-id={item.id} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class="entry-name" class:folder>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>
+      <a href={item.href} data-sveltekit-reload={item.reload ? '' : undefined} dir="auto" data-item-id={item.id} data-focus-name={onRename ? item.id : undefined} aria-label={item.name.trim() ? item.name : `${item.name} (Whitespace-only name)`} class="entry-name" class:folder>{item.name}{#if !item.name.trim()}<span> (Whitespace-only name)</span>{/if}</a>
     {:else}
-      <span dir="auto" class="entry-name" class:folder>{item.name}{#if !item.name.trim()} (Whitespace-only name){/if}</span>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, after a row leaves the page) -->
+      <span dir="auto" data-focus-name={onRename ? item.id : undefined} tabindex={onRename ? -1 : undefined} class="entry-name" class:folder>{item.name}{#if !item.name.trim()} (Whitespace-only name){/if}</span>
     {/if}
     {#if item.shared}<span class="tag">Shared</span>{/if}
   </span>
@@ -237,7 +241,7 @@
   .preview a { text-decoration: underline; }
   th.actions { width: var(--drive-size-column-actions); }
   .size { text-align: right; font-variant-numeric: tabular-nums; }
-  a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } a:focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  a { color: inherit; text-decoration: none; unicode-bidi: plaintext; } a:hover { text-decoration: underline; } :is(a, [data-focus-name]):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
   .name { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--drive-space-2); max-width: 100%; }
   .name :global(svg) { margin-top: var(--drive-space-2); }
   .entry-name { display: inline-block; flex: 1 1 0; min-width: 0; max-width: 100%; padding-block: var(--drive-space-2); white-space: break-spaces; overflow-wrap: anywhere; word-break: normal; unicode-bidi: plaintext; }
