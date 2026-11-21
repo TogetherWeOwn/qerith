@@ -53,14 +53,12 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       await list.getByRole('option', { name: 'Name unavailable' }).waitFor();
       await capture('options');
       assert(await list.evaluate(el => el.scrollHeight > el.clientHeight), 'Listbox must overflow');
-      await page.addStyleTag({ content: '[role=listbox]::-webkit-scrollbar { width: 16px; } [role=listbox]::-webkit-scrollbar-thumb { background: gray; }' });
-      const { x, y, width: listWidth } = await list.boundingBox();
-      await page.mouse.move(x + listWidth - 8, y + 24);
-      await page.mouse.down();
-      await page.mouse.move(x + listWidth - 8, y + 80, { steps: 4 });
-      await page.mouse.up();
+      // Headless Chromium need not expose a draggable scrollbar thumb.
+      await list.hover();
+      const before = await list.evaluate(el => ({ id: el.id, top: el.scrollTop }));
+      await page.mouse.wheel(0, 80);
+      await page.waitForFunction(({ id, top }) => document.getElementById(id)?.scrollTop > top, before, { timeout: 3000 });
       await focused();
-      await page.waitForFunction(id => document.getElementById(id)?.scrollTop > 0, await list.getAttribute('id'), { timeout: 3000 });
       await key('Tab');
       assert.equal(await list.count(), 0, 'Forward Tab closes the overflowing listbox');
       assert(await page.getByRole('button', { name: 'Continue' }).evaluate(el => el.matches(':focus-visible')));
@@ -148,7 +146,7 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       assert(await list.getByRole('option', { selected: true }).evaluate(el => getComputedStyle(el).outlineStyle === 'solid'));
       await screenshot('forced-colours');
       await writeFile(resolve(output, `share-recipient-${width}-keyboard.json`), JSON.stringify(evidence, null, 2));
-      console.log(`Share recipient selection, clearing, caret editing, scrollbar drag, Tab/Escape focus, Greek prefix, reflow and axe passed at ${width}×${height}`);
+      console.log(`Share recipient selection, clearing, caret editing, wheel scroll, Tab/Escape focus, Greek prefix, reflow and axe passed at ${width}×${height}`);
     } finally {
       await context.close();
     }
