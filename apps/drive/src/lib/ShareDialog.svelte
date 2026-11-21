@@ -30,6 +30,10 @@
   const listNames = (people: ShareRecipient[]) => names.format(people.map(label));
   let dialog: HTMLDialogElement, accessTitle: HTMLElement, opener: HTMLElement | undefined;
   let first: HTMLButtonElement, last: HTMLButtonElement, backdrop = false;
+  const focusLost = () => document.activeElement === document.body || document.activeElement === dialog;
+  function focusPicker() {
+    if (dialog?.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
+  }
   let notice = $state<HTMLElement>(), session = $state(0);
   let picked = $state<ShareRecipient[]>([]), added = $state<string[]>([]);
   let confirm = $state<string | null>(null), pending = $state<'share' | 'remove' | null>(null);
@@ -51,20 +55,21 @@
     if (pending) return;
     const eligible = picked.filter(canSelect);
     if (eligible.length !== picked.length) {
+      const active = document.activeElement;
       picked = eligible;
       selectionNotice = 'People who are no longer eligible were removed from the selection.';
+      if (active && dialog?.contains(active)) void tick().then(() => {
+        if (!active.isConnected && focusLost()) focusPicker();
+      });
     }
   });
   $effect(() => { if (accessPagerEmpty && document.activeElement?.id === `${id}-access-pager`) accessTitle.focus(); });
-  $effect(() => {
-    if (nobody && dialog?.open && (document.activeElement === document.body || document.activeElement === dialog)) last.focus();
-  });
+  $effect(() => { if (nobody && focusLost()) focusPicker(); });
   // Mount per entry; its identity and owner must not change during a dialog session.
   export async function open(from?: HTMLElement) {
     if (dialog.open) return;
     opener = from; session++; picked = []; confirm = paging = null; error = live = status = selectionNotice = ''; added = [];
-    dialog.showModal(); await tick();
-    if (dialog?.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
+    dialog.showModal(); await tick(); focusPicker();
   }
   function close() { if (!pending) { dialog.close(); opener?.focus(); onreturn?.(); } }
   function keys(event: KeyboardEvent) {
