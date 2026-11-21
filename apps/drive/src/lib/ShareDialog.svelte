@@ -1,0 +1,204 @@
+<script module lang="ts">
+  import type { ShareRecipient } from './share-client';
+  export type ShareAccess = ShareRecipient & { direct: boolean; inheritedFrom: string | null };
+  export type SharePage<T> = {
+    // Rows are one bounded page. Only complete effective access may establish emptiness.
+    complete?: boolean;
+    state: 'loading' | 'failed' | 'ready'; rows: readonly T[];
+    previous?: () => void; next?: () => void; retry?: () => void;
+  };
+</script>
+
+<script lang="ts">
+  import { tick } from 'svelte';
+  import ShareRecipientPicker, { shareAvatar } from './ShareRecipientPicker.svelte';
+  import './dialog.css';
+
+  let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove }: {
+    name: string; kind: 'File' | 'Folder'; owner: { recipientId: string; driveOwner: boolean };
+    access: SharePage<ShareAccess>;
+    // The caller must exclude anyone with effective access, including access not on the current page.
+    candidates: SharePage<ShareRecipient>; nobodyElse?: boolean; onInvite?: () => void;
+    // Resolve only after confirmation and refreshing the page(s); reject on failure or uncertainty.
+    onShare: (ids: readonly string[]) => Promise<void>; onRemove: (id: string) => Promise<void>;
+  } = $props();
+
+  const id = $props.id();
+  const label = (person: ShareRecipient) => person.displayName?.trim() ? person.displayName : 'Name unavailable';
+  let dialog: HTMLDialogElement;
+  let first: HTMLButtonElement, last: HTMLButtonElement;
+  let accessTitle: HTMLElement;
+  let notice = $state<HTMLElement>();
+  let opener: HTMLElement | undefined;
+  let backdrop = false;
+  let picked = $state<ShareRecipient[]>([]);
+  let confirm = $state<string | null>(null);
+  let pending = $state<'share' | 'remove' | null>(null);
+  let error = $state(''), status = $state('');
+  let added = $state<string[]>([]);
+  const allowed = $derived(candidates.rows.filter(person => person.recipientId !== owner.recipientId &&
+    !access.rows.some(row => row.recipientId === person.recipientId)));
+  const shareBlocked = $derived(!!pending || !picked.length || candidates.state !== 'ready' || access.state !== 'ready' ||
+    picked.some(person => access.rows.some(row => row.recipientId === person.recipientId)));
+  const nobody = $derived(nobodyElse && candidates.state === 'ready' && !candidates.previous && !candidates.next && !candidates.rows.length);
+
+  // Mount per entry; its identity and owner must not change during a dialog session.
+  export async function open(from: HTMLElement) {
+    if (dialog.open) return;
+    opener = from;
+    picked = []; confirm = null; error = status = ''; added = [];
+    dialog.showModal();
+    await tick();
+    if (dialog.open) (dialog.querySelector<HTMLInputElement>('[role="combobox"]') ?? last).focus();
+  }
+  function close() {
+    if (pending) return;
+    dialog.close(); opener?.focus();
+  }
+  function keys(event: KeyboardEvent) {
+    if (event.key !== 'Tab') return;
+    const [from, to] = event.shiftKey ? [first, last] : [last, first];
+    if (document.activeElement === from) { event.preventDefault(); to.focus(); }
+  }
+  function load(event: MouseEvent, action: () => void) {
+    if (pending) return;
+    const button = event.currentTarget as HTMLButtonElement;
+    button.parentElement?.focus();
+    confirm = null;
+    action();
+  }
+  function select(ids: string[]) {
+    if (pending) return;
+    picked = ids.flatMap(key => [...picked, ...allowed].find(person => person.recipientId === key) ?? []);
+  }
+  async function apply(person?: ShareAccess) {
+    if (pending || (person ? !person.direct || confirm !== person.recipientId || access.state !== 'ready' : shareBlocked)) return;
+    const submitted = picked;
+    pending = person ? 'remove' : 'share'; error = status = '';
+    try {
+      if (person) {
+        await onRemove(person.recipientId);
+        confirm = null;
+        status = !person.inheritedFrom?.trim() ? `Removed direct access for ${label(person)}.` :
+          `Removed direct access for ${label(person)}. Access through ${person.inheritedFrom} remains.`;
+      } else {
+        const ids = submitted.map(choice => choice.recipientId);
+        await onShare(ids);
+        added = [...new Set([...added, ...ids])]; picked = [];
+        status = `Shared with ${submitted.length === 1 ? label(submitted[0]) : `${submitted.length} people`}`;
+      }
+    } catch {
+      error = `${person ? 'Couldn’t confirm removal of direct access.' : 'Couldn’t confirm sharing.'} Check who has access before trying again.`;
+    } finally {
+      pending = null;
+      await tick();
+      if (error) notice?.focus();
+      else if (person && dialog.open) accessTitle.focus();
+    }
+  }
+</script>
+
+{#snippet pager(page: SharePage<ShareRecipient>, subject: string)}
+  <div class="paging" role="group" aria-label={`Pages of ${subject}`} tabindex="-1">
+    {#if page.state === 'loading'}<p role="status">Loading {subject}…</p>
+    {:else if page.state === 'failed'}<p role="alert">Couldn’t load {subject}.</p>
+      {#if page.retry}<button type="button" aria-label={`Retry loading ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.retry!)}>Retry</button>{/if}
+    {:else if page.previous || page.next}
+      <p>Showing one page of {subject}.</p>
+      {#if page.previous}<button type="button" aria-label={`Previous page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.previous!)}>Previous</button>{/if}
+      {#if page.next}<button type="button" aria-label={`Next page of ${subject}`} aria-disabled={!!pending} onclick={event => load(event, page.next!)}>Next</button>{/if}
+    {/if}
+  </div>
+{/snippet}
+
+<dialog class="drive-dialog" bind:this={dialog} aria-labelledby={`${id}-title`} aria-describedby={`${id}-rules`}
+  onkeydown={keys} oncancel={event => { event.preventDefault(); close(); }}
+  onpointerdown={event => { backdrop = event.target === dialog; }} onclick={event => { if (backdrop && event.target === dialog) close(); }}>
+  <div class="panel">
+    <header><h2 id={`${id}-title`}>Share “<bdi>{name}</bdi>”</h2>
+      <button type="button" class="close" aria-label="Close" aria-disabled={!!pending} bind:this={first} onclick={close}>×</button>
+    </header>
+    <p id={`${id}-rules`}>People you add can view and download. They can’t change, delete or re-share it.{kind === 'Folder' ? ' They also see anything you add to it later.' : ''}</p>
+    {#if error}<p class="notice" role="alert" tabindex="-1" bind:this={notice}>{error}</p>{/if}
+    {#if nobody}
+      <div class="empty"><strong>There’s nobody else on this drive yet.</strong>
+        {#if owner.driveOwner && onInvite}<button type="button" aria-disabled={!!pending} onclick={() => { if (!pending) { close(); onInvite?.(); } }}>Invite someone</button>
+        {:else if !owner.driveOwner}<p>Ask the owner to invite them.</p>{/if}
+      </div>
+    {:else}
+      <ShareRecipientPicker choices={candidates.state === 'ready' ? allowed : []} selectedChoices={picked} selectedIds={picked.map(person => person.recipientId)}
+        onSelectionChange={select} pageOnly locked={!!pending || candidates.state !== 'ready'} />
+      {@render pager(candidates, 'people to add')}
+    {/if}
+    <section aria-labelledby={`${id}-access`}>
+      <h3 id={`${id}-access`} tabindex="-1" bind:this={accessTitle}>People with access</h3>
+      <ul role="list">
+        <li><strong>You · owner</strong></li>
+        {#each access.rows.filter(row => row.recipientId !== owner.recipientId && (row.direct || row.inheritedFrom !== null)) as person (person.recipientId)}
+          {@const badge = shareAvatar(person)}
+          <li class:added={added.includes(person.recipientId)}>
+            <span class="avatar" style:background-color={badge.colour} aria-hidden="true">{badge.initials}</span>
+            <div class="person"><strong><bdi>{label(person)}</bdi></strong>
+              {#if person.inheritedFrom !== null}<small>Through <bdi>{person.inheritedFrom.trim() || 'a folder'}</bdi></small>{/if}
+            </div>
+            <span class="tag">Can view</span>
+            {#if person.direct && access.state === 'ready'}
+              {@const direct = person.inheritedFrom !== null}
+              {@const action = direct ? 'direct access' : 'access'}
+              <button type="button" class="danger" aria-label={`Remove ${label(person)}’s ${action}`} aria-expanded={confirm === person.recipientId}
+                aria-disabled={!!pending} onclick={() => { if (!pending) confirm = confirm === person.recipientId ? null : person.recipientId; }}>Remove</button>
+              {#if confirm === person.recipientId}
+                <div class="confirmation"><p>Remove <bdi>{label(person)}</bdi>’s {action}?{direct ? ' They’ll still have access through this folder.' : ''}</p>
+                  <button type="button" class="danger" aria-label={`${pending === 'remove' ? 'Removing' : 'Confirm removal of'} direct access for ${label(person)}`}
+                    aria-busy={pending === 'remove'} aria-disabled={!!pending} onclick={() => apply(person)}>{pending === 'remove' ? 'Removing…' : 'Remove'}</button>
+                  <button type="button" aria-disabled={!!pending} onclick={event => { if (!pending) { confirm = null; event.currentTarget.closest('li')?.querySelector('button')?.focus(); } }}>Cancel</button>
+                </div>
+              {/if}
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      {#if access.state === 'ready' && access.complete && !access.next && !access.previous && !access.rows.length}<p>Only you can see this.</p>{/if}
+      {@render pager(access, 'people with access')}
+    </section>
+    <p role="status">{status}</p>
+    {#if !picked.length}<p id={`${id}-pick`}>Pick someone to share with</p>{/if}
+    <footer>
+      <button type="button" class="primary" aria-disabled={shareBlocked} aria-busy={pending === 'share'} aria-describedby={!picked.length ? `${id}-pick` : undefined}
+        onclick={() => apply()}>{pending === 'share' ? 'Sharing…' : picked.length > 1 ? `Share with ${picked.length} people` : 'Share'}</button>
+      <button type="button" aria-disabled={!!pending} bind:this={last} onclick={close}>Done</button>
+    </footer>
+  </div>
+</dialog>
+
+<style>
+  header, footer, li, .paging, .confirmation { display: flex; align-items: center; flex-wrap: wrap; gap: var(--drive-space-2); }
+  header { flex-wrap: nowrap; justify-content: space-between; }
+  footer { justify-content: flex-end; }
+  h2, h3, p, li { overflow-wrap: anywhere; }
+  h3, p, ul { margin: 0; }
+  h3 { font-size: var(--drive-font-size-ui); }
+  p, small { color: var(--drive-color-text-secondary); }
+  p { font-size: var(--drive-font-size-small); }
+  li { font-size: var(--drive-font-size-ui); }
+  p[role='status']:empty { position: absolute; clip-path: inset(50%); }
+  ul { padding: 0; list-style: none; }
+  li { min-height: var(--drive-size-control-md); border-block-end: var(--drive-size-line) solid var(--drive-color-line-hairline); }
+  li.added, .tag, button[aria-disabled='true'] { background: var(--drive-color-bg-raised); }
+  .avatar { display: grid; place-items: center; inline-size: var(--drive-size-control-sm); block-size: var(--drive-size-control-sm); border-radius: var(--drive-radius-pill); }
+  .person { flex: 1; min-width: 0; }
+  small { display: block; font-size: var(--drive-font-size-meta); }
+  .confirmation { flex-basis: 100%; }
+  .tag { padding-inline: var(--drive-space-3); border-radius: var(--drive-radius-pill); }
+  button { padding-inline: var(--drive-space-inset-room); border-radius: var(--drive-radius-pill); }
+  .empty { padding: var(--drive-space-inset-card); border: var(--drive-size-line) solid var(--drive-color-line-hairline-strong); border-radius: var(--drive-radius-m); }
+  button { min-height: var(--drive-size-control-sm); border: var(--drive-size-line) solid transparent; background: transparent; color: var(--drive-color-text-secondary); font: inherit; font-weight: var(--drive-font-weight-semibold); cursor: pointer; }
+  button.close { min-width: var(--drive-size-control-sm); padding: 0; }
+  button.danger { color: var(--drive-color-state-danger); }
+  button:not(.primary):not([aria-disabled='true']):hover { background: var(--drive-color-bg-raised); }
+  .primary { min-height: var(--drive-size-control-md); }
+  button.primary:not([aria-disabled='true']) { background: var(--drive-color-accent-default); color: var(--drive-color-text-on-accent); }
+  button[aria-disabled='true'] { cursor: default; }
+  :is(button, h3, .notice, .paging):focus-visible { outline: var(--drive-size-focus-width) solid var(--drive-color-focus-ring); outline-offset: var(--drive-size-focus-offset); }
+  @media (max-width: 820px) { footer { flex-direction: column; align-items: stretch; } }
+</style>

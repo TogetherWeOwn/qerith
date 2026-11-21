@@ -1,10 +1,22 @@
+<script module lang="ts">
+  type Choice = { recipientId: string; displayName: string | null };
+  export function shareAvatar(choice: Choice) {
+    let hash = 0;
+    for (const char of choice.recipientId) hash = (Math.imul(31, hash) + char.codePointAt(0)!) >>> 0;
+    const initials = choice.displayName?.trim().split(/\s+/u).slice(0, 2)
+      .map(word => Array.from(word)[0]?.toUpperCase()).join('');
+    return { colour: `var(--drive-color-avatar-${hash % 12})`, initials };
+  }
+</script>
+
 <script lang="ts">
   import { flushSync, tick } from 'svelte';
-  type Choice = { recipientId: string; displayName: string | null };
-  // The caller supplies unique, eligible choices and owns selection. Retain selected choices across pages for chip labels.
-  let { choices, selectedIds, onSelectionChange }: {
+  // The caller supplies unique, eligible choices and owns selection. selectedChoices can retain labels from other pages.
+  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, pageOnly = false, locked = false }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
+    selectedChoices?: readonly Choice[];
+    pageOnly?: boolean; locked?: boolean;
     onSelectionChange: (ids: string[]) => void;
   } = $props();
 
@@ -15,13 +27,13 @@
   let active = $state<string | null>(null);
   let announcement = $state('');
   const label = (choice: Choice) => choice.displayName?.trim() ? choice.displayName : 'Name unavailable';
-  const picked = $derived(selectedIds.flatMap(key => choices.find(choice => choice.recipientId === key) ?? []));
+  const picked = $derived(selectedIds.flatMap(key => selectedChoices.find(choice => choice.recipientId === key) ?? []));
   const foldName = (name: string) => name.normalize().toLowerCase().replaceAll('ς', 'σ'); // Lowercasing can produce final sigma at the end of a prefix.
   const search = $derived(foldName(query.trim()));
   const matchingNames = $derived(choices.filter(choice => !search || foldName(choice.displayName ?? '').includes(search)));
   const matches = $derived(matchingNames.filter(choice => !selectedIds.includes(choice.recipientId)));
-  const expanded = $derived(open && matches.length > 0);
-  const noMatch = $derived(open && !!search && !matches.length);
+  const expanded = $derived(!locked && open && matches.length > 0);
+  const noMatch = $derived(!locked && open && !!search && !matches.length);
   const activeIndex = $derived(expanded ? matches.findIndex(choice => choice.recipientId === active) : -1);
   const optionId = (index: number) => `${id}-option-${index}`;
 
@@ -37,6 +49,7 @@
   }
 
   function remove(choice: Choice) {
+    if (locked) return;
     input.focus();
     dismiss();
     const next = selectedIds.filter(id => id !== choice.recipientId);
@@ -46,7 +59,7 @@
 
   async function keydown(event: KeyboardEvent) {
     if (event.key === 'Tab' && open) return flushSync(dismiss); // Remove Chromium's implicit scroll stop before native Tab.
-    if (event.isComposing) return;
+    if (event.isComposing || locked) return;
     if (event.key === 'Escape' && (expanded || noMatch)) {
       event.preventDefault();
       event.stopPropagation();
@@ -67,14 +80,6 @@
       if (activeIndex >= 0) document.getElementById(optionId(activeIndex))?.scrollIntoView({ block: 'nearest' });
     }
   }
-
-  function avatar(choice: Choice) {
-    let hash = 0;
-    for (const char of choice.recipientId) hash = (Math.imul(31, hash) + char.codePointAt(0)!) >>> 0;
-    const initials = choice.displayName?.trim().split(/\s+/u).slice(0, 2)
-      .map(word => Array.from(word)[0]?.toUpperCase()).join('');
-    return { colour: `var(--drive-color-avatar-${hash % 12})`, initials };
-  }
 </script>
 
 <div class="picker">
@@ -85,12 +90,12 @@
         {#each picked as choice (choice.recipientId)}
           <li class="chip">
             <bdi>{label(choice)}</bdi>
-            <button type="button" aria-label={`Remove ${label(choice)}`} onclick={() => remove(choice)}>×</button>
+            <button type="button" aria-label={`Remove ${label(choice)}`} aria-disabled={locked} onclick={() => remove(choice)}>×</button>
           </li>
         {/each}
       </ul>
     {/if}
-    <input bind:this={input} bind:value={query} {id} role="combobox" autocomplete="off"
+    <input bind:this={input} bind:value={query} {id} readonly={locked} role="combobox" autocomplete="off"
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? `${id}-choices` : undefined}
       aria-activedescendant={activeIndex >= 0 ? optionId(activeIndex) : undefined}
       placeholder="Find someone by name" onfocus={() => open = true} onclick={() => { active = null; open = true; }}
@@ -99,7 +104,7 @@
   {#if expanded}
     <ul id={`${id}-choices`} role="listbox" aria-label="Available people" class="popover">
       {#each matches as choice, index (choice.recipientId)}
-        {@const badge = avatar(choice)}
+        {@const badge = shareAvatar(choice)}
         <!-- svelte-ignore a11y_click_events_have_key_events (DOM focus stays on the combobox, which handles option keys) -->
         <li id={optionId(index)} role="option" aria-selected={index === activeIndex}
           onmousedown={event => event.preventDefault()} onclick={() => select(choice)}>
@@ -110,7 +115,7 @@
     </ul>
   {/if}
   <div role="status" class:popover={noMatch} class:message={noMatch} class:visually-hidden={!noMatch}>
-    {#if noMatch}{#if matchingNames.length}Matching people are already selected.{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}{:else}{announcement}{/if}
+    {#if noMatch}{#if matchingNames.length}Matching people are already selected.{:else if pageOnly}No matching people available on this page.{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}{:else}{announcement}{/if}
   </div>
 </div>
 
