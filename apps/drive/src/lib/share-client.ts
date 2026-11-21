@@ -18,10 +18,8 @@ function isId(value: unknown): value is string {
     !/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value) && encoder.encode(value).length <= 512;
 }
 
-const isPathId = (id: string) => id !== '.' && id !== '..';
-
 function encodeId(id: string, pathSegment = false): string {
-  if (!isId(id) || (pathSegment && !isPathId(id))) throw new TypeError('Invalid Share ID');
+  if (!isId(id) || (pathSegment && (id === '.' || id === '..'))) throw new TypeError('Invalid Share ID');
   return encodeURIComponent(id).replaceAll("'", '%27');
 }
 
@@ -31,9 +29,7 @@ function fields(value: unknown): Record<string, unknown> {
 }
 
 function effectiveRecipient(recipientId: string, { displayName, direct, inheritedFrom }: Record<string, unknown>): ShareAccess {
-  if (!isPathId(recipientId)) throw new Error('Invalid Share recipient');
-  if (displayName !== null && (typeof displayName !== 'string' || displayName.length > 128 ||
-      [...displayName].length > 64 || /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u.test(displayName))) throw new Error('Invalid Share name');
+  if (displayName !== null && typeof displayName !== 'string') throw new Error('Invalid Share name');
   if (typeof direct !== 'boolean' || (inheritedFrom !== null && typeof inheritedFrom !== 'string')) {
     throw new Error('Invalid Share access');
   }

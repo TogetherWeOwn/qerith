@@ -122,6 +122,29 @@ test('projects a single effective page using both kinds of access and preserves 
   });
 });
 
+test('preserves opaque dot IDs on reads while blocking them in mutation paths', async () => {
+  const direct = recipient('.', true, null, 'Existing grant');
+  const candidate = { recipientId: '..', displayName: 'Eligible member' };
+  const { calls, fetcher } = transport(Response.json({
+    recipients: [direct, recipient(candidate.recipientId, false, null, candidate.displayName)], nextCursor: null,
+  }));
+  const share = entryShare('entry', fetcher);
+  assert.deepEqual(await share.listAccessPage(), {
+    access: [direct], candidates: [candidate], nextCursor: null, complete: true,
+  });
+  await assert.rejects(share.revoke(direct.recipientId), TypeError);
+  await assert.rejects(share.grant(candidate.recipientId), TypeError);
+  assert.equal(calls.length, 1);
+});
+
+test('preserves stored display labels longer than the current enrollment limit', async () => {
+  const access = recipient('member', true, null, 'é'.repeat(65));
+  const { fetcher } = transport(Response.json({ recipients: [access], nextCursor: null }));
+  assert.deepEqual(await entryShare('entry', fetcher).listAccessPage(), {
+    access: [access], candidates: [], nextCursor: null, complete: true,
+  });
+});
+
 test('keeps the roster cursor even when a filtered page is empty', async () => {
   const cursor = "é /&'";
   const candidates = fullPageEndingAt(cursor).map(({ recipientId }) => recipient(recipientId));
@@ -148,8 +171,8 @@ test('rejects invalid effective rows, opaque IDs and pagination envelopes', asyn
   const invalidRows = [
     { ...valid, direct: 1 }, { ...valid, direct: undefined }, { ...valid, inheritedFrom: undefined },
     { ...valid, inheritedFrom: true }, { ...valid, inheritedFrom: 'sub/folder' }, { ...valid, inheritedFrom: 'é'.repeat(128) },
-    { ...valid, displayName: undefined }, { ...valid, displayName: '😀'.repeat(65) }, { ...valid, displayName: '\ud800' },
-    ...['', '..', 'x\u0001', '\ud800', 'é'.repeat(257)].map(recipientId => ({ ...valid, recipientId })),
+    { ...valid, displayName: undefined }, { ...valid, displayName: 1 },
+    ...['', 'x\u0001', '\ud800', 'é'.repeat(257)].map(recipientId => ({ ...valid, recipientId })),
   ];
   const invalid = [
     ...invalidRows.map(row => ({ recipients: [row], nextCursor: null })),
