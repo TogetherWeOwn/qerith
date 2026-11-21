@@ -46,7 +46,12 @@ test('lost runner needs positive provider proof beyond candidate and URL expiry'
     { runner: proof('lost', 5) },
     { candidate: { ...snapshot.candidate, at: start + 9 } },
     { inFlight: proof('settled', 9) },
+    { runner: proof('settled', 21) }, // Admission closed at 10, but the drain at 20 preceded runner settlement.
     { inFlight: [] },
+    { candidate: { ...snapshot.candidate, state: 'open' } },
+    { candidate: { ...snapshot.candidate, version: 'bb123456-7890-1234-5678-1234567890ab' } },
+    { storageUrls: { ...snapshot.storageUrls, state: 'open' } },
+    { storageUrls: proof('expired', 30) },
     { storageUrls: { ...snapshot.storageUrls, at: start + 29 } },
     { storageUrls: { ...proof('expired', 19), latestExpiry: start + 18 } },
     { storageInFlight: proof('pending', 40) },
