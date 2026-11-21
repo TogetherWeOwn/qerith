@@ -222,7 +222,7 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
           const policy = expiryPayload(outcome === 'missing retention' ? [] : [objects]);
           if (outcome === 'paginated policy') policy.result_info = { cursor: 'next' };
           return Response.json(policy, { status: outcome === 'partial status' ? 206 : 200,
-            headers: ['partial status', 'content range'].includes(outcome) ? { 'content-range': 'bytes 0-255/512' } : {} });
+            headers: outcome === 'content range' ? { 'content-range': 'bytes 0-255/512' } : {} });
         }
         trace.push(request.method);
         assert.equal(request.url, objectURL);
