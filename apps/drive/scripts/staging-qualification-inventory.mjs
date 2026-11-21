@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
 import { readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
-import { assertNoQualificationD1MigrationFixtures } from './staging-qualification-d1.mjs';
+import { assertNoQualificationD1MigrationFixtures, assertQualificationD1Roster } from './staging-qualification-d1.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
 import { inspectQualificationWorker, runQualificationPhase, stagingConfigAt } from './staging-qualification-worker.mjs';
@@ -70,6 +70,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
         if (!estate || Object.keys(estate).length !== Object.keys(expected).length) throw unverified();
         for (const [kind, items] of Object.entries(expected)) matchScan(estate[kind], items);
 
+        await assertQualificationD1Roster(env, cwd, active, request);
         active.throwIfAborted();
         matchScan(await readFixtures({ account, database }, active), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
