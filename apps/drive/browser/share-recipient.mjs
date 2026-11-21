@@ -66,8 +66,20 @@ export async function exerciseShareRecipient(browser, origin, axe, output) {
       await focused();
       await key('ArrowDown');
       assert.equal(await sam.count(), 0, 'Picked choice is filtered out');
+      await input.fill('sam mora');
+      assert.equal(await status.textContent(), 'Matching people are already selected.');
+      await key('Enter');
+      await selection(1);
+      assert.equal(await list.count(), 0);
+      await capture('already-selected');
+      await key('Escape');
+      assert.equal(await status.textContent(), '');
+      await input.fill('');
       await list.getByRole('option', { name: 'Zoë Chen' }).click();
       await selection(1, 2);
+      const chips = page.getByRole('list', { name: 'Selected people' });
+      assert.equal(await chips.getByRole('listitem').count(), 2);
+      assert.equal(await chips.getByRole('listitem').getByRole('button', { name: 'Remove Sam Mora' }).count(), 1);
       await capture('picked');
 
       await input.fill('someone@example.test');

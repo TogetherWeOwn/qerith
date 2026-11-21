@@ -81,6 +81,8 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(join(dir, file), content);
     }
     await verifyEvidence(dir, head);
+    const verifyShare = () => verifyEvidence(dir, head, false, false, false, false, false, false, false, true);
+    await assert.rejects(verifyShare(), /share-recipient-390-keyboard\.json/);
     const verifyContinuation = () => verifyEvidence(dir, head, false, false, false, false, true);
     await assert.rejects(verifyContinuation(), /root-continuation-390\.json/);
     const proofPath390 = join(dir, 'root-continuation-390.json');
@@ -125,6 +127,12 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
           chunk('IDAT', deflateSync(Buffer.alloc((w + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
       };
       const png = pngAt(width);
+      const shareStates = ['empty', 'options', 'picked', 'already-selected', 'no-match'];
+      for (const w of width === 390 ? [width, 320] : [width]) {
+        await writeFile(join(dir, `share-recipient-${w}-keyboard.json`), JSON.stringify(Object.fromEntries(shareStates.map(state => [state, '- main']))));
+        for (const state of shareStates) await writeFile(join(dir, `axe-share-recipient-${w}-${state}.json`), '{"violations":[]}');
+        for (const state of [...shareStates, 'greyscale', 'forced-colours']) await writeFile(join(dir, `share-recipient-${w}-${state}.png`), pngAt(w));
+      }
       for (const label of ['acknowledged-finishing', 'empty-finishing', 'empty-acknowledged-finishing', 'suffix-interrupted', 'uploaded']) {
         await writeFile(join(dir, `root-continuation-${label}-${width}.png`), png);
       }
@@ -177,6 +185,9 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
         await writeFile(screenshot, png);
       }
     }
+    await verifyShare();
+    await writeFile(join(dir, 'axe-share-recipient-320-already-selected.json'), '{"violations":[{}]}');
+    await assert.rejects(verifyShare(), /Invalid picker evidence: share-recipient-320-already-selected/);
     await verifyContinuation();
     for (const requests of [[], continuation.fresh.requests.map(([method, path, body]) => [method, path.replace(fresh, intent), body]),
       continuation.fresh.requests.map(([method, path, body]) => [method, path, method === 'PUT' ? 0 : body])]) {
