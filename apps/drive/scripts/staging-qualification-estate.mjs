@@ -32,20 +32,7 @@ export function createQualificationEstate(env, cwd, { readWriterFence, ...reads 
         active.throwIfAborted();
         if (Date.now() >= validUntil) throw unverified();
       };
-      const pending = new Set();
-      const send = request => {
-        assertHeld();
-        const work = (async () => {
-          const response = await reads.send(request);
-          if (request.signal.aborted) await response.body?.cancel();
-          request.signal.throwIfAborted();
-          return response;
-        })();
-        pending.add(work);
-        const settled = () => pending.delete(work);
-        void work.then(settled, settled);
-        return work;
-      };
+      const send = request => { assertHeld(); return reads.send(request); };
       const cleanR2 = await createQualificationR2Cleanup(env, cwd, { send });
       const request = (...args) => { assertHeld(); return reads.request(...args); };
       const scope = { ...source, prefix };
@@ -53,8 +40,6 @@ export function createQualificationEstate(env, cwd, { readWriterFence, ...reads 
       const results = await Promise.allSettled([
         cleanR2(scope, active), cleanQualificationD1(scope, env, cwd, active, request),
       ]);
-      // The signer can reject on abort before its injected transport settles.
-      await Promise.allSettled(pending);
       assertHeld();
       if (results.some(result => result.status !== 'fulfilled' || result.value !== true)) throw unverified();
     }, null, held, Math.min(remaining, 60_000));
