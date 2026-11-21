@@ -355,7 +355,7 @@ export default { fetch(request, env, ctx) {
         DB.prepare("INSERT INTO drive_upload_part_operations VALUES ('staging-resume-part', ?, 'member', ?, ?, ?, 2, 1, ?)")
           .bind(resumeId, storageKey, vars.DRIVE_S3_STORAGE_EPOCH, uploadId, partBytes),
         DB.prepare("INSERT INTO drive_upload_part_byte_evidence VALUES ('staging-resume-part', ?, ?)")
-          .bind(Uint8Array.fromHex(sha256).buffer, new TextEncoder().encode('"part"').buffer),
+          .bind(Uint8Array.from(Buffer.from(sha256, 'hex')).buffer, new TextEncoder().encode('"part"').buffer),
       ]);
       const resume = await get(uploadResumePath(resumeId), memberHeaders);
       assert.deepEqual([resume.status, resume.headers.get('cache-control'), resume.headers.get('content-type')],
