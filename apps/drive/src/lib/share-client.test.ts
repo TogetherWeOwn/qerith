@@ -60,6 +60,25 @@ test('creates and revokes by opaque ID with one bodyless request per action', as
   assert.equal(calls.length, 2);
 });
 
+test('aborts grant and revoke transport and skips a write with an already aborted signal', async () => {
+  for (const [method, verb] of [['grant', 'PUT'], ['revoke', 'DELETE']] as const) {
+    const controller = new AbortController();
+    const { signal } = controller;
+    let calls = 0;
+    const share = entryShare('entry', async (path, init) => {
+      calls++;
+      assert.equal(path, '/api/entries/entry/read-grants/member');
+      assert.deepEqual(init, { mode: 'same-origin', credentials: 'same-origin', redirect: 'error', cache: 'no-store', method: verb, signal });
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    });
+    const inFlight = share[method]('member', signal);
+    controller.abort();
+    await assert.rejects(inFlight, { name: 'AbortError' });
+    await assert.rejects(share[method]('later', signal), { name: 'AbortError' });
+    assert.equal(calls, 1);
+  }
+});
+
 test('rejects an empty page with a fresh continuation but accepts a terminal empty page', async () => {
   const { fetcher } = transport(
     Response.json({ recipients: [], nextCursor: 'fresh' }),
