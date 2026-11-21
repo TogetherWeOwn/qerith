@@ -9,13 +9,13 @@ const freshId = '00000000-0000-4000-8000-000000000103';
 const name = 'Re-picked.txt';
 const partBytes = 16 * 1024 * 1024;
 const file = buffer => ({ name, mimeType: 'text/plain', buffer });
-const known = Buffer.from('verified bytes');
-const refusedFile = Buffer.alloc(partBytes + 1, 42);
+const repicked = Buffer.alloc(partBytes + 1, 42);
+const prefix = repicked.subarray(0, partBytes);
 const cases = [
-  { label: 'acknowledged', bytes: known, prefix: known },
-  { label: 'empty', bytes: Buffer.alloc(0) },
-  { label: 'empty-acknowledged', bytes: Buffer.alloc(0), prefix: Buffer.alloc(0) },
-  { label: 'suffix', bytes: refusedFile, prefix: refusedFile.subarray(0, partBytes) },
+  { label: 'acknowledged', bytes: repicked, parts: [prefix, repicked.subarray(partBytes)] },
+  { label: 'empty', bytes: Buffer.alloc(0), parts: [] },
+  { label: 'empty-acknowledged', bytes: Buffer.alloc(0), parts: [Buffer.alloc(0)] },
+  { label: 'suffix', bytes: repicked, parts: [prefix] },
 ];
 const allocate = '/api/uploads';
 const resume = `${allocate}/${intentId}/resume`;
@@ -102,16 +102,16 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
       assert.deepEqual(requests, []);
       evidence.canceled = { requests: [], refreshes: 0 };
 
-      for (const { label, bytes, prefix } of cases) {
+      for (const { label, bytes, parts } of cases) {
         if (label !== 'acknowledged') {
           await page.goto(url);
           await continuation.waitFor();
         }
         assert.deepEqual(requests, []);
         if (label === 'suffix') await page.evaluate(() => { window.holdFixtureEvidence = true; });
-        projection = { declaredSize: bytes.length, parts: prefix ? [
-          { partNumber: 1, sizeBytes: prefix.length, sha256: createHash('sha256').update(prefix).digest('hex') },
-        ] : [] };
+        projection = { declaredSize: bytes.length, parts: parts.map((part, index) => ({
+          partNumber: index + 1, sizeBytes: part.length, sha256: createHash('sha256').update(part).digest('hex'),
+        })) };
         await pick(continuation, file(bytes));
         const expected = [['GET', resume, null]];
         if (label === 'suffix') {
@@ -125,7 +125,7 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
           assert.equal(await status.textContent(), `${name}: Upload interrupted.`);
           evidence[label] = { pending, refused };
         } else {
-          if (!prefix) expected.push(['PUT', part(intentId), 0]);
+          if (!parts.length) expected.push(['PUT', part(intentId), 0]);
           expected.push(['POST', complete(intentId), destination]);
           await page.waitForFunction(() => typeof window.releaseFixtureCompletion === 'function');
           const pending = await assertState('Finishing upload…', bytes.length, bytes.length, bytes.length, 0);
@@ -160,10 +160,10 @@ export async function exerciseRootUploadContinuation(browser, origin, axe, outpu
       assert.deepEqual(requests, []); // No automatic retry or fresh allocation after refusal.
 
       // Same page and exact refused file: only a deliberate fresh click allocates.
-      await pick(fresh, file(refusedFile));
-      evidence.fresh = await assertState('Uploaded.', refusedFile.length, refusedFile.length, refusedFile.length, 1);
+      await pick(fresh, file(repicked));
+      evidence.fresh = await assertState('Uploaded.', repicked.length, repicked.length, repicked.length, 1);
       assert.deepEqual(requests, [
-        ['POST', allocate, JSON.stringify({ size: refusedFile.length })],
+        ['POST', allocate, JSON.stringify({ size: repicked.length })],
         ['PUT', part(freshId), partBytes],
         ['PUT', part(freshId, 2), 1],
         ['POST', complete(freshId), destination],

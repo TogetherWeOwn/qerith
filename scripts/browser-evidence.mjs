@@ -1,12 +1,30 @@
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   ...['signed-out', 'empty', 'listed', 'invalid-page', 'exhausted', 'unavailable'].flatMap(state =>
     [`root-${state}-${width}.png`, `axe-root-${state}-${width}.json`]),
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
+
+function hasViewportImageData(png, width, height) {
+  if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
+      png.readUInt32BE(16) !== width || png.readUInt32BE(20) !== height) return false;
+  let hasData = false;
+  for (let offset = 33; offset + 12 <= png.length;) {
+    const length = png.readUInt32BE(offset);
+    const end = offset + length + 12;
+    if (end > png.length) return false;
+    const type = png.toString('ascii', offset + 4, offset + 8);
+    if (type === 'IEND') return hasData && end === png.length &&
+      png.subarray(offset).equals(Buffer.from('0000000049454e44ae426082', 'hex'));
+    if (type === 'IDAT' && length > 0) hasData = true;
+    offset = end;
+  }
+  return false;
+}
 
 export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false, continuation = false) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
@@ -34,21 +52,32 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
           !Array.isArray(axe.violations) || axe.violations.length) throw new Error(`Invalid upload evidence: ${label}`);
     }
   }
-  if (continuation) for (const width of [390, 1280]) {
+  if (continuation) for (const [width, height] of [[390, 844], [1280, 800]]) {
     const proof = JSON.parse(await readFile(join(dir, `root-continuation-${width}.json`), 'utf8'));
+    const requireTrace = (phase, expected) => {
+      const actual = phase.split('.').reduce((value, key) => value?.[key], proof);
+      if (!isDeepStrictEqual(actual?.requests, expected)) throw new Error(`Invalid continuation trace: ${width} ${phase}`);
+    };
+    const intent = '/api/uploads/00000000-0000-4000-8000-000000000101';
+    const fresh = '/api/uploads/00000000-0000-4000-8000-000000000103';
+    const resume = ['GET', `${intent}/resume`, null];
+    const destination = '{"parentId":null,"name":"Re-picked.txt"}';
+    requireTrace('canceled', []);
+    requireTrace('fresh', [['POST', '/api/uploads', '{"size":16777217}'], ['PUT', `${fresh}/parts/1`, 16777216],
+      ['PUT', `${fresh}/parts/2`, 1], ['POST', `${fresh}/complete`, destination]]);
+    for (const phase of ['pending', 'refused']) requireTrace(`suffix.${phase}`, [resume]);
     const finishing = ['acknowledged', 'empty', 'empty-acknowledged'];
-    const phases = [proof?.canceled, proof?.fresh, proof?.suffix?.pending, proof?.suffix?.refused,
-      ...finishing.flatMap(label => [proof?.[label]?.pending, proof?.[label]?.published])];
-    if (!phases.every(phase => Array.isArray(phase?.requests))) throw new Error(`Invalid continuation trace: ${width}`);
+    for (const label of finishing) {
+      const expected = [resume, ...(label === 'empty' ? [['PUT', `${intent}/parts/1`, 0]] : []),
+        ['POST', `${intent}/complete`, destination]];
+      for (const phase of ['pending', 'published']) requireTrace(`${label}.${phase}`, expected);
+    }
     const axe = JSON.parse(await readFile(join(dir, `axe-root-continuation-${width}.json`), 'utf8'));
     if (!Array.isArray(axe?.violations) || axe.violations.length) throw new Error(`Invalid continuation axe evidence: ${width}`);
     for (const state of [...finishing.map(label => `${label}-finishing`), 'suffix-interrupted', 'uploaded']) {
       const label = `${state}-${width}`;
       const png = await readFile(join(dir, `root-continuation-${label}.png`));
-      if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
-          png.readUInt32BE(16) !== width || !png.subarray(-12).equals(Buffer.from('0000000049454e44ae426082', 'hex'))) {
-        throw new Error(`Invalid continuation screenshot: ${label}`);
-      }
+      if (!hasViewportImageData(png, width, height)) throw new Error(`Invalid continuation screenshot: ${label}`);
     }
   }
   if (staging) {
