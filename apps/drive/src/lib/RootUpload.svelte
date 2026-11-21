@@ -1,17 +1,25 @@
 <script lang="ts">
-  import { resumeMultipartToRoot, uploadMultipartToRoot, uploadToRoot } from './root-upload';
+  import {
+    resumeBoundMultipartToRoot, resumeMultipartToRoot, uploadBoundMultipartToRoot,
+    uploadMultipartToRoot, uploadToRoot, type RootUploadResult, type UploadResumeCandidate,
+  } from './root-upload';
   import type { DriveUploadMode } from './server/request-auth';
   import './tokens.css';
 
   let { mode, announce, refresh, paginated, busy = $bindable(false), fixtureResumeIntentId, fixtureFetcher }: {
     mode: Exclude<DriveUploadMode, 'disabled'>;
     announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
-    // Only the disposable fixture supplies these. Never discover or persist an intent here.
+    // Only the disposable fixture supplies these for the legacy path and transport.
     fixtureResumeIntentId?: string; fixtureFetcher?: typeof fetch;
   } = $props();
   const id = $props.id();
+  let uploadButton = $state<HTMLButtonElement>();
+  let continueButton = $state<HTMLButtonElement>();
   let picker = $state<HTMLInputElement>();
   let continuePicker = $state<HTMLInputElement>();
+  // One in-memory candidate. Never discover, serialize or persist it across reloads.
+  let candidate = $state<UploadResumeCandidate>();
+  const canContinue = $derived(mode === 'multipart' && (candidate !== undefined || fixtureResumeIntentId !== undefined));
   let selected = $state<{ name: string; size: number }>();
   let acceptedBytes = $state(0);
   let message = $state('');
@@ -22,11 +30,14 @@
     if (!busy) picker?.click();
   }
 
-  async function upload(event: Event, intentId?: string) {
+  async function upload(event: Event, continuing = false) {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
     input.value = '';
-    if (!file || busy) return;
+    if (!file || busy || (continuing && !canContinue)) return;
+    const resumeCandidate = continuing ? candidate : undefined;
+    const legacyCandidate = continuing ? fixtureResumeIntentId : undefined;
+    if (!continuing) candidate = undefined;
     busy = true;
     const attempt = ++selection;
     selected = { name: file.name, size: file.size };
@@ -34,18 +45,29 @@
     published = false;
 
     try {
-      const continuing = intentId !== undefined;
       announce(continuing ? `Continuing upload of ${file.name} to My Drive.` : `Uploading ${file.name} to My Drive.`);
       message = continuing ? 'Continuing upload…' : 'Uploading…';
       const partAccepted = (bytes: number) => { acceptedBytes = bytes; };
-      const result = continuing
-        ? await resumeMultipartToRoot(intentId, file, bytes => {
-            partAccepted(bytes);
-            message = 'Finishing upload…';
-          }, fixtureFetcher)
-        : mode === 'multipart'
-          ? await uploadMultipartToRoot(file, partAccepted, fixtureFetcher)
-          : await uploadToRoot(file, () => partAccepted(file.size), fixtureFetcher);
+      const resumeProgress = (bytes: number) => {
+        partAccepted(bytes);
+        message = bytes === file.size ? 'Finishing upload…' : 'Continuing upload…';
+      };
+      let result: RootUploadResult;
+      if (resumeCandidate !== undefined) {
+        result = await resumeBoundMultipartToRoot(resumeCandidate, file, resumeProgress, fixtureFetcher);
+      } else if (legacyCandidate !== undefined) {
+        result = await resumeMultipartToRoot(legacyCandidate, file, resumeProgress, fixtureFetcher);
+      } else if (mode !== 'multipart') {
+        result = await uploadToRoot(file, () => partAccepted(file.size), fixtureFetcher);
+      } else if (fixtureResumeIntentId !== undefined) {
+        result = await uploadMultipartToRoot(file, partAccepted, fixtureFetcher);
+      } else {
+        result = await uploadBoundMultipartToRoot(file, partAccepted, id => { candidate = id; }, fixtureFetcher);
+      }
+      if (candidate !== undefined && result.status !== 'interrupted') {
+        if (document.activeElement === continueButton) uploadButton?.focus();
+        candidate = undefined;
+      }
       if (result.status === 'published') {
         published = true;
         message = 'Uploaded.';
@@ -67,15 +89,13 @@
   }
 </script>
 
-<button type="button" aria-disabled={!picker || busy} onclick={openPicker}>Upload</button>
+<button type="button" bind:this={uploadButton} aria-disabled={!picker || busy} onclick={openPicker}>Upload</button>
 <input type="file" hidden bind:this={picker} onchange={event => upload(event)} />
-{#if mode === 'multipart' && fixtureResumeIntentId !== undefined}
-  {#key fixtureResumeIntentId}
-    <button class="quiet" type="button" aria-disabled={!continuePicker || busy}
+{#if canContinue}
+  {#key candidate ?? fixtureResumeIntentId}
+    <button class="quiet" type="button" bind:this={continueButton} aria-disabled={!continuePicker || busy}
       onclick={() => { if (!busy) continuePicker?.click(); }}>Continue upload</button>
-    <input type="file" hidden bind:this={continuePicker} onchange={event => {
-      if (mode === 'multipart' && fixtureResumeIntentId !== undefined) void upload(event, fixtureResumeIntentId);
-    }} />
+    <input type="file" hidden bind:this={continuePicker} onchange={event => upload(event, true)} />
   {/key}
 {/if}
 {#if selected}
