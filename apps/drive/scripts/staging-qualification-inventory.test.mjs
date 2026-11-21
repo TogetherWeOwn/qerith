@@ -25,7 +25,8 @@ const pinnedBucket = { name: bucket, jurisdiction: 'default' };
 const bucketPage = { total_count: 1, per_page: 10 };
 const bucketRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: { buckets: [pinnedBucket] }, result_info: bucketPage, ...overrides }, init);
-const r2RosterOrder = ['r2-roster', 'r2-roster-default', 'r2-roster-eu', 'r2-roster-fedramp'];
+const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
+const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
 const scan = (items = []) => ({ complete: true, items });
 const error = { message: 'Qualification estate inventory is unverified.' };
@@ -99,7 +100,7 @@ function fixture(t) {
         trace.push(kind);
         assert.deepEqual(init.headers, { authorization: 'Bearer fixture-token',
           ...(jurisdiction && { 'cf-r2-jurisdiction': jurisdiction }) });
-        const empty = jurisdiction === 'eu' || jurisdiction === 'fedramp';
+        const empty = jurisdiction && jurisdiction !== 'default';
         return (jurisdiction ? state.scopedBucketLists?.[jurisdiction] : state.bucketList) ??
           bucketRoster(empty ? { result: { buckets: [] }, result_info: { total_count: 0 } } : {},
             state.partial === kind ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined);
@@ -421,7 +422,7 @@ test('inventory reads only pinned resources and compares the exact attempt basel
 
 test('inventory rejects an extra native R2 bucket before and after the attempt', async t => {
   const f = fixture(t);
-  for (const [index, jurisdiction] of ['default', 'eu', 'fedramp'].entries()) {
+  for (const [index, jurisdiction] of r2Jurisdictions.entries()) {
     for (const phase of ['before', 'after']) {
       const run = f.create();
       if (phase === 'after') assert.equal(await run('before'), true);

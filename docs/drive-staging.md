@@ -231,9 +231,11 @@ replace the separate estate and app-fixture readers.
 
 Both passes also check the native R2 bucket roster in the account from the
 reviewed storage binding. The headerless list and the explicit `default` list
-must each contain only the bound bucket; the `eu` and `fedramp` lists must be
-empty. None are filtered by name. Each read must return one bounded page with
-an exact total count and no continuation; denied reads do not count as empty.
+must each contain only the bound bucket; the `eu`, `us`, `fedramp`, and
+`fedramp-high` lists must be empty. The six sequential reads are unfiltered by
+name and share a 15-second deadline. Each must return one page of at most 64 KiB
+with an exact total count and no continuation. Denied reads, including on
+restricted jurisdictions, make inventory unverified; they do not count as empty.
 This checks what the existing credential can list in the documented R2
 jurisdictions. It does not replace the estate reader, lifecycle policy readback,
 or direct object and multipart listings.

@@ -47,7 +47,7 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   await runQualificationPhase(async (_, active) => {
     const url = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets?per_page=${pageSize}`;
     // Keep the headerless, name-unfiltered read, but don't rely on it for jurisdiction coverage.
-    for (const jurisdiction of [null, 'default', 'eu', 'fedramp']) {
+    for (const jurisdiction of [null, 'default', 'eu', 'us', 'fedramp', 'fedramp-high']) {
       active.throwIfAborted();
       const expected = !jurisdiction || jurisdiction === 'default' ? 1 : 0;
       const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
