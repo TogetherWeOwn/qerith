@@ -87,12 +87,15 @@ test('composed cases require exact attempt and fail closed on unobserved access'
   const { cwd, env, context } = job(t);
   const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
   const trace = [];
-  const adapters = Object.fromEntries(['readFileFixtures', 'openTransferClient', 'openDeletion', 'send']
+  const adapters = Object.fromEntries(['readFileFixtures', 'openTransferClient', 'openDeletion']
     .map(name => [name, () => trace.push(name)]));
   adapters.withAccessFixtures = (identity, signal) => {
     trace.push({ identity, aborted: signal.aborted });
     return { 'passkey-positive': 'pass' }; // Not observed through the access checker.
   };
+  await assert.rejects(createQualificationExercise(env, cwd, adapters), /adapters/);
+  assert.deepEqual(trace, []);
+  adapters.send = () => trace.push('send');
   await assert.rejects(createQualificationExercise(env, cwd, { ...adapters, openDeletion: undefined }), /adapters/);
   await assert.rejects(createQualificationExercise({ ...env, QERITH_S3_BUCKET: 'other' }, cwd, adapters), /S3 cases are unverified/);
   const run = await createQualificationExercise(env, cwd, adapters);
@@ -406,7 +409,56 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
   assert.deepEqual(trace, storageCalls);
 });
 
-test('lifecycle runs all 19 cases for one candidate and rejects replay of that evidence', { timeout: 90_000 }, async t => {
+function composedLifecycle({ cwd, env, active, phases, exercise, signal, after = () => true }) {
+  return runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
+    inventory({ phase }) { phases.push(phase); return phase === 'after' ? after() : true; },
+    cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
+  }, env, cwd, signal, {
+    upload: () => active, migrate: () => null,
+    async worker({ upload, exercise, cleanup }, _env, _cwd, workerSignal) {
+      try { return await exercise(upload, workerSignal); }
+      finally { await cleanup(upload, workerSignal); phases.push('restore'); }
+    },
+  });
+}
+
+const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
+
+test('lifecycle aborts and drains an escaped access callback before recovery', { timeout: 10_000 }, async t => {
+  const { cwd, env, context } = job(t);
+  const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+  const phases = [], entered = Promise.withResolvers(), release = Promise.withResolvers();
+  const fixture = accessFixture(async (_command, response) => {
+    entered.resolve();
+    await release.promise;
+    return response;
+  }, active);
+  let signal, late, callback;
+  const unused = () => phases.push('unexpected adapter');
+  const exercise = await createQualificationExercise(env, cwd, {
+    readFileFixtures: unused, send: unused, openTransferClient: unused, openDeletion: unused,
+    withAccessFixtures(scope, activeSignal, run) {
+      signal = activeSignal;
+      callback = fixture.withFixtures(scope, signal, fixtures => { late = () => run(fixtures); return late(); }).catch(() => {});
+      return { 'passkey-positive': 'pass' };
+    },
+  });
+  const result = assert.rejects(composedLifecycle({ cwd, env, active, phases, exercise, signal: new AbortController().signal }), /\(access\)/);
+  try {
+    await entered.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(phases, ['before']);
+    assert.equal(signal.aborted, true);
+  } finally { release.resolve(); }
+  await result;
+  await callback;
+  await assert.rejects(late());
+  assert.equal(fixture.transcript[0][0], 'owner sign-in');
+  assert.deepEqual(phases, lifecycleOrder);
+});
+
+for (const ending of ['success and replay', 'unverified final inventory', 'cancelled at final inventory']) test(
+  `lifecycle runs all 19 cases for one candidate: ${ending}`, { timeout: 90_000 }, async t => {
   const { cwd, env, context } = job(t);
   const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
   const binding = { endpoint, bucket, epoch: env.QERITH_S3_STORAGE_EPOCH };
@@ -430,23 +482,22 @@ test('lifecycle runs all 19 cases for one candidate and rejects replay of that e
       return io;
     },
   });
-  const signal = new AbortController().signal;
-  const run = exercise => runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
-    inventory({ phase }) { phases.push(phase); return true; },
-    cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
-  }, env, cwd, signal, {
-    upload: () => active, migrate: () => null,
-    async worker({ upload, exercise, cleanup }, _env, _cwd, workerSignal) {
-      try { return await exercise(upload, workerSignal); }
-      finally { await cleanup(upload, workerSignal); phases.push('restore'); }
+  const controller = new AbortController();
+  const run = exercise => composedLifecycle({ cwd, env, active, phases, exercise, signal: controller.signal,
+    after() {
+      if (ending === 'cancelled at final inventory') controller.abort();
+      return ending !== 'unverified final inventory';
     },
   });
-  const { deployment: cases } = await run(async (invocation, phaseSignal) => {
-    const evidence = await compose(invocation, phaseSignal);
-    assert.throws(() => verifyQualificationExercise(evidence, { ...invocation }, phaseSignal), /case evidence/);
-    assert.throws(() => verifyQualificationExercise(evidence, invocation, new AbortController().signal), /case evidence/);
-    return evidence;
+  let cases;
+  const result = run(async (invocation, phaseSignal) => {
+    cases = await compose(invocation, phaseSignal);
+    assert.throws(() => verifyQualificationExercise(cases, { ...invocation }, phaseSignal), /case evidence/);
+    assert.throws(() => verifyQualificationExercise(cases, invocation, new AbortController().signal), /case evidence/);
+    return cases;
   });
+  if (ending === 'success and replay') assert.equal((await result).deployment, cases);
+  else await assert.rejects(result, ending === 'unverified final inventory' ? /inventory is unverified \(after\)/ : { name: 'AbortError' });
   const expected = [
     'passkey-positive', 'passkey-negative', 'invite-acceptance', 'member-revocation', 'cross-user-denial',
     'unauthenticated-file-denial', 'authenticated-file-access', 'folder-operations', 'share-and-revoke',
@@ -457,11 +508,12 @@ test('lifecycle runs all 19 cases for one candidate and rejects replay of that e
   assert.deepEqual(access.transcript, []);
   assert.deepEqual(storage.trace, storageCalls);
   assert.deepEqual([large.clients, resume.clients, scopeReads, trees.size], [1, 2, 1, 8]);
-  const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
   assert.deepEqual(phases, lifecycleOrder);
-  // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
-  await assert.rejects(run(() => cases), /case evidence/);
-  assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
+  if (ending === 'success and replay') {
+    // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
+    await assert.rejects(run(() => cases), /case evidence/);
+    assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
+  }
 });
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {

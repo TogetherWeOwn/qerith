@@ -111,11 +111,13 @@ test('a settled duplicate callback invalidates a complete transcript', async () 
 
 test('scope mismatch, zero observations, cancellation and adapter errors cannot yield results', async () => {
   const fail = { message: 'Qualification access is unverified (fixture-scope).' };
-  let opened = false;
-  const withFixtures = () => { opened = true; };
+  let late, observed = false;
+  const withFixtures = (_scope, _signal, run) => { late = run; };
   await assert.rejects(exerciseQualificationAccess({ ...context, attempt: '3' }, undefined, { withFixtures }), fail);
-  assert.equal(opened, false);
+  assert.equal(late, undefined);
   await assert.rejects(exerciseQualificationAccess(context, undefined, { withFixtures }), fail);
+  await assert.rejects(late({ get owner() { observed = true; } }));
+  assert.equal(observed, false);
   await assert.rejects(exerciseQualificationAccess(context, undefined, { withFixtures: () => { throw new Error(token); } }), fail);
   const controller = new AbortController();
   const scope = fixture(command => { if (command === 'owner sign-in') controller.abort(); });

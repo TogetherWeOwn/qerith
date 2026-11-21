@@ -40,7 +40,7 @@ export function verifyQualificationExercise(evidence, context, signal) {
 // fixtures, and drain before settling on abort. The lifecycle owns the overall
 // budget and post-case cleanup (including any partly provisioned fixtures).
 export async function createQualificationExercise(env, cwd, { withAccessFixtures, readFileFixtures,
-  openTransferClient, openDeletion, send = fetch } = {}) {
+  openTransferClient, openDeletion, send } = {}) {
   const settings = { ...env };
   const identity = assertQualificationJob(settings, cwd);
   const prefix = qualificationPrefix(identity);

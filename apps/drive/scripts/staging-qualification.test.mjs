@@ -423,7 +423,7 @@ test('only a complete successful full-v0 run has the pinned consumer name', t =>
 
 const exerciseResults = Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass']));
 
-function lifecycle(t, failure, driftKind, results = exerciseResults) {
+function lifecycle(t, failure, driftKind) {
   const controller = new AbortController();
   const { cwd, env } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification',
@@ -472,7 +472,7 @@ function lifecycle(t, failure, driftKind, results = exerciseResults) {
       step('exercise-settled');
       signal.throwIfAborted();
       if (failure === 'exercise') throw new Error('Case failed');
-      return results;
+      return exerciseResults;
     },
     cleanup({ prefix: keyPrefix, version: activeVersion }, signal) {
       assert.equal(keyPrefix, prefix);
@@ -542,19 +542,6 @@ test('exercise covers exactly the full-v0 cases not proved by the lifecycle', ()
   const lifecycleCases = ['sha-bound-readiness', 'migration-ledger', 'time-travel-bookmark',
     'rollback-or-disablement', 'zero-idle-inventory', 'prefix-cleanup-verified'];
   assert.deepEqual([...qualificationExerciseCases, ...lifecycleCases].sort(), [...requiredCases].sort());
-});
-
-test('incomplete or invalid case evidence does not skip cleanup and rollback', async t => {
-  const { 'delete-provider-proof': removed, ...incomplete } = exerciseResults;
-  const accessor = Object.defineProperty({ ...incomplete }, 'delete-provider-proof', {
-    get() { assert.fail('evidence getters must not be invoked'); },
-  });
-  for (const results of [incomplete, { ...exerciseResults, 'delete-provider-proof': 'skip' },
-    { ...exerciseResults, 'fixture-only': 'pass' }, Object.create(exerciseResults), accessor]) {
-    const { run, events } = lifecycle(t, undefined, undefined, results);
-    await assert.rejects(run(), /case evidence/);
-    assert.deepEqual(events, successOrder);
-  }
 });
 
 test('qualification lifecycle rejects missing admission, a stale baseline and unrecorded recovery', async t => {
