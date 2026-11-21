@@ -65,7 +65,9 @@ function fixture(change = () => {}, expectedContext = context) {
 
 test('all six access cases require the exact isolated browser transcript', async () => {
   const scope = fixture();
-  assert.deepEqual(await exerciseQualificationAccess(context, undefined, scope), {
+  assert.deepEqual(await exerciseQualificationAccess(context, undefined, {
+    async withFixtures(...args) { await Promise.resolve(); return scope.withFixtures(...args); },
+  }), {
     'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
     'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass',
   });
@@ -107,6 +109,16 @@ test('a settled duplicate callback invalidates a complete transcript', async () 
   assert.equal(duplicate.status, 'rejected');
   assert.equal(scope.transcript.length, 0);
   assert.equal(scope.closed(), true);
+});
+
+test('a queued first callback after adapter settlement makes no access request', async () => {
+  const scope = fixture();
+  let late;
+  await assert.rejects(exerciseQualificationAccess(context, undefined, {
+    async withFixtures(...args) { queueMicrotask(() => { late = scope.withFixtures(...args); late.catch(() => {}); }); },
+  }), /fixture-scope/);
+  await assert.rejects(late);
+  assert.equal(scope.transcript[0][0], 'owner HEAD /');
 });
 
 test('scope mismatch, zero observations, cancellation and adapter errors cannot yield results', async () => {

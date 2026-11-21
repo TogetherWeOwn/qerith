@@ -177,14 +177,9 @@ previous Worker deployment before their respective changes. Any case that starts
 must settle before cleanup, which uses its own bounded signal and the exact
 run/attempt prefix while the candidate is still active. Final inventory is
 checked after Worker recovery, even after an error or cooperative cancellation.
-The offline case composer sequences the access, file/folder/share, signed R2,
-large-transfer, resume and deletion adapters for one exact candidate attempt.
-Each adapter must prove its own case subset. The lifecycle accepts only
-composer-issued evidence from its exact invocation; missing, extra, stale or
-non-passing evidence fails without skipping cleanup and rollback. Readiness,
-migrations, restore and inventory are checked separately. The injected app
-fixtures and transports do not establish live admission or writer quiescence.
-The qualification workflow still has no caller and cannot issue a receipt.
+The offline composer requires every case to pass and binds evidence to the exact invocation.
+These are ordering checks with offline callbacks, not provider evidence. The
+qualification workflow still has no caller and cannot issue a receipt.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects

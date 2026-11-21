@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { test as nodeTest } from 'node:test';
-import { exerciseQualificationDeletion } from './staging-qualification-deletion.mjs';
+import { exerciseQualificationDeletion as exerciseDeletion } from './staging-qualification-deletion.mjs';
 import { qualificationPrefix } from './staging-qualification.mjs';
 
 // The composition test imports the fixture without re-registering this suite.
@@ -11,6 +11,7 @@ export { fixture as deletionFixture };
 const run = { runId: '23', attempt: '2' };
 const context = { ...run, prefix: qualificationPrefix(run) };
 const fixtureScope = { endpoint: 'https://storage.example.test', bucket: 'fixture-bucket', epoch: 'fixture-epoch' };
+const exerciseQualificationDeletion = (attempt, signal, io) => exerciseDeletion(attempt, signal, fixtureScope, io);
 const bytes = Buffer.from([0, 17, 255]);
 const tag = data => `"${createHash('md5').update(data).digest('hex')}"`;
 const etag = tag(bytes), wrongEtag = tag(Buffer.from([1]));
@@ -113,7 +114,7 @@ function fixture({ scope = fixtureScope, prefix = context.prefix } = {}) {
 
 test('verifies all four deletion cases using only owned fixtures and injected clients', async () => {
   const { io, actions, probeCalls } = fixture();
-  assert.deepEqual(await exerciseQualificationDeletion(context, undefined, fixtureScope, io), {
+  assert.deepEqual(await exerciseQualificationDeletion(context, undefined, io), {
     'delete-envelope': 'pass', 'delete-boundary-and-safe-fallback': 'pass',
     'delete-rollback-and-retry': 'pass', 'delete-provider-proof': 'pass',
   });
@@ -130,7 +131,7 @@ test('accepts reordered journal rows before and after scoped retry', async () =>
     if (state.key.endsWith('delete-recovery') && state.job?.completionToken) state.journal.reverse();
     return state;
   };
-  const result = await exerciseQualificationDeletion(context, undefined, fixtureScope, io);
+  const result = await exerciseQualificationDeletion(context, undefined, io);
   assert.equal(result['delete-rollback-and-retry'], 'pass');
 });
 
@@ -139,7 +140,7 @@ test('refuses to invoke retry when the injected clock does not advance', async (
   let retryCalls = 0;
   io.advanceRetryClock = () => {};
   io.retry = () => { retryCalls++; };
-  await assert.rejects(exerciseQualificationDeletion(context, undefined, fixtureScope, io), /\(delete-rollback-and-retry\)/);
+  await assert.rejects(exerciseQualificationDeletion(context, undefined, io), /\(delete-rollback-and-retry\)/);
   assert.equal(retryCalls, 0);
 });
 
@@ -226,7 +227,7 @@ for (const [name, phase, corrupt] of [
   test(`rejects ${name}`, async () => {
     const setup = fixture();
     corrupt(setup);
-    await assert.rejects(exerciseQualificationDeletion(context, undefined, fixtureScope, setup.io), new RegExp(`\\(delete-${phase}\\)`));
+    await assert.rejects(exerciseQualificationDeletion(context, undefined, setup.io), new RegExp(`\\(delete-${phase}\\)`));
     if (name === 'probe scope mismatch') assert.equal(setup.probeCalls.length, 0);
   });
 }
@@ -235,7 +236,7 @@ test('rejects another attempt prefix and cancellation before fixture work', asyn
   const { io, trees, probeCalls } = fixture();
   const signal = AbortSignal.abort();
   await assert.rejects(exerciseQualificationDeletion({ ...context, prefix: qualificationPrefix({ ...run, attempt: '1' }) },
-    undefined, fixtureScope, io), /\(scope\)/);
-  await assert.rejects(exerciseQualificationDeletion(context, signal, fixtureScope, io), /\(scope\)/);
+    undefined, io), /\(scope\)/);
+  await assert.rejects(exerciseQualificationDeletion(context, signal, io), /\(scope\)/);
   assert.equal(trees.size + probeCalls.length, 0);
 });

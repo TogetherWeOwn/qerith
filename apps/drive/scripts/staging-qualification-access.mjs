@@ -11,12 +11,15 @@ const require = condition => { if (!condition) throw new Error(); };
 async function observeFixtures(withFixtures, identity, signal, observe) {
   const controller = new AbortController();
   const active = AbortSignal.any([signal, controller.signal]);
-  let open = true, invocations = 0, settled = false, work, drained;
+  let open = true, invoking = true, invocations = 0, settled = false, work, drained;
   try {
     const result = withFixtures(identity, active, fixtures => {
       const accepted = open && ++invocations === 1;
       const attempt = (async () => {
         require(accepted);
+        // Let an already-settled adapter close admission before a queued callback starts I/O.
+        if (!invoking) await Promise.resolve();
+        require(open);
         active.throwIfAborted();
         try { await observe(fixtures, active); }
         finally { settled = true; }
@@ -25,6 +28,7 @@ async function observeFixtures(withFixtures, identity, signal, observe) {
       if (accepted) work = attempt;
       return attempt;
     });
+    invoking = false;
     if (typeof result?.then === 'function') await result;
   } finally {
     open = false;
