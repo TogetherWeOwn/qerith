@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import test from 'node:test';
 import { folderPage } from '../src/lib/server/folder-page';
 import { stagingOrigin } from '../src/lib/server/request-auth';
-import { loadFolder } from '../src/routes/f/[folderId]/load-folder';
 import { moveNeighbor, readMoveReceipt } from '../src/routes/f/[folderId]/move-action';
 
 const savedMove = { source: 'B', target: null, rows: ['A', 'B', 'C', 'D'], until: 0 };
@@ -121,7 +121,16 @@ test('only projects a positive download hint on a canonical file ID', async () =
   ]);
 });
 
-test('nested loader marks only owned, addressable rows as movable in invite mode', async () => {
+test('nested loader marks only owned, addressable rows as movable in invite mode', async t => {
+  // Supply the two platform bindings while exercising the real route loader in Node.
+  const sources = new Map([['cloudflare:workers', 'export const env = {}'], ['$app/env', 'export const building = true']]);
+  const hooks = registerHooks({ resolve(specifier, context, next) {
+    const code = sources.get(specifier);
+    return code ? { url: `data:text/javascript,${encodeURIComponent(code)}`, shortCircuit: true } : next(specifier, context);
+  } });
+  t.after(() => hooks.deregister());
+  const { env } = await import('cloudflare:workers');
+  const { load } = await import('../src/routes/f/[folderId]/+page.server');
   const file = { id: '00000000-0000-4000-8000-000000000611', name: 'Invoice.pdf', kind: 'file' };
   const folder = { id: 'a folder/雪', name: '2026', kind: 'folder' };
   const invalid = { ...file, id: '..' };
@@ -133,12 +142,12 @@ test('nested loader marks only owned, addressable rows as movable in invite mode
     };
     const withSession = test.mock.fn((_mode: 'first-primary') => ({ prepare: () => statement }));
     const origin = invite ? stagingOrigin : 'https://drive.example.test';
-    const { result } = await loadFolder({ DB: { withSession }, DRIVE_ORIGIN: origin,
-      ...(invite ? { DRIVE_STAGING_INVITE_ACCEPTANCE: '1' } : { DRIVE_SIGN_IN_FIXTURE: '1' }),
-    })({
+    Object.assign(env, { DB: { withSession }, DRIVE_ORIGIN: origin,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: invite ? '1' : undefined, DRIVE_SIGN_IN_FIXTURE: invite ? undefined : '1' });
+    const { result } = await load({
       request: new Request(`${origin}/f/private`), params: { folderId: 'private' }, setHeaders: () => {},
       locals: { driveSession: { token: 'a'.repeat(43), principal: { id: 'principal', role } } },
-    });
+    } as Parameters<typeof load>[0]);
     assert.deepEqual(withSession.mock.calls.map(call => call.arguments), [['first-primary'], ['first-primary']]);
     assert.equal(result.status, 'ok');
     const flag = invite && owned ? { movable: true } : {};

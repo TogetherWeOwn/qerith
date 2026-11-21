@@ -99,7 +99,7 @@ try {
 
   const assets = new Set();
   let holdRefresh, pendingNotice;
-  const relay = async (route, target = worker, navigationSite, wait = () => holdRefresh) => {
+  const relay = async (route, target = worker, navigationSite, wait) => {
     const request = route.request(), url = new URL(request.url());
     if (url.origin !== origin) return route.abort();
     const headers = await request.allHeaders();
@@ -125,7 +125,7 @@ try {
     }
     if (response.ok && url.pathname.startsWith('/_app/immutable/')) assets.add(url.pathname);
     const payload = Buffer.from(await response.arrayBuffer()); // Drain the Worker stream before holding browser delivery.
-    if (url.pathname === dataPath) await wait();
+    await (wait ? wait() : url.pathname === dataPath ? holdRefresh : undefined);
     await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: payload });
   };
   await context.route('**/*', route => relay(route));
@@ -311,6 +311,7 @@ try {
   await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
   page.setDefaultTimeout(10_000);
   await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
+  page.setDefaultTimeout(5_000); // Report a stalled nested step before the fixture deadline.
   await proveNestedMove(page, origin, DB, intercept);
 
   console.log('Staging-origin: checking owner session recovery and revocation');

@@ -104,12 +104,12 @@ export async function proveRename(page, { origin, DB, principal, intercept, curs
       await evidence('success');
       if (intercept) {
         await open(renamed, `Taxes ${width} 📁`);
-        const read = Promise.withResolvers(), requested = Promise.withResolvers();
-        intercept('/__data.json', async route => { requested.resolve(); await read.promise; await route.abort(); });
+        const read = Promise.withResolvers();
+        intercept('/__data.json', async route => { await read.promise; await route.abort(); });
         const recovery = page.getByRole('link', { name: 'Refresh My Drive', exact: true });
         try {
-          await submit('Refresh needed.pdf', file, 200);
-          await requested.promise; await page.clock.fastForward(5_000); // The real app timeout fires while the read is still held.
+          await Promise.all([page.waitForRequest(r => new URL(r.url()).pathname === '/__data.json'), submit('Refresh needed.pdf', file, 200)]);
+          await page.clock.fastForward(5_000); // The real app timeout fires while the read is still held.
           await recovery.and(active).waitFor({ timeout: 8_000 });
         } finally { read.resolve(); }
         await page.getByRole('status').filter({ hasText: 'Renamed to “Refresh needed.pdf”. Refresh My Drive to see it.' }).waitFor();
