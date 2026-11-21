@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
+import { entryShare } from '../src/lib/share-client.ts';
 
 export const readGrantWorker = `import { readGrantRequest } from ${JSON.stringify(resolve('src/lib/server/read-grant-routes.ts'))};`;
 const folder = 'share-folder';
@@ -142,7 +143,9 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   const owner = await session('share-owner', 'member');
   const recipientId = 'share-récipient';
   const recipient = await session(recipientId, 'member');
+  const displayName = 'Shared with Émie';
   await DB.batch([
+    DB.prepare('UPDATE drive_principals SET display_name = ? WHERE id = ?').bind(displayName, recipientId),
     DB.prepare(`INSERT INTO drive_entries (id, owner_id, parent_id, name, kind) VALUES
       (?, 'share-owner', NULL, 'Share folder', 'folder'),
       ('share-nested', 'share-owner', ?, 'Share nested', 'folder'),
@@ -153,6 +156,9 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   const ask = (path, cookie, method = 'GET', headers = {}, body) => worker.fetch(origin + path, {
     method, redirect: 'manual', headers: { ...(cookie ? { cookie } : {}), ...(method === 'GET' ? {} : { origin }), ...headers }, body,
   });
+  const client = (id, cookie = owner) => entryShare(id, (path, init) => worker.fetch(origin + path, {
+    ...init, headers: { cookie, ...(init?.method ? { origin } : {}) },
+  }));
   const status = async (response, expected) => {
     const result = await response;
     assert.deepEqual([result.status, await result.text(), result.headers.get('cache-control'), result.headers.get('location')],
@@ -192,6 +198,23 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   assert.deepEqual(await list(pathFor(file)), empty);
   assert.deepEqual((await list(nested, recipient)).entries, [{ id: file, name: 'Share file', kind: 'file' }]);
 
+  const person = { recipientId, displayName };
+  const inheritedFrom = 'Share folder';
+  const root = await client(folder).listAccessPage();
+  assert.equal(root.complete, true);
+  assert.deepEqual(root.access, [{ ...person, direct: true, inheritedFrom: null }]);
+  const nestedShare = client(file);
+  const inherited = await nestedShare.listAccessPage();
+  assert.equal(inherited.complete, true);
+  assert.deepEqual(inherited.access, [{ ...person, direct: false, inheritedFrom }]);
+  assert.ok(!inherited.candidates.some(row => row.recipientId === recipientId));
+  await assert.rejects(client(file, recipient).listAccessPage(), /Share list unavailable/);
+
+  await nestedShare.grant(recipientId);
+  assert.deepEqual((await nestedShare.listAccessPage()).access, [{ ...person, direct: true, inheritedFrom }]);
+  await nestedShare.revoke(recipientId);
+  assert.deepEqual((await nestedShare.listAccessPage()).access, inherited.access);
+
   await status(ask(readGrantPath, recipient), 404);
   await status(ask(pathFor('missing'), recipient), 404);
   await status(ask(item(folder, 'other'), recipient, 'PUT'), 404);
@@ -202,6 +225,9 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   await status(ask(item(folder), owner, 'DELETE', { 'sec-fetch-site': 'cross-site' }), 403);
   assert.deepEqual(await list(readGrantPath), granted);
   await status(ask(item(folder), owner, 'DELETE'), 204);
+  const removed = await nestedShare.listAccessPage();
+  assert.deepEqual(removed.access, []);
+  assert.deepEqual(removed.candidates.find(row => row.recipientId === recipientId), person);
   await status(ask(item(folder), owner, 'DELETE'), 404);
   await status(ask(nested, recipient), 404);
   assert.deepEqual((await list(shared, recipient)).entries, []);
@@ -222,10 +248,11 @@ export async function exerciseReadGrants({ worker, DB, origin, session }) {
   await status(ask(item(folder), owner, 'PUT'), 204);
   await DB.prepare("UPDATE drive_sessions SET expires_at = 1 WHERE principal_id = 'share-owner'").run();
   await status(ask(next, owner), 401);
+  await assert.rejects(nestedShare.listAccessPage(), /Share list unavailable/);
   await status(ask(item(file), owner, 'PUT'), 401);
   await status(ask(item(folder), owner, 'DELETE'), 401);
   assert.deepEqual((await list(nested, recipient)).entries, [{ id: file, name: 'Share file', kind: 'file' }]);
   assert.deepEqual((await DB.prepare('SELECT recipient_id FROM drive_read_grants WHERE entry_id = ?').bind(folder).all()).results,
     [{ recipient_id: recipientId }]);
-  console.log('Generated Worker fixture: explicit grants, inherited reads, pagination, non-owner writes, revocation and stale sessions passed');
+  console.log('Generated Worker fixture: root and nested Share client, explicit grants, inheritance, pagination, revocation and stale sessions passed');
 }

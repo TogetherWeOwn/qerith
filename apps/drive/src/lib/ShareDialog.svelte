@@ -1,6 +1,5 @@
 <script module lang="ts">
-  import type { ShareRecipient } from './share-client';
-  export type ShareAccess = ShareRecipient & { direct: boolean; inheritedFrom: string | null };
+  export type { ShareAccess } from './share-client';
   export type SharePage<T> = {
     // Rows are one bounded page. Only complete effective access may establish emptiness.
     complete?: boolean; pageNumber: number | null; // One-based; null for unpaged results.
@@ -11,6 +10,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import ShareRecipientPicker, { avatar } from './ShareRecipientPicker.svelte';
+  import type { ShareAccess, ShareRecipient } from './share-client';
   import './dialog.css';
   let { name, kind, owner, access, candidates, nobodyElse = false, onInvite, onShare, onRemove }: {
     name: string; kind: 'File' | 'Folder'; owner: { recipientId: string; driveOwner: boolean };
