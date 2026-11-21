@@ -12,11 +12,11 @@
 <script lang="ts">
   import { flushSync, tick } from 'svelte';
   // The caller supplies unique, eligible choices and owns selection. selectedChoices can retain labels from other pages.
-  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, pageOnly = false, locked = false }: {
+  let { choices, selectedIds, selectedChoices = choices, onSelectionChange, pageOnly = false, locked = false, status = '' }: {
     choices: readonly Choice[];
     selectedIds: readonly string[];
     selectedChoices?: readonly Choice[];
-    pageOnly?: boolean; locked?: boolean;
+    pageOnly?: boolean; locked?: boolean; status?: string;
     onSelectionChange: (ids: string[]) => void;
   } = $props();
 
@@ -114,9 +114,9 @@
       {/each}
     </ul>
   {/if}
-  <div role="status" class:popover={noMatch} class:message={noMatch} class:visually-hidden={!noMatch}>
-    {#if noMatch}{#if matchingNames.length}Matching people are already selected.{:else if pageOnly}No matching people available on this page.{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}{:else}{announcement}{/if}
-  </div>
+  <div role="status">{#if noMatch}
+    <div class="popover message">{#if matchingNames.length}Matching people are already selected.{:else if pageOnly}No matching people available on this page.{:else}Nobody called “<bdi>{query}</bdi>” is on this drive. The owner can invite them.{/if}</div>{/if}{#if status}
+    <div class="message" aria-hidden={noMatch}>{status}</div>{:else if !noMatch}<span class="visually-hidden">{announcement}</span>{/if}</div>
 </div>
 
 <style>

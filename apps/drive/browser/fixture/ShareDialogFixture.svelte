@@ -13,9 +13,7 @@
   let attempts = 0;
   let writes = $state<string[]>([]);
   const alone = $derived(mode === 'owner' || mode === 'member');
-
   function settle() {
-    if (mode !== 'actions') return Promise.resolve();
     return new Promise<void>((resolve, reject) => window.addEventListener('fixture-settle', () => [1, 3].includes(++attempts) ? reject() : resolve(), { once: true }));
   }
   async function share(ids: readonly string[]) {
