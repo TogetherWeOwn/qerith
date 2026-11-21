@@ -1,8 +1,8 @@
-import { captureUploadPartAcknowledgement, type UploadPartByteEvidence,
+import { prepareUploadPartBytes, type UploadPartByteEvidence,
   type UploadPartByteScope } from './metadata/upload-part-byte-evidence';
+import { MAX_PART_BYTES } from './s3/multipart-completion';
 import type { createMultipartUpload } from './s3/multipart-upload';
 
-const maxPartBytes = 16 * 1024 * 1024;
 const uploadBodyReadMs = 60_000;
 type SendPart = ReturnType<typeof createMultipartUpload>;
 type PartReceipt = Awaited<ReturnType<SendPart>>;
@@ -22,7 +22,7 @@ export interface UploadPartDependencies {
   authorize(request: Request, intentId: string): Promise<{
     // Atomically recheck live authority and claim this slot. Only a fresh,
     // acknowledged claim grants a send; an existing evidence row never does.
-    claim(partNumber: number, size: number): Promise<PartAttempt | null>;
+    claim(partNumber: number, size: number, sha256: string | null): Promise<PartAttempt | null>;
   } | null>;
   send: SendPart;
 }
@@ -84,27 +84,31 @@ export async function uploadPart(request: Request, intentId: string, part: strin
   if (length === null) return reply(411);
   if (!/^[0-9]+$/.test(length)) return reply(400);
   const size = Number(length);
-  if (size > maxPartBytes) return reply(413);
+  if (size > MAX_PART_BYTES) return reply(413);
   const bytes = await readUploadBody(request, size).catch(() => null);
   if (!bytes || request.signal.aborted) return reply(400);
+  // A missing digest can pass only the legacy unbound branch of the claim.
+  const prepared = await prepareUploadPartBytes(bytes, size).catch(() => null);
+  if (request.signal.aborted) return reply(400);
 
   try {
-    const attempt = await access.claim(partNumber, size);
+    const attempt = await access.claim(partNumber, size, prepared?.sha256 ?? null);
     if (!attempt) return reply(404);
     const send = async (key: string, uploadId: string, part: number, body: Uint8Array<ArrayBuffer>) =>
       deps.send(key, uploadId, part, body, request.signal);
     let sent: Promise<PartReceipt> | undefined;
-    if (attempt.byteEvidence) {
+    if (prepared && attempt.byteEvidence) {
       const { scope, store } = attempt.byteEvidence;
       try {
-        const proof = await captureUploadPartAcknowledgement(scope, bytes, (target, body) =>
+        const proof = await prepared.capture(scope, (target, body) =>
           sent ??= send(target.objectKey, target.uploadId, target.partNumber, body));
         await store.recordAcknowledged(proof);
         return reply(204);
       } catch { /* Fall back to the existing receipt path, never to a second send. */ }
     }
     // Capture can fail before dispatch. Once started, even rejection is final.
-    const receipt = await (sent ?? send(attempt.objectKey, attempt.uploadId, partNumber, bytes)).catch(() => null);
+    const dispatch = (body: Uint8Array<ArrayBuffer>) => send(attempt.objectKey, attempt.uploadId, partNumber, body);
+    const receipt = await (sent ?? (prepared ? prepared.send(dispatch) : dispatch(bytes))).catch(() => null);
     await attempt.record(receipt);
     if (receipt !== null) return reply(204);
   } catch {

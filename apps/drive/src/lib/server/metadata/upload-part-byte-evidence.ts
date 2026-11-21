@@ -31,18 +31,33 @@ function snapshot(bytes: Uint8Array, size: number): Uint8Array<ArrayBuffer> {
   return new Uint8Array(copyBytes(bytes, size));
 }
 
-// Call once, only after a freshly acknowledged runtime claim. This helper does
-// not check authorization or grant dispatch. The trusted sender must use the
-// given storage target and forward the snapshot unchanged to the bounded uploader.
-export async function captureUploadPartAcknowledgement(scope: UploadPartByteScope & { objectKey: string; uploadId: string },
-  bytes: Uint8Array, send: SendPart): Promise<AcknowledgedUploadPartBytes> {
+const hexDigest = (digest: ArrayBuffer) =>
+  Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+type PartScope = UploadPartByteScope & { objectKey: string; uploadId: string };
+
+// Hash before claiming, keeping the snapshot private until the trusted sender
+// forwards it unchanged. Neither preparation nor capture grants dispatch.
+export async function prepareUploadPartBytes(bytes: Uint8Array, size: number) {
+  const body = snapshot(bytes, size);
+  const digest = await crypto.subtle.digest('SHA-256', body);
+  return {
+    sha256: hexDigest(digest),
+    send: (send: (body: Uint8Array<ArrayBuffer>) => Promise<PartReceipt>) => send(body),
+    capture: (scope: PartScope, send: SendPart) => capture(scope, body, digest, send)
+  };
+}
+
+export async function captureUploadPartAcknowledgement(scope: PartScope, bytes: Uint8Array, send: SendPart) {
   scope = { ...scope };
+  return (await prepareUploadPartBytes(bytes, scope.sizeBytes)).capture(scope, send);
+}
+
+async function capture(scope: PartScope, body: Uint8Array<ArrayBuffer>, digest: ArrayBuffer,
+  send: SendPart): Promise<AcknowledgedUploadPartBytes> {
   const identity = bindScope(scope);
   const { endpoint, bucket, storageEpoch, objectKey, uploadId, partNumber, sizeBytes } = scope;
-  if (!isText(objectKey) || !isText(uploadId) || partNumber < 1 || partNumber > MAX_PARTS)
+  if (!isText(objectKey) || !isText(uploadId) || partNumber < 1 || partNumber > MAX_PARTS || sizeBytes !== body.byteLength)
     throw new TypeError('Invalid upload part target');
-  const body = snapshot(bytes, sizeBytes);
-  const sha256 = await crypto.subtle.digest('SHA-256', body);
   const receipt = await send(Object.freeze({ endpoint, bucket, storageEpoch, objectKey, uploadId, partNumber }), body);
   if (receipt.partNumber !== partNumber || receipt.size !== sizeBytes || typeof receipt.etag !== 'string' ||
       receipt.etag.length > 8192 || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(receipt.etag)) {
@@ -50,7 +65,7 @@ export async function captureUploadPartAcknowledgement(scope: UploadPartByteScop
   }
   const tag = Uint8Array.from(receipt.etag, (char) => char.charCodeAt(0));
   const proof = Object.freeze({}) as AcknowledgedUploadPartBytes;
-  captured.set(proof, [sha256, tag.buffer, ...identity]);
+  captured.set(proof, [digest, tag.buffer, ...identity]);
   return proof;
 }
 
@@ -78,8 +93,7 @@ export class UploadPartByteEvidence {
     scope = { ...scope };
     const identity = bindScope(scope);
     const digest = await crypto.subtle.digest('SHA-256', snapshot(bytes, scope.sizeBytes));
-    const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-    return (await this.read(identity))?.sha256 === sha256;
+    return (await this.read(identity))?.sha256 === hexDigest(digest);
   }
 
   private read(identity: ReturnType<typeof bindScope>) {

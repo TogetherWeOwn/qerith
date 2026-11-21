@@ -14,14 +14,15 @@ const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
 async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualified, endpoint = config.endpoint,
-  size = 7, completionTimeoutMs = () => 15_000, staging = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
+  size = 7, expectedParts = null, completionTimeoutMs = () => 15_000, staging = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
   const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
   const other = `other-${intent}`, calls = [], parts = [], headPins = [];
   await sql("INSERT INTO drive_principals (id, role, status) VALUES (?, ?, 'active'), (?, 'member', 'active')",
     principal, role, other).run();
-  await sql("INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size) VALUES (?, ?, ?, 'created', ?)", intent, principal, key, size).run();
+  await sql(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size, expected_part_sha256s)
+    VALUES (?, ?, ?, 'created', ?, ?)`, intent, principal, key, size, expectedParts).run();
   await sql('INSERT INTO drive_upload_storage_bindings VALUES (?, ?, ?, ?)', intent, endpoint, config.bucket, epoch).run();
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
@@ -67,12 +68,48 @@ async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualifi
   return { send, generation, calls, foreign, key, principal, other, headPins, intent };
 }
 
-const partObservation = (key) => sql(`SELECT o.intent_id, o.owner_id, o.object_key, o.storage_epoch, o.upload_id,
+const partObservation = (key, number = 1) => sql(`SELECT o.intent_id, o.owner_id, o.object_key, o.storage_epoch, o.upload_id,
   o.intent_version, o.part_number, o.size_bytes, r.kind, CAST(r.reported_etag AS TEXT) AS etag,
   lower(hex(e.sha256)) AS digest FROM drive_upload_part_operations o
   JOIN drive_upload_part_observations r USING (operation_id)
   LEFT JOIN drive_upload_part_byte_evidence e USING (operation_id)
-  WHERE o.object_key = ? AND o.part_number = 1`, key).first();
+  WHERE o.object_key = ? AND o.part_number = ?`, key, number).first();
+const partClaim = (intent) => sql('SELECT 1 FROM drive_upload_part_operations WHERE intent_id = ?', intent).first();
+const partDigest = async (bytes) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+  (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+it('claims only the planned slot, size and digest of a bound upload', async () => {
+  const bytes = Uint8Array.of(0, 1, 127, 128, 255, 23, 32), digest = await partDigest(bytes);
+  // Deliberately inconsistent slot 1 proposal to exercise the size predicate even when its digest matches.
+  const short = await partDigest(new Uint8Array(minimum));
+  const { send, key, intent, calls, foreign } = await fixture({ size: 16 * 1024 * 1024 + bytes.length,
+    expectedParts: short + digest, onPart: (body) => expect(new Uint8Array(body)).toEqual(bytes) });
+  for (const [number, options, status] of [
+    [2, { bytes: bytes.slice().reverse() }, 404], [1, { bytes: minimum }, 404], [3, { bytes }, 404],
+    [2, { bytes, auth: null }, 401], [2, { bytes, auth: foreign }, 404],
+  ]) expect((await send(number, options)).status).toBe(status);
+  expect(await partClaim(intent)).toBeNull();
+  expect(calls).toEqual([]);
+  expect((await send(2, { bytes })).status).toBe(204);
+  expect(await partObservation(key, 2)).toMatchObject({ part_number: 2, size_bytes: bytes.length,
+    kind: 'reported', etag: tag, digest });
+  expect((await send(2, { bytes })).status).toBe(404);
+  expect(calls).toEqual(['PUT']);
+});
+
+it.each(['wrong storage', 'revoked during claim'])('denies a matching bound part with %s', async (scenario) => {
+  let qualifiedChecks = 0;
+  const { send, intent, calls } = await fixture({ expectedParts: await partDigest(new Uint8Array(7)),
+    endpoint: scenario === 'wrong storage' ? 'https://wrong.example.test' : config.endpoint,
+    async isQualified(id, _intent, token) {
+      if (scenario === 'revoked during claim' && ++qualifiedChecks === 2) await sessions.revoke(token);
+      return qualified(id);
+    } });
+  expect((await send(1)).status).toBe(404);
+  if (scenario === 'revoked during claim') expect(qualifiedChecks).toBe(2);
+  expect(await partClaim(intent)).toBeNull();
+  expect(calls).toEqual([]);
+});
 
 it('records the exact acknowledged provider body for a fresh owner part', async () => {
   const bytes = Uint8Array.of(0, 1, 127, 128, 255, 23, 32);
@@ -99,9 +136,10 @@ it('records the exact acknowledged provider body for a fresh owner part', async 
   }
 });
 
-it('does not record byte evidence for a cancelled provider attempt', async () => {
+it.each([false, true])('records no byte evidence for a cancelled provider attempt (bound: %s)', async (bound) => {
   const controller = new AbortController();
-  const { send, key, calls } = await fixture({ onPart: () => controller.abort() });
+  const { send, key, calls } = await fixture({ onPart: () => controller.abort(),
+    expectedParts: bound ? await partDigest(new Uint8Array(7)) : null });
   expect((await send(1, { signal: controller.signal })).status).toBe(409);
   expect(await partObservation(key)).toMatchObject({ kind: 'uncertain', etag: null, digest: '' });
   expect((await send(1)).status).toBe(404);

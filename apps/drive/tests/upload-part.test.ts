@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { uploadPart, type UploadPartDependencies } from '../src/lib/server/upload-part';
 
@@ -93,19 +94,21 @@ test('rejects invalid selectors and short, oversized or understated bodies befor
   assert.equal(claims, 0);
 });
 
-test('sends the bounded part once for a fresh claim and never exposes storage identifiers', async () => {
-  let claimed = false;
+test('claims with the digest of the bounded body it sends exactly once', async () => {
+  let digest: string | null = null;
   const receipt = { partNumber: 1, size: limit, etag: '"provider-etag"' };
   const recorded: unknown[] = [];
   const deps: UploadPartDependencies = {
-    authorize: async (_, intentId) => ({ claim: async (part, size) => {
+    authorize: async (_, intentId) => ({ claim: async (part, size, sha256) => {
       assert.deepEqual([intentId, part, size], [id, 1, limit]);
-      if (claimed) return null;
-      claimed = true;
+      if (digest !== null) return null;
+      assert.match(sha256 ?? '', /^[0-9a-f]{64}$/);
+      digest = sha256;
       return { objectKey: 'private-key', uploadId: 'provider-id', record: async (result) => { recorded.push(result); } };
     } }),
     send: async (key, uploadId, part, bytes) => {
       assert.deepEqual([key, uploadId, part, bytes.byteLength], ['private-key', 'provider-id', 1, limit]);
+      assert.equal(digest, createHash('sha256').update(bytes).digest('hex'));
       return receipt;
     }
   };
@@ -138,27 +141,31 @@ test('keeps lost acknowledgments and failed sends uncertain without retries', as
   }
 });
 
-test('a failed evidence digest permits only the already-claimed send and preserves its receipt', async (t) => {
+test('a failed digest allows only a legacy claim and preserves its receipt', async (t) => {
   const digest = t.mock.method(crypto.subtle, 'digest', async () => { throw new Error('Digest unavailable'); });
   const receipt = { partNumber: 1, size: 1, etag: '"provider-etag"' };
   const scope = { operationId: 'op', intentId: id, ownerId: 'owner', objectKey: 'key', uploadId: 'upload',
     intentVersion: 2, partNumber: 1, sizeBytes: 1, storageEpoch: 'epoch', endpoint: origin, bucket: 'bucket' };
   const recorded: unknown[] = [];
-  let claimed = false;
+  let bound = true, claimed = false;
   const send = t.mock.fn(async () => receipt);
   const recordAcknowledged = t.mock.fn(async () => { assert.fail('unexpected evidence write'); });
   const deps: UploadPartDependencies = {
-    authorize: async () => ({ claim: async () => {
-      if (claimed) return null;
+    authorize: async () => ({ claim: async (_, __, sha256) => {
+      assert.equal(sha256, null);
+      if (bound || claimed) return null;
       claimed = true;
       return { objectKey: scope.objectKey, uploadId: scope.uploadId, byteEvidence: { scope, store: { recordAcknowledged } },
         record: async (outcome) => { recorded.push(outcome); } };
     } }),
     send
   };
+  assert.equal((await uploadPart(put(), id, '1', deps)).status, 404);
+  assert.equal(send.mock.callCount(), 0);
+  bound = false;
   assert.equal((await uploadPart(put(), id, '1', deps)).status, 204);
   assert.equal((await uploadPart(put(), id, '1', deps)).status, 404);
-  assert.equal(digest.mock.callCount(), 1);
+  assert.equal(digest.mock.callCount(), 3);
   assert.equal(send.mock.callCount(), 1);
   assert.equal(recordAcknowledged.mock.callCount(), 0);
   assert.deepEqual(recorded, [receipt]);
