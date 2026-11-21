@@ -248,9 +248,9 @@ namespaces visible to the existing credential in that account; it does not
 replace the estate or app-fixture reader or independently prove alarm absence.
 
 Both passes also read the unfiltered native Containers application list in the
-pinned Worker account. The unpaginated result must be an explicit empty array
-within five seconds and 64 KiB. An existing application fails even if it has
-zero instances. A denied, partial, or paginated response is not an empty list.
+pinned Worker account. The result must be an explicit empty array with no
+continuation within five seconds and 64 KiB. An existing application fails even
+if it has zero instances. Denied, partial, and nonterminal responses fail.
 This covers only applications visible to the existing credential in that
 account; it does not replace the separate estate or app-fixture readers.
 

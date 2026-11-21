@@ -503,12 +503,15 @@ test('inventory requires a complete, bounded native container roster', async t =
   const f = fixture(t);
   const roster = { success: true, errors: [], messages: [], result: [] };
   const empty = f.create();
-  f.state.containerList = Response.json(roster);
+  f.state.containerList = Response.json({ ...roster, result_info: {} });
   assert.equal(await empty('before'), true);
+  f.state.containerList = Response.json({ ...roster, result_info: { next_page_token: '' } });
+  assert.equal(await empty('after'), true);
   for (const reply of [
     Response.json({ ...roster, success: false }), Response.json({ ...roster, result: undefined }),
     Response.json({ ...roster, errors: [{ code: 10000 }] }), Response.json({ ...roster, messages: ['partial'] }),
-    Response.json({ ...roster, result_info: { next_page_token: 'more' } }),
+    ...[null, [], '', { next_page_token: 'more' }, { next_page_token: ' ' }, { next_page_token: null }, { cursor: 'more' }]
+      .map(result_info => Response.json({ ...roster, result_info })),
     Response.json({ ...roster, result: { applications: [] } }), Response.json(roster, { status: 403 }),
     Response.json(roster, { headers: { Link: '</next>; rel="next"' } }), Response.json(roster, { status: 206 }),
     Response.json(roster, { headers: { 'Content-Range': 'bytes 0-9/100' } }),
@@ -516,6 +519,20 @@ test('inventory requires a complete, bounded native container roster', async t =
   ]) {
     const run = f.create();
     f.state.containerList = reply;
+    await assert.rejects(run('before'), error);
+    assert.equal(f.trace.at(-1), 'containers');
+  }
+});
+
+test('inventory rejects duplicate native container roster members', async t => {
+  const f = fixture(t);
+  for (const fields of [
+    '"result":[{}],"result":[]',
+    '"result":[{}],"res\\u0075lt":[]',
+    '"result":[],"result_info":{"next_page_token":"more","next_page_token":""}',
+  ]) {
+    const run = f.create();
+    f.state.containerList = new Response(`{"success":true,"errors":[],${fields}}`);
     await assert.rejects(run('before'), error);
     assert.equal(f.trace.at(-1), 'containers');
   }

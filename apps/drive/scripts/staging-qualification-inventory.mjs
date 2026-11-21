@@ -17,7 +17,23 @@ function matchScan(scan, expected) {
       scan.items.length !== expected.length || !isDeepStrictEqual(scan.items, expected)) throw unverified();
 }
 
-async function boundedProviderDocument(response) {
+// Scan already-valid JSON; a string followed by a colon is an object member.
+// Decode member names so different escape spellings cannot hide a duplicate.
+function hasDuplicateMembers(text) {
+  const objects = [];
+  for (const [token, key, colon] of text.matchAll(/("(?:[^"\\]|\\.)*")([ \t\r\n]*:)?|[{}]/gs)) {
+    if (token === '{') objects.push(new Set());
+    else if (token === '}') objects.pop();
+    else if (colon) {
+      const keys = objects.at(-1), name = JSON.parse(key);
+      if (keys.has(name)) return true;
+      keys.add(name);
+    }
+  }
+  return false;
+}
+
+async function boundedProviderDocument(response, rejectDuplicates = false) {
   if (response.status !== 200 || response.headers.has('content-range') || !response.body) {
     await response.body?.cancel();
     throw unverified();
@@ -30,7 +46,10 @@ async function boundedProviderDocument(response) {
     size += chunk.byteLength;
   }
   const bytes = buffer.subarray(0, size);
-  return { bytes, parsed: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  const parsed = JSON.parse(text);
+  if (rejectDuplicates && hasDuplicateMembers(text)) throw unverified();
+  return { bytes, parsed };
 }
 
 // The native lifecycle endpoint is a single policy document, not a list API.
@@ -93,7 +112,7 @@ async function assertNoDurableObjectNamespaces(account, token, request, signal) 
   }, null, signal, 5_000);
 }
 
-// The native list used by Wrangler deployment is an unfiltered, unpaginated array.
+// Read the native list without filters; only a terminal response proves absence.
 async function assertNoContainerApplications(account, token, request, signal) {
   if (!token?.trim()) throw unverified();
   await runQualificationPhase(async (_, active) => {
@@ -104,12 +123,14 @@ async function assertNoContainerApplications(account, token, request, signal) {
       await response.body?.cancel();
       throw unverified();
     }
-    const { parsed } = await boundedProviderDocument(response);
-    const { success, errors, messages, result } = parsed;
+    const { parsed } = await boundedProviderDocument(response, true);
+    const { success, errors, messages, result, result_info: page } = parsed;
     if (success !== true || !Array.isArray(errors) || errors.length ||
         (Object.hasOwn(parsed, 'messages') && (!Array.isArray(messages) || messages.length)) ||
-        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result'].includes(key)) ||
-        !Array.isArray(result) || result.length) throw unverified();
+        Object.keys(parsed).some(key => !['success', 'errors', 'messages', 'result', 'result_info'].includes(key)) ||
+        !Array.isArray(result) || result.length ||
+        (Object.hasOwn(parsed, 'result_info') && (!page || typeof page !== 'object' || Array.isArray(page) ||
+          Object.entries(page).some(([key, value]) => key !== 'next_page_token' || value !== '')))) throw unverified();
   }, null, signal, 5_000);
 }
 
