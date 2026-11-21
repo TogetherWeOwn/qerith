@@ -209,8 +209,9 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
   for (const outcome of ['verified', 'readback drift', 'lost acknowledgement', 'missing retention']) {
     await t.test(outcome, async () => {
       const trace = [];
-      let stored;
-      const send = async (request, init) => {
+      let stored, fixtureError;
+      const lostAcknowledgement = new Error('fixture lost the acknowledgement after storing bytes');
+      const respond = async (request, init) => {
         if (typeof request === 'string') {
           trace.push('lifecycle');
           assert.equal(request, lifecycleURL);
@@ -228,13 +229,18 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
           assert.match(authorization.split('SignedHeaders=')[1].split(',')[0], /(?:^|;)if-none-match(?:;|$)/);
           assert.equal(request.headers.get('x-amz-content-sha256'), createHash('sha256').update(canonical).digest('hex'));
           stored = Buffer.from(await request.arrayBuffer());
-          if (outcome === 'lost acknowledgement') throw new Error('fixture lost the acknowledgement after storing bytes');
+          if (outcome === 'lost acknowledgement') throw lostAcknowledgement;
           return new Response(null, { headers: { etag: '"created"' } });
         }
         assert.equal(request.headers.get('cache-control'), 'no-cache, no-store');
         const bytes = outcome === 'readback drift' ? Buffer.concat([stored, Buffer.from('\n')]) : stored;
         return new Response(bytes, { headers: { 'last-modified': new Date().toUTCString(), 'content-length': bytes.length } });
       };
+      const send = (...args) => respond(...args).catch(error => {
+        // Production masks transport errors; don't let it mask a broken fixture.
+        if (error !== lostAcknowledgement) fixtureError ??= error;
+        throw error;
+      });
       await assert.rejects(createQualificationR2RecoveryStore({ sha: head, runId, attempt }, env, cwd, { send }),
         /recovery storage is unverified/);
       assert.deepEqual(trace, []);
@@ -242,6 +248,7 @@ test('signed recovery uses the source commit and requires a byte-identical GET a
       const write = qualificationRecoveryWriter(context, store);
       if (outcome === 'verified') assert.equal(await write(record), true);
       else await assert.rejects(write(record), { message: 'Staging qualification recovery record is unverified.' });
+      assert.ifError(fixtureError);
       assert.deepEqual(stored, outcome === 'missing retention' ? undefined : canonical);
       assert.deepEqual(trace, ['lifecycle', ...(outcome === 'missing retention' ? [] : ['PUT']),
         ...(['verified', 'readback drift'].includes(outcome) ? ['GET'] : [])]);
