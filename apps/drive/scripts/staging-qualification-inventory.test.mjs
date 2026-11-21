@@ -91,7 +91,13 @@ function fixture(t) {
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
         return response;
       }
-      const pinned = `${root}${account}/workers/scripts/${worker}/`;
+      const scripts = `${root}${account}/workers/scripts`;
+      if (url === scripts) {
+        trace.push('scripts');
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        return state.scriptList ?? json([{ id: worker }]);
+      }
+      const pinned = `${scripts}/${worker}/`;
       assert.ok(url.startsWith(pinned));
       const path = url.slice(pinned.length); trace.push(path.split('/')[0]);
       if (path === 'schedules') return json({ schedules: [] }, state.cronPage);
@@ -382,9 +388,21 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = ['estate', 'fixtures', 'd1-fixtures', 'expiry', 'uploads', 'objects', 'deployments', 'versions',
-    'schedules', 'deployments'];
+  const expected = ['estate', 'fixtures', 'd1-fixtures', 'expiry', 'uploads', 'objects', 'scripts', 'deployments',
+    'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
+});
+
+test('inventory rejects an extra native Worker before and after the attempt', async t => {
+  const f = fixture(t);
+  for (const phase of ['before', 'after']) {
+    const run = f.create();
+    if (phase === 'after') assert.equal(await run('before'), true);
+    f.trace.length = 0;
+    f.state.scriptList = json([{ id: worker }, { id: 'unexpected-worker' }]);
+    await assert.rejects(run(phase), error);
+    assert.equal(f.trace.at(-1), 'scripts');
+  }
 });
 
 test('inventory requires native D1 migration fixture absence before and after the attempt', async t => {
