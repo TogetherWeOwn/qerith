@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,6 +75,42 @@ test('wrong parent count, head, main ancestry and mutable refs fail closed', () 
   assert.throws(() => selectCheckout({ ...input, head: 'main' }, graph()), /immutable/);
   assert.throws(() => selectCheckout({ ...input, event: 'push' }, graph()), /must match/);
 });
+
+test('push, merge queue and manual browser checks require the exact snapshot', () => {
+  for (const event of ['push', 'merge_group', 'workflow_dispatch']) {
+    const request = { event, head: snapshot, snapshot };
+    assert.deepEqual(selectCheckout(request, graph()), { tested: snapshot, mode: 'head', snapshotBase: null });
+    assert.throws(() => selectCheckout(request, graph({ hasSnapshot: false })), /not eligible/);
+    assert.throws(() => selectCheckout({ ...request, head }, graph()), /must match/);
+  }
+});
+
+test('ci-ok requires a successful browser registry coverage result', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const aggregate = workflow.split(/^  ci-ok:\n/m)[1]?.split(/^  \S/m)[0];
+  assert.match(aggregate, /^    name: ci-ok$/m);
+  assert.match(aggregate, /^    if: \$\{\{ always\(\) \}\}$/m);
+  assert.match(aggregate, /^          NEEDS_JSON: \$\{\{ toJSON\(needs\) \}\}$/m);
+  const dependencies = aggregate.match(/^    needs: \[([^\n]+)\]$/m)[1].split(', ');
+  assert.ok(dependencies.includes('drive-browser-coverage'));
+  const command = aggregate.match(/^      - run: \|\n((?:^ {10}[^\n]*\n)+)/m)[1];
+  const results = Object.fromEntries(dependencies.map(id => [id, { result: 'success' }]));
+  const status = needs => {
+    const run = spawnSync('bash', ['-ec', command], {
+      env: { ...process.env, NEEDS_JSON: JSON.stringify(needs) }, encoding: 'utf8',
+    });
+    if (run.error) throw run.error;
+    assert.equal(run.signal, null);
+    return run.status;
+  };
+  assert.equal(status(results), 0);
+  for (const result of ['failure', 'cancelled', 'skipped', 'neutral', 'timed_out', undefined]) {
+    assert.equal(status({ ...results, 'drive-browser-coverage': { result } }), 1, String(result));
+  }
+  delete results['drive-browser-coverage'];
+  assert.equal(status(results), 1, 'missing coverage job');
+});
+
 test('generated browser entrypoints have separate exact-head deadlines', async () => {
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const capture = workflow.split(/^  drive-browser-capture:\n/m)[1]?.split(/^  \S/m)[0];
