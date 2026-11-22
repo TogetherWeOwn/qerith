@@ -50,10 +50,12 @@ class History:
         except (OSError, subprocess.SubprocessError) as exc:
             raise CheckError("git_data_unavailable") from exc
 
-    def fetch(self, base, head):
+    def fetch(self, base, head, number):
         self.git("init", "--bare", "--template=", "--initial-branch=candidate")
+        # GitHub exposes fork commits through this ref on the base repository.
+        # Pin the expected object below even if the PR moves during the fetch.
         self.git("fetch", "--no-tags", "--no-recurse-submodules", "--", ORIGIN,
-                 f"{head}:refs/heads/candidate", f"{base}:refs/heads/baseline")
+                 f"refs/pull/{number}/head:refs/heads/candidate", f"{base}:refs/heads/baseline")
         if (self.git("rev-parse", "--verify", "refs/heads/candidate^{commit}").strip().decode() != head
                 or self.git("rev-parse", "--verify", "refs/heads/baseline^{commit}").strip().decode() != base):
             raise CheckError("git_candidate_identity_mismatch")
@@ -133,8 +135,10 @@ def test_issues(policy, history, base, head, body, files):
         try:
             current = scan(path, candidate)
             prior = scan(old_path, baseline) if baseline is not None else {}
-        except (SyntaxError, ValueError) as exc:
-            raise CheckError("test_source_unsupported_or_invalid") from exc
+        except (SyntaxError, ValueError):
+            for claim, _ in names:
+                yield claim, "test_source_unsupported_or_invalid"
+            continue
         for claim, name in names:
             matches = current.get(name, [])
             if not matches:
@@ -148,7 +152,7 @@ def test_issues(policy, history, base, head, body, files):
 def verdict(policy, api, event, history, fetch=True):
     try:
         detail = event["pull_request"]
-        number = detail["number"]
+        number = policy.number(detail["number"])
         event_head = policy.sha(detail["head"]["sha"])
         if (event["repository"]["full_name"] != REPO or api.repo != REPO
                 or event["action"] not in {"opened", "reopened", "synchronize", "edited", "ready_for_review"}):
@@ -160,7 +164,7 @@ def verdict(policy, api, event, history, fetch=True):
     if head != event_head or pr.get("state") != "open" or pr["base"].get("ref") != "main":
         raise CheckError("event_snapshot_stale")
     if fetch:
-        history.fetch(base, head)
+        history.fetch(base, head, number)
     merge_base, files = history.changes(base, head)
     report = policy.validate(body, files)
     if report["verdict"] == "valid":
@@ -180,8 +184,8 @@ def main():
             raise CheckError("event_unsupported")
         policy = load_policy(os.environ["PR_ATTESTATION_ORG_POLICY"])
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-        api = policy.GitHub(os.environ.get("GH_TOKEN"), REPO)
         try:
+            api = policy.GitHub(os.environ.get("GH_TOKEN"), REPO)
             with tempfile.TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as folder:
                 result = verdict(policy, api, event, History(folder))
         except policy.ObservationError as exc:

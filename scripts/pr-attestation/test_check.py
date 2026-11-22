@@ -64,7 +64,7 @@ class ExactHeadTests(unittest.TestCase):
     def git(cls, *args):
         return subprocess.check_output([
             "git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "-c", "commit.gpgsign=false", "-C", str(cls.tree), *args,
+            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-C", str(cls.tree), *args,
         ], text=True).strip()
 
     @classmethod
@@ -125,6 +125,28 @@ class ExactHeadTests(unittest.TestCase):
         with self.assertRaisesRegex(CheckError, "pr_snapshot_changed"):
             verdict(self.policy, api, self.event(self.head), self.history, fetch=False)
 
+    def test_fetches_fork_head_from_base_pr_ref_and_rejects_a_moved_ref(self):
+        class LocalHistory(History):
+            def git(self, *args):
+                return super().git("-c", "protocol.file.allow=always", *args)
+
+        with tempfile.TemporaryDirectory() as folder:
+            origin = Path(folder) / "base.git"
+            candidate = Path(folder) / "candidate.git"
+            candidate.mkdir()
+            self.git("init", "--bare", "--quiet", "--template=", str(origin))
+            self.git("push", "--quiet", str(origin), f"{self.base}:refs/heads/main", f"{self.head}:refs/pull/7/head")
+            with patch("check.ORIGIN", origin.as_uri()):
+                api = PullAPI(self.base, self.head, attestation(f"{FILE}::test_good"), 2)
+                history = LocalHistory(candidate)
+                result = verdict(self.policy, api, self.event(self.head), history)
+                self.assertEqual(result["issues"], [])
+                self.assertEqual(result["head_sha"], self.head)
+                self.assertFalse((candidate / FILE).exists())
+                self.git("push", "--quiet", str(origin), f"{self.rename}:refs/pull/7/head")
+                with self.assertRaisesRegex(CheckError, "git_candidate_identity_mismatch"):
+                    verdict(self.policy, api, self.event(self.head), history)
+
     def test_command_fails_on_invalid_evidence_and_unavailable_git(self):
         event_path = self.tree / "event.json"
         event_path.write_text(json.dumps(self.event(self.head)))
@@ -144,6 +166,27 @@ class ExactHeadTests(unittest.TestCase):
 
 
 class DeclarationsTests(unittest.TestCase):
+    def test_typescript_const_table_resolves_each_name_and_row_change(self):
+        source = b"""
+          import test from 'node:test';
+          for (const [kind, count] of ([['registration', 1], ['authentication', 2]] as const)) {
+            test(`${kind} verified`, () => assert.equal(count, fixture(kind)));
+          }
+        """
+        baseline = scan("ceremony.test.ts", source)
+        revised = scan("ceremony.test.ts", source.replace(b"'registration', 1", b"'registration', 3"))
+        self.assertEqual(set(baseline), {"registration verified", "authentication verified", "${kind} verified"})
+        self.assertNotEqual(baseline["registration verified"], revised["registration verified"])
+        self.assertEqual(baseline["authentication verified"], revised["authentication verified"])
+
+    def test_javascript_statement_boundary_changes_fingerprint(self):
+        prefix = b"import test from 'node:test'; test('case', () => { "
+        baseline = scan("sample.test.mjs", prefix + b"return\n assert.rejects(operation()) });")
+        revised = scan("sample.test.mjs", prefix + b"return assert.rejects(operation()) });")
+        commented = scan("sample.test.mjs", prefix + b"return /* comment */ assert.rejects(operation()) });")
+        self.assertNotEqual(baseline["case"], revised["case"])
+        self.assertEqual(revised["case"], commented["case"])
+
     def test_javascript_and_typescript_declarations(self):
         source = b"""
           import test, {test as nodeTest} from 'node:test';

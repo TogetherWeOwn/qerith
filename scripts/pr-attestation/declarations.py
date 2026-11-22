@@ -29,17 +29,24 @@ def descendants(root):
         pending.extend(reversed(node.named_children))
 
 
-def tokens(root):
+def fingerprint(root):
+    # Preserve statement boundaries as well as tokens. JavaScript can change
+    # its parse tree when a newline is moved without changing leaf tokens.
     pending = [root]
     result = []
     while pending:
         node = pending.pop()
+        if node is None:
+            result.append(None)
+            continue
         if node.type in {"comment", "line_comment", "block_comment"}:
             continue
         if node.child_count:
+            result.append(node.type)
+            pending.append(None)
             pending.extend(reversed(node.children))
         else:
-            result.append(node.text)
+            result.append((node.type, node.text))
     return tuple(result)
 
 
@@ -102,7 +109,9 @@ def js_loop_values(call, name):
         left = parent.child_by_field_name("left")
         right = parent.child_by_field_name("right")
         operator = parent.child_by_field_name("operator")
-        if text(operator) != "of" or right.type != "array" or parent.child_by_field_name("kind").type != "const":
+        while right.type in {"as_expression", "parenthesized_expression"}:
+            right = next(child for child in right.named_children if child.type != "comment")
+        if text(operator) != "of" or right.type != "array" or text(parent.child_by_field_name("kind")) != "const":
             continue
         if left.type == "identifier" and text(left) == name:
             rows = [(row, row) for row in right.named_children]
@@ -112,7 +121,7 @@ def js_loop_values(call, name):
                     if row.type == "array" and row.named_child_count > index]
         else:
             continue
-        return [(js_text(text(value)[1:-1]), tokens(row)) for value, row in rows
+        return [(js_text(text(value)[1:-1]), fingerprint(row)) for value, row in rows
                 if value.type == "string"]
     return []
 
@@ -168,18 +177,18 @@ def js_declarations(root):
                     or not node_subtest(node, text(function.child_by_field_name("object")), bindings)):
                 continue
         title = args[0]
-        fingerprint = tokens(node)
+        declaration = fingerprint(node)
         if title.type == "string":
-            yield js_text(text(title)[1:-1]), fingerprint
+            yield js_text(text(title)[1:-1]), declaration
         elif title.type == "template_string":
             parts = [child for child in title.named_children if child.type == "template_substitution"]
-            yield js_text(text(title)[1:-1]), fingerprint
+            yield js_text(text(title)[1:-1]), declaration
             if len(parts) == 1 and parts[0].named_child_count == 1 and parts[0].named_children[0].type == "identifier":
                 part = parts[0]
                 prefix = title.text[1:part.start_byte - title.start_byte].decode()
                 suffix = title.text[part.end_byte - title.start_byte:-1].decode()
                 for value, row in js_loop_values(node, text(part.named_children[0])):
-                    yield js_text(prefix) + value + js_text(suffix), (fingerprint, row)
+                    yield js_text(prefix) + value + js_text(suffix), (declaration, row)
 
 
 def rust_declarations(root):
@@ -194,12 +203,12 @@ def rust_declarations(root):
             preceding = preceding.prev_named_sibling
         if any(RUST_TEST.fullmatch(attr.text) for attr in attrs):
             name = text(node.child_by_field_name("name"))
-            fingerprint = (tuple(tokens(attr) for attr in reversed(attrs)), tokens(node))
-            yield name, fingerprint
+            declaration = (tuple(fingerprint(attr) for attr in reversed(attrs)), fingerprint(node))
+            yield name, declaration
             modules = [text(parent.child_by_field_name("name")) for parent in ancestors(node)
                        if parent.type == "mod_item"]
             if modules:
-                yield "::".join([*reversed(modules), name]), fingerprint
+                yield "::".join([*reversed(modules), name]), declaration
 
 
 def python_declarations(source):
