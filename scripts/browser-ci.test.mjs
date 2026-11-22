@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { crc32, deflateSync } from 'node:zlib';
 import { verifyEvidence } from './browser-evidence.mjs';
 import { selectCheckout } from './select-browser-checkout.mjs';
@@ -17,6 +20,32 @@ function graph({ hasHead = false, hasSnapshot = true, introducedHead = false,
     if (args[0] === 'is-ancestor') return args[2] === 'origin/main' ? onMain : args[2] === head ? introducedHead : introducedBase;
     throw new Error('Unexpected git operation');
   };
+}
+
+async function writeBaseEvidence(dir) {
+  await writeFile(join(dir, 'head.txt'), head);
+  for (const size of ['1280x800', '390x844']) {
+    await writeFile(join(dir, `${size}.png`), Buffer.from('89504e470d0a1a0a', 'hex'));
+    await writeFile(join(dir, `axe-${size}.json`), '{"violations":[]}');
+    await writeFile(join(dir, `keyboard-${size}.json`), '{"tab":true}');
+  }
+}
+
+function viewportPng(width, height) {
+  const chunk = (type, data) => {
+    const png = Buffer.alloc(data.length + 12);
+    png.writeUInt32BE(data.length);
+    png.write(type, 4);
+    data.copy(png, 8);
+    png.writeUInt32BE(crc32(png.subarray(4, -4)), png.length - 4);
+    return png;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // 8-bit greyscale, filter 0 on each row.
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
+    chunk('IDAT', deflateSync(Buffer.alloc((width + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
 }
 
 test('legacy fixture selects the bound integration snapshot', () => {
@@ -71,15 +100,8 @@ test('generated browser entrypoints have separate exact-head deadlines', async (
 test('evidence fails when missing, empty or bound to the wrong checkout', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-evidence-test-'));
   try {
-    const files = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
-      [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
     await assert.rejects(verifyEvidence(dir, head));
-    for (const file of files) {
-      const content = file === 'head.txt' ? head : file.endsWith('.png')
-        ? Buffer.from('89504e470d0a1a0a', 'hex') : file.startsWith('axe-')
-          ? '{"violations":[]}' : '{"tab":true}';
-      await writeFile(join(dir, file), content);
-    }
+    await writeBaseEvidence(dir);
     await verifyEvidence(dir, head);
     const verifyShare = () => verifyEvidence(dir, head, false, false, false, false, false, false, false, true);
     await assert.rejects(verifyShare(), /share-recipient-390-keyboard\.json/);
@@ -101,14 +123,6 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       acknowledged: finished(), empty: finished(['PUT', `${intent}/parts/1`, 0]), 'empty-acknowledged': finished(),
       fresh: { requests: [['POST', '/api/uploads', '{"size":16777217}'], ['PUT', `${fresh}/parts/1`, 16777216],
         ['PUT', `${fresh}/parts/2`, 1], ['POST', `${fresh}/complete`, destination]] } };
-    const chunk = (type, data) => {
-      const png = Buffer.alloc(data.length + 12);
-      png.writeUInt32BE(data.length);
-      png.write(type, 4);
-      data.copy(png, 8);
-      png.writeUInt32BE(crc32(png.subarray(4, -4)), png.length - 4);
-      return png;
-    };
     const verifyDeletion = () => verifyEvidence(dir, head, false, false, false, false, false, false, true);
     await assert.rejects(verifyDeletion(), /delete-file-390-keyboard\.json/);
     const deleteStages = ['open', 'saving', 'error', 'accepted'];
@@ -118,14 +132,7 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     for (const [width, height] of [[390, 844], [1280, 800]]) {
       await writeFile(join(dir, `root-continuation-${width}.json`), JSON.stringify(continuation));
       await writeFile(join(dir, `axe-root-continuation-${width}.json`), '{"violations":[]}');
-      const header = Buffer.alloc(13);
-      const pngAt = w => {
-        header.writeUInt32BE(w);
-        header.writeUInt32BE(height, 4);
-        header[8] = 8; // 8-bit greyscale, filter 0 on each row.
-        return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
-          chunk('IDAT', deflateSync(Buffer.alloc((w + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
-      };
+      const pngAt = w => viewportPng(w, height);
       const png = pngAt(width);
       const shareStates = ['empty', 'options', 'picked', 'already-selected', 'no-match'];
       for (const w of width === 390 ? [width, 320] : [width]) {
@@ -245,5 +252,95 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     await assert.rejects(verifyEvidence(dir, head), /Empty evidence/);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('routed Share gates bind to the exact head and require each fixture’s evidence', async t => {
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const step = workflow.split('      - name: Verify evidence and record both provenance identities\n')[1]?.split(/^      - /m)[0];
+  assert.ok(step);
+  const run = promisify(execFile);
+  const script = fileURLToPath(new URL('./browser-evidence.mjs', import.meta.url));
+  const fixtures = [
+    ['root', 'ROOT_SHARE_EVIDENCE', ['signed-out', 'root', 'invite-empty', 'dialog'], [
+      '- dialog "Share “Shareable file”":',
+      '    - option "Root Reader"',
+      '  - button "Remove Root Reader’s access": Remove',
+      '  - button "Invite someone"',
+      '- main:',
+      '  - heading "Users and invites" [level=1]',
+    ]],
+    ['nested', 'NESTED_SHARE_EVIDENCE', ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only'], [
+      '- menu:',
+      '  - menuitem "Share"',
+      '  - menuitem "Move"',
+      '- dialog "Share “Review materials”":',
+      '    - option "New Reader"',
+      '  - text: Through Shared project Can view',
+      '  - button "Confirm removal of direct access for Folder Reader"',
+      '  - status: Removed direct access for Folder Reader.',
+    ]],
+  ];
+  for (const [scope, flag, states, review] of fixtures) {
+    await t.test(scope, async () => {
+      const stem = `${scope}-share`;
+      const gate = `steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/${stem}.mjs') != ''`;
+      assert.ok(step.split('\n').includes('          ' + flag + ': ${{ ' + gate + ' }}'));
+      const dir = await mkdtemp(join(tmpdir(), `browser-${stem}-test-`));
+      const env = { EVIDENCE_DIR: dir, TESTED_SHA: head, REQUESTED_HEAD: head, SNAPSHOT_SHA: snapshot,
+        COMPATIBILITY_MODE: 'head', GITHUB_WORKFLOW: 'CI', GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'example/fixture' };
+      const verify = (enabled = 'true') => run(process.execPath, [script], { env: { ...env, [flag]: enabled } });
+      const detail = (mode, width, height) => scope === 'root'
+        ? `${stem}-${width}x${height}-${mode}` : `${stem}-${mode}-${width}`;
+      try {
+        await writeBaseEvidence(dir);
+        await verify('false');
+        await assert.rejects(verify(), { stderr: new RegExp(`ENOENT.*${stem}-signed-out-390\\.png`) });
+        for (const [width, height] of [[390, 844], [1280, 800]]) {
+          const png = viewportPng(width, height);
+          for (const state of states) {
+            const label = `${stem}-${state}-${width}`;
+            const screenshot = state === 'signed-out' ? viewportPng(width, height + 16) : png;
+            await writeFile(join(dir, `${label}.png`), screenshot);
+            await writeFile(join(dir, `axe-${label}.json`), '{"violations":[]}');
+          }
+          for (const mode of ['greyscale', 'forced-colours']) {
+            await writeFile(join(dir, `${detail(mode, width, height)}.png`), png);
+          }
+          await writeFile(join(dir, `${detail('reflow', width, height)}.png`), viewportPng(320, height));
+          await writeFile(join(dir, `${detail('aria-review', width, height)}.txt`), [...review,
+            '  - heading "People with access" [level=3]',
+            '  - combobox "Add people" [expanded]',
+            '  - listbox "Available people":',
+          ].join('\n'));
+        }
+        await verify();
+        const missing = join(dir, `${detail('forced-colours', 1280, 800)}.png`);
+        const original = await readFile(missing);
+        await rm(missing);
+        await assert.rejects(verify(), { stderr: new RegExp(`ENOENT.*${detail('forced-colours', 1280, 800)}\\.png`) });
+        await writeFile(missing, original);
+        const mobilePng = viewportPng(390, 844);
+        const headerOnly = Buffer.concat([mobilePng.subarray(0, 33), mobilePng.subarray(-12)]);
+        const invalid = [
+          [`${stem}-${states.at(-1)}-390.png`, headerOnly, 'screenshot'],
+          [`axe-${stem}-${states.at(-1)}-1280.json`, '{"violations":[{}]}', 'axe evidence'],
+          [`${detail('greyscale', 390, 844)}.png`, viewportPng(390, 845), 'screenshot'],
+          [`${detail('reflow', 1280, 800)}.png`, viewportPng(1280, 800), 'screenshot'],
+          [`${detail('aria-review', 1280, 800)}.txt`, 'Share controls checked.', 'ARIA review'],
+        ];
+        for (const [file, content, kind] of invalid) {
+          const path = join(dir, file);
+          const good = await readFile(path);
+          await writeFile(path, content);
+          const label = file.slice(0, file.lastIndexOf('.')).replace(/^axe-/, '');
+          await assert.rejects(verify(), { stderr: new RegExp(`Invalid Share ${kind}: ${label}`) });
+          await writeFile(path, good);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   }
 });
