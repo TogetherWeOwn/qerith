@@ -4,9 +4,11 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { qualificationPrefix } from './staging-qualification.mjs';
 import { createQualificationInventory } from './staging-qualification-inventory.mjs';
+import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './fixtures/qualification-d1.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
 import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
@@ -31,14 +33,20 @@ const bucketRoster = (overrides, init) => Response.json({ success: true, errors:
 const streamEmpty = { liveInputs: [], range: 0, total: 0 };
 const streamRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: streamEmpty, ...overrides }, init);
-const beforeR2 = ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows', 'queues'];
+const beforeD1Census = ['estate', 'd1-roster', 'd1-census'];
+const beforeR2 = [...beforeD1Census, 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows', 'queues'];
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
 const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-roster-${jurisdiction}`)];
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
 const scan = (items = []) => ({ complete: true, items });
 const error = { message: 'Qualification estate inventory is unverified.' };
+const permanentReservation = "INSERT INTO drive_upload_key_reservations VALUES ('offline-fixture')";
 
-function fixture(t) {
+function waitForFixtureStep(step, operation) {
+  return Promise.race([step, operation.then(() => assert.fail('Operation finished before the fixture step'))]);
+}
+
+function fixture(t, { migrationLimit } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-inventory-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', ['-c', 'user.name=Drive', '-c', 'user.email=drive@example.test',
@@ -47,6 +55,15 @@ function fixture(t) {
   const dir = join(cwd, 'apps/drive/scripts');
   mkdirSync(dir, { recursive: true });
   copyFileSync(new URL('../wrangler.staging.json', import.meta.url), join(dir, '../wrangler.staging.json'));
+  stageReviewedD1FixtureMigrations(cwd);
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  if (migrationLimit !== null) applyReviewedD1FixtureMigrations(db, migrationLimit);
+  db.exec('PRAGMA query_only = ON');
+  const seed = sql => {
+    db.exec('PRAGMA query_only = OFF');
+    try { db.exec(sql); } finally { db.exec('PRAGMA query_only = ON'); }
+  };
   const identitySha256 = createHash('sha256').update(JSON.stringify([JSON.stringify([endpoint, bucket, 'fixture']),
     'auto', 'fixture-key'])).digest('hex');
   writeFileSync(join(dir, 'staging-storage-qualification.json'), JSON.stringify({ version: 1, passed: true, failures: [],
@@ -65,7 +82,7 @@ function fixture(t) {
     CLOUDFLARE_API_TOKEN: 'fixture-token', QERITH_S3_ENDPOINT: endpoint, QERITH_S3_BUCKET: bucket, QERITH_S3_REGION: 'auto',
     QERITH_S3_STORAGE_EPOCH: 'fixture', QERITH_S3_ACCESS_KEY_ID: 'fixture-key', QERITH_S3_SECRET_ACCESS_KEY: 'fixture-secret' };
   const trace = [];
-  const defaults = () => ({ version: uuid('1'), deployment: uuid('2'), expiry: true, fixtures: scan(),
+  const defaults = () => ({ version: uuid('1'), deployment: uuid('2'), expiry: true,
     estate: { workers: scan([{ name: worker }]), databases: scan([{ id: database, compute: 'on-demand' }]),
       buckets: scan([{ account: storageAccount, name: bucket }]), containers: scan(), durableObjects: scan(),
       alarms: scan(), scheduledWorkers: scan(), streamInputs: scan(), otherCompute: scan() } });
@@ -76,10 +93,6 @@ function fixture(t) {
       state.onEstate?.();
       return state.estate;
     },
-    async readFixtures(scope, signal) {
-      assert.deepEqual(scope, { account, database }); signal.throwIfAborted(); trace.push('fixtures');
-      return state.fixtures;
-    },
     async request(url, init) {
       assert.equal(init.redirect, 'error'); init.signal.throwIfAborted();
       const root = 'https://api.cloudflare.com/client/v4/accounts/';
@@ -88,7 +101,18 @@ function fixture(t) {
       const d1 = `${root}${account}/d1/database/${database}`;
       if (url === `${d1}/query`) {
         assert.equal(init.method, 'POST');
-        assert.match(JSON.parse(init.body).batch[0].sql, /^SELECT EXISTS/);
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        const { batch } = JSON.parse(init.body);
+        assert.equal(batch.length, 1);
+        const [{ sql, params }] = batch;
+        if (sql.startsWith('WITH expected_migrations')) {
+          trace.push('d1-census');
+          if (state.readCensus) return state.readCensus(init.signal);
+          const results = db.prepare(sql).all(...params);
+          if (state.partialCensus) results.pop();
+          return json([{ success: true, results }]);
+        }
+        assert.match(sql, /^SELECT EXISTS/);
         trace.push('d1-fixtures');
         return json([{ success: true, results: [{ invite_present: state.migrationResidue ? 1 : 0, ceremony_present: 0 }] }]);
       }
@@ -99,7 +123,10 @@ function fixture(t) {
         assert.equal(init.headers['x-jurisdiction'], undefined);
         return state.databaseList ?? json([{ uuid: database, name: worker }]);
       }
-      if (url === d1) return json({ uuid: database, name: worker, version: 'production' });
+      if (url === d1) {
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        return state.databaseTarget ?? json({ uuid: database, name: worker, version: 'production' });
+      }
       if (url === `${root}${storageAccount}/r2/buckets?per_page=10`) {
         const jurisdiction = init.headers['cf-r2-jurisdiction'];
         const kind = jurisdiction ? `r2-roster-${jurisdiction}` : 'r2-roster';
@@ -193,7 +220,7 @@ function fixture(t) {
     const inspect = createQualificationInventory(env, cwd, reads);
     return (phase, overrides, signal) => inspect({ ...context, phase, ...overrides }, signal);
   };
-  return { context, create, trace, env, cwd, reads, get state() { return state; } };
+  return { context, create, trace, env, cwd, reads, seed, get state() { return state; } };
 }
 
 test('composed lifecycle has no default admission or transport', async t => {
@@ -202,6 +229,21 @@ test('composed lifecycle has no default admission or transport', async t => {
   await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
   await assert.rejects(createQualificationLifecycle(env, cwd, { assertFullV0: unused }), /requires.*explicit transport/);
 });
+
+for (const [label, migrationLimit] of [['an uninitialized', null], ['a partially migrated', 1]]) {
+  test(`composed lifecycle refuses ${label} D1 before upload or migration`, async t => {
+    const { cwd, env, reads, trace } = fixture(t, { migrationLimit });
+    const unused = () => assert.fail('Unexpected adapter');
+    const run = await createQualificationLifecycle(env, cwd, {
+      assertFullV0() { trace.push('admission'); return true; },
+      readEstate: reads.readEstate, readWriterFence: unused,
+      withAccessFixtures: unused, readFileFixtures: unused, openTransferClient: unused, openDeletion: unused,
+      send: reads.request,
+    }, { upload: unused, migrate: unused });
+    await assert.rejects(run(), { message: 'Qualification estate inventory is unverified.' });
+    assert.deepEqual(trace, ['admission', ...beforeD1Census]);
+  });
+}
 
 function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
   const app = join(cwd, 'apps/drive');
@@ -253,8 +295,11 @@ function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
   };
 }
 
-for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
-  const { context, trace, env, cwd, reads, state } = fixture(t);
+for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1',
+  'worker', 'app residue after restore', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
+  const { context, trace, env, cwd, reads, state, seed } = fixture(t);
+  const hasResidue = fault === 'app residue after restore';
+  const reachesCases = hasResidue || !fault;
   const noRetention = ['retention', 'default retention'].includes(fault);
   state.recordRetention = !noRetention;
   const stored = new Map();
@@ -262,7 +307,7 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     expiresAt: String(Date.now() + 25 * 60_000) };
   const unused = () => assert.fail('Unexpected app adapter');
   const unexpectedNetwork = t.mock.method(globalThis, 'fetch', () => assert.fail('Unexpected network request'));
-  const reachesWorker = ['retention after D1', 'worker', null].includes(fault);
+  const reachesWorker = reachesCases || ['retention after D1', 'worker'].includes(fault);
   const nativeRequest = reachesWorker ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
   const identity = { sha: context.sha, runId: context.runId, attempt: context.attempt };
   const { expiresAt, version } = candidate;
@@ -272,6 +317,7 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
       assert.deepEqual(scope, { ...context, version });
       assert.equal(state.version, version);
       trace.push('cases');
+      if (hasResidue) seed(permanentReservation);
       throw new Error('Synthetic case failure');
     },
     readWriterFence(source, signal) {
@@ -325,22 +371,35 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     },
   });
   assert.deepEqual(trace, []);
-  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : noRetention ? /recovery retention is unverified/ :
-    fault ? /recovery record is unverified/ : /access.*unverified|unverified.*access/);
+  const accessFailure = /access.*unverified|unverified.*access/;
+  const operation = run();
+  if (hasResidue) {
+    await assert.rejects(operation, failure => {
+      assert.ok(failure instanceof AggregateError);
+      assert.equal(failure.errors.length, 2);
+      assert.match(failure.errors[0].message, accessFailure);
+      assert.equal(failure.errors[1].message, error.message);
+      return true;
+    });
+    assert.equal(trace.at(-1), 'd1-census');
+  } else {
+    await assert.rejects(operation, fault === 'admission' ? /admission is unverified/ :
+      noRetention ? /recovery retention is unverified/ : fault ? /recovery record is unverified/ : accessFailure);
+  }
   await assert.rejects(run(), /already started/);
-  const milestones = ['admission', 'estate', 'upload', 'd1 PUT', 'd1 GET', 'migrate', 'worker PUT', 'worker GET',
+  const milestones = ['admission', 'estate', 'd1-census', 'upload', 'd1 PUT', 'd1 GET', 'migrate', 'worker PUT', 'worker GET',
     'activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'];
   assert.deepEqual(trace.filter(step => milestones.includes(step)), ['admission',
-    ...(fault === 'admission' ? [] : ['estate']),
+    ...(fault === 'admission' ? [] : ['estate', 'd1-census']),
     ...(fault === 'admission' || noRetention ? [] : ['upload']),
     ...(fault === 'admission' || noRetention || fault === 'retention after upload' ? [] : ['d1 PUT', 'd1 GET']),
     ...(reachesWorker ? ['migrate'] : []),
     ...(reachesWorker && fault !== 'retention after D1' ? ['worker PUT', 'worker GET'] : []),
-    ...(!fault ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
-    ...(fault === 'admission' ? [] : ['estate'])]);
-  const cleanup = fault ? trace : trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
+    ...(reachesCases ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
+    ...(fault === 'admission' ? [] : ['estate', 'd1-census'])]);
+  const cleanup = reachesCases ? trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore')) : trace;
   assert.deepEqual(cleanup.filter(step => step.endsWith('-cleanup')).sort(),
-    fault ? [] : ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')]);
+    reachesCases ? ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')] : []);
   assert.equal(unexpectedNetwork.mock.callCount(), 0);
 });
 
@@ -421,18 +480,20 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
         }
       },
     });
-    const rejected = assert.rejects(run, mode === 'held' ? /Offline case failed/ :
-      mode === 'foreign' ? /writer quiescence is unverified/ : r2Fails ? /estate cleanup is unverified/ : { name: 'AbortError' });
     const lost = mode.startsWith('lost ');
     let recoveryBeforeDrain = [];
     if (lost || r2Fails) {
-      await (lost ? entered.promise : r2Failed.promise);
-      if (lost) fence.abort();
-      await new Promise(resolve => setImmediate(resolve));
-      recoveryBeforeDrain = trace.slice(trace.indexOf('fence') + 1).filter(step => step === 'restore' || step === 'estate');
-      release.resolve();
+      try {
+        await waitForFixtureStep(lost ? entered.promise : r2Failed.promise, run);
+        if (lost) fence.abort();
+        await new Promise(resolve => setImmediate(resolve));
+        recoveryBeforeDrain = trace.slice(trace.indexOf('fence') + 1).filter(step => step === 'restore' || step === 'estate');
+      } finally {
+        release.resolve();
+      }
     }
-    await rejected;
+    await assert.rejects(run, mode === 'held' ? /Offline case failed/ :
+      mode === 'foreign' ? /writer quiescence is unverified/ : r2Fails ? /estate cleanup is unverified/ : { name: 'AbortError' });
     assert.deepEqual(recoveryBeforeDrain, []);
     const cleanupTrace = trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
     assert.deepEqual(trace.filter(step => ['estate', 'cases', 'fence', 'restore'].includes(step)),
@@ -446,9 +507,11 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
 test('inventory reads only pinned resources and compares the exact attempt baseline', async t => {
   const f = fixture(t), run = f.create();
   await assert.rejects(run('after'), error);
-  await assert.rejects(run('before', { attempt: '4' }), error);
+  const foreign = [{ sha: 'b'.repeat(40) }, { runId: '12' }, { attempt: '4' }, { prefix: namespace }];
+  for (const override of foreign) await assert.rejects(run('before', override), error);
   assert.deepEqual(f.trace, []);
   assert.equal(await run('before'), true);
+  for (const override of foreign) await assert.rejects(run('after', override), error);
   f.state.deployment = uuid('3');
   f.state.message = `restore-${f.context.sha}-${f.context.runId}-${f.context.attempt}`;
   f.state.bucketList = bucketRoster({ result_info: { total_count: 1, cursor: '' }, messages: ['ok'] });
@@ -460,6 +523,53 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
 
+for (const [fault, change, expected] of [
+  ['denied read', f => { f.state.readCensus = () => new Response(null, { status: 403 }); }, beforeD1Census],
+  ['wrong D1 target', f => { f.state.databaseTarget = json({ uuid: uuid('4'), name: worker, version: 'production' }); },
+    beforeD1Census.slice(0, -1)],
+  ['partial catalog', f => { f.state.partialCensus = true; }, beforeD1Census],
+  ['unknown catalog', f => f.seed('CREATE TABLE unknown_table (id INTEGER)'), beforeD1Census],
+  ['permanent residue', f => f.seed(permanentReservation), beforeD1Census],
+]) {
+  test(`inventory refuses ${fault} at both D1 census boundaries`, async t => {
+    for (const phase of ['before', 'after']) await t.test(phase, async t => {
+      const f = fixture(t), run = f.create();
+      if (phase === 'after') assert.equal(await run('before'), true);
+      f.trace.length = 0;
+      change(f);
+      await assert.rejects(run(phase), error);
+      assert.deepEqual(f.trace, expected);
+      await assert.rejects(run(phase), error);
+      assert.deepEqual(f.trace, expected);
+    });
+  });
+}
+
+test('inventory drains an aborted D1 census before settling', { timeout: 10_000 }, async t => {
+  const f = fixture(t), run = f.create(), controller = new AbortController();
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  f.state.readCensus = async signal => {
+    entered.resolve(signal);
+    await release.promise;
+    signal.throwIfAborted();
+    assert.fail('Census transport was not cancelled');
+  };
+  let settled = false;
+  const operation = run('before', {}, controller.signal).finally(() => { settled = true; });
+  try {
+    const signal = await waitForFixtureStep(entered.promise, operation);
+    controller.abort(new Error('private error'));
+    assert.equal(signal.aborted, true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+  } finally {
+    release.resolve();
+  }
+  await assert.rejects(operation, error);
+  await assert.rejects(run('after'), error);
+  assert.deepEqual(f.trace, beforeD1Census);
+});
+
 test('inventory rejects a native Durable Object namespace before and after the attempt', async t => {
   const f = fixture(t);
   for (const phase of ['before', 'after']) {
@@ -469,7 +579,7 @@ test('inventory rejects a native Durable Object namespace before and after the a
     f.state.namespaceList = emptyPagedRoster({ result: [{ name: 'unbound' }],
       result_info: { ...namespacePage, count: 1, total_count: 1, total_pages: 1 } });
     await assert.rejects(run(phase), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures', 'namespaces']);
+    assert.deepEqual(f.trace, [...beforeD1Census, 'd1-fixtures', 'namespaces']);
   }
 });
 
@@ -875,7 +985,7 @@ test('inventory requires native D1 migration fixture absence before and after th
     f.trace.length = 0;
     f.state.migrationResidue = true;
     await assert.rejects(run(phase), error);
-    assert.deepEqual(f.trace, ['estate', 'd1-roster', 'fixtures', 'd1-fixtures']);
+    assert.deepEqual(f.trace, [...beforeD1Census, 'd1-fixtures']);
   }
 });
 
@@ -887,7 +997,6 @@ test('inventory rejects incomplete reads, extra resources, fixtures and unverifi
     s => { s.estate.workers.items.push({ name: 'other' }); }, s => { s.estate.buckets.items[0].name = 'other'; },
     s => { s.estate.databases.items[0].id = uuid('4'); }, s => { delete s.estate.databases.items[0].compute; },
     s => { s.estate.databases.items[0].compute = 'running'; }, s => { s.estate.durableObjects.nextCursor = 'more'; },
-    s => { s.fixtures.nextCursor = 'more'; }, s => { s.fixtures.items.push({ tag: 'older-attempt' }); },
     ...['expiryPage', 'objectPage', 'uploadPage', 'object', 'upload', 'cronPage'].map(key => s => { s[key] = true; }),
     s => { s.expiry = false; },
   ]) {
@@ -911,7 +1020,7 @@ for (const [index, kind] of r2ReadOrder.entries()) {
 test('inventory rejects final drift and does not rebaseline after cancellation', async t => {
   const f = fixture(t);
   for (const change of [{ version: uuid('3') }, { deployment: uuid('3'), message: 'restore-unrelated' }, { object: true },
-    { fixtures: scan([{ tag: '182' }]) }, { expiry: false }]) {
+    { expiry: false }]) {
     const run = f.create();
     assert.equal(await run('before'), true);
     Object.assign(f.state, change);

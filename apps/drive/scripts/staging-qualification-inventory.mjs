@@ -1,7 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import { assertQualificationJob, qualificationFixtureNamespace, qualificationPrefix } from './staging-qualification.mjs';
 import { readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
-import { assertNoQualificationD1MigrationFixtures, assertQualificationD1Roster } from './staging-qualification-d1.mjs';
+import {
+  assertNoQualificationD1MigrationFixtures, assertQualificationD1Roster, readQualificationD1AppFixtures,
+} from './staging-qualification-d1.mjs';
 import { verifyQualificationR2Expiry } from './staging-qualification-expiry.mjs';
 import { hasDuplicateMembers } from './staging-qualification-json.mjs';
 import { readQualificationR2Binding } from './staging-qualification-storage.mjs';
@@ -150,14 +152,11 @@ async function assertNoStreamInputs(account, token, request, signal) {
   }, null, signal, 5_000);
 }
 
-// Unwired. The eventual readers must enumerate the bounded staging estate,
-// not filter discovery to expected IDs, and verify D1 is natively on-demand
-// (no provisioned compute). readFixtures must cover all staging fixture tags
-// in the pinned D1, not just the current attempt or a subset of tables. Both
-// readers must bound responses, honor abort and drain before settling.
-// This is an observation, not a writer fence, rollback proof or billing audit.
-export function createQualificationInventory(env, cwd, { readEstate, readFixtures, request, send } = {}) {
-  if ([readEstate, readFixtures, request, send].some(read => typeof read !== 'function')) throw unverified();
+// Offline composition. The estate reader must enumerate all resources within
+// its bounded scope, verify native D1 compute mode, and drain on abort. The same
+// reviewed, fully migrated D1 profile is required before and after the attempt.
+export function createQualificationInventory(env, cwd, { readEstate, request, send } = {}) {
+  if ([readEstate, request, send].some(read => typeof read !== 'function')) throw unverified();
   env = { ...env };
   const identity = assertQualificationJob(env, cwd);
   const prefix = qualificationPrefix(identity);
@@ -184,7 +183,7 @@ export function createQualificationInventory(env, cwd, { readEstate, readFixture
 
         await assertQualificationD1Roster(env, cwd, active, request);
         active.throwIfAborted();
-        matchScan(await readFixtures({ account, database }, active), []);
+        matchScan(await readQualificationD1AppFixtures({ ...identity, account, database }, env, cwd, active, request), []);
         await assertNoQualificationD1MigrationFixtures(env, cwd, active, request);
         await assertEmptyNativePage(account, 'workers/durable_objects/namespaces', env.CLOUDFLARE_API_TOKEN, request, active);
         await assertNoContainerApplications(account, env.CLOUDFLARE_API_TOKEN, request, active);

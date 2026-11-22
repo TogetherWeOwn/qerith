@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import {
   assertNoQualificationD1MigrationFixtures, cleanQualificationD1, readQualificationD1AppFixtures, recoverQualificationD1,
 } from './staging-qualification-d1.mjs';
+import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './fixtures/qualification-d1.mjs';
 
 const config = new URL('../wrangler.staging.json', import.meta.url);
 const migrations = new URL('../migrations/', import.meta.url);
@@ -36,16 +36,8 @@ function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus =
     env: { HOME: cwd, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   const git = (...args) => gitOutput(...args).trim();
   git('init', '-b', 'main');
-  let names = readdirSync(migrations).sort();
-  if (reviewedCensus) {
-    const repo = fileURLToPath(new URL('../../../', import.meta.url));
-    const committed = (...args) => execFileSync('/usr/bin/git', ['-C', repo, ...args]);
-    const path = 'apps/drive/migrations';
-    names = committed('ls-tree', '--name-only', '-z', `HEAD:${path}`).toString().slice(0, -1).split('\0');
-    mkdirSync(join(cwd, path));
-    for (const name of names) writeFileSync(join(cwd, path, name), committed('show', `HEAD:${path}/${name}`));
-    if (sourceDrift) writeFileSync(join(cwd, path, names[0]), '\n-- Unreviewed source.\n', { flag: 'a' });
-  }
+  const names = reviewedCensus ? stageReviewedD1FixtureMigrations(cwd) : readdirSync(migrations).sort();
+  if (sourceDrift) writeFileSync(join(cwd, 'apps/drive/migrations', names[0]), '\n-- Unreviewed source.\n', { flag: 'a' });
   git('add', 'apps/drive');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'fixture');
   const sha = git('rev-parse', 'HEAD');
@@ -64,16 +56,14 @@ function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus =
   function baseline() {
     const db = new DatabaseSync(':memory:');
     if (emptyBaseline) return db;
-    // This is the ledger DDL in pinned Wrangler 4.160.1.
-    db.exec(reviewedCensus ? `CREATE TABLE IF NOT EXISTS "d1_migrations"(
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		name       TEXT UNIQUE,
-		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
-);` : 'CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE, applied_at TEXT);');
+    if (reviewedCensus) {
+      applyReviewedD1FixtureMigrations(db, migrationLimit);
+      return db;
+    }
+    db.exec('CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE, applied_at TEXT);');
     db.exec('PRAGMA foreign_keys = ON');
     for (const [index, name] of names.slice(0, migrationLimit).entries()) {
-      db.exec(reviewedCensus ? gitOutput('show', `${sha}:apps/drive/migrations/${name}`) :
-        readFileSync(new URL(name, migrations), 'utf8'));
+      db.exec(readFileSync(new URL(name, migrations), 'utf8'));
       db.prepare('INSERT INTO d1_migrations VALUES (?, ?, ?)').run(index + 1, name, '2026-11-20 10:00:00');
     }
     return db;
@@ -138,7 +128,7 @@ function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus =
     intercept(fn) { intercept = (path, init) => fn(path, init, () => simulatedFetch(path, init)); },
     inspect: (patch = {}, signal) => assertNoQualificationD1MigrationFixtures({ ...env, ...patch }, cwd, signal, send),
     census: ({ scope = censusScope, patch = {}, signal, transport = send, fromDriveDirectory = false } = {}) =>
-      readQualificationD1AppFixtures(scope, { ...env, ...patch },
+      readQualificationD1AppFixtures({ ...source, ...scope }, { ...env, ...patch },
         fromDriveDirectory ? join(cwd, 'apps/drive') : cwd, signal, transport),
     clean: (patch = {}, signal) => cleanQualificationD1({ ...source, prefix, ...patch }, env, cwd, signal, send),
     recover: ({ overrides, recordPatch, proveQuiescence = (scope, signal) => {
@@ -230,7 +220,10 @@ test('app table census rejects ambiguous or incomplete provider readback and hon
   const f = fixture(t, { reviewedCensus: true });
   await assert.rejects(f.census({ signal: AbortSignal.abort() }), censusError);
   await assert.rejects(f.census({ transport: null }), censusError);
-  await assert.rejects(f.census({ scope: { ...censusScope, database: 'unknown' } }), censusError);
+  for (const wrong of [{ sha: 'b'.repeat(40) }, { runId: '18' }, { attempt: '1' },
+    { account: 'f'.repeat(32) }, { database: 'unknown' }]) {
+    await assert.rejects(f.census({ scope: { ...censusScope, ...wrong } }), censusError);
+  }
   await assert.rejects(f.census({ patch: { GITHUB_WORKFLOW_SHA: 'b'.repeat(40) } }), censusError);
   assert.deepEqual(f.calls, []);
 
