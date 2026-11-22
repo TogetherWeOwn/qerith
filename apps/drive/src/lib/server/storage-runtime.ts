@@ -1,3 +1,4 @@
+import { withIoDeadline } from './bounded-io';
 import { uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import type { QualificationReadinessEnv } from './qualification-readiness';
 import type { DriveAuthEnv } from './request-auth';
@@ -57,17 +58,22 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
     completionTimeoutMs(id) { return id === storageConfigId ? budget : null; },
     async verifyParts({ storageConfigId: id, objectKey, uploadId, beforeSend }) {
       if (id !== storageConfigId) return null;
-      const signal = AbortSignal.timeout(listTimeoutMs);
-      const deadline = performance.now() + listTimeoutMs;
-      const listing = createS3Listing(settings, { fetch: transport, timeoutMs: listTimeoutMs,
-        beforeSend: async () => (!beforeSend || await beforeSend() === true) && performance.now() < deadline });
-      const parts: CompletedPart[] = [];
-      let retainedEtagBytes = 0;
-      let marker: number | undefined;
-      try {
+      return withIoDeadline(listTimeoutMs, undefined, async ({ signal, check }) => {
+        const listing = createS3Listing(settings, { fetch: transport, timeoutMs: listTimeoutMs,
+          beforeSend: async () => {
+            check();
+            const admitted = !beforeSend || await beforeSend() === true;
+            check();
+            return admitted;
+          } });
+        const parts: CompletedPart[] = [];
+        let retainedEtagBytes = 0;
+        let marker: number | undefined;
         do {
+          check();
           const page = await listing.parts(objectKey, uploadId, { partNumberMarker: marker, signal });
-          if (signal.aborted || performance.now() >= deadline || parts.length + page.parts.length > MAX_PARTS) return null;
+          check();
+          if (parts.length + page.parts.length > MAX_PARTS) return null;
           for (const part of page.parts) {
             const { etag } = part;
             if (etag.length > maxPartEtagBytes || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) return null;
@@ -79,8 +85,8 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
           }
           marker = page.nextPartNumberMarker;
         } while (marker !== undefined);
-        return parts.length && !signal.aborted && performance.now() < deadline ? parts : null;
-      } catch { return null; }
+        return parts.length ? parts : null;
+      }).catch(() => null);
     }
   };
 }

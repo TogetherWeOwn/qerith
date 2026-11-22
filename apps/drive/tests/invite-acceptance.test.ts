@@ -86,6 +86,26 @@ void test('bounds bytes, empty chunks and stalled reads without awaiting teardow
   assert.deepEqual(calls, []);
 });
 
+void test('cancels an interrupted invite body before consulting any service', { timeout: 5_000 }, async () => {
+  const { run, calls } = fixture();
+  const caller = new AbortController();
+  const reason = new Error('request interrupted');
+  const reading = Promise.withResolvers<void>();
+  let cancelled: unknown;
+  const body = new ReadableStream<Uint8Array>({
+    pull() { reading.resolve(); },
+    cancel(value) { cancelled = value; return new Promise(() => {}); },
+  }, { highWaterMark: 0 });
+  const init = { body, signal: caller.signal, duplex: 'half' };
+  const result = run(request(init), 'challenge');
+  await reading.promise;
+  caller.abort(reason);
+  assertPolicy(await result, 400);
+  assert.equal(cancelled, reason);
+  assert.equal(body.locked, false);
+  assert.deepEqual(calls, []);
+});
+
 void test('refuses live or ambiguous sessions and separates invite denial from database faults', async () => {
   const live = fixture('member');
   const body = JSON.stringify({ token, challenge, response });

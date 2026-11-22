@@ -1,4 +1,5 @@
 import type { PublicKeyCredentialCreationOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
+import { readBoundedBody } from './bounded-io';
 import { CeremonyCapacityReached } from './identity/challenges';
 import { InvitationEnrollment } from './identity/enrollment';
 import { Invitations, InvitationUnavailable } from './identity/invitations';
@@ -29,30 +30,13 @@ const base64url = (value: unknown): value is string => typeof value === 'string'
 async function readInput(request: Request): Promise<unknown> {
   if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' ||
       !request.body || request.body.locked) return null;
-  const reader = request.body.getReader();
-  const bytes = new Uint8Array(bodyLimit);
-  const deadline = performance.now() + bodyReadMs;
-  const cancel = () => { void reader.cancel().catch(() => {}); };
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; cancel(); }, bodyReadMs);
-  let length = 0;
   try {
-    // Bound the read count as well as bytes so empty chunks cannot starve the timer.
-    for (let reads = 0; reads < 256; reads++) {
-      const { done, value } = await reader.read();
-      if (timedOut || performance.now() >= deadline) break;
-      if (done) return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
-      if (value.length > bytes.length - length) break;
-      bytes.set(value, length);
-      length += value.length;
-    }
-    return null;
+    const bytes = await readBoundedBody(request.body, {
+      maxBytes: bodyLimit, maxReads: 256, timeoutMs: bodyReadMs, signal: request.signal,
+    });
+    return bytes && JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
-    if (!timedOut) cancel();
-    reader.releaseLock();
   }
 }
 
@@ -90,7 +74,7 @@ export async function inviteAcceptance(request: Request, step: InviteStep, env: 
   if (!allowsOrigin(request, origin.origin) || /[?#]/.test(request.url)) return deny(403);
 
   const input = await readInput(request);
-  if (!record(input) || typeof input.token !== 'string' || !opaqueValue.test(input.token) ||
+  if (request.signal.aborted || !record(input) || typeof input.token !== 'string' || !opaqueValue.test(input.token) ||
       Object.keys(input).length !== (step === 'enroll' ? 3 : 1)) return deny(400);
   const { token, challenge } = input;
   const assertion = step === 'enroll' && base64url(challenge) ? readRegistration(input.response) : null;

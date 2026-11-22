@@ -1,3 +1,4 @@
+import { IoDeadlineExceeded, readBoundedBody } from './bounded-io';
 import { prepareUploadPartBytes, type UploadPartByteEvidence,
   type UploadPartByteScope } from './metadata/upload-part-byte-evidence';
 import { MAX_PART_BYTES } from './s3/multipart-completion';
@@ -34,38 +35,13 @@ export const uploadIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 export async function readUploadBody(request: Request, size: number): Promise<Uint8Array<ArrayBuffer> | null> {
   const { body, signal } = request;
-  const bytes = new Uint8Array(size);
-  if (!body) return size === 0 && !signal.aborted ? bytes : null;
-  const reader = body.getReader();
-  const deadline = performance.now() + uploadBodyReadMs;
-  let cancelled = false;
-  const cancel = () => {
-    if (cancelled) return;
-    cancelled = true;
-    // Cancelling settles the pending read even if the source never finishes cleanup.
-    void reader.cancel().catch(() => {});
-  };
-  const expired = () => cancelled || signal.aborted || performance.now() >= deadline;
-  const timer = setTimeout(cancel, uploadBodyReadMs);
-  signal.addEventListener('abort', cancel, { once: true });
-  let offset = 0, reads = 0;
+  if (!body) return size === 0 && !signal.aborted ? new Uint8Array(0) : null;
   try {
-    while (!expired()) {
-      const { done, value } = await reader.read();
-      if (expired()) break;
-      if (done) return offset === size ? bytes : null;
-      if (value.byteLength > size - offset) break;
-      bytes.set(value, offset);
-      offset += value.byteLength;
-      // Immediately ready reads (even empty chunks) must not starve the timer.
-      if (++reads % 256 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    cancel();
-    return null;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener('abort', cancel);
-    reader.releaseLock();
+    const bytes = await readBoundedBody(body, { signal, timeoutMs: uploadBodyReadMs, maxBytes: size, exact: true });
+    return signal.aborted ? null : bytes;
+  } catch (error) {
+    if ((signal.aborted && Object.is(error, signal.reason)) || error instanceof IoDeadlineExceeded) return null;
+    throw error;
   }
 }
 

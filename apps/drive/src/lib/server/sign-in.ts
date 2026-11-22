@@ -1,5 +1,6 @@
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { decodeClientDataJSON, isoBase64URL } from '@simplewebauthn/server/helpers';
+import { readBoundedBody } from './bounded-io';
 import { CeremonyCapacityReached, ChallengeUnavailable } from './identity/challenges';
 import { PasskeyDenied, PasskeyLogin, RevokedPasskey } from './identity/login';
 import { admitsStagingInvite, allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, stagingOrigin, type DriveAuthEnv } from './request-auth';
@@ -17,39 +18,12 @@ function hostCookie(name: string, value: string, maxAge: number, sameSite: 'Stri
 async function readAssertion(request: Request, challenge: string): Promise<AuthenticationResponseJSON | null> {
   if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' ||
       !request.body || request.body.locked) return null;
-  const reader = request.body.getReader();
-  const bytes = new Uint8Array(assertionLimit);
-  const deadline = performance.now() + assertionReadMs;
-  let timedOut = false;
-  const cancel = () => {
-    // Cancellation closes pending reads before the underlying source finishes teardown.
-    void reader.cancel().catch(() => {});
-  };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    cancel();
-  }, assertionReadMs);
   try {
-    let length = 0;
-    let reads = 0;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (timedOut) return null;
-      if (performance.now() >= deadline) {
-        cancel();
-        return null;
-      }
-      if (done) break;
-      if (value.length > bytes.length - length) {
-        cancel();
-        return null;
-      }
-      bytes.set(value, length);
-      length += value.length;
-      // Ready reads (including empty chunks) must not starve the Workers timer.
-      if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
+    const bytes = await readBoundedBody(request.body, {
+      maxBytes: assertionLimit, timeoutMs: assertionReadMs, signal: request.signal,
+    });
+    if (!bytes || request.signal.aborted) return null;
+    const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (data?.type !== 'public-key' || !base64url(data.id) || data.rawId !== data.id ||
         !base64url(data.response?.clientDataJSON) || !base64url(data.response.authenticatorData) ||
         !base64url(data.response.signature) ||
@@ -63,9 +37,6 @@ async function readAssertion(request: Request, challenge: string): Promise<Authe
     };
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
-    reader.releaseLock();
   }
 }
 
@@ -98,7 +69,7 @@ export async function signIn(
     }
 
     const assertion = challenge && await readAssertion(request, challenge);
-    if (!assertion) return reply(401, 'denied');
+    if (!assertion || request.signal.aborted) return reply(401, 'denied');
     // The database consumes the challenge; a delayed response must not clear a newer cookie.
     const session = await login.authenticate(context, challenge, assertion);
     const maxAge = Math.floor((session.expiresAt - Date.now()) / 1000);
