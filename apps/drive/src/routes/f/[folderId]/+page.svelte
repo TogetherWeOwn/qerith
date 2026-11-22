@@ -104,6 +104,7 @@
       {#key sharing}
         {@const target = sharing}
         <EntryShareDialog entryId={target.entry.id} name={target.entry.name} kind={target.entry.kind === 'folder' ? 'Folder' : 'File'}
+          onInvite={data.ownerInvites ? () => location.assign('/people') : undefined}
           owner={data.shareOwner} isCurrent={target.current} onreturn={() => closeShare(target)} />
       {/key}
     {/if}

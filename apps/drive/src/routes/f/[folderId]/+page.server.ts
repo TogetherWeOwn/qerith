@@ -25,6 +25,7 @@ export const load: PageServerLoad = async ({ request, params, locals, setHeaders
     shareAllowed: admitsStagingReadGrants(env),
     readAccess: { get: (...args) => primary().get(...args), list: (...args) => primary().list(...args) },
   });
-  return { result, shareOwner: result.status === 'ok' && result.folder.entries.some(entry => entry.shareable)
+  return { result, ownerInvites: role === 'owner' && inviteMode,
+    shareOwner: result.status === 'ok' && result.folder.entries.some(entry => entry.shareable)
     ? { recipientId: id, driveOwner: role === 'owner' } : undefined };
 };
