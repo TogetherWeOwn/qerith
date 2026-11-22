@@ -1,4 +1,5 @@
 import type { LivePrincipalMode } from '../identity/sessions';
+import type { qualificationPrefix } from '../qualification-readiness';
 import { MAX_PART_BYTES } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
 
@@ -31,6 +32,8 @@ export interface ExpectedUploadPart {
   readonly sizeBytes: number;
   readonly sha256: string;
 }
+
+type AllocationPrefix = '' | ReturnType<typeof qualificationPrefix>;
 
 const maxExpectedUploadBytes = 5 * 1024 ** 3;
 const partSha256 = /^[0-9a-f]{64}$/;
@@ -69,9 +72,10 @@ export class UploadIntents<DB extends Database = Database> {
 
   // Bind the namespace before claiming on the same transaction that checks live authority.
   async claimNewAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
-    size: number, endpoint: string, bucket: string, epoch: string, ownerOnly = false): Promise<UploadIntent | null> {
+    size: number, endpoint: string, bucket: string, epoch: string, ownerOnly = false,
+    prefix: AllocationPrefix = ''): Promise<UploadIntent | null> {
     if (!Number.isSafeInteger(size) || size < 0) throw new TypeError('Invalid declared upload size');
-    return this.claimAllocation(principalId, sessionHash, size, endpoint, bucket, epoch, ownerOnly, null);
+    return this.claimAllocation(principalId, sessionHash, size, endpoint, bucket, epoch, ownerOnly, null, prefix);
   }
 
   // Server-only producer. The caller authenticates and supplies the trusted session
@@ -79,16 +83,16 @@ export class UploadIntents<DB extends Database = Database> {
   // There is intentionally no API to attach a proposal to an existing intent.
   async claimNewExpectedAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
     size: number, endpoint: string, bucket: string, epoch: string, mode: LivePrincipalMode,
-    parts: readonly ExpectedUploadPart[]): Promise<UploadIntent | null> {
+    parts: readonly ExpectedUploadPart[], prefix: AllocationPrefix = ''): Promise<UploadIntent | null> {
     if (mode !== 'owner' && mode !== 'active') throw new TypeError('Invalid upload admission mode');
     return this.claimAllocation(principalId, sessionHash, size, endpoint, bucket, epoch, mode === 'owner',
-      packExpectedParts(size, parts));
+      packExpectedParts(size, parts), prefix);
   }
 
   private async claimAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
     size: number, endpoint: string, bucket: string, epoch: string, ownerOnly: boolean,
-    expected: string | null): Promise<UploadIntent | null> {
-    const id = crypto.randomUUID(), key = crypto.randomUUID();
+    expected: string | null, prefix: AllocationPrefix): Promise<UploadIntent | null> {
+    const id = crypto.randomUUID(), key = prefix + crypto.randomUUID();
     const [, , claim] = await this.db.batch<UploadIntent>([
       this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size${
         expected === null ? '' : ', expected_part_sha256s'})

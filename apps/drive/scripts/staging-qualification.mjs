@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isQualificationRunNumber } from '../src/lib/server/qualification-readiness.ts';
+export { qualificationFixtureNamespace, qualificationPrefix } from '../src/lib/server/qualification-readiness.ts';
 
 const repo = 'TogetherWeOwn/qerith';
 const main = 'refs/heads/main';
@@ -64,19 +66,10 @@ export function assertQualificationJob(env, cwd) {
   const { GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: attempt, GITHUB_WORKFLOW_REF: workflow } = env;
   if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'qualification' || env.GITHUB_WORKFLOW_SHA !== testedSha ||
       workflow !== `${repo}/.github/workflows/drive-staging-qualification.yml@${main}` ||
-      !requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
+      !isQualificationRunNumber(runId) || !isQualificationRunNumber(attempt)) {
     throw new Error('Requires the protected staging qualification job.');
   }
   return { sha: testedSha, runId, attempt };
-}
-
-export const qualificationFixtureNamespace = 'drive-qualification/full-v0/';
-
-export function qualificationPrefix({ runId, attempt }) {
-  if (!requireMatch(positiveInteger, runId) || !requireMatch(positiveInteger, attempt)) {
-    throw new Error('Invalid qualification run or attempt.');
-  }
-  return `${qualificationFixtureNamespace}${runId}/${attempt}/`;
 }
 
 // This is a policy predicate, not a live-evidence source or an artifact writer.

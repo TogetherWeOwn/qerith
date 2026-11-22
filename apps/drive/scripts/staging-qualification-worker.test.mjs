@@ -22,6 +22,7 @@ const probeUrl = stagingOrigin + readinessPath;
 const now = 1_800_000_000_000;
 const expiresAt = String(now + 25 * 60_000);
 const expiryBinding = 'DRIVE_QUALIFICATION_EXPIRES_AT';
+const attemptVars = { DRIVE_QUALIFICATION_RUN_ID: '18', DRIVE_QUALIFICATION_RUN_ATTEMPT: '2' };
 
 test('candidate traffic fails closed at its absolute deadline and with partial identity', () => {
   const env = { ...readinessEnv, [expiryBinding]: expiresAt };
@@ -159,7 +160,7 @@ function fixture(t, upload = false) {
   const { d1_databases: [db] } = JSON.parse(readFileSync(join(app, 'wrangler.staging.json'), 'utf8'));
   const state = { current: deployment(prior, baseline), tag, candidateBindings: [
     { name: 'DB', type: 'd1', id: db.database_id }, { name: 'ASSETS', type: 'assets' },
-    ...varsToBindings({ DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt }),
+    ...varsToBindings({ DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt, ...attemptVars }),
     { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' },
   ] };
   const controller = new AbortController();
@@ -332,7 +333,7 @@ function uploadFixture({ cwd, app, env }) {
   const setup = { previews_enabled: false, tags: ['staging'], baselineBindings: [...shared, ...varsToBindings(storageVars)],
     uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
   const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
-    [expiryBinding]: expiresAt, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
+    [expiryBinding]: expiresAt, ...attemptVars, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
     DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
   async function request(url, { method, body, headers }) {
@@ -432,6 +433,7 @@ test('does not return candidates on cancellation, ambiguous output, binding drif
     [{ uploadId: baseline }, /new version ID/],
     [{ readbackTag: 'another-attempt' }, /SHA and attempt/],
     [{ adjust: bindings => bindings.filter(binding => binding.name !== expiryBinding) }, /incompatible resource/],
+    [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_QUALIFICATION_RUN_ID') }, /incompatible resource/],
     [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_QUALIFICATION_VERSION') }, /unchanged staging baseline/],
     [{ adjust: bindings => bindings.filter(binding => binding.name !== 'DRIVE_OWNER_ENROLLMENT') }, /unchanged staging baseline/],
     [{ superseded: true }, /unchanged staging baseline/],
@@ -448,6 +450,20 @@ test('records the rollback point, proves exact-SHA readiness, and reads back the
   const { run, calls, identity } = fixture(t);
   assert.deepEqual(await run(), { ...identity, previousVersion: baseline, restoredDeployment: restored, cases: 'synthetic cases' });
   assert.deepEqual(calls, ['current', 'version', 'record', 'current', 'activate', 'current', 'probe', 'cases', 'current', 'restore', 'current']);
+});
+
+test('activation rejects missing or mismatched attempt bindings under the correct version tag', async t => {
+  const { run, calls, state } = fixture(t);
+  const bindings = state.candidateBindings;
+  for (const name of [...Object.keys(attemptVars), 'DRIVE_QUALIFICATION_VERSION']) {
+    state.candidateBindings = bindings.filter(binding => binding.name !== name);
+    await assert.rejects(run(), /incompatible resource/);
+    assert.deepEqual(calls.splice(0), ['current', 'version']);
+  }
+  state.candidateBindings = bindings.map(binding => binding.name === 'DRIVE_QUALIFICATION_RUN_ATTEMPT'
+    ? { ...binding, text: '3' } : binding);
+  await assert.rejects(run(), /incompatible resource/);
+  assert.deepEqual(calls, ['current', 'version']);
 });
 
 test('refuses activation when the deadline differs or recovery recording consumes the activation window', async t => {
@@ -677,6 +693,20 @@ test('lost-run recovery rejects mismatched and non-main source attempts before p
   const sha = git('rev-parse', 'HEAD');
   await assert.rejects(recover({ sha }, { ...source, sha }), /recovery is unverified/);
   assert.deepEqual(calls, []);
+});
+
+test('lost-run recovery verifies published attempt bindings and can still restore an older candidate', async t => {
+  const { recover, calls, state } = recoveryFixture(t);
+  const bindings = state.candidateBindings;
+  state.candidateBindings = bindings.filter(binding => binding.name !== 'DRIVE_QUALIFICATION_RUN_ID');
+  await assert.rejects(recover(), /recovery is unverified/);
+  assert.deepEqual(calls.splice(0), ['current', 'baseline-version', 'version']);
+  state.candidateBindings = bindings.map(binding => binding.name === 'DRIVE_QUALIFICATION_RUN_ATTEMPT'
+    ? { ...binding, text: '3' } : binding);
+  await assert.rejects(recover(), /recovery is unverified/);
+  assert.deepEqual(calls.splice(0), ['current', 'baseline-version', 'version']);
+  state.candidateBindings = bindings.filter(binding => !Object.hasOwn(attemptVars, binding.name));
+  assert.equal((await recover()).status, 'restored');
 });
 
 test('lost-run recovery never writes when the deployment or version evidence has changed', async t => {

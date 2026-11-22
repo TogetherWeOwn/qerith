@@ -1,10 +1,11 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { expect, it, vi } from 'vitest';
+import { expect, it, onTestFinished, vi } from 'vitest';
 import { Sessions } from '../../drive/src/lib/server/identity/sessions.ts';
 import { UploadIntents } from '../../drive/src/lib/server/metadata/upload-intents.ts';
 import { privateRequests, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { admitStagingRequest } from '../../drive/src/lib/server/staging-admission.ts';
+import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
 import { createUploadIntent, maxUploadIntentBytes, postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
 
 const origin = 'https://drive.example';
@@ -34,6 +35,154 @@ const partBytes = 16 * 1024 ** 2, ceiling = 320 * partBytes;
 const first = 'ab'.repeat(32), last = 'cd'.repeat(32);
 const empty = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const boundBody = (size, expectedPartSha256s) => JSON.stringify({ size, expectedPartSha256s });
+
+const uuid = '[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}';
+const scope = 'drive-qualification/full-v0/18/2/';
+const scopedKey = new RegExp(`^${scope}${uuid}$`);
+const storageConfigId = JSON.stringify([config.endpoint, config.bucket, 'fixture']);
+const storageProof = JSON.stringify({ version: 1, storageConfigId, region: config.region, sourceSha: 'b'.repeat(40),
+  runId: '42', runAttempt: 1, completionTimeoutMs: 5000 });
+
+function candidateEnv(db, overrides = {}) {
+  return wireUploadStorage({ DB: db, DRIVE_ORIGIN: stagingOrigin,
+    DRIVE_QUALIFICATION_SHA: 'a'.repeat(40), DRIVE_QUALIFICATION_RUN_ID: '18', DRIVE_QUALIFICATION_RUN_ATTEMPT: '2',
+    DRIVE_QUALIFICATION_VERSION: { id: '00000000-0000-4000-8000-000000000001' },
+    DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 60_000),
+    DRIVE_S3_ENDPOINT: config.endpoint, DRIVE_S3_BUCKET: config.bucket, DRIVE_S3_REGION: config.region,
+    DRIVE_S3_ACCESS_KEY_ID: config.accessKeyId, DRIVE_S3_SECRET_ACCESS_KEY: config.secretAccessKey,
+    DRIVE_S3_STORAGE_EPOCH: 'fixture', DRIVE_S3_QUALIFICATION: storageProof, ...overrides });
+}
+
+async function allocationFixture(target = stagingOrigin, role = 'owner') {
+  const result = await fixture(target, role);
+  const { db, owner } = result;
+  if (role === 'owner') {
+    onTestFinished(async () => {
+      await db.prepare("UPDATE drive_principals SET role = 'member' WHERE id = ?").bind(owner).run();
+    });
+  }
+  return result;
+}
+
+it.each([
+  ['ordinary app', origin, 'member', '{"size":4}', false],
+  ['ordinary staging', stagingOrigin, 'owner', '{"size":4}', false],
+  ['qualification preview', stagingOrigin, 'owner', '{"size":4}', true],
+  ['qualification multipart', stagingOrigin, 'member', boundBody(0, empty), true],
+])('reserves the exact server-selected key before multipart dispatch for %s', async (_mode, target, role, body, candidate) => {
+  const { db, owner, post, row, fetch } = await allocationFixture(target, role);
+  const overrides = candidate ? candidateEnv(db, role === 'member' ? multipart : {}) : {};
+  let claimed, storage, reservation;
+  fetch.mockImplementation(async () => {
+    claimed = await row();
+    storage = await db.prepare('SELECT * FROM drive_upload_storage_bindings WHERE intent_id = ?').bind(claimed.id).first();
+    reservation = await db.prepare('SELECT object_key FROM drive_upload_key_reservations WHERE object_key = ?')
+      .bind(claimed.object_key).first();
+    return new Response(`<InitiateMultipartUploadResult><Key>${claimed.object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
+  });
+  const forged = { 'x-drive-qualification-run-id': '99', 'x-drive-qualification-run-attempt': '1',
+    'x-drive-qualification-prefix': 'drive-qualification/full-v0/99/1/' };
+  expect((await post('{"size":4,"prefix":"outside/"}', { overrides })).status).toBe(400);
+  const response = await post(body, { overrides, headers: forged });
+  expect(response.status).toBe(201);
+  expect(await response.json()).toEqual({ id: claimed.id });
+  expect(claimed).toMatchObject({ owner_id: owner, state: 'initiating', version: 1, upload_id: null });
+  expect(claimed.object_key).toMatch(candidate ? scopedKey : new RegExp(`^${uuid}$`));
+  expect(claimed.id).toMatch(new RegExp(`^${uuid}$`));
+  expect(storage).toEqual({ intent_id: claimed.id, endpoint: config.endpoint, bucket: config.bucket, storage_epoch: 'fixture' });
+  expect(reservation).toEqual({ object_key: claimed.object_key });
+  expect(await row()).toMatchObject({ object_key: claimed.object_key, state: 'allocated', upload_id: 'provider-only' });
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls[0][0].url).toBe(`${config.endpoint}/${config.bucket}/${claimed.object_key}?uploads=`);
+});
+
+it('fails closed for partial, stale, non-staging and unqualified candidate uploads', async () => {
+  const { db, post, request, row, fetch } = await allocationFixture();
+  for (const broken of [
+    { DRIVE_QUALIFICATION_RUN_ID: undefined, DRIVE_QUALIFICATION_RUN_ATTEMPT: undefined },
+    { DRIVE_QUALIFICATION_RUN_ID: '18/', DRIVE_QUALIFICATION_RUN_ATTEMPT: '2' },
+    { DRIVE_QUALIFICATION_RUN_ID: '1'.repeat(21) }, { DRIVE_QUALIFICATION_RUN_ID: '18\n' },
+    { DRIVE_QUALIFICATION_RUN_ATTEMPT: '02' }, { DRIVE_QUALIFICATION_RUN_ATTEMPT: undefined },
+    { DRIVE_QUALIFICATION_SHA: undefined }, { DRIVE_QUALIFICATION_SHA: 'HEAD' },
+    { DRIVE_QUALIFICATION_VERSION: { id: 'latest' } }, { DRIVE_QUALIFICATION_VERSION: undefined },
+    { DRIVE_QUALIFICATION_EXPIRES_AT: undefined }, { DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() - 1) },
+    { DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 26 * 60_000) },
+    { DRIVE_SIGN_IN_FIXTURE: '1' }, { DRIVE_S3_BUCKET: 'wrong-bucket' }, { DRIVE_S3_REGION: 'wrong-region' },
+    { DRIVE_S3_STORAGE_EPOCH: 'wrong-epoch' }, { DRIVE_S3_QUALIFICATION: undefined },
+  ]) {
+    const overrides = candidateEnv(db, broken);
+    expect((await post('{"size":4}', { overrides })).status, JSON.stringify(broken)).toBe(503);
+  }
+  const overrides = candidateEnv(db);
+  expect((await post('{"size":4}', { overrides, req: request(origin) })).status).toBe(403);
+  expect((await post('{"size":4}', { overrides, req: new Request(stagingOrigin + '/api/uploads?attempt=3',
+    { method: 'POST', headers: request().headers }) })).status).toBe(404);
+  expect((await post('{"size":4}', { overrides: candidateEnv(db, { DRIVE_ORIGIN: origin }),
+    req: request(origin, undefined, origin) })).status).toBe(503);
+  expect((await post('{"size":4}', { overrides: { DRIVE_QUALIFICATION_RUN_ATTEMPT: '2' } })).status).toBe(503);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it.each(['abort', 'expiry'])('keeps the claimed key and sends nothing on candidate %s after the claim', async reason => {
+  const { db, post, row, fetch } = await allocationFixture();
+  const controller = new AbortController();
+  const overrides = candidateEnv(db);
+  const { DRIVE_UPLOAD_VERIFIER: verifier } = overrides;
+  const clock = vi.spyOn(Date, 'now');
+  let claimed;
+  overrides.DRIVE_UPLOAD_VERIFIER = { ...verifier, async isQualified(id, signal) {
+    if ((claimed = await row())) {
+      if (reason === 'abort') controller.abort();
+      else clock.mockReturnValue(Number(overrides.DRIVE_QUALIFICATION_EXPIRES_AT));
+    }
+    return verifier.isQualified(id, signal);
+  } };
+  try {
+    expect((await post('{"size":4}', { overrides, signal: controller.signal })).status).toBe(503);
+  } finally { clock.mockRestore(); }
+  expect(claimed).toMatchObject({ state: 'initiating', upload_id: null });
+  expect(claimed.object_key).toMatch(scopedKey);
+  expect(await row()).toMatchObject({ object_key: claimed.object_key, state: 'created', upload_id: null });
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('keeps a lost allocation enumerable and never repurposes an older intent on retry', async () => {
+  const { db, owner, post, fetch } = await allocationFixture();
+  const rows = async () => (await db.prepare('SELECT * FROM drive_upload_intents WHERE owner_id = ?').bind(owner).all()).results;
+  const dispatched = [];
+  let lost;
+  fetch.mockImplementation(async request => {
+    const claim = (await rows()).find(intent => intent.state === 'initiating');
+    dispatched.push({ url: request.url, claim });
+    if (lost) throw new Error('fixture lost the provider response');
+    return new Response(`<InitiateMultipartUploadResult><Key>${claim.object_key}</Key><UploadId>provider-only</UploadId></InitiateMultipartUploadResult>`);
+  });
+  expect((await post('{"size":4}')).status).toBe(201);
+  const [original] = await rows();
+  lost = true;
+  const overrides = candidateEnv(db);
+  expect((await post('{"size":4}', { overrides })).status).toBe(409);
+  const uncertain = (await rows()).find(intent => intent.id !== original.id);
+  expect(uncertain).toMatchObject({ state: 'uncertain', version: 2, upload_id: null });
+  lost = false;
+  const retry = await post('{"size":4}', { overrides });
+  expect(retry.status).toBe(201);
+  const { id } = await retry.json();
+  const final = await rows();
+  expect(final).toHaveLength(3);
+  expect(final).toEqual(expect.arrayContaining([original, uncertain]));
+  const fresh = final.find(intent => intent.id === id);
+  expect(fresh.object_key).not.toBe(uncertain.object_key);
+  for (const [position, intent] of [uncertain, fresh].entries()) {
+    expect(intent.object_key).toMatch(scopedKey);
+    expect(dispatched[position + 1]).toMatchObject({
+      url: `${config.endpoint}/${config.bucket}/${intent.object_key}?uploads=`,
+      claim: { id: intent.id, object_key: intent.object_key, state: 'initiating' },
+    });
+  }
+  expect(fetch).toHaveBeenCalledTimes(3);
+});
 
 it.each([[0, empty], [partBytes + 1, first + last], [ceiling, first.repeat(319) + last]])(
   'atomically binds the ordered digest vector for %i bytes before dispatch', async (size, packed) => {
