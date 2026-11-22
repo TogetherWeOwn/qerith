@@ -4,6 +4,27 @@
 workspace checks. Follow the relevant app or fixture instructions when working
 in a subdirectory.
 
+## Model selection and effort
+
+- T3 Code selects the provider, model, and effort for each task or independent
+  review. Outside T3 Code, whoever sets up the task or review makes those
+  choices using this policy.
+- Use GPT/Sol for routine implementation and Claude/Opus for design or
+  high-risk work when appropriate.
+- Use `high` effort by default. Use `xhigh` only when the task brief justifies
+  it. Never use `max` or `ultra`.
+- Choose independent reviewers from a different model family than the author.
+  Follow the review tiers and owner approval requirements below.
+- Keep shared guidance in `AGENTS.md` and keep `CLAUDE.md` to the single
+  `@AGENTS.md` import. Keep harness-specific model settings, model-forcing
+  hooks, model pins, and internal provider IDs out of tracked configuration.
+
+## Shell hygiene
+
+In any harness, never use forced removal (`rm -f`, `rm -rf`, or `rm --force`),
+including in `trap` cleanups and `bash -lc` strings. For authorized cleanup,
+use `rm -r -- "$dir"` for a directory or `rm -- "$file"` for a file.
+
 ## Checks and review
 
 - Run `git diff --check` and the focused checks relevant to the change. For
