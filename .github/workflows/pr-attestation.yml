@@ -1,0 +1,57 @@
+name: Qerith PR attestation
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/pr-attestation.yml, 'scripts/pr-attestation/**']
+  push:
+    branches: [main]
+    paths: [.github/workflows/pr-attestation.yml, 'scripts/pr-attestation/**']
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-attestation-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+jobs:
+  attest:
+    if: github.repository == 'TogetherWeOwn/qerith'
+    # Candidate CI has its own context. Only the protected workflow evaluates PR text.
+    name: ${{ github.event_name == 'pull_request' && 'pr-attestation fixtures' || 'pr-attestation' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      PR_ATTESTATION_ORG_POLICY: ${{ github.workspace }}/org-policy/.github/scripts/pr_attestation.py
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.workflow_sha }}
+          path: policy
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TogetherWeOwn/.github
+          ref: a3c24dfba42f2a8092889541bb256d244e9f67c2
+          path: org-policy
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Install hash-pinned source parsers
+        run: |
+          python3.12 -m venv "$RUNNER_TEMP/pr-attestation"
+          "$RUNNER_TEMP/pr-attestation/bin/python" -Im pip --isolated install --disable-pip-version-check \
+            --index-url https://pypi.org/simple --only-binary=:all: --no-deps --require-hashes \
+            -r policy/scripts/pr-attestation/requirements.txt
+      - name: Validate the exact PR head
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: '"$RUNNER_TEMP/pr-attestation/bin/python" -IB policy/scripts/pr-attestation/check.py'
+      - name: Exercise edited PR and exact-head fixtures
+        if: github.event_name != 'pull_request_target'
+        run: '"$RUNNER_TEMP/pr-attestation/bin/python" -IB -m unittest discover -s policy/scripts/pr-attestation -p test_check.py -v'
