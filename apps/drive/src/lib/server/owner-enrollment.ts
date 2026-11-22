@@ -1,3 +1,4 @@
+import { readBoundedBody } from './bounded-io';
 import { OwnerBootstrap } from './identity/owner-bootstrap';
 import { OwnerProvisioning } from './identity/owner-provisioning';
 import { allowsOrigin, stagingOrigin } from './request-auth';
@@ -19,30 +20,15 @@ const deny = (status: number) => new Response(null, { status, headers });
 async function enrollmentInput(request: Request): Promise<unknown> {
   if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json' ||
       !request.body) return null;
-  const reader = request.body.getReader();
-  const bytes = new Uint8Array(bodyLimit);
-  const deadline = performance.now() + bodyReadMs;
-  const cancel = () => { void reader.cancel().catch(() => {}); };
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; cancel(); }, bodyReadMs);
-  let length = 0;
+  // A locked body is a server failure, as when acquiring the reader failed here.
+  if (request.body.locked) throw new TypeError('Enrollment request body is locked');
   try {
-    // Also bound the number of reads so empty chunks cannot starve the timer.
-    for (let reads = 0; reads < 256; reads++) {
-      const { done, value } = await reader.read();
-      if (timedOut || performance.now() >= deadline) break;
-      if (done) return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
-      if (value.length > bytes.length - length) break;
-      bytes.set(value, length);
-      length += value.length;
-    }
-    cancel();
-    return null;
+    const bytes = await readBoundedBody(request.body, {
+      maxBytes: bodyLimit, maxReads: 256, timeoutMs: bodyReadMs, signal: request.signal,
+    });
+    return bytes && JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
-    reader.releaseLock();
   }
 }
 
@@ -72,7 +58,7 @@ export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Pro
 
   try {
     const input = await enrollmentInput(request);
-    if (input === null) return deny(400);
+    if (input === null || request.signal.aborted) return deny(400);
     // A suspended/revoked owner also permanently closes bootstrap. The SQL in
     // OwnerBootstrap independently enforces this at challenge and commit time.
     if (await env.DB.prepare("SELECT 1 FROM drive_principals WHERE role = 'owner' LIMIT 1").first()) return deny(409);

@@ -1,3 +1,4 @@
+import { readBoundedBody } from './bounded-io';
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type ExpectedUploadPart, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
@@ -39,27 +40,14 @@ async function readIntent(request: Request, inviteMode: boolean): Promise<Intent
       (length !== null && (!lengthPattern.test(length) || +length < 1 || +length > bodyLimit))) return null;
 
   const limit = length === null ? bodyLimit : +length;
-  const bytes = new Uint8Array(limit), reader = request.body.getReader();
-  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(intentReadMs)]);
-  const cancel = () => { void reader.cancel().catch(() => {}); };
-  signal.addEventListener('abort', cancel, { once: true });
-  const deadline = performance.now() + intentReadMs;
   try {
-    let offset = 0, reads = 0;
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (signal.aborted || performance.now() >= deadline) { cancel(); return null; }
-      if (done) break;
-      if (value.length > limit - offset) { cancel(); return null; }
-      bytes.set(value, offset);
-      offset += value.length;
-      // Ready reads, including empty chunks, must not starve the deadline timer.
-      if (++reads % 64 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    if (length !== null && offset !== limit) return null;
-    const json = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, offset));
+    const bytes = await readBoundedBody(request.body, {
+      maxBytes: limit, exact: length !== null, timeoutMs: intentReadMs, signal: request.signal,
+    });
+    if (!bytes || request.signal.aborted) return null;
+    const json = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     // Preserve the legacy request's original byte and Content-Length limits.
-    if (offset <= intentBodyLimit && (length === null || length.length <= 2)) {
+    if (bytes.length <= intentBodyLimit && (length === null || length.length <= 2)) {
       const legacy = /^[\t\n\r ]*\{[\t\n\r ]*"size"[\t\n\r ]*:[\t\n\r ]*(0|[1-9][0-9]*)[\t\n\r ]*\}[\t\n\r ]*$/.exec(json);
       if (legacy) return { size: Number(legacy[1]) };
     }
@@ -77,16 +65,12 @@ async function readIntent(request: Request, inviteMode: boolean): Promise<Intent
     }));
     return { size, expectedParts };
   } catch { return null; }
-  finally {
-    signal.removeEventListener('abort', cancel);
-    reader.releaseLock();
-  }
 }
 
 export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
   const input = await readIntent(request, admitsStagingInvite(env));
-  if (!input) return reply(400);
+  if (!input || request.signal.aborted) return reply(400);
   const { DRIVE_UPLOAD_VERIFIER: verifier } = env;
   return createUploadIntent(request, input.size, {
     ...env,

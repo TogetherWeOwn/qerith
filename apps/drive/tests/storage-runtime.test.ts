@@ -116,6 +116,34 @@ test('verification uses signed ListParts on the exact key and upload ID across p
   assert.equal(await invalid.verifyParts(upload), null);
 });
 
+test('the ListParts deadline covers later pages and cancels a stalled provider body', { timeout: 2_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const reading = Promise.withResolvers<void>();
+  let pages = 0, cancelled = false;
+  let signal: AbortSignal | undefined;
+  const verifier = wireUploadStorage(bindings(), async input => {
+    if (++pages === 1) {
+      t.mock.timers.tick(4_000);
+      return listPage(listPart(1, '"first"'), 1);
+    }
+    assert.ok(input instanceof Request);
+    signal = input.signal;
+    return new Response(new ReadableStream({
+      pull() { reading.resolve(); },
+      cancel() { cancelled = true; return new Promise(() => {}); },
+    }, { highWaterMark: 0 }));
+  }).DRIVE_UPLOAD_VERIFIER!;
+  const result = verifier.verifyParts(upload);
+  await reading.promise;
+  t.mock.timers.tick(999);
+  assert.equal(signal?.aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(await result, null);
+  assert.equal(signal?.aborted, true);
+  assert.equal(cancelled, true);
+  assert.equal(pages, 2);
+});
+
 test('verification stops on oversized individual or cumulative ETag metadata', async () => {
   const etag = `"${'a'.repeat(8190)}"`;
   const oversized = wireUploadStorage(bindings(), async () => listPage(listPart(1, `"a${etag.slice(1)}`))).DRIVE_UPLOAD_VERIFIER!;
