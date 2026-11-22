@@ -112,30 +112,49 @@ def tuple_items(node):
             yield index, child
 
 
+def binds(pattern, name):
+    return pattern is not None and any(
+        node.type in {"identifier", "shorthand_property_identifier_pattern"} and text(node) == name
+        for node in descendants(pattern)
+    )
+
+
+def shadows(scope, name):
+    if any(binds(scope.child_by_field_name(field), name) for field in ("parameters", "parameter")):
+        return True
+    if scope.type != "statement_block":
+        return False
+    return any(binds(binding.child_by_field_name("name"), name)
+               for statement in scope.named_children if statement.type in {"lexical_declaration", "variable_declaration"}
+               for binding in statement.named_children if binding.type == "variable_declarator")
+
+
 def js_loop_values(call, name):
     """Resolve literal loop rows, including the tuple cases used by node:test."""
     for parent in ancestors(call):
-        if parent.type in {"arrow_function", "function_expression", "function_declaration", "method_definition"}:
+        if shadows(parent, name):
             break
         if parent.type != "for_in_statement":
             continue
         left = parent.child_by_field_name("left")
+        if not binds(left, name):
+            continue
         right = parent.child_by_field_name("right")
         operator = parent.child_by_field_name("operator")
         while right.type in {"as_expression", "parenthesized_expression"}:
             right = next(child for child in right.named_children if child.type != "comment")
         if text(operator) != "of" or right.type != "array" or text(parent.child_by_field_name("kind")) != "const":
-            continue
+            break
         if left.type == "identifier" and text(left) == name:
             rows = [(row, row) for row in right.named_children]
         elif left.type == "array_pattern":
             index = next((slot for slot, binding in tuple_items(left) if text(binding) == name), None)
             if index is None:
-                continue
+                break
             rows = [(value, row) for row in right.named_children if row.type == "array"
                     for slot, value in tuple_items(row) if slot == index]
         else:
-            continue
+            break
         return [(js_text(text(value)[1:-1]), fingerprint(row)) for value, row in rows
                 if value.type == "string"]
     return []
@@ -265,10 +284,12 @@ def compare(path, source, old_path, baseline):
     js_grammars = {JS, TS, TSX}
     if head_grammar in js_grammars and base_grammar in js_grammars and head_grammar != base_grammar:
         # Both sides must use the same AST grammar for an extension-only rename.
-        for grammar in dict.fromkeys((head_grammar, base_grammar, TSX)):
+        names = {name: len(matches) for name, matches in current.items()}
+        for grammar in dict.fromkeys((head_grammar, TSX, base_grammar)):
             try:
                 candidate = current if grammar == head_grammar else scan(path, source, grammar=grammar)
-                return candidate, scan(old_path, baseline, grammar=grammar)
+                if {name: len(matches) for name, matches in candidate.items()} == names:
+                    return candidate, scan(old_path, baseline, grammar=grammar)
             except ValueError:
                 continue
         raise ValueError("no common JavaScript grammar")

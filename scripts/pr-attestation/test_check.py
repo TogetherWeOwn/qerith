@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from check import CheckError, History, REPO, load_policy, main, verdict
-from declarations import scan
+from declarations import compare, scan
 
 
 FILE = "test_sample.py"
@@ -172,6 +172,31 @@ class ExactHeadTests(unittest.TestCase):
 
 
 class DeclarationsTests(unittest.TestCase):
+    def test_jsx_rename_retains_generic_typescript_test_declarations(self):
+        before = b"import test from 'node:test'; const element = <div/>; test('renders', () => {});"
+        after = b"import test from 'node:test'; test<Context>('renders', () => {});"
+        head, baseline = compare("render.test.ts", after, "render.test.jsx", before)
+        self.assertEqual(set(head), {"renders"})
+        self.assertEqual(set(baseline), {"renders"})
+        self.assertNotEqual(head["renders"], baseline["renders"])
+
+    def test_loop_titles_resolve_in_callbacks_that_capture_the_binding(self):
+        source = b"""
+          import test from 'node:test';
+          for (const kind of ['registration', 'authentication']) {
+            test('parent', (t) => {
+              t.test(`${kind} verified`, () => {});
+              {
+                const kind = 'different';
+                t.test(`${kind} shadowed`, () => {});
+              }
+            });
+          }
+        """
+        self.assertEqual(set(scan("sample.test.mjs", source)), {
+            "parent", "${kind} verified", "registration verified", "authentication verified", "${kind} shadowed",
+        })
+
     def test_typescript_const_table_resolves_each_name_and_row_change(self):
         source = b"""
           import test from 'node:test';
