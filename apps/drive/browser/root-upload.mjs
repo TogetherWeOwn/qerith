@@ -114,14 +114,13 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   const downloaded = await readFile(await download.path());
   assert.deepEqual(downloaded, file.buffer);
   const conflict = `${name}: An item with this name already exists in My Drive.`;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  async function assertConflict(attempt) {
     await choose({ ...file, buffer: Buffer.from('must not replace the original') });
     await page.waitForFunction(({ conflict, attempt }) => window.uploadAnnouncementChanges.filter(([, text]) => text === conflict).length === attempt, { conflict, attempt });
     await assertStatus(conflict, 'assertive');
-    assert.equal(requests, 3 + attempt * 3, 'a conflict does not retry');
   }
-  const conflicts = await page.evaluate(conflict => window.uploadAnnouncementChanges.filter(([, text]) => text === conflict), conflict);
-  assert.deepEqual(conflicts, [['assertive', conflict], ['assertive', conflict]]);
+  await assertConflict(1);
+  assert.equal(requests, 6, 'a conflict does not retry');
   const [original] = await Promise.all([page.waitForEvent('download'), link.press('Enter')]);
   assert.deepEqual(await readFile(await original.path()), file.buffer);
   failRefresh();
@@ -129,13 +128,20 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   await assertStatus('Second.bin: Uploaded. Refresh My Drive to see it.');
   assert.equal(await inspect(`document.activeElement === ${button}`), true);
   assert.equal(await link.count(), 1, 'a failed refresh leaves the previous listing mounted');
-  assert.equal(requests, 12, 'a failed listing refresh does not replay the upload');
+  assert.equal(requests, 9, 'a failed listing refresh does not replay the upload');
   const proof = {
     keyboard: 'Tab then Enter opened the single-file picker', statusRegions: 1, focusPreserved: true,
     documentsDuringRefresh: 0, refresh503PreservedUpload: true, responses: [...responses], bytes: downloaded.length,
-    announcements: { startsAndReceipts: 'polite', conflicts, singleLiveSource: true, emptySSRAndHydration: true },
     sha256: createHash('sha256').update(downloaded).digest('hex'), byteIdentical: true,
   };
+  // The round-trip verifier expects the original trace. Run the repeats afterwards.
+  await assertConflict(2);
+  await assertConflict(3);
+  assert.equal(requests, 15, 'two repeated conflicts neither replay nor retry');
+  const conflicts = await page.evaluate(conflict => window.uploadAnnouncementChanges.filter(([, text]) => text === conflict), conflict);
+  assert.deepEqual(conflicts, Array.from({ length: 3 }, () => ['assertive', conflict]));
+  const repeatResponses = responses.slice(proof.responses.length);
+  assert.deepEqual(repeatResponses, [['POST', 201], ['PUT', 204], ['POST', 409], ['POST', 201], ['PUT', 204], ['POST', 409]]);
 
   await db.prepare(`WITH RECURSIVE pages(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM pages WHERE n < 99)
     INSERT INTO drive_entries (id, owner_id, name, kind)
@@ -186,5 +192,6 @@ export async function captureRootUpload(page, origin, holdResponse, failRefresh,
   assert.deepEqual(await regions.locator('[aria-live]').allTextContents(), ['', ''], 'a routed document does not inherit upload feedback');
   await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, 'root-upload-round-trip.json'), JSON.stringify({
     ...proof, focusRestored: true, rootFolderDocumentNavigation: true,
+    announcements: { startsAndReceipts: 'polite', conflicts, repeatResponses, singleLiveSource: true, emptySSRAndHydration: true },
   }, null, 2));
 }
