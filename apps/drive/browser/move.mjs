@@ -71,12 +71,25 @@ export async function proveMove(page, { origin, DB, intercept, file, downloadPat
       if (movingFile) await button(taxes).press('Enter');
       const parent = movingFile ? taxes : 'My Drive';
       await heading(movingFile ? `My Drive / ${taxes}` : parent).waitFor();
-      await button('New folder').press('Enter');
-      const input = page.getByRole('dialog', { name: `New folder in ${parent}` }).getByRole('textbox', { name: 'Folder name' });
-      await input.and(active).fill(archive);
-      await input.press('Enter');
-      await heading(`My Drive / ${movingFile ? `${taxes} / ` : ''}${archive}`).waitFor();
       const status = page.locator('[data-drive-announcements]').getByRole('status');
+      const createDestination = async label => {
+        await button('New folder').press('Enter');
+        const input = page.getByRole('dialog', { name: `New folder in ${parent}` }).getByRole('textbox', { name: 'Folder name' });
+        await input.and(active).fill(label);
+        await input.press('Enter');
+        await heading(`My Drive / ${movingFile ? `${taxes} / ` : ''}${label}`).waitFor();
+      };
+      if (!movingFile) {
+        const kept = `${archive} kept`;
+        await createDestination(kept);
+        await button('Cancel').press('Enter');
+        await trigger.and(active).waitFor();
+        await link(kept).waitFor();
+        await status.filter({ hasText: `Created “${kept}”.` }).waitFor();
+        await open();
+        await button(kept).waitFor();
+      }
+      await createDestination(archive);
       const hold = Promise.withResolvers();
       intercept(path, async (_, relay) => { await hold.promise; return relay(); });
       const pending = submit(`Move to ${archive}`);
@@ -116,6 +129,7 @@ export async function proveMove(page, { origin, DB, intercept, file, downloadPat
       await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `keyboard-owner-move-${width}x${height}.json`), JSON.stringify({
         focus: ['path', 'close', 'cancel', 'close', 'row trigger', 'destination path', 'conflict alert', 'gone alert', 'new folder field', 'new folder path'],
         submission: [409, 404, 200], freshDestination: true, failedRefresh: movingFile, downloaded: movingFile, receipt,
+        cancellationPreservedNewFolder: movingFile ? undefined : true,
       }, null, 2));
     } finally { page.off('request', track); }
   }
