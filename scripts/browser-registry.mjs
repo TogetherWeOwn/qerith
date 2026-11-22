@@ -95,6 +95,10 @@ export function planBrowser(paths, proposed = {}, exactHead = true, trusted = re
     entries.set(id, previous ? { ...previous, states: [...new Set([...previous.states, ...next.states])] } : next);
   }
   const checks = {}, claimed = new Map();
+  const claimLegacy = file => {
+    if (claimed.get(file)) throw new Error(`Overlapping browser evidence claim: ${file}`);
+    claimed.set(file, null);
+  };
   for (const path of validateCoverage ? paths : []) {
     if (!path.startsWith(browserPath) || !path.endsWith('.mjs')) continue;
     const id = path.slice(browserPath.length, -4);
@@ -112,13 +116,13 @@ export function planBrowser(paths, proposed = {}, exactHead = true, trusted = re
       throw new Error(`Browser registration has no module: ${source}`);
     }
     if (entry.legacy) {
-      for (const file of legacyFiles(entry.inventory)) claimed.set(file, null);
+      for (const file of legacyFiles(entry.inventory)) claimLegacy(file);
       if (entry.check === 'rootShare' || entry.check === 'nestedShare') {
         for (const width of entry.widths) {
-          for (const file of Object.values(routedShareFiles(id, width))) claimed.set(file, null);
+          for (const file of Object.values(routedShareFiles(id, width))) claimLegacy(file);
           for (const state of entry.states) {
-            claimed.set(`${id}-${state}-${width}.png`, null);
-            claimed.set(`axe-${id}-${state}-${width}.json`, null);
+            claimLegacy(`${id}-${state}-${width}.png`);
+            claimLegacy(`axe-${id}-${state}-${width}.json`);
           }
         }
       }

@@ -87,6 +87,8 @@ test('generated browser entrypoints have separate exact-head deadlines', async (
   assert.match(verifier, /merge-multiple: true/);
   assert.match(coverage, /merge-multiple: true/);
   assert.match(capture, /git merge-base "\$MERGE_GROUP_BASE" origin\/main/);
+  assert.match(capture, /policy:.*steps.browser-source.outputs.policy/);
+  assert.match(verifier, /VERIFIED_BROWSER_POLICY:.*needs.drive-browser-capture.outputs.policy/);
   assert.match(coverage, /VERIFIED_BROWSER_POLICY:.*needs.drive-browser.outputs.policy/);
   assert.doesNotMatch(capture + coverage + verifier, /continue-on-error/);
   assert.match(await readFile(new URL('./browser-job.mjs', import.meta.url), 'utf8'),
@@ -369,6 +371,10 @@ test('the trusted registry inventories sources and controls legacy selection', (
   const added = planBrowser(examplePaths, { example: { ...example, states: ['closed'] } }, true, trusted);
   assert.ok(added.claimed.has('scenario-example-open-390.png'));
   assert.ok(added.claimed.has('scenario-example-closed-390.png'));
+  const legacyCollision = { legacy: true, inventory: { '': { file: ['scenario-example-open-390.png'] } } };
+  for (const registry of [{ example, legacyCollision }, { legacyCollision, example }]) {
+    assert.throws(() => planBrowser(examplePaths, {}, true, registry), /Overlapping browser evidence claim/);
+  }
   assert.throws(() => planBrowser(new Set(), {}, true, trusted, { previousPaths: examplePaths }),
     /Browser coverage module was removed/);
   paths.delete('apps/drive/browser/example.mjs');

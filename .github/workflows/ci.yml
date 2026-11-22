@@ -467,6 +467,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       artifact-id: ${{ steps.browser-upload.outputs.artifact-id }}
+      policy: ${{ steps.browser-source.outputs.policy }}
     env:
       REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -511,6 +512,9 @@ jobs:
             *) policy="$SNAPSHOT_SHA" ;;
           esac
           [[ "$policy" =~ ^[a-f0-9]{40}$ ]]
+          if [[ -v VERIFIED_BROWSER_POLICY ]]; then
+            test "$policy" = "$VERIFIED_BROWSER_POLICY"
+          fi
           git merge-base --is-ancestor "$policy" origin/main
           git show "$policy:scripts/select-browser-checkout.mjs" > "$RUNNER_TEMP/select-browser-checkout.mjs"
           node "$RUNNER_TEMP/select-browser-checkout.mjs" >> "$GITHUB_OUTPUT"
@@ -614,6 +618,7 @@ jobs:
       REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       SNAPSHOT_SHA: ${{ github.sha }}
+      VERIFIED_BROWSER_POLICY: ${{ needs.drive-browser-capture.outputs.policy }}
     steps:
       - *browser-integration
       - *browser-node
