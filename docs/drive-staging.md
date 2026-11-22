@@ -200,6 +200,12 @@ approvals for the exact main commit, browser workflow and candidate settings.
 It checks the same commit's successful main-push CI run, exact-head browser
 policy and checkout, generated fixture step, verified artifact identity and
 digest, and selected passkey, invite, grant and shared-listing observations.
+The latest CI attempt must contain the capture, verification, registry
+coverage, and `ci-ok` successes. The aggregate can pass independently of
+registry coverage, and a failed-jobs-only rerun can leave some successes in
+an earlier attempt. Rerun all jobs when the latest attempt lacks a complete
+record.
+
 The future protected evidence reader must authenticate the approvals and CI
 metadata independently and extract the claims from the same digest-verified
 archive. The offline tests inject synthetic records for that interface.
