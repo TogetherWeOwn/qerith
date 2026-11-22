@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
 import { qualificationPrefix } from './staging-qualification.mjs';
-import { largeBytes, verifyQualificationDownload, verifyQualificationLargeDownload } from './staging-qualification-large-transfer.mjs';
+import { largeBytes, verifyQualificationDownload } from './staging-qualification-large-transfer.mjs';
 import { probeQualificationWorker } from './staging-qualification-worker.mjs';
 
 const partBytes = 16 * 1024 ** 2;
@@ -137,9 +137,7 @@ async function exercise(context, signal, openClient, revokedMemberId, size, inte
       await sendParts(request, signal, path, size, seed, interruption + 1, expectedParts.length);
     }
     const download = await completeAndDownload(request, signal, path, name);
-    if (!resumable) return await verifyQualificationLargeDownload(download, digest, signal);
     await verifyQualificationDownload(download, size, digest, signal);
-    return { 'interrupted-transfer-resume': 'pass' };
   } catch {
     throw unverified();
   }
@@ -150,11 +148,16 @@ async function exercise(context, signal, openClient, revokedMemberId, size, inte
 // active, dedicated invitee. Reopen authenticates that member for the original
 // intent. The same candidate-bound transport serves readiness and app requests.
 // Requests are same-origin, abortable, non-retrying, and drain upload bodies before settling.
-export const exerciseQualificationLargeTransfer = (context, signal, openClient, revokedMemberId) =>
-  exercise(context, signal, openClient, revokedMemberId, largeBytes, null);
-export const exerciseQualificationResume = (context, signal, openClient, revokedMemberId) =>
-  exercise(context, signal, openClient, revokedMemberId, resumeBytes, interruptionPart);
+export async function exerciseQualificationLargeTransfer(context, signal, openClient, revokedMemberId) {
+  await exercise(context, signal, openClient, revokedMemberId, largeBytes, null);
+  return { 'large-transfer-hash': 'pass' };
+}
 
-// Two real-sized parts exercise the sealed HTTP contract in a disposable Worker.
+export async function exerciseQualificationResume(context, signal, openClient, revokedMemberId) {
+  await exercise(context, signal, openClient, revokedMemberId, resumeBytes, interruptionPart);
+  return { 'interrupted-transfer-resume': 'pass' };
+}
+
+// Two real-sized parts exercise the sealed HTTP contract without issuing case evidence.
 export const exerciseQualificationResumeFixture = (context, signal, openClient, revokedMemberId) =>
   exercise(context, signal, openClient, revokedMemberId, partBytes + 257, 1);

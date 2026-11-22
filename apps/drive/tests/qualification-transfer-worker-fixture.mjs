@@ -155,7 +155,7 @@ export async function exerciseQualificationTransferWorker({ worker, DB, origin, 
     } };
   };
   const signal = AbortSignal.timeout(45_000);
-  assert.deepEqual(await exerciseQualificationResumeFixture(scope, signal, openClient, revokedMemberId), { 'interrupted-transfer-resume': 'pass' });
+  assert.equal(await exerciseQualificationResumeFixture(scope, signal, openClient, revokedMemberId), undefined);
   assert.deepEqual(opened, [principal, principal]);
   const row = await DB.prepare(`SELECT entry_id, owner_id, object_key FROM drive_published_generations WHERE intent_id = ?`)
     .bind(id).first();

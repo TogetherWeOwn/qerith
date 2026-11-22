@@ -34,7 +34,7 @@ export function fixture({ resume = false, small = false, fault, controller, lost
     return {
       scope: reopened && fault?.startsWith('scope-') ? { ...expected, [fault.slice(6)]: 'wrong' } : expected,
       principalId: fault === 'revoked-principal' ? revokedMember : reopened && fault === 'foreign-principal' ? file : member,
-      role: fault === 'owner' ? 'owner' : 'member',
+      role: fault === 'owner' || (reopened && fault === 'reopen-owner') ? 'owner' : 'member',
       intentId: reopened && fault === 'wrong-intent' ? file : binding.intentId,
       async request(path, { method, body, headers, signal, redirect }) {
         check(signal);
@@ -132,7 +132,7 @@ test('continues the same intent from one persisted GiB without replaying any par
 });
 
 const redacted = { message: 'Qualification app transfer is unverified.' };
-test('rejects missing admission, bad scope and ambiguous acknowledgements without restart', async () => {
+test('rejects invalid admission, bad scope and ambiguous acknowledgements without restart', async () => {
   for (const fault of ['owner', 'revoked-principal', 'wrong-ready', 'wrong-scope', 'lost-ack', 'cancel']) {
     const controller = new AbortController();
     const { openClient, calls } = fixture({ small: true, resume: true, fault, controller });
@@ -159,8 +159,8 @@ test('denied, unsealed or mismatched persisted evidence prevents all suffix writ
   }
 });
 
-test('rejects foreign member, intent or candidate scope before reading the journal', async () => {
-  for (const fault of ['foreign-principal', 'wrong-intent', 'scope-sha', 'scope-version', 'scope-runId', 'scope-attempt', 'scope-prefix']) {
+test('rejects the owner, foreign member, wrong intent or candidate scope before reading the journal', async () => {
+  for (const fault of ['reopen-owner', 'foreign-principal', 'wrong-intent', 'scope-sha', 'scope-version', 'scope-runId', 'scope-attempt', 'scope-prefix']) {
     const { openClient, calls } = fixture({ small: true, resume: true, fault });
     await assert.rejects(exerciseQualificationResumeFixture(context, active(), openClient, revokedMember), redacted);
     assert.deepEqual(calls, ['allocate', `PUT ${upload}/parts/1`]);
