@@ -43,22 +43,38 @@ const allowed = {
 };
 
 const liveRoles = new Set(['alert', 'status', 'log']);
+const liveAttributes = new Set(['aria-live', 'role']);
+const markup = new Set(['RegularElement', 'SvelteElement', 'Component', 'SvelteComponent', 'SvelteSelf']);
+
+function isLiveValue(name, value) {
+  if (!liveAttributes.has(name)) return false;
+  // A dynamic role or live priority cannot be established at lint time.
+  if (typeof value !== 'string') return true;
+  const tokens = value.trim().toLowerCase().split(/\s+/);
+  return name === 'role' ? tokens.some(token => liveRoles.has(token)) : tokens[0] !== 'off';
+}
 
 function isLiveAttribute(attribute) {
-  if (attribute.type !== 'Attribute' || !['aria-live', 'role'].includes(attribute.name)) return false;
-  const { value } = attribute;
-  // A dynamic role or live priority cannot be established at lint time.
-  if (!Array.isArray(value) || value.some(part => part.type !== 'Text')) return true;
-  const tokens = value.map(part => part.data).join('').trim().toLowerCase().split(/\s+/);
-  return attribute.name === 'role' ? tokens.some(token => liveRoles.has(token)) : tokens[0] !== 'off';
+  if (attribute.type === 'SpreadAttribute' && attribute.expression.type === 'ObjectExpression') {
+    return attribute.expression.properties.some(({ type, key, computed, value }) => {
+      if (type !== 'Property') return false;
+      const name = key.type === 'Literal' ? key.value : !computed && key.name;
+      return isLiveValue(name, value.type === 'Literal' ? value.value : undefined);
+    });
+  }
+  if (attribute.type !== 'Attribute' || !liveAttributes.has(attribute.name)) return false;
+  const { name, value } = attribute;
+  const text = Array.isArray(value) && value.every(part => part.type === 'Text') ? value.map(part => part.data).join('') : undefined;
+  return isLiveValue(name, text);
 }
 
 export function lintAnnouncements(path, source) {
+  path = path.replaceAll('\\', '/');
   const exceptions = new Set(allowed[path] ?? []);
   const messages = [];
   function visit(node) {
     if (!node || typeof node !== 'object') return;
-    if (['RegularElement', 'SvelteElement'].includes(node.type) && node.attributes.some(isLiveAttribute)) {
+    if (markup.has(node.type) && node.attributes.some(isLiveAttribute)) {
       const signature = source.slice(node.start, node.attributes.at(-1).end);
       if (!exceptions.delete(signature)) {
         const line = source.slice(0, node.start).split('\n').length;

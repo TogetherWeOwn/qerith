@@ -39,6 +39,7 @@
   let recovery = $state<HTMLAnchorElement>();
   let refreshVersion = 0, appliedVersion = 0;
   const announce = useAnnounce();
+  const announceCreation = useAnnounce();
   const announceUpload = useAnnounce();
 
   function uploadFeedback(message: string, priority?: AnnouncementPriority) {
@@ -96,12 +97,12 @@
   async function folderCreated(id: string, name: string, close?: () => void) {
     const loaded = await refresh('folder').then(() => result.status === 'ok', () => false);
     receipt = { id, name, loaded };
-    if (!close) { announce(createdStatus); return; } // The picker owns focus and dismissal.
+    if (!close) { announceCreation(createdStatus); return; } // The picker owns focus and dismissal.
     await tick();
     close();
     if (createdVisible) list?.focusCreatedRow(id);
     else recovery?.focus();
-    announce(createdStatus);
+    announceCreation(createdStatus);
   }
 
   function returnToRow(id: string) {

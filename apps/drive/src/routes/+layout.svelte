@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { createAnnouncer, setAnnouncer } from '../lib/announcements';
   import type { LayoutProps } from './$types';
+  import '../lib/tokens.css';
 
   let { children }: LayoutProps = $props();
   let polite = $state(''), assertive = $state('');
@@ -35,5 +36,5 @@
 </div>
 
 <style>
-  .announcements { position: absolute; inset-block-start: 0; inset-inline-start: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .announcements { position: absolute; inset-block-start: 0; inset-inline-start: 0; inline-size: var(--drive-size-line); block-size: var(--drive-size-line); overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>
