@@ -29,6 +29,14 @@ export function isolatedScenarios(entries) {
   });
 }
 
+export function isolatedSchedule(paths, proposed, trusted = registry) {
+  const scheduled = new Map(isolatedScenarios(trusted));
+  for (const id of Object.keys(proposed)) {
+    if (!Object.hasOwn(trusted, id) && scenarioName.test(id)) scheduled.set(id, 'exercise');
+  }
+  return [...scheduled].filter(([id]) => paths.has(`${browserPath}${id}.mjs`));
+}
+
 export function routedShareFiles(id, width) {
   const detail = mode => id === 'root-share' ? `${id}-${width}x${viewports[width]}-${mode}` : `${id}-${mode}-${width}`;
   return {
@@ -62,10 +70,14 @@ function legacyFiles(inventory = {}) {
   return files;
 }
 
-export function generatedCommands(paths, trusted, exactHead) {
+export function generatedCommands(paths, trusted = registry, exactHead = true) {
   if (!exactHead) return [];
-  return Object.entries(trusted).flatMap(([id, { command }]) =>
-    command && paths.has(`${browserPath}${id}.mjs`) && paths.has(browserPath + command[0]) ? [command] : []);
+  return Object.entries(trusted).flatMap(([id, { command, required }]) => {
+    if (!command) return [];
+    const present = paths.has(`${browserPath}${id}.mjs`) && paths.has(browserPath + command[0]);
+    if (required && !present) throw new Error(`Missing required generated browser module: ${id}`);
+    return present ? [command] : [];
+  });
 }
 
 // Only the registry from the verified main snapshot can declare legacy entries.
@@ -90,7 +102,7 @@ export function planBrowser(paths, proposed = {}, exactHead = true, trusted = re
   }
   for (const [id, entry] of entries) {
     const source = `${browserPath}${id}.mjs`;
-    if (validateCoverage && !paths.has(source) && previousPaths.has(source) && (entry.check || entry.command || !entry.legacy)) {
+    if (validateCoverage && !paths.has(source) && previousPaths.has(source) && (entry.check || entry.command || entry.exercise || !entry.legacy)) {
       throw new Error(`Browser coverage module was removed: ${source}`);
     }
     if (validateCoverage && exactHead && entry.requires && previousPaths.has(entry.requires) && !paths.has(entry.requires)) {
@@ -122,8 +134,7 @@ export function planBrowser(paths, proposed = {}, exactHead = true, trusted = re
       }
     }
   }
-  const isolated = isolatedScenarios(Object.fromEntries(entries)).filter(([id]) => paths.has(`${browserPath}${id}.mjs`));
-  return { checks, commands: generatedCommands(paths, trusted, exactHead), isolated, claimed };
+  return { checks, claimed };
 }
 
 export async function verifyBrowserInventory(dir, claimed) {

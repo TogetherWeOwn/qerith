@@ -262,7 +262,9 @@ try {
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
   browser = await chromium.launch({ headless: true });
-  for (const [id, name] of isolatedScenarios(registry)) {
+  const schedule = process.env.DRIVE_BROWSER_ISOLATED
+    ? JSON.parse(process.env.DRIVE_BROWSER_ISOLATED) : isolatedScenarios(registry);
+  for (const [id, name] of schedule) {
     const scenario = await import(`./${id}.mjs`);
     await scenario[name](browser, origin, axe, output, registry[id]);
   }

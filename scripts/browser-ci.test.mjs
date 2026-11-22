@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { crc32, deflateSync } from 'node:zlib';
 import { verifyEvidence, verifyRoutedShareEvidence } from './browser-evidence.mjs';
-import { accessibilityModes, planBrowser, verifyBrowserInventory } from './browser-registry.mjs';
+import { accessibilityModes, generatedCommands, isolatedSchedule, planBrowser, verifyBrowserInventory } from './browser-registry.mjs';
 import { selectCheckout } from './select-browser-checkout.mjs';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), snapshot = 'c'.repeat(40);
@@ -84,6 +84,10 @@ test('generated browser entrypoints have separate exact-head deadlines', async (
   assert.match(verifier, /needs: drive-browser-capture/);
   assert.match(verifier, /git show "\$BROWSER_POLICY_SHA:scripts\/browser-evidence.mjs"/);
   assert.match(coverage, /needs: drive-browser\n/);
+  assert.match(verifier, /merge-multiple: true/);
+  assert.match(coverage, /merge-multiple: true/);
+  assert.match(capture, /git merge-base "\$MERGE_GROUP_BASE" origin\/main/);
+  assert.match(coverage, /VERIFIED_BROWSER_POLICY:.*needs.drive-browser.outputs.policy/);
   assert.doesNotMatch(capture + coverage + verifier, /continue-on-error/);
   assert.match(await readFile(new URL('./browser-job.mjs', import.meta.url), 'utf8'),
     /'timeout', \['--signal=TERM', '--kill-after=10s', '90s', process.execPath, \.\.\.args\]/);
@@ -338,14 +342,20 @@ test('routed Share requires each registered fixture’s evidence', async t => {
 
 test('the trusted registry inventories sources and controls legacy selection', () => {
   const paths = new Set(['apps/drive/browser/run.mjs', 'apps/drive/browser/upload-storage.mjs',
-    'apps/drive/browser/root-share.mjs', 'apps/drive/browser/staging-root-standalone.mjs']);
+    'apps/drive/browser/root-share.mjs', 'apps/drive/browser/staging-root-standalone.mjs',
+    'apps/drive/browser/share-dialog.mjs']);
   const proposed = { 'root-share': { states: [], modes: [], widths: [] } };
   const exact = planBrowser(paths, proposed);
   assert.equal(exact.checks.rootShare, true);
-  assert.deepEqual(exact.commands, [['staging-root-standalone.mjs'], ['staging-root-standalone.mjs', '--root-share-only']]);
+  assert.throws(() => generatedCommands(paths, undefined, true), /Missing required generated browser module/);
+  paths.add('apps/drive/browser/sign-in.mjs');
+  assert.deepEqual(generatedCommands(paths, undefined, true),
+    [['sign-in.mjs'], ['staging-root-standalone.mjs'], ['staging-root-standalone.mjs', '--root-share-only']]);
+  assert.deepEqual(isolatedSchedule(paths, proposed), [['share-dialog', 'exerciseShareDialog']]);
+  assert.deepEqual(isolatedSchedule(paths, { 'share-dialog': {} }), [['share-dialog', 'exerciseShareDialog']]);
   const legacy = planBrowser(paths, proposed, false);
   assert.equal(legacy.checks.rootShare, undefined);
-  assert.deepEqual(legacy.commands, []);
+  assert.deepEqual(generatedCommands(paths, undefined, false), []);
   assert.ok(legacy.claimed.has('head.txt'));
   paths.add('apps/drive/browser/example.mjs');
   assert.throws(() => planBrowser(paths, proposed), /Unregistered browser module: .*example/);
@@ -353,7 +363,7 @@ test('the trusted registry inventories sources and controls legacy selection', (
     assert.throws(() => planBrowser(paths, { ...proposed, example: invalid }), /Invalid accessibility registration/);
   }
   const example = { states: ['open'], widths: [390, 1280], modes: accessibilityModes };
-  assert.deepEqual(planBrowser(paths, { ...proposed, example }).isolated, [['example', 'exercise']]);
+  assert.deepEqual(isolatedSchedule(paths, { ...proposed, example }), [['share-dialog', 'exerciseShareDialog'], ['example', 'exercise']]);
   const trusted = { example };
   const examplePaths = new Set(['apps/drive/browser/example.mjs']);
   const added = planBrowser(examplePaths, { example: { ...example, states: ['closed'] } }, true, trusted);

@@ -58,6 +58,7 @@
   },
   "sign-in": {
     "command": ["sign-in.mjs"],
+    "required": true,
     "legacy": true
   },
   "staging-root-standalone": {

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import registry from '../apps/drive/browser/scenarios.json' with { type: 'json' };
-import { browserPath, generatedCommands, planBrowser, verifyBrowserInventory, viewports } from './browser-registry.mjs';
+import { browserPath, generatedCommands, isolatedSchedule, planBrowser, verifyBrowserInventory, viewports } from './browser-registry.mjs';
 import { verifyEvidence, verifyRoutedShareEvidence } from './browser-evidence.mjs';
 
 const {
@@ -37,7 +37,13 @@ const validateCoverage = command === 'coverage';
 const paths = tree(tested, validateCoverage);
 const proposedPath = browserPath + 'scenarios.json';
 
-if (command === 'capture') {
+function readRegistration() {
+  return paths.has(proposedPath) ? JSON.parse(git('show', `${tested}:${proposedPath}`)) : {};
+}
+
+if (command === 'isolated') {
+  console.log(JSON.stringify(isolatedSchedule(paths, readRegistration())));
+} else if (command === 'capture') {
   if (!testedDir || !dir || !exactHead) throw new Error('Generated browser fixtures require the exact requested head');
   for (const args of generatedCommands(paths, registry, exactHead)) {
     execFileSync('timeout', ['--signal=TERM', '--kill-after=10s', '90s', process.execPath, ...args], {
@@ -49,8 +55,7 @@ if (command === 'capture') {
   if (![dir, snapshot, policy, mode, workflow, runId, runAttempt, server, repository].every(Boolean)) {
     throw new Error('Missing provenance context');
   }
-  const proposed = validateCoverage && exactHead && paths.has(proposedPath)
-    ? JSON.parse(git('show', `${requestedHead}:${proposedPath}`)) : {};
+  const proposed = validateCoverage && exactHead ? readRegistration() : {};
   const previousPaths = validateCoverage ? tree(git('merge-base', requestedHead, snapshotBase || policy)) : new Set();
   const options = { validateCoverage, previousPaths };
   const { checks, claimed } = planBrowser(paths, proposed, exactHead, registry, options);
@@ -74,6 +79,6 @@ if (command === 'capture') {
     claimed.set('provenance.json', null);
     await verifyBrowserInventory(dir, claimed);
   } else {
-    throw new Error('Expected capture, baseline, or coverage');
+    throw new Error('Expected isolated, capture, baseline, or coverage');
   }
 }

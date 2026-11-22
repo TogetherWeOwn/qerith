@@ -499,10 +499,15 @@ jobs:
           case "$GITHUB_EVENT_NAME" in
             pull_request) policy="$(git rev-parse "$SNAPSHOT_SHA^1")" ;;
             merge_group)
-              policy="$MERGE_GROUP_BASE"
+              [[ "$MERGE_GROUP_BASE" =~ ^[a-f0-9]{40}$ ]]
+              git merge-base --is-ancestor "$MERGE_GROUP_BASE" "$SNAPSHOT_SHA"
+              policy="${VERIFIED_BROWSER_POLICY:-$(git merge-base "$MERGE_GROUP_BASE" origin/main)}"
+              git merge-base --is-ancestor "$policy" "$MERGE_GROUP_BASE"
+              ;;
+            workflow_dispatch)
+              policy="${VERIFIED_BROWSER_POLICY:-$(git merge-base "$SNAPSHOT_SHA" origin/main)}"
               git merge-base --is-ancestor "$policy" "$SNAPSHOT_SHA"
               ;;
-            workflow_dispatch) policy="$(git rev-parse origin/main)" ;;
             *) policy="$SNAPSHOT_SHA" ;;
           esac
           [[ "$policy" =~ ^[a-f0-9]{40}$ ]]
@@ -550,11 +555,27 @@ jobs:
       - name: Install pinned Chromium on the runner
         working-directory: tested/apps/drive/browser
         run: npx --no-install playwright install --with-deps chromium
+      - name: Load the browser scheduler
+        working-directory: integration
+        env:
+          BROWSER_POLICY_SHA: ${{ steps.browser-source.outputs.policy }}
+        run: |
+          set -euo pipefail
+          source="$BROWSER_POLICY_SHA"
+          if ! git cat-file -e "$source:scripts/browser-job.mjs"; then source="$SNAPSHOT_SHA"; fi
+          mkdir "$RUNNER_TEMP/browser-policy"
+          git archive "$source" scripts/browser-job.mjs scripts/browser-registry.mjs scripts/browser-evidence.mjs apps/drive/browser/scenarios.json |
+            tar -x -C "$RUNNER_TEMP/browser-policy"
       - name: Exercise fixture and require complete evidence
         env:
           DRIVE_BROWSER_HEAD: ${{ steps.browser-source.outputs.tested }}
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+          BROWSER_GIT_DIR: ${{ github.workspace }}/integration
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
         run: |
+          set -euo pipefail
+          DRIVE_BROWSER_ISOLATED="$(node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" isolated)"
+          export DRIVE_BROWSER_ISOLATED
           git diff --exit-code
           git diff --cached --exit-code
           npm test --prefix apps/drive/browser
@@ -565,16 +586,10 @@ jobs:
         env:
           BROWSER_GIT_DIR: ${{ github.workspace }}/integration
           BROWSER_TESTED_DIR: ${{ github.workspace }}/tested
-          BROWSER_POLICY_SHA: ${{ steps.browser-source.outputs.policy }}
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
         run: |
           set -euo pipefail
-          source="$BROWSER_POLICY_SHA"
-          if ! git -C ../integration cat-file -e "$source:scripts/browser-job.mjs"; then source="$SNAPSHOT_SHA"; fi
-          mkdir "$RUNNER_TEMP/browser-policy"
-          git -C ../integration archive "$source" scripts/browser-job.mjs scripts/browser-registry.mjs scripts/browser-evidence.mjs apps/drive/browser/scenarios.json |
-            tar -x -C "$RUNNER_TEMP/browser-policy"
           npm run build --prefix apps/drive
           node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" capture
           test "$(git rev-parse HEAD)" = "$TESTED_SHA"
@@ -594,7 +609,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       artifact-id: ${{ steps.browser-upload.outputs.artifact-id }}
-    env: &browser-identities
+      policy: ${{ steps.browser-source.outputs.policy }}
+    env:
       REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       SNAPSHOT_SHA: ${{ github.sha }}
@@ -609,6 +625,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           artifact-ids: ${{ needs.drive-browser-capture.outputs.artifact-id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/drive-browser-evidence
       - name: Verify evidence and record both provenance identities
         working-directory: integration
@@ -672,7 +689,11 @@ jobs:
     needs: drive-browser
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    env: *browser-identities
+    env:
+      REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SNAPSHOT_SHA: ${{ github.sha }}
+      VERIFIED_BROWSER_POLICY: ${{ needs.drive-browser.outputs.policy }}
     steps:
       - *browser-integration
       - *browser-node
@@ -684,6 +705,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           artifact-ids: ${{ needs.drive-browser.outputs.artifact-id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/drive-browser-evidence
       - name: Require registered sources and complete claimed evidence
         working-directory: integration
