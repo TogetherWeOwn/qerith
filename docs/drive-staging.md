@@ -218,9 +218,14 @@ and shared listing to `1`, fixture sign-in to `0`, and owner enrollment to
 version before activation. Full-v0 composition requires an explicit candidate
 uploader. A protected implementation must build the admitted commit in an
 exclusive checkout and keep the Worker entry, its transitive sources, assets,
-migrations, and pinned build tools isolated through Wrangler upload. It must
-verify the candidate's settings on upload readback before returning its
-version. The stock uploader continues to use closed opt-ins.
+migrations, and pinned build tools isolated through Wrangler upload. Before
+Wrangler inherits bindings, require the version serving all staging traffic
+to be the latest upload. After upload, require the candidate to immediately
+follow that version in upload history and require the serving deployment to
+stay the same. Verify the candidate's complete binding set, including the
+exact admitted settings and inherited secret names, on version readback.
+These checks must finish before the adapter returns a version for migration
+or activation. The stock uploader continues to use closed opt-ins.
 Synthetic owner provisioning requires its own reviewed path under the writer
 fence after the initial clean census.
 
