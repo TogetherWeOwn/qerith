@@ -289,6 +289,7 @@ account. The unfiltered list requests counts and must return an explicitly empty
 64 KiB. Disabled inputs, missing counts, denied reads, and continuation evidence
 all fail. Offline fixtures cover the empty-response shape. The read is scoped
 to live inputs visible to the existing credential in the pinned account.
+Stored recordings, billing, and other accounts require separate evidence.
 
 Both passes also read the unfiltered native Workflows definition roster in the
 pinned Worker account. The first page must explicitly contain no definitions,
