@@ -140,10 +140,6 @@ stagingRoot: try {
   const session = (await context.cookies(origin)).find(cookie => cookie.name === sessionName);
   assert.ok(session?.httpOnly && session.secure);
   const cookie = `${sessionName}=${session.value}`;
-  if (process.argv.includes('--root-share-only')) {
-    await proveRootShare(browser, { origin, DB, worker, relay, ownerToken: session.value, memberToken });
-    break stagingRoot;
-  }
 
   const upload = page.getByRole('button', { name: 'Upload', exact: true });
   await upload.and(page.locator('[aria-disabled="false"]')).waitFor();
@@ -177,6 +173,11 @@ stagingRoot: try {
     return [response.status, response.headers.get('content-range'), Array.from(new Uint8Array(await response.arrayBuffer()))];
   }, await row.getAttribute('href'));
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
+  if (process.argv.includes('--root-share-only')) {
+    await proveRootShare(browser, { origin, DB, worker, relay, ownerToken: session.value, memberToken,
+      file, downloadPath: await row.getAttribute('href') });
+    break stagingRoot;
+  }
   await proveSharedListing(browser, { origin, DB, worker, relay, ownerCookie: cookie, memberToken,
     file, downloadPath: await row.getAttribute('href') });
 

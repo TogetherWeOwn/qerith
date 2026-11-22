@@ -44,7 +44,7 @@ export const load: PageServerLoad = async (event) => {
   return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
     folderLinks: fixture || inviteMode,
     metadataWriteAllowed: inviteMode && (role === 'owner' || role === 'member'),
-    shareOwner: principal && listing?.status === 'ok' && admitsStagingReadGrants(env)
+    shareOwner: principal && inviteMode && listing?.status === 'ok' && admitsStagingReadGrants(env)
       ? { recipientId: principal.id, driveOwner: role === 'owner' } : undefined,
     ownerInvites: role === 'owner' && inviteMode,
     sharedListing: role === 'member' && admitsSharedListing(env),

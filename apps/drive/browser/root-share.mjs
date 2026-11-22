@@ -3,16 +3,17 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture } from './root-listing.mjs';
 
-const folder = 'share / folder', file = 'share-root-file', child = 'share-child', owned = 'share-member-folder';
+const folder = 'share / folder', child = 'share-child', owned = 'share-member-folder';
 const reader = 'share-reader-000', second = 'share-reader-001', third = 'share-reader-002';
 const late = 'share-reader-101';
-const folderName = 'Shareable folder', fileName = 'Shareable file', memberName = 'Member’s own folder';
+const folderName = 'Shareable folder', memberName = 'Member’s own folder';
 const entry = id => `/api/entries/${encodeURIComponent(id)}`;
 const roster = id => `${entry(id)}/eligible-recipients`;
 const grant = (id, recipient) => `${entry(id)}/read-grants/${recipient}`;
 const cookie = value => ({ name: '__Host-drive-session', value, secure: true, httpOnly: true });
 
-export async function proveRootShare(browser, { origin, DB, worker, relay, ownerToken, memberToken }) {
+export async function proveRootShare(browser, { origin, DB, worker, relay, ownerToken, memberToken, file, downloadPath }) {
+  const fileId = downloadPath.split('/').at(-1);
   const names = ['Root Reader', 'Second Reader', 'Third Reader'];
   const session = await DB.prepare("SELECT token_hash, expires_at FROM drive_sessions WHERE principal_id = 'member'").first();
   const recipients = Array.from({ length: 102 }, (_, i) => DB.prepare(
@@ -24,14 +25,12 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
   await DB.batch([
     ...recipients, insertFolder(folder, 'owner', folderName), insertFolder(child, 'owner', 'Nested folder', folder),
     insertFolder(owned, 'member', memberName),
-    DB.prepare("INSERT INTO drive_entries (id, owner_id, name, kind, object_key, size_bytes) VALUES (?, 'owner', ?, 'file', ?, 0)")
-      .bind(file, fileName, file),
   ]);
-  let flag = '1', ownerInvites = false, failRead = false, writes = [];
+  let flag = '1', inviteMode = false, failRead = false, writes = [];
   const target = { async fetch(resource, init) {
     const headers = new Headers(init.headers);
     headers.set('x-fixture-read-grants', flag);
-    if (ownerInvites || headers.get('cookie') === `${cookie(memberToken).name}=${memberToken}`) headers.set('x-fixture-invite', '1');
+    if (inviteMode) headers.set('x-fixture-invite', '1');
     const path = new URL(resource).pathname;
     const response = await worker.fetch(resource, { ...init, headers });
     if (path.includes('/read-grants/') || (init.method === 'POST' && path.startsWith('/api/owner/'))) writes.push([init.method, path, response.status]);
@@ -45,7 +44,7 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
     method, redirect: 'manual', headers: { cookie: `${cookie(token).name}=${token}`, origin, 'sec-fetch-site': 'same-origin' },
   });
   const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
-  for (const [width, height, id, name] of [[1280, 800, folder, folderName], [390, 844, file, fileName]]) {
+  for (const [width, height, id, name] of [[1280, 800, folder, folderName], [390, 844, fileId, file.name]]) {
     const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce', serviceWorkers: 'block' });
     let hold = false, beforeRosterReply;
     const release = [];
@@ -77,15 +76,16 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       await context.addCookies([{ ...cookie(ownerToken), url: origin }]);
       const triggerFor = entryName => page.getByRole('button', { name: `Actions for ${entryName}` });
       const trigger = triggerFor(name);
-      flag = 'true';
-      await visit();
-      assert.equal(await trigger.count(), 0);
+      const menu = page.getByRole('menu'), dialog = page.getByRole('dialog', { name: `Share “${name}”` });
+      flag = '1'; inviteMode = false; await visit();
+      assert.equal(await trigger.count(), 0, 'Share stays hidden while invite admission is disabled');
+      assert.equal((await ask('/people')).status, 404);
+      assert.equal((await ask(downloadPath, memberToken)).status, 403);
+      flag = 'true'; inviteMode = true; await visit(); await trigger.press('ArrowDown');
+      assert.equal(await menu.getByRole('menuitem', { name: 'Share' }).count(), 0, 'Read-grant opt-in must be exact');
       assert.equal((await ask(roster(id))).status, 404);
       assert.equal((await ask(grant(id, reader), ownerToken, 'PUT')).status, 404);
-      flag = '1';
-      await visit();
-      await audit('root');
-      const menu = page.getByRole('menu'), dialog = page.getByRole('dialog', { name: `Share “${name}”` });
+      flag = '1'; await visit(); await audit('root');
       const input = dialog.getByRole('combobox', { name: 'Add people' });
       const button = name => dialog.getByRole('button', { name, exact: true });
       const focused = locator => locator.and(page.locator(':focus')).waitFor();
@@ -107,10 +107,8 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       await turn('Next', 'people to add', 2); await setRoster('revoked');
       await button('Previous page of people to add').press('Enter'); await empty.waitFor();
       assert.equal(await button('Share').getAttribute('aria-disabled'), 'true');
-      assert.equal(await button('Invite someone').count(), 0);
-      assert.equal((await ask('/people')).status, 404);
       await focused(button('Done')); await keyboard.press('Enter');
-      ownerInvites = true; writes = []; await visit(); await open(); await empty.waitFor();
+      writes = []; await open(); await empty.waitFor();
       const onlyYou = dialog.getByText('Only you can see this.', { exact: true });
       await onlyYou.waitFor();
       await audit('invite-empty');
@@ -125,28 +123,24 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       const peopleTree = await page.locator('body').ariaSnapshot();
       assert.match(peopleTree, /link "Users and invites"[\s\S]*main:[\s\S]*heading "Users and invites"/);
       assert.deepEqual(writes, []);
-      ownerInvites = false; await visit();
+      await visit();
       await DB.prepare("UPDATE drive_principals SET status = 'active' WHERE id = 'member'").run();
-      await updateGrant('member', 'PUT');
-      await open();
-      await button('Remove Name unavailable’s access').waitFor();
+      await DB.prepare("INSERT INTO drive_sessions VALUES (?, 'member', ?)").bind(session.token_hash, session.expires_at).run();
+      await open(); await dialog.getByRole('option', { name: 'Name unavailable' }).waitFor();
+      await keyboard.press('ArrowDown'); await keyboard.press('Enter'); await button('Share').press('Enter');
+      await live('Shared with Name unavailable'); await button('Remove Name unavailable’s access').waitFor();
+      if (id === fileId) {
+        const received = await ask(downloadPath, memberToken);
+        assert.equal(received.status, 200);
+        assert.deepEqual(Buffer.from(await received.arrayBuffer()), file.buffer);
+      }
       assert.equal(await empty.count(), 0, 'A complete roster with only granted recipients is not empty');
       await button('Done').press('Enter');
       await updateGrant('member', 'DELETE');
       await setRoster('active');
-      await DB.prepare("INSERT INTO drive_sessions VALUES (?, 'member', ?)").bind(session.token_hash, session.expires_at).run();
-      await trigger.press('ArrowDown');
-      await focused(menu.getByRole('menuitem', { name: 'Share' }));
-      const read = page.waitForResponse(response => new URL(response.url()).pathname === roster(id));
-      await keyboard.press('Enter');
-      await focused(input);
-      assert.equal((await read).status(), 200);
-      await button('Next page of people with access').waitFor();
+      await open(); await focused(input); await button('Next page of people with access').waitFor();
       assert.equal(await onlyYou.count(), 0);
-      const nextRead = page.waitForResponse(response => new URL(response.url()).pathname === roster(id) && !!new URL(response.url()).search);
-      await button('Next page of people with access').press('Enter');
-      assert.equal((await nextRead).status(), 200);
-      await live('Showing page 2 of people with access.');
+      await turn('Next', 'people with access', 2);
       assert.equal(await onlyYou.count(), 0);
       await turn('Previous', 'people with access', 1);
       await input.fill(names[0]);
@@ -277,7 +271,7 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
         'The status region updated for paging, selection and removal. A focused alert distinguished acknowledged, uncertain and unsent shares across a read timeout.',
         'Keyboard opened the menu, moved into Share, dismissed the picker on Escape, wrapped both directions, and returned focus to the row.',
         'Reduced motion enabled, forced-colours focus visible, and no horizontal overflow at 320 CSS px. Chromium accessibility tree review.',
-        'With invite admission enabled, Tab reached Invite someone and Enter opened the Users and invites document. The action was absent with invite admission disabled.',
+        'With invite admission enabled, Tab reached Invite someone and Enter opened the Users and invites document. Share stayed hidden with invite admission disabled.',
         pickerTree, resultTree, inviteTree, peopleTree,
       ].join('\n\n'));
       console.log(`Root Share passed at ${width}×${height}`);
