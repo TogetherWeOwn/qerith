@@ -1,28 +1,11 @@
 import { deepStrictEqual as equal } from 'node:assert/strict';
 import { qualificationPrefix } from './staging-qualification.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
+import { verifyOwnedFolder } from './staging-qualification-folder.mjs';
+import { stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const label = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(value) && value === value.trim();
-
-// Recognize only the script-free folder SSR shell and its direct children.
-// Allow Svelte markers between elements, never strip them out of tag syntax.
-const gap = String.raw`(?:[ \t\r\n\f]|<!--(?:\[!?-?\d*|\])?-->)*`;
-const css = '(?: class="svelte-[a-z0-9]+")?';
-const headAttrs = '(?: [a-z-]+="[^"<>]*")+';
-// Svelte's <svelte:head> marker is a 32-bit filename hash encoded in base 36.
-const headChild = `(?:<(?:meta|link)${headAttrs} */?>|<title>[^<]*</title>|<!--[0-9a-z]{1,7}-->)`;
-const folderDocument = new RegExp(`^${gap}<!doctype html>${gap}<html lang="en">${gap}<head>(?:${gap}${headChild})*${gap}</head>${gap}` +
-  `<body>${gap}<div style="display: contents">${gap}<main data-sveltekit-reload(?:="")?${css}>${gap}` +
-  `<h1 dir="auto"${css}>([^<]*)</h1>([\\s\\S]*?)</main>${gap}</div>${gap}</body>${gap}</html>${gap}$`);
-const emptyFolder = new RegExp(`^${gap}<section class="empty(?: svelte-[a-z0-9]+)?" aria-labelledby="empty-title">${gap}` +
-  `<div${css}>${gap}<h2 id="empty-title"${css}>This folder is empty\\.</h2>${gap}</div>${gap}</section>${gap}$`);
-const folderList = new RegExp(`^${gap}<ul role="list"${css}>([\\s\\S]*?)</ul>${gap}$`);
-const onlyGap = new RegExp(`^${gap}$`);
-const glyph = '<svg(?: (?:viewBox|aria-hidden|fill|stroke(?:-width|-linecap|-linejoin)?|class)="[^"<>]*")+>' +
-  `${gap}<path d="[a-zA-Z0-9 .-]+"(?: */>|></path>)${gap}</svg>`;
-const row = `<li${css}>${gap}${glyph}${gap}<a href="(/f/[0-9a-f-]+)" dir="auto"${css}>([^<]*)</a>${gap}` +
-  `<span class="kind(?: svelte-[a-z0-9]+)?">Folder</span>${gap}</li>`;
 
 async function boundedBody(response, signal, limit) {
   if (response.body === null) return Buffer.alloc(0);
@@ -55,8 +38,9 @@ async function boundedBody(response, signal, limit) {
 // exact attempt's file and empty anchor, not values copied from the fixture.
 // Each client pairs its request function with the principal verified for that
 // isolated session. Functions take relative paths, supply session and same-origin
-// Origin on writes, honor manual redirects, and stop/drain on abort. No retries
-// or shared cookies. The caller tears down even after ambiguous writes.
+// Origin on writes, retain the fetch response URL, honor manual redirects, and
+// stop/drain on abort. No retries or shared cookies. The caller tears down even
+// after ambiguous writes.
 export async function exerciseQualificationFiles(context, signal, {
   owner: ownerSession, recipient: recipientSession, fixture, provisioning,
 } = {}) {
@@ -88,7 +72,10 @@ export async function exerciseQualificationFiles(context, signal, {
             for (const [key, expected] of Object.entries({ 'cache-control': 'private, no-store', ...headers })) {
               equal(response.headers.get(key), expected);
             }
-            if (html) equal(/^text\/html(?:[ \t]*;[ \t]*charset=(?:utf-8|"utf-8"))?$/i.test(response.headers.get('content-type')), true);
+            if (html) {
+              equal(response.url, stagingOrigin + path);
+              equal(/^text\/html(?:[ \t]*;[ \t]*charset=(?:utf-8|"utf-8"))?$/i.test(response.headers.get('content-type')), true);
+            }
             return await boundedBody(response, active, limit);
           } finally {
             if (response.body && !response.bodyUsed) await response.body.cancel().catch(() => {});
@@ -119,26 +106,9 @@ export async function exerciseQualificationFiles(context, signal, {
       return created;
     };
     // Staging admits SSR folders, not the disposable fixture JSON listing.
-    const list = async (folder, children) => {
-      const html = (await ask(owner, `/f/${folder.id}`, { html: true, limit: 65536 })).toString('utf8');
-      const [, name, listing] = html.match(folderDocument) ?? [];
-      equal(name, folder.name);
-      if (!children.length) {
-        equal(emptyFolder.test(listing), true);
-        return;
-      }
-      const [, body] = listing.match(folderList) ?? [];
-      if (body === undefined) throw new Error('Incomplete folder listing.');
-      const rows = [];
-      const next = new RegExp(`${gap}${row}`, 'y');
-      for (const _ of children) {
-        const match = next.exec(body);
-        if (!match) throw new Error('Incomplete folder listing.');
-        rows.push(match.slice(1));
-      }
-      equal(onlyGap.test(body.slice(next.lastIndex)), true);
-      equal(rows.sort(), children.map(child => [`/f/${child.id}`, child.name]).sort());
-    };
+    const list = async (folder, children) => verifyOwnedFolder(
+      await ask(owner, `/f/${folder.id}`, { html: true, limit: 65536 }), folder, children, ownerId,
+    );
     const anchor = { id: folderId, name: folderName };
     await list(anchor, []);
     const source = await create('Qualification source', folderId);
