@@ -15,7 +15,7 @@ in a subdirectory.
   only when the brief justifies the higher effort.
 - Never use `max`, `ultra`, or `ultrathink` on any model.
 - Choose independent reviewers from a different model family than the author.
-  Follow the review tiers and owner approval requirements below.
+  Follow the review tiers and production release gate below.
 - Keep shared guidance in `AGENTS.md` and keep `CLAUDE.md` to the single
   `@AGENTS.md` import. Keep harness-specific model settings, model-forcing
   hooks, model pins, and internal provider IDs out of tracked configuration.
@@ -59,12 +59,26 @@ use `rm -r -- "$dir"` for a directory or `rm -- "$file"` for a file.
   [staging runbook](docs/drive-staging.md) for isolated, run-tagged fixtures,
   bounded use, and cleanup on success and failure. Keep credentials and private
   user data out of commits, logs, and artifacts.
-- Stop before any merge or operation that would deploy to or change production.
-  Treat unclear impact as production. Obtain explicit approval for the exact
-  candidate and action from the repository owner acting as Release Manager.
-  This applies to deploys, migrations, storage changes, credentials, and grants.
-  Record the independent exact-SHA acceptance and meet the other release
-  prerequisites in the [production runbook](docs/drive-production.md).
+- Use a dedicated release task for any merge or operation that would change
+  production, including deploys, migrations, storage, credentials, grants,
+  and configuration. Treat unclear impact as production. Record the evidence
+  required by the [production runbook](docs/drive-production.md) in the task.
+  - Verify required checks are green and tier reviews are complete for the
+    exact candidate. Run the exact build on staging and confirm staging checks
+    and smoke tests pass.
+  - Resolve any unknown that makes recovery unsafe. Verify a backup or snapshot
+    before changing production data or schema. Document rollback and rehearse
+    it where supported.
+  - Have a separate, independent release reviewer examine the plan and evidence
+    and record `APPROVE` in the task. This supplies the runbook's Release Manager
+    acceptance for the exact SHA.
+- Release only through the protected workflow after meeting the runbook's
+  prerequisites, including production storage authorization, the production
+  environment policy, and the staging receipt guard. Keep the disabled workflow
+  undispatched. Enabling a real release requires a separately reviewed change.
+- After deployment, watch health and errors for at least 30 minutes, roll back
+  promptly on regression, and record the outcome in the release task and
+  product log.
 
 ## Modern Web Guidance
 
