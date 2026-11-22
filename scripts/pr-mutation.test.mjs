@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { baseLine, plan, testVerdict } from './pr-mutation.mjs';
+import { baseLine, integrationBase, plan, testVerdict } from './pr-mutation.mjs';
 
 function repository(t) {
   const dir = mkdtempSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'pr-mutation-'));
@@ -14,8 +14,11 @@ function repository(t) {
   git('config', 'user.email', 'fixture@example.test');
   git('config', 'user.name', 'Mutation fixture');
   const commit = (files) => {
-    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
-    git('add', '--all');
+    for (const [name, content] of Object.entries(files)) {
+      mkdirSync(join(dir, dirname(name)), { recursive: true });
+      writeFileSync(join(dir, name), content);
+    }
+    git('add', '--', ...Object.keys(files));
     git('commit', '--quiet', '-m', 'Synthetic change');
     return git('rev-parse', 'HEAD');
   };
@@ -34,7 +37,11 @@ test('selection caps changed targets and excludes changes already on base', t =>
   git('switch', '--quiet', '--detach', unrelated);
   const advanced = commit({ 'a.test.mjs': '// new' });
   git('merge', '--quiet', '--no-edit', head);
-  assert.deepEqual(plan(dir, advanced, 'HEAD').targets, ['b.test.mjs', 'c.test.mjs', 'd.test.mjs', 'e.test.mjs']);
+  git('update-ref', 'refs/remotes/origin/main', advanced);
+  const snapshot = git('rev-parse', 'HEAD');
+  const parent = integrationBase(dir, snapshot, unrelated, head, 'main');
+  assert.equal(parent, advanced);
+  assert.deepEqual(plan(dir, parent, snapshot).targets, ['b.test.mjs', 'c.test.mjs', 'd.test.mjs', 'e.test.mjs']);
 });
 
 test('only completed test runs give a mutant verdict', () => {
@@ -50,30 +57,32 @@ test('zero-context hunks distinguish edited from shifted lines', () => {
     [1, 2, null, 3, 4, 7, null, 9]);
 });
 
-test('hosted Git diffs exercise the mutation verdict', { skip: process.env.MUTATION_PROOF !== '1' }, async t => {
+for (const runner of ['node:test', 'vitest']) test(`hosted Git diffs via ${runner}`, { skip: process.env.MUTATION_PROOF !== '1' }, async t => {
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   const { dir, git, commit } = repository(t);
+  const path = runner === 'vitest' ? 'apps/drive-test/test/' : '';
+  const target = path + 'behavior.test.mjs', sourceModule = path + 'source.mjs';
   const module = 'export const existing = n => n >= 2;\nexport const legacy = n => n === 10;\n';
-  const testFile = "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { existing } from './source.mjs';\n";
+  const testFile = `import assert from 'node:assert/strict';\nimport { test } from '${runner}';\nimport { existing } from './source.mjs';\n`;
   const strong = "test('existing threshold', () => assert.equal(existing(2), true));\n";
-  const base = commit({ 'source.mjs': module, 'behavior.test.mjs': testFile + strong });
+  const base = commit({ [sourceModule]: module, [target]: testFile + strong });
   const baseline = join(dir, '.git', 'baseline');
   git('worktree', 'add', '--quiet', '--detach', baseline, base);
-  const parser = 'apps/drive/node_modules/typescript';
-  writeFileSync(join(dir, '.git/info/exclude'), '/apps/drive/node_modules/\n');
-  mkdirSync(join(dir, 'apps/drive/node_modules'), { recursive: true });
-  symlinkSync(join(process.env.MUTATION_HEAD, parser), join(dir, parser));
+  mkdirSync(join(dir, 'apps/drive'), { recursive: true });
+  const linkModules = (root, app) => symlinkSync(join(process.env.MUTATION_HEAD, app, 'node_modules'), join(root, app, 'node_modules'));
+  linkModules(dir, 'apps/drive');
+  if (runner === 'vitest') for (const root of [dir, baseline]) linkModules(root, 'apps/drive-test');
   const source = '// Shift existing operators.\n' + module + 'export const added = n => n <= 7;\n';
   const changedTest = testFile.replace('{ existing }', '{ existing, added }');
   const cli = fileURLToPath(new URL('./pr-mutation.mjs', import.meta.url));
 
   for (const [name, files, status, expected] of [
-    ['strong new assertion', { 'source.mjs': source, 'behavior.test.mjs': changedTest +
+    ['strong new assertion', { [sourceModule]: source, [target]: changedTest +
       strong + "test('new threshold', () => assert.equal(added(7), true));\n" }, 0,
     ['"line":4,"from":"<=","to":"<","result":"killed"', '"result":"baseline survivor"']],
-    ['weak new assertion', { 'source.mjs': source, 'behavior.test.mjs': changedTest +
+    ['weak new assertion', { [sourceModule]: source, [target]: changedTest +
       strong + "test('new type', () => assert.equal(typeof added(7), 'boolean'));\n" }, 1, ['"line":4', '1 new survivor(s)']],
-    ['weakened existing assertion', { 'behavior.test.mjs': testFile +
+    ['weakened existing assertion', { [target]: testFile +
       "test('existing type', () => assert.equal(typeof existing(2), 'boolean'));\n" }, 1, ['"line":1', '1 new survivor(s)']],
     ['unrelated diff', { 'other.md': 'unrelated' }, 0, ['0 target(s), 0 new survivor(s)']],
   ]) {
@@ -81,7 +90,7 @@ test('hosted Git diffs exercise the mutation verdict', { skip: process.env.MUTAT
       git('switch', '--quiet', '--detach', base);
       const head = commit(files);
       const run = spawnSync(process.execPath, [cli, 'run', dir, base, head, baseline], { encoding: 'utf8' });
-      console.log(`${name} (exit ${run.status}):\n${run.stdout}`);
+      console.log(`${runner}: ${name} (exit ${run.status}):\n${run.stdout}`);
       assert.equal(run.status, status, run.stderr);
       for (const fragment of expected) assert.ok(run.stdout.includes(fragment), fragment);
       assert.equal(git('status', '--porcelain', '--untracked-files=no'), '');

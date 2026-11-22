@@ -15,6 +15,14 @@ function git(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' });
 }
 
+export function integrationBase(root, snapshot, eventBase, head, branch) {
+  const [sha, base, actualHead, extra] = git(root, ['rev-list', '--parents', '-n', '1', snapshot]).trim().split(' ');
+  if (sha !== snapshot || !base || actualHead !== head || extra) throw new Error('Unexpected PR integration parents');
+  git(root, ['merge-base', '--is-ancestor', eventBase, base]);
+  git(root, ['merge-base', '--is-ancestor', base, `refs/remotes/origin/${branch}`]);
+  return base;
+}
+
 export function plan(root, base, head) {
   const fields = git(root, ['diff', '--name-status', '-z', '-M', '--diff-filter=AMR', base, head]).split('\0');
   const changes = new Map();
@@ -182,15 +190,16 @@ export function audit(ts, root, baseline, base, head) {
 }
 
 if (import.meta.main) {
-  const [mode, root, base, head, baseline] = process.argv.slice(2);
+  const [mode, root, base, head, tree, branch] = process.argv.slice(2);
   if (mode === 'plan') {
-    const { changes, targets } = plan(root, base, head);
+    const parent = integrationBase(root, tree, base, head, branch);
+    const { changes, targets } = plan(root, parent, tree);
     const proof = ['scripts/pr-mutation.mjs', 'scripts/pr-mutation.test.mjs'].some(path => changes.has(path));
-    console.log([targets.length, targets.some(isWorkers) ? 1 : 0,
+    console.log([parent, targets.length, targets.some(isWorkers) ? 1 : 0,
       targets.some(path => isWorkers(path) || isDrive(path)) ? 1 : 0, proof ? 1 : 0].join(' '));
   } else if (mode === 'run') {
     const ts = await import(join(root, 'apps/drive/node_modules/typescript/lib/typescript.js'));
-    process.exitCode = Number(audit(ts.default, root, baseline, base, head) > 0);
+    process.exitCode = Number(audit(ts.default, root, tree, base, head) > 0);
   } else {
     throw new Error('Expected mutation plan or run');
   }

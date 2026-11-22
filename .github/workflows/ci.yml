@@ -307,7 +307,7 @@ jobs:
     # Keep the check separate from ci-ok during rollout.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Report PR-only scope on main
         if: github.event_name == 'push'
@@ -326,13 +326,14 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-list --parents -n 1 HEAD)" = "$GITHUB_SHA $PR_BASE $PR_HEAD"
-          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$PR_BASE" "$GITHUB_SHA")
-          read -r targets workers drive proof <<< "$plan"
-          printf 'Comparing base %s to integration %s for PR head %s\n' "$PR_BASE" "$GITHUB_SHA" "$PR_HEAD"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$PR_BASE" "$PR_HEAD" "$GITHUB_SHA" "$BASE_BRANCH")
+          read -r base targets workers drive proof <<< "$plan"
+          printf 'Comparing base %s to integration %s for PR head %s\n' "$base" "$GITHUB_SHA" "$PR_HEAD"
           if [[ "$targets" == 0 && "$proof" == 0 ]]; then
             echo 'Mutation pass: 0 target(s), 0 new survivor(s)'
             exit 0
@@ -341,7 +342,7 @@ jobs:
           export MUTATION_HEAD="$RUNNER_TEMP/mutation-head"
           baseline="$RUNNER_TEMP/mutation-base"
           git worktree add --detach "$MUTATION_HEAD" "$GITHUB_SHA"
-          git worktree add --detach "$baseline" "$PR_BASE"
+          git worktree add --detach "$baseline" "$base"
           test "$(npm --version)" = '11.19.0'
 
           install_locked() {
@@ -365,14 +366,16 @@ jobs:
             (cd "$MUTATION_HEAD/apps/drive" && node node_modules/@sveltejs/kit/svelte-kit.js sync)
             (cd "$baseline/apps/drive" && node node_modules/@sveltejs/kit/svelte-kit.js sync)
           fi
-          if [[ "$workers" == 1 ]]; then
+          if [[ "$workers" == 1 || "$proof" == 1 ]]; then
             install_locked "$MUTATION_HEAD/apps/drive-test"
+          fi
+          if [[ "$workers" == 1 ]]; then
             install_locked "$baseline/apps/drive-test"
           fi
           if [[ "$proof" == 1 ]]; then
             MUTATION_PROOF=1 node --test scripts/pr-mutation.test.mjs
           fi
-          node scripts/pr-mutation.mjs run "$MUTATION_HEAD" "$PR_BASE" "$GITHUB_SHA" "$baseline"
+          node scripts/pr-mutation.mjs run "$MUTATION_HEAD" "$base" "$GITHUB_SHA" "$baseline"
 
   sealed-output-reader:
     name: sealed output reader
