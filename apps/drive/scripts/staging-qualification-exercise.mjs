@@ -69,11 +69,16 @@ export async function createQualificationExercise(env, cwd, { withAccessFixtures
         throw unverified(group);
       }
     };
-    await run('access', () => exerciseQualificationAccess(active, signal, { withFixtures: withAccessFixtures }));
+    let revokedMemberId;
+    await run('access', async () => {
+      const access = await exerciseQualificationAccess(active, signal, { withFixtures: withAccessFixtures });
+      revokedMemberId = access.revokedMemberId;
+      return access.evidence;
+    });
     await run('files', async () => exerciseQualificationFiles(active, signal, await readFileFixtures(active, signal)));
     await run('storage', () => storage(active, signal));
-    await run('large', () => exerciseQualificationLargeTransfer(active, signal, openTransferClient));
-    await run('resume', () => exerciseQualificationResume(active, signal, openTransferClient));
+    await run('large', () => exerciseQualificationLargeTransfer(active, signal, openTransferClient, revokedMemberId));
+    await run('resume', () => exerciseQualificationResume(active, signal, openTransferClient, revokedMemberId));
     await run('deletion', async () => {
       const { exerciseQualificationDeletion } = await import('./staging-qualification-deletion.mjs');
       signal.throwIfAborted();

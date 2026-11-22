@@ -5,6 +5,7 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
+import { qualificationPrefix } from '../src/lib/server/qualification-scope.mjs';
 import { routeMethods, stagingRoutes } from '../src/lib/server/staging-routes.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
@@ -17,6 +18,7 @@ import { exerciseStagingFolderCreate } from '../tests/staging-folder-create-work
 import { exerciseStagingQualificationFiles } from '../tests/staging-qualification-files-worker-fixture.mjs';
 import { exerciseExpectedParts, expectedPartsWorker } from '../tests/upload-expected-parts-worker-fixture.mjs';
 import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
+import { exerciseQualificationTransferWorker, qualificationTransferStorage } from '../tests/qualification-transfer-worker-fixture.mjs';
 
 async function exercise(args, assertions) {
   const worker = spawn('./node_modules/.bin/wrangler', ['dev', ...args, '--local', '--ip', '127.0.0.1', '--port', '18787'], {
@@ -163,12 +165,15 @@ async function assertRootUploadData(response, mode) {
 }
 
 async function exercisePrivateBoundary(main, {
-  preview = false, staging = false, rawOutsideStaging = false, qualificationFiles = false, stagingRoutesOnly = false
+  preview = false, staging = false, rawOutsideStaging = false,
+  qualificationFiles = false, qualificationTransfer = false, stagingRoutesOnly = false,
 } = {}) {
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
   const release = 'a'.repeat(40);
   const qualificationVersion = '00000000-0000-4000-8000-000000000002';
+  const attempt = { runId: '123', attempt: '2' };
+  const transferScope = Object.freeze({ ...attempt, sha: release, version: qualificationVersion, prefix: qualificationPrefix(attempt) });
   const enrollmentToken = staging ? randomBytes(32).toString('base64url') : undefined;
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
@@ -178,7 +183,7 @@ async function exercisePrivateBoundary(main, {
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
 import app, { createDriveWorker } from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js'))};
-globalThis.fetch = (${fixtureStorage})();` : preview ? readGrantWorker : deletionWorker}
+globalThis.fetch = ${qualificationTransfer ? `(${qualificationTransferStorage})(${JSON.stringify(transferScope.prefix)})` : `(${fixtureStorage})()`};` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 ${preview ? expectedPartsWorker : ''}
@@ -243,7 +248,11 @@ export default {
       storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: release, runId: '1', runAttempt: 1 })
   } : {}), ...(staging ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
     DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}`,
-    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}) };
+    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}), ...(qualificationTransfer ? {
+    DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_QUALIFICATION_SHA: transferScope.sha,
+    DRIVE_QUALIFICATION_RUN_ID: transferScope.runId, DRIVE_QUALIFICATION_RUN_ATTEMPT: transferScope.attempt,
+    DRIVE_QUALIFICATION_VERSION: { id: transferScope.version }, DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 240_000),
+  } : {}) };
   const harness = createTestHarness({ workers: [{ configPath, vars }] });
   try {
     await harness.listen();
@@ -262,6 +271,10 @@ export default {
     };
     if (qualificationFiles) {
       await exerciseStagingQualificationFiles({ worker, DB, origin, session });
+      return;
+    }
+    if (qualificationTransfer) {
+      await exerciseQualificationTransferWorker({ worker, DB, origin, scope: transferScope, session });
       return;
     }
     const assertProvisioningUnavailable = async (cookie, role) => {
@@ -734,6 +747,10 @@ if (process.argv.includes('--staging-routes-only')) {
   await exercisePrivateBoundary(appWorker, { staging: true, stagingRoutesOnly: true });
   process.exit();
 }
+if (!process.argv.includes('--qualification-files-only')) {
+  await exercisePrivateBoundary(appWorker, { staging: true, qualificationTransfer: true });
+}
+if (process.argv.includes('--qualification-transfer-only')) process.exit(0);
 await exercisePrivateBoundary(appWorker, { staging: true, qualificationFiles: true });
 if (process.argv.includes('--qualification-files-only')) process.exit();
 const unavailable = ['/', '/f/private', asset].map(path => [path, 503, 'Service unavailable']);
