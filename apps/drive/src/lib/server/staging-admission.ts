@@ -4,12 +4,14 @@ import { dispatchEligibleRecipients } from './eligible-recipient-route';
 import { entryChangeRequest, entryChangeSource, type MetadataWriteEnv } from './entry-change-route';
 import { postFolder } from './folder-route';
 import { Sessions } from './identity/sessions';
-import { getMoveDestinations, moveDestinationsPath } from './move-destinations';
+import { getMoveDestinations } from './move-destinations';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { eligibleRecipientEntry, readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor } from './shared-page';
 import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
-import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
+import { stagingRoutes, type CeremonyStep, type InviteStep, type RouteAccess, type SignedOut, type StagingGate,
+  type StagingRoute, type StagingRouteTarget } from './staging-routes';
+import { isBodylessUploadResume, uploadAdmissionRoute } from './upload-admission';
 
 interface PreviewAssets {
   signIn: ReadonlySet<string>;
@@ -20,13 +22,10 @@ interface PreviewAssets {
   shared?: ReadonlySet<string>;
 }
 
-type CeremonyStep = 'challenge' | 'restart' | 'verify';
-type InviteStep = 'present' | 'challenge' | 'enroll';
-type Target = { kind: 'sign-in' | 'public-asset' | 'root-data' | 'download' | 'upload' | 'upload-resume' | 'invite' | 'invite-asset' | 'owner-lifecycle' | 'people' | 'folder' } |
-  { kind: 'read-grant' | 'eligible-recipients' } |
-  { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' } | { kind: 'move-destinations' } |
-  { kind: 'ceremony'; step: CeremonyStep } | { kind: 'invite-ceremony'; step: InviteStep } |
-  { kind: 'private-asset' | 'people-asset' | 'folder-asset' | 'shared' | 'shared-asset' | 'root'; deadline?: number };
+type Target = (StagingRouteTarget |
+  { kind: 'public-asset' | 'invite-asset' | 'private-asset' | 'people-asset' | 'folder-asset' | 'shared-asset' }) &
+  { deadline?: number };
+type Admission = { target: Target; access: RouteAccess; signedOut: SignedOut };
 
 interface PreviewDispatch {
   adapter(request: Request): Promise<Response>;
@@ -35,47 +34,34 @@ interface PreviewDispatch {
   asset(request: Request): Promise<Response>;
 }
 
-function route(request: Request, url: URL, assets: PreviewAssets, invite: boolean, shared: boolean): Target | null {
-  const { method } = request;
-  const { pathname: path } = url;
-  if (method === 'GET' || method === 'HEAD') {
-    if (path === '/sign-in') return { kind: 'sign-in' };
-    if (invite && path === '/invite') return { kind: 'invite' };
-    if (invite && path === '/people') return { kind: 'people' };
-    if (invite && method === 'GET' && path === moveDestinationsPath) return { kind: 'move-destinations' };
-    if (invite && isExactFolderDocument(request, url)) return { kind: 'folder' };
-    if (shared && isExactSharedDocument(request, url)) return { kind: 'shared' };
-    if (path === '/') return { kind: 'root' };
-    if (method === 'GET' && path === '/__data.json') return { kind: 'root-data' };
-    // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
-    if (path.startsWith('/_app/immutable/')) {
-      if (assets.signIn.has(path)) return { kind: 'public-asset' };
-      if (invite && assets.invite.has(path)) return { kind: 'invite-asset' };
-      if (assets.root.has(path)) return { kind: 'private-asset' };
-      if (invite && assets.people.has(path)) return { kind: 'people-asset' };
-      // Preserve prior classifications even if the folder shares a build dependency.
-      if (invite && assets.folder.has(path) && request.url === stagingOrigin + path) return { kind: 'folder-asset' };
-      if (shared && assets.shared?.has(path) && request.url === stagingOrigin + path) return { kind: 'shared-asset' };
-    }
+function matchesRoute(route: StagingRoute, request: Request, url: URL): boolean {
+  const { target, path } = route;
+  switch (target.kind) {
+    case 'folder': return isExactFolderDocument(request, url);
+    case 'shared': return isExactSharedDocument(request, url);
+    case 'download': return isExactDownloadGet(request.method, url.pathname);
+    case 'upload':
+    case 'upload-resume': return uploadAdmissionRoute(request, url) === path;
+    case 'owner-lifecycle': return ownerLifecycleRoute(request, url) === path;
+    case 'read-grant': return readGrantAdmissionRoute(request, url) === path;
+    case 'eligible-recipients': return eligibleRecipientEntry(request, url) !== null;
+    case 'metadata-write':
+      return target.operation === 'create-folder' ? request.url === stagingOrigin + path : entryChangeSource(request, url) !== null;
+    default: return url.pathname === path;
   }
-  if (invite) {
-    if (method === 'POST' && request.url === `${stagingOrigin}/api/folders`) {
-      return { kind: 'metadata-write', operation: 'create-folder' };
-    }
-    if (method === 'PATCH' && entryChangeSource(request, url) !== null) {
-      return { kind: 'metadata-write', operation: 'change-entry' };
-    }
-  }
-  const [, api, resource, id, action] = path.split('/', 5);
-  if (api !== 'api') return null;
-  if (method === 'POST' && resource === 'sign-in' && action === undefined &&
-      (id === 'challenge' || id === 'restart' || id === 'verify')) return { kind: 'ceremony', step: id };
-  if (invite && method === 'POST' && resource === 'invite' && action === undefined &&
-      (id === 'present' || id === 'challenge' || id === 'enroll')) return { kind: 'invite-ceremony', step: id };
-  if (isExactDownloadGet(method, path)) return { kind: 'download' };
-  const upload = uploadAdmissionRoute(request, url);
-  if (upload === uploadResumeRoute) return invite ? { kind: 'upload-resume' } : null;
-  return upload ? { kind: 'upload' } : null;
+}
+
+function assetAdmission(request: Request, path: string, assets: PreviewAssets, gates: Record<StagingGate, boolean>): Admission | undefined {
+  if ((request.method !== 'GET' && request.method !== 'HEAD') || !path.startsWith('/_app/immutable/')) return;
+  // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
+  if (assets.signIn.has(path)) return { target: { kind: 'public-asset' }, access: 'public', signedOut: 'dispatch' };
+  if (gates.invite && assets.invite.has(path)) return { target: { kind: 'invite-asset' }, access: 'public', signedOut: 'dispatch' };
+  if (assets.root.has(path)) return { target: { kind: 'private-asset' }, access: 'owner-or-invited-member', signedOut: 401 };
+  if (gates.invite && assets.people.has(path)) return { target: { kind: 'people-asset' }, access: 'owner', signedOut: 401 };
+  // Preserve prior classifications even if the folder shares a build dependency.
+  if (request.url !== stagingOrigin + path) return;
+  if (gates.invite && assets.folder.has(path)) return { target: { kind: 'folder-asset' }, access: 'owner-or-member', signedOut: 401 };
+  if (gates.shared && assets.shared?.has(path)) return { target: { kind: 'shared-asset' }, access: 'member', signedOut: 401 };
 }
 
 function deny(status: number): Response {
@@ -90,14 +76,13 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
   if (!allowsOrigin(request, stagingOrigin)) return deny(403);
   const url = new URL(request.url);
   const { pathname, search } = url;
-  const invite = admitsStagingInvite(env);
-  const grants = admitsStagingReadGrants(env);
-  const readGrant = grants && readGrantAdmissionRoute(request, url);
-  const eligibleRecipients = grants && request.method === 'GET' && eligibleRecipientEntry(request, url) !== null;
-  const target: Target | null = readGrant ? { kind: 'read-grant' } : eligibleRecipients ? { kind: 'eligible-recipients' }
-    : invite && ownerLifecycleRoute(request, url) ? { kind: 'owner-lifecycle' }
-    : route(request, url, assets, invite, admitsSharedListing(env));
-  if (!target) return deny(404);
+  const gates = { invite: admitsStagingInvite(env), 'read-grants': admitsStagingReadGrants(env), shared: admitsSharedListing(env) };
+  const route = stagingRoutes.find((route): route is StagingRoute => !('excluded' in route) &&
+    (!route.gate || gates[route.gate]) && route.methods.some(method => method === request.method) && matchesRoute(route, request, url));
+  const admission = route ?? assetAdmission(request, pathname, assets, gates);
+  if (!admission) return deny(404);
+  const { access, signedOut } = admission;
+  const target = { ...admission.target };
   const grantManagement = target.kind === 'read-grant' || target.kind === 'eligible-recipients';
   if (target.kind === 'upload-resume') {
     if (!allowsStagingInviteSite(request)) return deny(403);
@@ -120,7 +105,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     if (navigation && target.kind === 'root') return signInRedirect();
     if (!(navigation && target.kind === 'sign-in')) return deny(ownerPage ? 404 : 403);
   }
-  if (target.kind === 'sign-in' || target.kind === 'ceremony' || target.kind === 'public-asset') return target;
+  if (access === 'public') return target;
 
   try {
     const token = readSessionToken(request);
@@ -129,15 +114,11 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     const session = token === null ? null : await new Sessions(env.DB).lookupWithRemainingLifetime(token);
     const deadline = started + (session?.remaining_ms ?? 0);
     if (session && performance.now() < deadline) {
-      if (target.kind === 'shared' || target.kind === 'shared-asset') {
+      if (access === 'member') {
         return session.role === 'member' ? { ...target, deadline } : deny(404);
       }
-      const memberRoute = target.kind === 'upload' || target.kind === 'upload-resume'
-        ? driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request)
-        : grantManagement || invite && (target.kind === 'root' || target.kind === 'root-data' ||
-          target.kind === 'private-asset' || target.kind === 'download' ||
-          target.kind === 'folder' || target.kind === 'folder-asset' || target.kind === 'metadata-write' ||
-          target.kind === 'move-destinations');
+      const memberRoute = access === 'owner-or-member' || (access === 'owner-or-invited-member' && gates.invite) ||
+        (access === 'owner-or-multipart-member' && driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request));
       if (session.role === 'owner' || memberRoute) {
         return target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
           (target.kind === 'root' && request.method === 'HEAD')
@@ -147,8 +128,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       // An otherwise valid member cookie must not prevent the owner from signing in.
       return deny(target.kind === 'root' && request.method === 'HEAD' ? 401 : 403);
     }
-    if (navigation && (target.kind === 'root' || (target.kind === 'people' && request.method === 'GET'))) return signInRedirect();
-    if (navigation && target.kind === 'download') return downloadRedirect(downloadSignIn);
+    if (navigation && signedOut === 'return-to-route') return signInRedirect();
+    if (navigation && signedOut === 'return-to-root') return downloadRedirect(downloadSignIn);
     return deny(401);
   } catch {
     return deny(503);

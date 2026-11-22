@@ -5,6 +5,7 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
+import { routeMethods, stagingRoutes } from '../src/lib/server/staging-routes.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from '../tests/entry-change-worker-fixture.mjs';
@@ -93,6 +94,66 @@ function fixtureStorage() {
 
 const rootDataPath = '/__data.json?x-sveltekit-invalidated=01';
 
+async function exerciseStagingRoutes(worker, origin, owner, member) {
+  const flags = {
+    invite: { 'x-test-invite': '1' },
+    'read-grants': { 'x-test-read-grants': '1' },
+    shared: { 'x-test-invite': '1', 'x-test-shared-listing': '1' },
+  };
+  const navigation = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' };
+  for (const route of stagingRoutes) {
+    const path = route.path.replaceAll(/\[(\w+)\]/g, (_, parameter) =>
+      parameter === 'partNumber' ? '1' : '00000000-0000-4000-8000-000000000001');
+    const probe = async (method, headers, status, location = null, body) => {
+      const response = await worker.fetch(origin + path, { method, headers: { origin, ...headers }, redirect: 'manual' });
+      assert.deepEqual([response.status, response.headers.get('location'), response.headers.get('cache-control')],
+        [status, location, 'private, no-store'], `${method} ${path} (${Object.keys(headers).join(', ') || 'default'})`);
+      if (body) assert.match(await response.text(), body);
+      else await response.body?.cancel();
+    };
+    if ('excluded' in route) {
+      for (const method of route.methods) {
+        await probe(method, { cookie: owner }, route.signedOut);
+        await probe(method, { cookie: owner, ...flags.shared, ...flags['read-grants'] }, route.signedOut);
+      }
+      continue;
+    }
+    const enabled = route.gate ? flags[route.gate] : {};
+    for (const method of route.methods) {
+      if (route.gate) {
+        await probe(method, {}, 404);
+        await probe(method, { cookie: owner }, 404);
+      }
+      if (route.gate === 'invite') await probe(method, flags['read-grants'], 404);
+      if (route.gate === 'read-grants') await probe(method, flags.invite, 404);
+      if (route.gate === 'shared') {
+        await probe(method, { ...flags.invite, cookie: member }, 404);
+        await probe(method, { 'x-test-shared-listing': '1', cookie: member }, 404);
+        await probe(method, { ...enabled, cookie: owner }, 404);
+        const body = method === 'GET' ? /Nothing is shared with you yet\./ : undefined;
+        await probe(method, { ...enabled, cookie: member }, 200, null, body);
+      }
+      if (route.signedOut === 'dispatch') {
+        const { target } = route;
+        const status = target.kind === 'invite-ceremony' ? 400 : target.kind === 'ceremony' && target.step === 'verify' ? 401 : 200;
+        await probe(method, enabled, status);
+        continue;
+      }
+      await probe(method, enabled, 401);
+      if (method === 'GET' || method === 'HEAD') {
+        const next = route.signedOut === 'return-to-root' ? '/' : route.signedOut === 'return-to-route' ? path : null;
+        const location = next === null ? null : `/sign-in?${new URLSearchParams({ next })}`;
+        await probe(method, { ...enabled, ...navigation }, location === null ? 401 : 303, location);
+      }
+    }
+    for (const method of routeMethods) {
+      if (stagingRoutes.some(peer => peer.path === route.path && peer.methods.includes(method))) continue;
+      await probe(method, { ...enabled, cookie: route.access === 'member' ? member : owner }, 404);
+    }
+  }
+  console.log('Generated Worker fixture: staging routes honor declared methods, flags and signed-out behavior');
+}
+
 async function assertRootUploadData(response, mode) {
   assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
   const { nodes } = JSON.parse((await response.text()).split('\n', 1)[0]);
@@ -101,7 +162,9 @@ async function assertRootUploadData(response, mode) {
   assert.equal(data[data[0].uploadMode], mode);
 }
 
-async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false, qualificationFiles = false } = {}) {
+async function exercisePrivateBoundary(main, {
+  preview = false, staging = false, rawOutsideStaging = false, qualificationFiles = false, stagingRoutesOnly = false
+} = {}) {
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
   const release = 'a'.repeat(40);
@@ -157,8 +220,11 @@ export default {
     const missing = request.headers.get('x-test-missing-binding');
     if (missing) delete env[missing];
   }
-  if (request.headers.has('x-test-invite')) {
-    const bindings = { ...env, DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') };
+  if (['x-test-invite', 'x-test-read-grants', 'x-test-shared-listing'].some(name => request.headers.has(name))) {
+    const bindings = { ...env,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: request.headers.get('x-test-invite') ?? env.DRIVE_STAGING_INVITE_ACCEPTANCE,
+      DRIVE_STAGING_READ_GRANTS: request.headers.get('x-test-read-grants') ?? env.DRIVE_STAGING_READ_GRANTS,
+      DRIVE_STAGING_SHARED_LISTING: request.headers.get('x-test-shared-listing') ?? env.DRIVE_STAGING_SHARED_LISTING };
     if (request.headers.has('x-test-unqualified')) bindings.DRIVE_S3_STORAGE_EPOCH = 'mismatched-fixture';
     return withEnv(bindings, () => app.fetch(request, bindings, ctx));
   }` : ''}
@@ -219,6 +285,8 @@ export default {
       return;
     }
     const member = staging ? await session('member', 'member') : cookie;
+    if (staging) await exerciseStagingRoutes(worker, origin, cookie, member);
+    if (stagingRoutesOnly) return;
     // Probe before an existing owner would make the bootstrap operation refuse by itself.
     await assertProvisioningUnavailable(member, 'member');
     await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('other', 'member', 'active')").run();
@@ -280,8 +348,8 @@ export default {
         const asset = await get(path);
         assert.deepEqual([asset.status, asset.headers.get('cache-control')], [200, 'private, no-store'], path);
       }
-      for (const path of ['/shared', '/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list',
-        '/api/root-listing', '/api/deployer/owner-enrollment', '/api/entries/fixture/delete', '/invite']) {
+      for (const path of ['/%73ign-in', '/sign-in.html', '/sign-in/__data.json', '/_app/env.js', '/api/uploads/list',
+        '/api/deployer/owner-enrollment', '/api/entries/fixture/delete']) {
         assert.equal((await get(path, { cookie })).status, 404, path);
       }
       const crossSite = { 'x-test-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' };
@@ -299,9 +367,6 @@ export default {
       const post = (step, headers = {}, body) => worker.fetch(`${origin}/api/sign-in/${step}`, {
         method: 'POST', headers: { origin, ...headers }, body,
       });
-      for (const step of ['present', 'challenge', 'enroll']) {
-        assert.equal((await worker.fetch(`${origin}/api/invite/${step}`, { method: 'POST', headers: { origin, cookie } })).status, 404);
-      }
       for (const headers of [{ cookie }, crossSite]) {
         assert.equal((await worker.fetch(`${origin}/invite`, { method: 'HEAD', headers })).status, 404);
       }
@@ -505,13 +570,12 @@ export default {
       assert.deepEqual([root.status, root.headers.get('cache-control')], [201, 'private, no-store']);
       const { id } = await root.json();
       const recipients = `/api/entries/${id}/eligible-recipients`;
-      const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie }, redirect: 'manual' });
+      const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie, origin }, redirect: 'manual' });
       for (const [path, method, status, allow] of [
         [`${recipients}?x-sveltekit-test=1`, 'GET', 400, null],
         [`${recipients}/__data.json`, 'GET', 404, null],
         [`${recipients}/__route.js`, 'GET', 404, null],
-        [recipients, 'OPTIONS', 405, 'GET'],
-        [recipients, 'HEAD', 405, 'GET'],
+        ...routeMethods.filter(method => method !== 'GET').map(method => [recipients, method, 405, 'GET']),
       ]) {
         const response = await lookup(path, method);
         assert.deepEqual([response.status, response.headers.get('cache-control'), response.headers.get('allow'),
@@ -666,6 +730,10 @@ const root = '.svelte-kit/cloudflare';
 const asset = '/_app/version.json';
 await access(`${root}${asset}`);
 const appWorker = `${root}/_worker.js`;
+if (process.argv.includes('--staging-routes-only')) {
+  await exercisePrivateBoundary(appWorker, { staging: true, stagingRoutesOnly: true });
+  process.exit();
+}
 await exercisePrivateBoundary(appWorker, { staging: true, qualificationFiles: true });
 if (process.argv.includes('--qualification-files-only')) process.exit();
 const unavailable = ['/', '/f/private', asset].map(path => [path, 503, 'Service unavailable']);
