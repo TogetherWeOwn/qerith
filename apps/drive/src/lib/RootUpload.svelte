@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { AnnouncementPriority } from './announcements';
   import {
     resumeBoundMultipartToRoot, resumeMultipartToRoot, uploadBoundMultipartToRoot,
     uploadMultipartToRoot, uploadToRoot, type RootUploadResult, type UploadResumeCandidate,
@@ -8,7 +9,7 @@
 
   let { mode, announce, refresh, paginated, busy = $bindable(false), fixtureResumeIntentId, fixtureFetcher }: {
     mode: Exclude<DriveUploadMode, 'disabled'>;
-    announce: (message: string) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
+    announce: (message: string, priority?: AnnouncementPriority) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
     // Only the disposable fixture supplies these for the legacy path and transport.
     fixtureResumeIntentId?: string; fixtureFetcher?: typeof fetch;
   } = $props();
@@ -82,7 +83,7 @@
       } else {
         message = 'Upload interrupted.';
       }
-      announce(`${file.name}: ${message}`);
+      announce(`${file.name}: ${message}`, result.status === 'published' ? 'polite' : 'assertive');
     } finally {
       busy = false;
     }

@@ -140,6 +140,13 @@ export function verifyOwnedFolder(body, folder, children, ownerId) {
   }
   equal(rows.map(row => [row.id, row.name]).sort(), children.map(row => [row.id, row.name]).sort());
   tag('</main>');
+  skip();
+  // Newer candidates render the two empty layout regions on every document.
+  if (read(new RegExp(`<div class="announcements ${scope}" data-drive-announcements="">`, 'y'))) {
+    tag('<div role="status" aria-live="polite" aria-atomic="true"></div>');
+    tag('<div aria-live="assertive" aria-atomic="true"></div>');
+    tag('</div>');
+  }
   tag('<script>');
   const [, script] = expect(/([^<]+)<\/script>/y);
   const match = boot.exec(script.split('\n').map(line => line.trim()).filter(Boolean).join('\n'));

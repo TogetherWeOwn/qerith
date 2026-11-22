@@ -171,7 +171,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
       headers: { origin, 'content-type': 'application/json' }, body: result.request().postData() });
     assert.equal(replay.status, 404);
     const releasePresent = holdNext('/api/invite/present');
-    const status = page.getByRole('status');
+    const status = page.getByRole('main').getByRole('status');
     const [presented, loading] = await Promise.all([
       page.waitForResponse(response => new URL(response.url()).pathname === '/api/invite/present'),
       (async () => {
@@ -184,7 +184,7 @@ export async function proveInvite(browser, { origin, relay, worker, DB, ownerTok
     assert.equal(presented.status(), 404);
     await dead.waitFor();
     await status.filter({ hasText: "This link doesn't work any more" }).waitFor();
-    assert.equal(await loading.evaluate(el => el === document.querySelector('[role="status"]')), true);
+    assert.equal(await loading.evaluate(el => el === document.querySelector('main [role="status"]')), true);
     assert.equal(await status.count(), 1);
     assert.equal(await page.evaluate(() => document.activeElement === document.body), true);
     await loading.dispose();

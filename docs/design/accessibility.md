@@ -36,10 +36,10 @@ The WCAG 2.2 AA floor is 24 × 24 px. **Drive's minimum is 36 px tall** for any 
 
 ## 6. Status region (SC 4.1.3)
 
-1. **One polite status region per page** (`<div role="status" aria-live="polite" class="sr">`). Nothing else on the page is `aria-live`.
+1. **Use the layout's `announce()` API for transient document feedback.** It has one polite region and one assertive region. Keep visible feedback and native control semantics. Native dialogs make the document inert, so feedback for a dialog's own controls stays inside it with its field associations and focus behavior.
 2. **Announce results and milestones, not ticks.** Announce: the result of the person's own action ("Renamed to Taxes 2026", "Link copied"), an upload batch starting, each upload failure or clash, the batch ending, a sort change. Never announce: progress percentages, sizes counting up, times ageing.
-3. **The person's own action is announced at once,** and drops any queued announcement it supersedes. Other announcements are merged when several arrive within 10 s.
-4. **Errors from the person's own action** may use `role="alert"`; nothing else does.
+3. **New feedback supersedes pending feedback from the same caller.** The layout publishes duplicate messages in a batch once, and a later action can repeat a message. Navigation clears document feedback.
+4. **Use assertive priority for blocking failures** such as an interrupted upload. Use polite priority for progress milestones and receipts. SvelteKit announces page titles separately during navigation.
 
 ## 7. Structure and names (SC 1.3.1, 2.4.6, 4.1.2)
 

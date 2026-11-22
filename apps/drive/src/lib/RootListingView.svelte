@@ -6,6 +6,7 @@
   import FileList from './FileList.svelte';
   import NameDialog from './NameDialog.svelte';
   import MoveDialog from './MoveDialog.svelte';
+  import { useAnnounce, type AnnouncementPriority } from './announcements';
   import { entryChangePath } from './metadata-id';
   import RootUpload from './RootUpload.svelte';
   import { entryId } from './download-id';
@@ -37,6 +38,13 @@
   let header: HTMLElement;
   let recovery = $state<HTMLAnchorElement>();
   let refreshVersion = 0, appliedVersion = 0;
+  const announce = useAnnounce();
+  const announceUpload = useAnnounce();
+
+  function uploadFeedback(message: string, priority?: AnnouncementPriority) {
+    status = message;
+    announceUpload(message, priority);
+  }
 
   $effect.pre(() => {
     if (!staging) return;
@@ -88,11 +96,12 @@
   async function folderCreated(id: string, name: string, close?: () => void) {
     const loaded = await refresh('folder').then(() => result.status === 'ok', () => false);
     receipt = { id, name, loaded };
-    if (!close) return; // The picker owns focus and dismissal.
+    if (!close) { announce(createdStatus); return; } // The picker owns focus and dismissal.
     await tick();
     close();
     if (createdVisible) list?.focusCreatedRow(id);
     else recovery?.focus();
+    announce(createdStatus);
   }
 
   function returnToRow(id: string) {
@@ -126,7 +135,6 @@
     const item = items.find(item => item.id === id);
     const detail = renameRefreshFailed ? ' Refresh My Drive to see it.' : !item ? ' It isn’t on this page.' :
       item.name !== name ? ' My Drive now shows a different name.' : '';
-    // Reopen the live region's accessibility subtree before publishing its text.
     await tick();
     close();
     const neighbor = items[Math.min(Math.max(0, index), items.length - 1)];
@@ -134,6 +142,7 @@
     else if (item || !neighbor) returnToRow(id);
     else list?.focusName(neighbor.id);
     renameStatus = `Renamed to “${name}”.${detail}`;
+    announce(renameStatus);
   }
 
   function openMove(id: string) {
@@ -146,7 +155,6 @@
     const neighbors = index < 0 ? [] : [...items.slice(index + 1), ...items.slice(0, index).reverse()];
     try { await refresh('entry'); }
     catch { if (result.status === 'ok') movedButNotRefreshed = [...movedButNotRefreshed, id]; }
-    moveReceipt = undefined; // Announce repeated moves to the same destination.
     await tick();
     close();
     const neighbor = neighbors.find(({ id }) => items.some(item => item.id === id)) ?? items.find(item => item.id !== id);
@@ -154,6 +162,7 @@
     else if (neighbor) list?.focusName(neighbor.id);
     else (recovery ?? heading).focus();
     moveReceipt = destination;
+    announce(`Moved to ${destination.name}`);
   }
 
   // loadRootListing returns only this session's owned entries at parent_id IS NULL.
@@ -176,26 +185,27 @@
   });
   const createdVisible = $derived(!!receipt && items.some(item => item.id === receipt?.id));
   const needsRefresh = $derived(receipt && (result.status === 'unavailable' || (result.status === 'ok' && !receipt.loaded && !createdVisible)));
+  const createdStatus = $derived(receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : '');
 </script>
 
 <header bind:this={header} class:can-create={metadataWriteAllowed && result.status === 'ok'}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
   <h1 bind:this={heading} tabindex={metadataWriteAllowed || staging ? -1 : undefined}>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
-    <RootUpload mode={uploadMode} announce={(message) => { status = message; }} {refresh} paginated={page !== null} bind:busy />
+    <RootUpload mode={uploadMode} announce={uploadFeedback} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if metadataWriteAllowed}
     <MoveDialog bind:this={moveDialog} onrootcreated={folderCreated} onmoved={moved} onreturn={returnToRow} />
     <NameDialog bind:this={nameDialog} available={result.status === 'ok'} {items} oncreated={folderCreated} onrenamed={renamed} onreturn={returnToRow} />
   {/if}
 </header>
-<p class:status={!status || !staging || result.status === 'ok'} role="status">{status}</p>
-{#if metadataWriteAllowed}<p class:status={!receipt || createdVisible} role="status">{receipt ? `Created “${receipt.name}”.${createdVisible || result.status === 'invalid-page' ? '' : needsRefresh ? ' Refresh My Drive to see it.' : ' It isn’t on this page.'}` : ''}</p>{/if}
-{#if metadataWriteAllowed}<p class:status={!renameStatus || !renameRefreshFailed} role="status">{renameStatus}</p>{/if}
+{#if status && staging && result.status !== 'ok'}<p class="receipt">{status}</p>{/if}
+{#if metadataWriteAllowed && receipt && !createdVisible}<p class="receipt">{createdStatus}</p>{/if}
+{#if metadataWriteAllowed && renameStatus && renameRefreshFailed}<p class="receipt">{renameStatus}</p>{/if}
 {#if metadataWriteAllowed}
   <div class:move-notice={!!moveReceipt}>
-    <p role="status" class:status={!moveReceipt}>{#if moveReceipt}<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg> Moved to <bdi>{moveReceipt.name}</bdi>{/if}</p>
     {#if moveReceipt}
+      <p class="receipt"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg> Moved to <bdi>{moveReceipt.name}</bdi></p>
       <a href={moveReceipt.id === null ? '/' : `/f/${moveReceipt.id}`} data-sveltekit-reload>Open <bdi>{moveReceipt.name}</bdi></a>
       {#if movedButNotRefreshed.length}<a href={page ? `/?page=${page}` : '/'} data-sveltekit-reload>Refresh My Drive</a>{/if}
     {/if}
@@ -243,8 +253,7 @@
   header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--drive-space-3); margin-bottom: var(--drive-space-4); }
   header.can-create { grid-template-columns: minmax(0, 1fr) auto auto; }
   h1 { margin: 0; font-family: var(--drive-font-ui); }
-  p[role="status"] { overflow-wrap: anywhere; }
-  .status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .receipt { overflow-wrap: anywhere; }
   @media (max-width: 820px) {
     header { grid-template-columns: minmax(0, 1fr); }
     header.can-create { grid-template-columns: minmax(0, 1fr) auto; }

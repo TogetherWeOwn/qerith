@@ -141,7 +141,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         await page.getByText("This folder didn't load.", { exact: false }).waitFor();
       }
       await recovery.and(active).waitFor();
-      await status(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`).waitFor();
+      await page.getByRole('main').getByText(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`, { exact: true }).waitFor();
       await evidence('refresh-failed');
       const [document] = await Promise.all([
         page.waitForResponse(r => r.request().isNavigationRequest() && r.url() === continuation), recovery.press('Enter'),
