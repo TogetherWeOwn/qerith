@@ -6,13 +6,14 @@ in a subdirectory.
 
 ## Model selection and effort
 
-- T3 Code selects the provider, model, and effort for each task or independent
-  review. Outside T3 Code, whoever sets up the task or review makes those
-  choices using this policy.
-- Use GPT/Sol for routine implementation and Claude/Opus for design or
+- Select the provider, model, and effort when setting up each task or
+  independent review. Set the effort explicitly where supported.
+- Use GPT/Sol for routine implementation and Claude Opus 5.5 for design or
   high-risk work when appropriate.
-- Use `high` effort by default. Use `xhigh` only when the task brief justifies
-  it. Never use `max` or `ultra`.
+- For tasks and reviews, use Opus 5.5 at `medium` effort and Sol at `high`
+  effort by default. Use `high` or `xhigh` for Opus 5.5, or `xhigh` for Sol,
+  only when the brief justifies the higher effort.
+- Never use `max`, `ultra`, or `ultrathink` on any model.
 - Choose independent reviewers from a different model family than the author.
   Follow the review tiers and owner approval requirements below.
 - Keep shared guidance in `AGENTS.md` and keep `CLAUDE.md` to the single
