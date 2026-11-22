@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 const helper = 'src/lib/server/bounded-io.ts';
+const workerConfig = 'vite.config.js';
 const bodyMethods = new Set(['getReader', 'arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']);
 const streamMethods = new Set(['pipeTo', 'pipeThrough', 'values']);
 
@@ -21,7 +22,6 @@ const existing = new Map([
   ['src/lib/server/s3/transport.ts', [
     'response.body?.getReader()', 'response.body?.getReader()',
     'performance.now() + budget.idleMs',
-    'performance.now() + 4', 'performance.now() + 4', 'performance.now() + 4', 'performance.now() + 4',
   ]],
   ['src/lib/server/upload-intent.ts', [
     'performance.now() + timeoutMs', 'performance.now() + timeoutMs',
@@ -78,11 +78,50 @@ function violation(node) {
   }
 }
 
+function workerSource(config) {
+  const templates = [];
+  function visit(node) {
+    if (ts.isCallExpression(node) && globalName(node.expression) === 'writeFileSync') {
+      const [target, contents] = node.arguments;
+      if (target && ts.isCallExpression(target) && globalName(target.expression) === 'resolve' &&
+          target.arguments.some(arg => ts.isStringLiteralLike(arg) && arg.text === '_worker.js')) {
+        templates.push(contents);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(config);
+  const [template] = templates;
+  if (templates.length !== 1 || !template) return;
+  const { line } = config.getLineAndCharacterOfPosition(template.getStart(config));
+  const padding = '\n'.repeat(line);
+  if (ts.isNoSubstitutionTemplateLiteral(template)) return padding + template.text;
+  if (!ts.isTemplateExpression(template)) return;
+
+  // The build interpolates JSON values. Parse the surrounding executable code
+  // without running the build, retaining source line numbers after each value.
+  let text = padding + template.head.text;
+  let position = template.head.end;
+  for (const { expression, literal } of template.templateSpans) {
+    if (!ts.isCallExpression(expression) || !methodOn(expression.expression, 'JSON', 'stringify')) return;
+    const end = literal.getStart(config);
+    text += 'null' + config.text.slice(position, end).replace(/[^\n]/g, '') + literal.text;
+    position = literal.end;
+  }
+  return text;
+}
+
 // Deliberately syntactic. Common direct calls are covered, including bracket
 // notation. Alias/data-flow analysis and the transport's fetch policy are separate.
 export function lintSource(path, contents) {
-  if (!inScope(path)) return [];
-  const source = ts.createSourceFile(path, contents, ts.ScriptTarget.Latest, true);
+  if (path !== workerConfig && !inScope(path)) return [];
+  let source = ts.createSourceFile(path, contents, ts.ScriptTarget.Latest, true);
+  if (path === workerConfig) {
+    const worker = workerSource(source);
+    if (worker === undefined) return [`${path}: unable to locate the generated Worker template for bounded I/O lint.`];
+    source = ts.createSourceFile(path, worker, ts.ScriptTarget.Latest, true);
+    if (source.parseDiagnostics.length) return [`${path}: unable to parse the generated Worker template for bounded I/O lint.`];
+  }
   const allowed = [...(existing.get(path) ?? [])];
   const errors = [];
   function visit(node) {
@@ -107,6 +146,7 @@ if (import.meta.main) {
   const paths = new Set(globSync('src/**/*.{ts,mts,cts,js,mjs,cjs}', { cwd })
     .map(path => path.split(sep).join('/')).filter(inScope));
   if (!paths.has('src/worker.ts')) throw new Error('Drive server sources were not found');
+  paths.add(workerConfig);
   const errors = [...paths].sort().flatMap(path => lintSource(path, readFileSync(join(cwd, path), 'utf8')));
   for (const path of existing.keys()) {
     if (!paths.has(path)) errors.push(`${path}: remove bounded I/O allowances for the deleted file.`);

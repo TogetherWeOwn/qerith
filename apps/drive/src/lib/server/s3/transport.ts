@@ -141,7 +141,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
         reader = response.body?.getReader();
         let length = 0;
         let chunksSinceYield = 0;
-        let yieldAt = performance.now() + 4;
+        let lastYield = performance.now();
         let yieldTimer: ReturnType<typeof setTimeout> | undefined;
         let finished = false;
         let onAbort: () => void;
@@ -173,10 +173,10 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
               let part: ReadableStreamReadResult<Uint8Array>;
               let bytes = 0;
               do {
-                if (++chunksSinceYield >= 1024 || performance.now() >= yieldAt) {
+                if (++chunksSinceYield >= 1024 || performance.now() - lastYield >= 4) {
                   await abortable(new Promise<void>((resolve) => { yieldTimer = setTimeout(resolve, 0); }), controller.signal);
                   chunksSinceYield = 0;
-                  yieldAt = performance.now() + 4;
+                  lastYield = performance.now();
                   checkAbort();
                 }
                 part = reader ? await abortable(reader.read(), controller.signal) : { done: true, value: undefined };
@@ -217,7 +217,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
       }
       const result = new Uint8Array(maxResponseBytes);
       let length = 0;
-      let yieldAt = performance.now() + 4;
+      let lastYield = performance.now();
       let chunksSinceYield = 0;
       reader = response.body?.getReader();
       if (reader) {
@@ -230,10 +230,10 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
           result.set(part.value, length);
           length += part.value.byteLength;
           // Workers clocks can freeze between I/O turns; also bound reads independently of time.
-          if (++chunksSinceYield >= 1024 || performance.now() >= yieldAt) {
+          if (++chunksSinceYield >= 1024 || performance.now() - lastYield >= 4) {
             await abortable(new Promise<void>((resolve) => setTimeout(resolve, 0)), controller.signal);
             chunksSinceYield = 0;
-            yieldAt = performance.now() + 4;
+            lastYield = performance.now();
           }
         }
       }

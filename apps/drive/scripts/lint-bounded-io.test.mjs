@@ -41,6 +41,27 @@ test('applies to server entry points and leaves browser code and test fixtures o
   }
 });
 
+test('checks executable code in the generated Worker template at its source line', () => {
+  const config = [
+    'const build = () => writeFileSync(resolve(config.assets.directory, "_worker.js"), `',
+    'const assets = ${JSON.stringify(',
+    '  generatedAssets(builder)',
+    ')};',
+    'export default { async fetch(request) { return Response.json(await request.json()); } };',
+    '`);',
+  ].join('\n');
+  assert.match(lintSource('vite.config.js', config)[0], /^vite\.config\.js:5: direct body read/);
+  assert.deepEqual(lintSource('vite.config.js', config.replace('await request.json()', 'assets')), []);
+  assert.match(lintSource('vite.config.js', 'export default {};')[0], /unable to locate the generated Worker template/);
+  assert.match(lintSource('vite.config.js', config.replace('JSON.stringify', 'renderCode'))[0], /unable to locate/);
+});
+
+test('accepts an elapsed CPU yield interval and rejects an absolute deadline', () => {
+  const path = 'src/lib/server/example.ts';
+  assert.deepEqual(lintSource(path, 'if (performance.now() - lastYield >= 4) await yieldToTimer();'), []);
+  assert.match(lintSource(path, 'const deadline = performance.now() + 4;')[0], /manual I\/O deadline/);
+});
+
 test('existing allowances match only their file and expression count and must shrink on removal', () => {
   const path = 'src/lib/server/s3/objects.ts';
   assert.deepEqual(lintSource(path, 'body.getReader()'), []);
