@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { capture, widths } from './root-listing.mjs';
+import { capture } from './root-listing.mjs';
+import { captureReviewModes } from './accessibility.mjs';
+import registry from './scenarios.json' with { type: 'json' };
+import { routedShareFiles, viewports } from '../../../scripts/browser-registry.mjs';
+
+const scenarioId = 'nested-share';
+const scenario = registry[scenarioId];
+const widths = scenario.widths.map(width => [width, viewports[width]]);
 
 const parent = 'nested-share-parent', folder = 'nested-share-folder';
 const parentName = 'Shared project', folderName = 'Review materials';
@@ -74,7 +81,10 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         const visit = () => page.goto(origin + path, { waitUntil: 'networkidle' });
-        const evidence = (state, audit = true) => capture(page, state, width, audit, 'nested-share');
+        const evidence = (state, captureWidth = width) => {
+          assert(scenario.states.includes(state), `Unregistered ${scenarioId} state: ${state}`);
+          return capture(page, state, captureWidth, true, scenarioId);
+        };
         const focused = locator => locator.and(page.locator(':focus')).waitFor();
         const actions = label => page.getByRole('button', { name: `Actions for ${label}`, exact: true });
         const trigger = actions(name), menu = page.getByRole('menu');
@@ -203,22 +213,21 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         const revokedTree = await dialog.ariaSnapshot();
         assert.match(revokedTree, /status: Removed direct access for Folder Reader\.[\s\S]*Folder Reader[\s\S]*Through Shared project/);
         await evidence('revoked');
-        await page.screenshot({ path: resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-greyscale-${width}.png`),
-          style: 'dialog { filter: grayscale(1); }' });
-        await page.setViewportSize({ width: 320, height });
-        assert(await dialog.evaluate(el => [el, document.documentElement].every(box => box.scrollWidth <= box.clientWidth)));
-        await evidence('reflow', false);
-        await page.setViewportSize({ width, height });
-        await page.emulateMedia({ forcedColors: 'active' });
-        await button('Done').focus();
-        await keyboard.press('Tab');
-        await focused(button('Close'));
-        assert.equal(await button('Close').evaluate(el => getComputedStyle(el).outlineStyle), 'solid');
-        assert.equal(await page.evaluate(() => document.getAnimations().length), 0);
-        await evidence('forced-colours', false);
+        await captureReviewModes(page, {
+          output: process.env.DRIVE_BROWSER_EVIDENCE_DIR, files: routedShareFiles(scenarioId, width),
+          fullPage: true, greyscale: 'dialog { filter: grayscale(1); }',
+          assertReflow: async () => assert(await dialog.evaluate(el =>
+            [el, document.documentElement].every(box => box.scrollWidth <= box.clientWidth))),
+          focusForced: async () => {
+            await button('Done').focus();
+            await keyboard.press('Tab');
+            await focused(button('Close'));
+            assert.equal(await button('Close').evaluate(el => getComputedStyle(el).outlineStyle), 'solid');
+            assert.equal(await page.evaluate(() => document.getAnimations().length), 0);
+          },
+        });
         await keyboard.press('Escape');
         await focused(trigger);
-        await page.emulateMedia({ forcedColors: 'none' });
 
         const pending = hold = { path: roster(id), ready: Promise.withResolvers(), release: Promise.withResolvers() };
         const other = isFolder ? file.name : folderName;
@@ -307,7 +316,7 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
             await focused(inviteDialog.getByRole('button', { name: 'Invite someone' }));
             const inviteTree = await inviteDialog.ariaSnapshot();
             assert.match(inviteTree, /button "Invite someone"/);
-            await capture(page, 'invite-empty', inviteWidth, true, 'nested-share');
+            await evidence('invite-empty', inviteWidth);
             const [people] = await Promise.all([responseFor('/people'), keyboard.press('Enter')]);
             assert(people.request().isNavigationRequest());
             assert.equal(people.status(), 200);
@@ -321,7 +330,7 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
           assert.deepEqual(writes, []);
           assert.deepEqual(await stored(), before);
           for (const [reviewWidth, review] of ariaReviews) {
-            await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-aria-review-${reviewWidth}.txt`), review.join('\n\n'));
+            await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, routedShareFiles(scenarioId, reviewWidth)['aria-review']), review.join('\n\n'));
           }
         }
         assert.deepEqual(errors, []);

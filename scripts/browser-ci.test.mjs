@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { crc32, deflateSync } from 'node:zlib';
-import { verifyEvidence } from './browser-evidence.mjs';
+import { verifyEvidence, verifyRoutedShareEvidence } from './browser-evidence.mjs';
+import { accessibilityModes, planBrowser, verifyBrowserInventory } from './browser-registry.mjs';
 import { selectCheckout } from './select-browser-checkout.mjs';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), snapshot = 'c'.repeat(40);
@@ -78,20 +76,17 @@ test('wrong parent count, head, main ancestry and mutable refs fail closed', () 
 });
 test('generated browser entrypoints have separate exact-head deadlines', async () => {
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const job = workflow.split(/^  drive-browser:\n/m)[1]?.split(/^  \S/m)[0];
-  assert.ok(job, 'drive-browser job is missing');
-  const steps = job.split(/^      - /m).slice(1);
-  const deadline = 'timeout --signal=TERM --kill-after=10s 90s node ';
-  const exactHead = 'steps.browser-source.outputs.tested == env.REQUESTED_HEAD';
-  const entrypoints = [['sign-in.mjs', exactHead], ['staging-root-standalone.mjs',
-    `${exactHead} && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''`]];
-  const [signInStep, stagingStep] = entrypoints.map(([entry, condition]) => {
-    const matches = steps.filter(step => step.includes(deadline + entry));
-    assert.equal(matches.length, 1, `${entry} must have one bounded invocation`);
-    assert.ok(matches[0].split('\n').includes(`        if: ${condition}`), `${entry} has the wrong CI condition`);
-    return matches[0];
-  });
-  assert.notEqual(signInStep, stagingStep, 'the fixtures must run in separate steps');
+  const capture = workflow.split(/^  drive-browser-capture:\n/m)[1]?.split(/^  \S/m)[0];
+  const verifier = workflow.split(/^  drive-browser:\n/m)[1]?.split(/^  \S/m)[0];
+  const coverage = workflow.split(/^  drive-browser-coverage:\n/m)[1]?.split(/^  \S/m)[0];
+  assert.match(capture, /if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD/);
+  assert.match(capture, /browser-job.mjs" capture/);
+  assert.match(verifier, /needs: drive-browser-capture/);
+  assert.match(verifier, /git show "\$BROWSER_POLICY_SHA:scripts\/browser-evidence.mjs"/);
+  assert.match(coverage, /needs: drive-browser\n/);
+  assert.doesNotMatch(capture + coverage + verifier, /continue-on-error/);
+  assert.match(await readFile(new URL('./browser-job.mjs', import.meta.url), 'utf8'),
+    /'timeout', \['--signal=TERM', '--kill-after=10s', '90s', process.execPath, \.\.\.args\]/);
   const browser = new URL('../apps/drive/browser/', import.meta.url);
   assert.match(await readFile(new URL('staging-root-standalone.mjs', browser), 'utf8'), /^import '\.\/staging-root\.mjs';$/m);
   assert.doesNotMatch(await readFile(new URL('sign-in.mjs', browser), 'utf8'), /staging-root.*\.mjs/);
@@ -103,9 +98,9 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     await assert.rejects(verifyEvidence(dir, head));
     await writeBaseEvidence(dir);
     await verifyEvidence(dir, head);
-    const verifyShare = () => verifyEvidence(dir, head, false, false, false, false, false, false, false, true);
+    const verifyShare = () => verifyEvidence(dir, head, { shareRecipient: true });
     await assert.rejects(verifyShare(), /share-recipient-390-keyboard\.json/);
-    const verifyContinuation = () => verifyEvidence(dir, head, false, false, false, false, true);
+    const verifyContinuation = () => verifyEvidence(dir, head, { continuation: true });
     await assert.rejects(verifyContinuation(), /root-continuation-390\.json/);
     const proofPath390 = join(dir, 'root-continuation-390.json');
     await writeFile(proofPath390, '{}');
@@ -123,7 +118,7 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       acknowledged: finished(), empty: finished(['PUT', `${intent}/parts/1`, 0]), 'empty-acknowledged': finished(),
       fresh: { requests: [['POST', '/api/uploads', '{"size":16777217}'], ['PUT', `${fresh}/parts/1`, 16777216],
         ['PUT', `${fresh}/parts/2`, 1], ['POST', `${fresh}/complete`, destination]] } };
-    const verifyDeletion = () => verifyEvidence(dir, head, false, false, false, false, false, false, true);
+    const verifyDeletion = () => verifyEvidence(dir, head, { deletion: true });
     await assert.rejects(verifyDeletion(), /delete-file-390-keyboard\.json/);
     const deleteStages = ['open', 'saving', 'error', 'accepted'];
     const writes = [[1, 400], [1, 401], [1, 403], [1, 404], [1, 200], [1, 0], [1, 503], [1, 202], [3, 202], [2, 202]]
@@ -201,7 +196,7 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
       await writeFile(proofPath390, JSON.stringify({ ...continuation, fresh: { requests } }));
       await assert.rejects(verifyContinuation(), /Invalid continuation trace: 390/);
     }
-    const verifyFolder = () => verifyEvidence(dir, head, false, false, false, true);
+    const verifyFolder = () => verifyEvidence(dir, head, { folder: true });
     await assert.rejects(verifyFolder(), /staging-folder-keyboard-390/);
     await writeFile(join(dir, 'staging-folder-keyboard-390.json'), JSON.stringify({ viewport: [390, 844], visibleTabFocus: true,
       enterDocumentNavigation: ['Child folder', 'Go to My Drive', 'Next page', 'First page'] }));
@@ -219,28 +214,28 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
     await writeFile(join(dir, `${folderLabel}.png`), folderPng);
     await assert.rejects(verifyFolder(), /staging-folder-empty-390.png/);
     const stagingPath = join(dir, 'staging-root-round-trip.json');
-    await assert.rejects(verifyEvidence(dir, head, false, false, true), /staging-root-round-trip\.json/);
+    await assert.rejects(verifyEvidence(dir, head, { staging: true }), /staging-root-round-trip\.json/);
     const staging = { mode: 'staging-origin', signIn: 'passkey', picker: 'Tab then Enter', navigations: 0,
       refresh: { method: 'GET', path: '/__data.json', status: 200 }, fullDownload: { bytes: 6, byteIdentical: true },
       rangeDownload: { status: 206, contentRange: 'bytes 1-3/6', byteIdentical: true },
       denied: { signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404 } };
     await writeFile(stagingPath, JSON.stringify({ ...staging, navigations: 1 }));
-    await assert.rejects(verifyEvidence(dir, head, false, false, true), /Invalid staging evidence/);
+    await assert.rejects(verifyEvidence(dir, head, { staging: true }), /Invalid staging evidence/);
     await writeFile(stagingPath, JSON.stringify(staging));
-    await verifyEvidence(dir, head, false, false, true);
-    await assert.rejects(verifyEvidence(dir, head, true), { code: 'ENOENT' });
-    await assert.rejects(verifyEvidence(dir, head, false, true), /root-upload-round-trip\.json/);
+    await verifyEvidence(dir, head, { staging: true });
+    await assert.rejects(verifyEvidence(dir, head, { root: true }), { code: 'ENOENT' });
+    await assert.rejects(verifyEvidence(dir, head, { upload: true }), /root-upload-round-trip\.json/);
     const proof = { byteIdentical: true, bytes: 8193, statusRegions: 1, documentsDuringRefresh: 0, focusPreserved: true,
       refresh503PreservedUpload: true, keyboard: 'Tab then Enter opened the single-file picker', sha256: '0'.repeat(64),
       responses: [['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 200], ['POST', 201], ['PUT', 204], ['POST', 409], ['POST', 201], ['PUT', 204], ['POST', 201], ['GET', 503]] };
     const proofPath = join(dir, 'root-upload-round-trip.json');
     await writeFile(proofPath, JSON.stringify(proof));
-    await assert.rejects(verifyEvidence(dir, head, false, true), { message: 'Invalid upload evidence' });
+    await assert.rejects(verifyEvidence(dir, head, { upload: true }), { message: 'Invalid upload evidence' });
     proof.sha256 = '2d18045cc77c707b09f9b436b44e5b90923bfdee7b80fec763479b0e1ef88c0a';
     await writeFile(proofPath, JSON.stringify(proof));
     await writeFile(join(dir, 'root-uploading-390.png'), Buffer.from('89504e470d0a1a0a0000000d4948445200000500000003200802000000000000000000000049454e44ae426082', 'hex'));
     await writeFile(join(dir, 'axe-root-uploading-390.json'), '{"violations":[]}');
-    await assert.rejects(verifyEvidence(dir, head, false, true), { message: 'Invalid upload evidence: root-uploading-390' });
+    await assert.rejects(verifyEvidence(dir, head, { upload: true }), { message: 'Invalid upload evidence: root-uploading-390' });
     await assert.rejects(verifyEvidence(dir, base), /does not match/);
     await writeFile(join(dir, 'axe-1280x800.json'), '{"violations":[{}]}');
     await assert.rejects(verifyEvidence(dir, head), /Invalid axe/);
@@ -255,14 +250,10 @@ test('evidence fails when missing, empty or bound to the wrong checkout', async 
   }
 });
 
-test('routed Share gates bind to the exact head and require each fixture’s evidence', async t => {
-  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const step = workflow.split('      - name: Verify evidence and record both provenance identities\n')[1]?.split(/^      - /m)[0];
-  assert.ok(step);
-  const run = promisify(execFile);
-  const script = fileURLToPath(new URL('./browser-evidence.mjs', import.meta.url));
+test('routed Share requires each registered fixture’s evidence', async t => {
+  const registry = JSON.parse(await readFile(new URL('../apps/drive/browser/scenarios.json', import.meta.url)));
   const fixtures = [
-    ['root', 'ROOT_SHARE_EVIDENCE', ['signed-out', 'root', 'invite-empty', 'dialog'], [
+    ['root', ['signed-out', 'root', 'invite-empty', 'dialog'], [
       '- dialog "Share “Shareable file”":',
       '    - option "Root Reader"',
       '  - button "Remove Root Reader’s access": Remove',
@@ -270,7 +261,7 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
       '- main:',
       '  - heading "Users and invites" [level=1]',
     ]],
-    ['nested', 'NESTED_SHARE_EVIDENCE', ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only', 'invite-empty'], [
+    ['nested', ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only', 'invite-empty'], [
       '- menu:',
       '  - menuitem "Share"',
       '  - menuitem "Move"',
@@ -284,22 +275,17 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
       '  - heading "Users and invites" [level=1]',
     ]],
   ];
-  for (const [scope, flag, states, review] of fixtures) {
+  for (const [scope, states, review] of fixtures) {
     await t.test(scope, async () => {
       const stem = `${scope}-share`;
-      const gate = `steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/${stem}.mjs') != ''`;
-      assert.ok(step.split('\n').includes('          ' + flag + ': ${{ ' + gate + ' }}'));
+      assert.deepEqual(registry[stem].states, states);
       const dir = await mkdtemp(join(tmpdir(), `browser-${stem}-test-`));
-      const env = { EVIDENCE_DIR: dir, TESTED_SHA: head, REQUESTED_HEAD: head, SNAPSHOT_SHA: snapshot,
-        COMPATIBILITY_MODE: 'head', GITHUB_WORKFLOW: 'CI', GITHUB_RUN_ID: '1', GITHUB_RUN_ATTEMPT: '1',
-        GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'example/fixture' };
-      const verify = (enabled = 'true') => run(process.execPath, [script], { env: { ...env, [flag]: enabled } });
+      const verify = () => verifyRoutedShareEvidence(dir, stem, { states, viewports: [[390, 844], [1280, 800]] });
       const detail = (mode, width, height) => scope === 'root'
         ? `${stem}-${width}x${height}-${mode}` : `${stem}-${mode}-${width}`;
       try {
         await writeBaseEvidence(dir);
-        await verify('false');
-        await assert.rejects(verify(), { stderr: new RegExp(`ENOENT.*${stem}-signed-out-390\\.png`) });
+        await assert.rejects(verify(), new RegExp(`ENOENT.*${stem}-signed-out-390\\.png`));
         for (const [width, height] of [[390, 844], [1280, 800]]) {
           const png = viewportPng(width, height);
           for (const state of states) {
@@ -322,7 +308,7 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
         const missing = join(dir, `${detail('forced-colours', 1280, 800)}.png`);
         const original = await readFile(missing);
         await rm(missing);
-        await assert.rejects(verify(), { stderr: new RegExp(`ENOENT.*${detail('forced-colours', 1280, 800)}\\.png`) });
+        await assert.rejects(verify(), new RegExp(`ENOENT.*${detail('forced-colours', 1280, 800)}\\.png`));
         await writeFile(missing, original);
         const mobilePng = viewportPng(390, 844);
         const headerOnly = Buffer.concat([mobilePng.subarray(0, 33), mobilePng.subarray(-12)]);
@@ -340,12 +326,80 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
           const good = await readFile(path);
           await writeFile(path, content);
           const label = file.slice(0, file.lastIndexOf('.')).replace(/^axe-/, '');
-          await assert.rejects(verify(), { stderr: new RegExp(`Invalid Share ${kind}: ${label}`) });
+          await assert.rejects(verify(), new RegExp(`Invalid Share ${kind}: ${label}`));
           await writeFile(path, good);
         }
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test('the trusted registry inventories sources and controls legacy selection', () => {
+  const paths = new Set(['apps/drive/browser/run.mjs', 'apps/drive/browser/upload-storage.mjs',
+    'apps/drive/browser/root-share.mjs', 'apps/drive/browser/staging-root-standalone.mjs']);
+  const proposed = { 'root-share': { states: [], modes: [], widths: [] } };
+  const exact = planBrowser(paths, proposed);
+  assert.equal(exact.checks.rootShare, true);
+  assert.deepEqual(exact.commands, [['staging-root-standalone.mjs'], ['staging-root-standalone.mjs', '--root-share-only']]);
+  const legacy = planBrowser(paths, proposed, false);
+  assert.equal(legacy.checks.rootShare, undefined);
+  assert.deepEqual(legacy.commands, []);
+  assert.ok(legacy.claimed.has('head.txt'));
+  paths.add('apps/drive/browser/example.mjs');
+  assert.throws(() => planBrowser(paths, proposed), /Unregistered browser module: .*example/);
+  for (const invalid of [{ legacy: true }, { helper: true }, { states: [], widths: [390, 1280], modes: accessibilityModes }]) {
+    assert.throws(() => planBrowser(paths, { ...proposed, example: invalid }), /Invalid accessibility registration/);
+  }
+  const example = { states: ['open'], widths: [390, 1280], modes: accessibilityModes };
+  assert.deepEqual(planBrowser(paths, { ...proposed, example }).isolated, [['example', 'exercise']]);
+  const trusted = { example };
+  const examplePaths = new Set(['apps/drive/browser/example.mjs']);
+  const added = planBrowser(examplePaths, { example: { ...example, states: ['closed'] } }, true, trusted);
+  assert.ok(added.claimed.has('scenario-example-open-390.png'));
+  assert.ok(added.claimed.has('scenario-example-closed-390.png'));
+  assert.throws(() => planBrowser(new Set(), {}, true, trusted, { previousPaths: examplePaths }),
+    /Browser coverage module was removed/);
+  paths.delete('apps/drive/browser/example.mjs');
+  assert.throws(() => planBrowser(paths, { ...proposed, example }), /registration has no module/);
+});
+
+test('the inventory accepts existing evidence and requires the full accessibility set for new scenarios', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-inventory-test-'));
+  try {
+    const paths = new Set(['apps/drive/browser/run.mjs']);
+    await writeBaseEvidence(dir);
+    await verifyBrowserInventory(dir, planBrowser(paths).claimed);
+    const extra = join(dir, 'unclaimed.png');
+    await writeFile(extra, viewportPng(390, 844));
+    await assert.rejects(verifyBrowserInventory(dir, planBrowser(paths).claimed), /Unclaimed browser evidence.*unclaimed/);
+    await rm(extra);
+    paths.add('apps/drive/browser/example.mjs');
+    const { claimed } = planBrowser(paths, { example: { states: ['open'], widths: [390, 1280], modes: accessibilityModes } });
+    await assert.rejects(verifyBrowserInventory(dir, claimed), /scenario-example-open-390\.png/);
+    for (const [width, height] of [[390, 844], [1280, 800]]) {
+      const label = `scenario-example-open-${width}`;
+      for (const suffix of ['', '-greyscale', '-forced-colours', '-reflow']) {
+        await writeFile(join(dir, label + suffix + '.png'), viewportPng(suffix === '-reflow' ? 320 : width, height));
+      }
+      await writeFile(join(dir, `axe-${label}.json`), '{"violations":[]}');
+      await writeFile(join(dir, `${label}-keyboard.json`), '{"focus":"Confirm","tree":"- button Confirm"}');
+    }
+    await verifyBrowserInventory(dir, claimed);
+    for (const [file, data, mode] of [
+      ['axe-scenario-example-open-390.json', '{"violations":[{}]}', 'axe'],
+      ['scenario-example-open-390-keyboard.json', '{"focus":"","tree":"- button Confirm"}', 'keyboard'],
+      ['scenario-example-open-1280-reflow.png', viewportPng(390, 800), 'reflow'],
+      ['scenario-example-open-1280-forced-colours.png', 'missing image', 'forced-colours'],
+    ]) {
+      const path = join(dir, file);
+      const good = await readFile(path);
+      await writeFile(path, data);
+      await assert.rejects(verifyBrowserInventory(dir, claimed), new RegExp(`Invalid ${mode} evidence`));
+      await writeFile(path, good);
+    }
+  } finally {
+    await rm(dir, { recursive: true });
   }
 });

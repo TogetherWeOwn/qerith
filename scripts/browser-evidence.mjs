@@ -1,6 +1,5 @@
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
@@ -9,7 +8,7 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-function hasViewportImageData(png, width, height, fullPage = false) {
+export function hasViewportImageData(png, width, height, fullPage = false) {
   if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
       png.readUInt32BE(16) !== width) return false;
   const imageHeight = png.readUInt32BE(20);
@@ -75,10 +74,8 @@ async function verifyShareRecipientEvidence(dir) {
   }
 }
 
-async function verifyRoutedShareEvidence(dir, scope) {
+export async function verifyRoutedShareEvidence(dir, scope, { states, viewports }) {
   const root = scope === 'root-share';
-  const states = root ? ['signed-out', 'root', 'invite-empty', 'dialog'] :
-    ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only', 'invite-empty'];
   const reviewNodes = ['dialog "Share “', 'heading "People with access"', 'combobox "Add people" [expanded]',
     'listbox "Available people"', 'button "Invite someone"', 'heading "Users and invites"', ...(root
       ? ['option "Root Reader"', 'button "Remove Root Reader’s access"']
@@ -89,7 +86,7 @@ async function verifyRoutedShareEvidence(dir, scope) {
       throw new Error(`Invalid Share screenshot: ${label}`);
     }
   };
-  for (const [width, height] of [[390, 844], [1280, 800]]) {
+  for (const [width, height] of viewports) {
     for (const state of states) {
       const label = `${scope}-${state}-${width}`;
       // The shared capture helper takes full-page screenshots.
@@ -110,8 +107,9 @@ async function verifyRoutedShareEvidence(dir, scope) {
   }
 }
 
-export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false,
-  continuation = false, shared = false, deletion = false, shareRecipient = false, { rootShare = false, nestedShare = false } = {}) {
+export async function verifyEvidence(dir, tested, {
+  root, upload, staging, folder, continuation, shared, deletion, shareRecipient,
+} = {}) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -192,8 +190,6 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
   }
   if (deletion) await verifyDeletionEvidence(dir);
   if (shareRecipient) await verifyShareRecipientEvidence(dir);
-  if (rootShare) await verifyRoutedShareEvidence(dir, 'root-share');
-  if (nestedShare) await verifyRoutedShareEvidence(dir, 'nested-share');
   if (shared) for (const [width, height] of [[390, 844], [1280, 800]]) {
     const keyboard = JSON.parse(await readFile(join(dir, `staging-shared-keyboard-${width}.json`), 'utf8'));
     if (!isDeepStrictEqual(keyboard, { viewport: [width, height], visibleFocus: true, skipToMain: true, keyboardDownload: true }))
@@ -218,27 +214,4 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
       throw new Error(`Invalid axe or keyboard evidence: ${size}`);
     }
   }
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { EVIDENCE_DIR: dir, TESTED_SHA: tested, REQUESTED_HEAD: requestedHead,
-    BASE_SHA: base, SNAPSHOT_SHA: snapshot, SNAPSHOT_BASE: snapshotBase, COMPATIBILITY_MODE: mode,
-    GITHUB_WORKFLOW: workflow, GITHUB_RUN_ID: runId, GITHUB_RUN_ATTEMPT: runAttempt,
-    GITHUB_SERVER_URL: server, GITHUB_REPOSITORY: repository } = process.env;
-  if (![dir, tested, requestedHead, snapshot, mode, workflow, runId, runAttempt, server, repository].every(Boolean)) {
-    throw new Error('Missing provenance context');
-  }
-  const root = process.env.ROOT_EVIDENCE === 'true';
-  const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
-  await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
-    folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true',
-    process.env.DELETE_FILE_EVIDENCE === 'true', process.env.SHARE_RECIPIENT_EVIDENCE === 'true', {
-      rootShare: process.env.ROOT_SHARE_EVIDENCE === 'true',
-      nestedShare: process.env.NESTED_SHARE_EVIDENCE === 'true',
-    });
-  const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
-  await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
-    base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
-    runUrl: `${server}/${repository}/actions/runs/${runId}`,
-    coverage: tested === requestedHead ? `synthetic fixture; ${generated}${folder ? '; generated staging-origin SSR folder (opt-in, disposable D1)' : ''}` : 'synthetic fixture only; not product behavior or sign-in' }, null, 2) + '\n');
 }
