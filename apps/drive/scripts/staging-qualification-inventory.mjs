@@ -76,6 +76,35 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   }, null, signal, 15_000);
 }
 
+// A terminal roster covers native bucket jobs only. Other writes and provider
+// operations still require the held writer fence.
+async function assertNoActiveR2BucketJobs(account, bucket, token, request, signal) {
+  const maxJobs = 100;
+  await runQualificationPhase(async (_, active) => {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${encodeURIComponent(bucket)}/jobs?maxKeys=${maxJobs}`;
+    const response = await request(url, { method: 'GET', redirect: 'error', signal: active,
+      headers: { authorization: `Bearer ${token}`, 'cf-r2-jurisdiction': 'default' } });
+    if (response.headers.has('link')) {
+      await response.body?.cancel();
+      throw unverified();
+    }
+    const { parsed } = await boundedProviderDocument(response);
+    const { success, errors, messages, result } = parsed;
+    if (success !== true || !Array.isArray(errors) || errors.length || !Array.isArray(messages) || messages.length ||
+        Object.keys(parsed).length !== 4 || !Array.isArray(result?.jobs) || Object.keys(result).length !== 1 ||
+        result.jobs.length > maxJobs) throw unverified();
+    const ids = new Set();
+    for (const job of result.jobs) {
+      if (typeof job?.id !== 'string' || !job.id.trim() || ids.has(job.id) ||
+          !['prefixDelete', 'storageClassMigration'].includes(job.jobType) ||
+          typeof job.startTime !== 'string' || !Number.isFinite(Date.parse(job.startTime)) ||
+          !job[job.jobType] || typeof job[job.jobType] !== 'object' || Array.isArray(job[job.jobType]) ||
+          !['COMPLETED', 'FAILED', 'CANCELLED'].includes(job.status)) throw unverified();
+      ids.add(job.id);
+    }
+  }, null, signal, 5_000);
+}
+
 // Shared for native page-number lists with an explicitly empty terminal page.
 async function assertEmptyNativePage(account, path, token, request, signal, { pageSize = 10 } = {}) {
   if (!token?.trim()) throw unverified();
@@ -192,6 +221,7 @@ export function createQualificationInventory(env, cwd, { readEstate, request, se
         await assertEmptyNativePage(account, 'queues', env.CLOUDFLARE_API_TOKEN, request, active, { pageSize: null });
         await assertR2Roster(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         await verifyQualificationR2Expiry(env, cwd, active, async (...args) => singleLifecycleDocument(await request(...args)));
+        await assertNoActiveR2BucketJobs(storageAccount, settings.bucket, env.CLOUDFLARE_API_TOKEN, request, active);
         // Check all full-v0 fixture attempts. The separate recovery-record and
         // storage-proof namespaces have their own retention/cleanup policies.
         const { keys, uploads } = await readQualificationR2Prefix(qualificationFixtureNamespace, active,

@@ -269,6 +269,18 @@ This checks what the existing credential can list in the documented R2
 jurisdictions. It does not replace the estate reader, lifecycle policy readback,
 or direct object and multipart listings.
 
+Both inventory passes read the [native R2 bucket job roster][r2-bucket-jobs]
+for the reviewed default-jurisdiction bucket before the signed object and multipart
+listings. They require a complete first page within five seconds, 100 job
+descriptors, and 64 KiB. The read includes all statuses and job types.
+Queued or running prefix deletion, bucket emptying, and storage-class migration
+jobs make inventory unverified. Unknown statuses and types, denied reads,
+and continuation also fail. Terminal job status describes that job at the time
+of the read. Writer exclusion still requires a held fence covering other writes,
+other provider operations, and new jobs.
+
+[r2-bucket-jobs]: https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/jobs/methods/list/
+
 Both passes require an empty, unfiltered native Durable Objects namespace list
 in the pinned Worker account. The first page must explicitly report zero total
 namespaces, with no conflicting pagination, within five seconds and 64 KiB.
@@ -305,7 +317,7 @@ and must report `total_count: 0` with no continuation, within five seconds and
 64 KiB. Even a queue without consumers fails. Offline fixtures cover the roster
 response shape for the pinned account.
 
-The native R2 bucket and lifecycle, Durable Objects, Containers, Stream,
+The native R2 bucket, lifecycle and job roster, Durable Objects, Containers, Stream,
 Workflows, and Queues inventory reads reject duplicate JSON fields, even when
 the last value would otherwise satisfy the check.
 
