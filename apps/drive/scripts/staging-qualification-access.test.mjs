@@ -66,10 +66,10 @@ test('all six access cases require the exact isolated browser transcript', async
   const scope = fixture();
   assert.deepEqual(await exerciseQualificationAccess(context, undefined, {
     async withFixtures(...args) { await Promise.resolve(); return scope.withFixtures(...args); },
-  }), {
+  }), { revokedMemberId: otherFile.memberId, evidence: {
     'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
     'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass',
-  });
+  } });
   assert.equal(scope.transcript.length, 0);
   assert.equal(scope.closed(), true);
 });

@@ -63,6 +63,7 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
   try {
     require(context.prefix === qualificationPrefix(context) && typeof context.sha === 'string' && /^[0-9a-f]{40}$/.test(context.sha));
     return await runQualificationPhase(async (identity, active) => {
+      let revokedMemberId;
       const drained = await observeFixtures(withFixtures, identity, active, async (fixtures, active) => {
         const { owner, member, signedOut, ownerFile, memberFile } = fixtures;
         require(new Set([owner, member, signedOut]).size === 3 && isFile(ownerFile));
@@ -122,7 +123,8 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
         check = 'cross-user-denial';
         active.throwIfAborted();
         const file = await memberFile(member, active);
-        require(isFile(file) && isId(file.memberId) && file.id !== ownerFile.id && !file.bytes.equals(ownerFile.bytes));
+        const memberId = file?.memberId;
+        require(isFile(file) && isId(memberId) && file.id !== ownerFile.id && !file.bytes.equals(ownerFile.bytes));
         await read(member, file);
         await empty(await request(member, filePath(ownerFile)), 404);
         await empty(await request(owner, filePath(file)), 404);
@@ -130,16 +132,17 @@ export async function exerciseQualificationAccess(context, signal, { withFixture
         for (const target of [ownerFile, file]) await empty(await request(signedOut, filePath(target)), 401);
 
         check = 'member-revocation';
-        await empty(await request(owner, `/api/owner/members/${file.memberId}/revoke`, 'POST'), 204);
+        await empty(await request(owner, `/api/owner/members/${memberId}/revoke`, 'POST'), 204);
         // Keep the existing browser session for this request; do not log out first.
         await empty(await request(member, filePath(file)), 401);
         await signIn(member, 403, 'revoked');
         await read(owner, ownerFile);
+        revokedMemberId = memberId;
       });
       check = 'fixture-scope';
       require(drained);
-      return { 'passkey-positive': 'pass', 'passkey-negative': 'pass', 'invite-acceptance': 'pass',
-        'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass' };
+      return { revokedMemberId, evidence: { 'passkey-positive': 'pass', 'passkey-negative': 'pass',
+        'invite-acceptance': 'pass', 'cross-user-denial': 'pass', 'unauthenticated-file-denial': 'pass', 'member-revocation': 'pass' } };
     }, context, signal, 90_000);
   } catch {
     // Adapter errors may include cookies, invite links or browser request data.
