@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { baseLine, isNewSurvivor, plan } from './pr-mutation.mjs';
+import { baseLine, plan, testVerdict } from './pr-mutation.mjs';
 
 function repository(t) {
   const dir = mkdtempSync(join(process.env.RUNNER_TEMP ?? '/tmp', 'pr-mutation-'));
@@ -22,8 +22,8 @@ function repository(t) {
   return { dir, git, commit };
 }
 
-test('selection caps changed test targets and orders them by path', t => {
-  const { dir, commit } = repository(t);
+test('selection caps changed targets and excludes changes already on base', t => {
+  const { dir, git, commit } = repository(t);
   const base = commit({ 'same.test.mjs': '// unchanged', 'other.md': 'original' });
   const unrelated = commit({ 'other.md': 'changed' });
   assert.deepEqual(plan(dir, base, unrelated).targets, []);
@@ -31,11 +31,17 @@ test('selection caps changed test targets and orders them by path', t => {
   const { targets, omitted } = plan(dir, base, head);
   assert.deepEqual(targets, ['a.test.mjs', 'b.test.mjs', 'c.test.mjs', 'd.test.mjs']);
   assert.deepEqual(omitted, ['e.test.mjs']);
+  git('switch', '--quiet', '--detach', unrelated);
+  const advanced = commit({ 'a.test.mjs': '// new' });
+  git('merge', '--quiet', '--no-edit', head);
+  assert.deepEqual(plan(dir, advanced, 'HEAD').targets, ['b.test.mjs', 'c.test.mjs', 'd.test.mjs', 'e.test.mjs']);
 });
 
-test('only surviving mutants without a matching survivor in base fail', () => {
-  assert.deepEqual([isNewSurvivor(false, false), isNewSurvivor(true, false), isNewSurvivor(true, true)],
-    [false, true, false]);
+test('only completed test runs give a mutant verdict', () => {
+  const tap = '# pass 0\n# fail 1\n# cancelled 0\n';
+  assert.equal(testVerdict({ status: 1, stdout: tap }, false), false);
+  assert.equal(testVerdict({ status: 1, stdout: `  exitCode: 1\n${tap}` }, false), null);
+  assert.equal(testVerdict({ status: 0, stdout: '# pass 0\n# cancelled 0\n' }, false), null);
 });
 
 test('zero-context hunks distinguish edited from shifted lines', () => {
@@ -48,8 +54,9 @@ test('hosted Git diffs exercise the mutation verdict', { skip: process.env.MUTAT
   assert.equal(process.env.GITHUB_ACTIONS, 'true');
   const { dir, git, commit } = repository(t);
   const module = 'export const existing = n => n >= 2;\nexport const legacy = n => n === 10;\n';
-  const testFile = "import assert from 'node:assert/strict';\nimport { existing } from './source.mjs';\n";
-  const base = commit({ 'source.mjs': module, 'behavior.test.mjs': testFile + 'assert.equal(existing(2), true);\n' });
+  const testFile = "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { existing } from './source.mjs';\n";
+  const strong = "test('existing threshold', () => assert.equal(existing(2), true));\n";
+  const base = commit({ 'source.mjs': module, 'behavior.test.mjs': testFile + strong });
   const baseline = join(dir, '.git', 'baseline');
   git('worktree', 'add', '--quiet', '--detach', baseline, base);
   const parser = 'apps/drive/node_modules/typescript';
@@ -62,12 +69,12 @@ test('hosted Git diffs exercise the mutation verdict', { skip: process.env.MUTAT
 
   for (const [name, files, status, expected] of [
     ['strong new assertion', { 'source.mjs': source, 'behavior.test.mjs': changedTest +
-      'assert.equal(existing(2), true);\nassert.equal(added(7), true);\n' }, 0,
+      strong + "test('new threshold', () => assert.equal(added(7), true));\n" }, 0,
     ['"line":4,"from":"<=","to":"<","result":"killed"', '"result":"baseline survivor"']],
     ['weak new assertion', { 'source.mjs': source, 'behavior.test.mjs': changedTest +
-      "assert.equal(existing(2), true);\nassert.equal(typeof added(7), 'boolean');\n" }, 1, ['"line":4', '1 new survivor(s)']],
+      strong + "test('new type', () => assert.equal(typeof added(7), 'boolean'));\n" }, 1, ['"line":4', '1 new survivor(s)']],
     ['weakened existing assertion', { 'behavior.test.mjs': testFile +
-      "assert.equal(typeof existing(2), 'boolean');\n" }, 1, ['"line":1', '1 new survivor(s)']],
+      "test('existing type', () => assert.equal(typeof existing(2), 'boolean'));\n" }, 1, ['"line":1', '1 new survivor(s)']],
     ['unrelated diff', { 'other.md': 'unrelated' }, 0, ['0 target(s), 0 new survivor(s)']],
   ]) {
     await t.test(name, () => {

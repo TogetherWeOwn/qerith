@@ -108,17 +108,35 @@ function candidates(ts, root, baseline, base, head, target, changes, tracked) {
   return [...modified, ...comparable];
 }
 
+export function testVerdict({ status, stdout }, workers, file) {
+  if (status !== 0 && status !== 1) return null;
+  if (workers) {
+    const report = stdout.split('\n').find(line => line.startsWith('{"numTotalTestSuites":'));
+    const result = report && JSON.parse(report);
+    if (result?.testResults?.length !== 1 || result.testResults[0].name !== file || result.testResults[0].message) return null;
+    if (status === 0 && result.numPassedTests > 0 && result.success) return true;
+    if (status === 1 && result.numFailedTests > 0) return false;
+  } else if (/^# cancelled 0$/m.test(stdout) && !/^ +(?:exitCode|signal):/m.test(stdout)) {
+    if (status === 0 && /^# pass [1-9]\d*$/m.test(stdout)) return true;
+    if (status === 1 && /^# fail [1-9]\d*$/m.test(stdout)) return false;
+  }
+  return null;
+}
+
 function runTest(root, target, clean) {
   const cwd = isWorkers(target) ? join(root, 'apps/drive-test') : isDrive(target) ? join(root, 'apps/drive') : root;
   const file = join(root, target);
   const args = isWorkers(target)
-    ? ['node_modules/vitest/vitest.mjs', 'run', '--maxWorkers=1', file]
-    : [...(isDrive(target) ? ['--import', 'tsx'] : []), '--test', file];
+    ? ['node_modules/vitest/vitest.mjs', 'run', '--maxWorkers=1', '--reporter=json', file]
+    : [...(isDrive(target) ? ['--import', 'tsx'] : []), '--test', '--test-reporter=tap', file];
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  if (target === 'apps/drive/scripts/staging-qualification-migrations.test.mjs') env.DRIVE_QUALIFICATION_WRANGLER_LOCAL = '1';
   const run = spawnSync('timeout', ['--kill-after=2s', '30s', process.execPath, ...args],
-    { cwd, encoding: 'utf8', maxBuffer: 2 ** 20 });
-  if (run.status === 0) return true;
-  if (!clean && run.status === 1) return false;
-  throw new Error(`Test execution failed for ${target} (exit ${run.status}): ${JSON.stringify(run.stderr?.slice(-2000))}`);
+    { cwd, env, encoding: 'utf8', maxBuffer: 2 ** 20 });
+  const verdict = testVerdict(run, isWorkers(target), file);
+  if (verdict === true || (!clean && verdict === false)) return verdict;
+  throw new Error(`Test execution failed for ${target} (exit ${run.status}): ${JSON.stringify((run.stdout + run.stderr).slice(-2000))}`);
 }
 
 function survives(root, target, mutant) {
@@ -130,10 +148,6 @@ function survives(root, target, mutant) {
   } finally {
     writeFileSync(file, text);
   }
-}
-
-export function isNewSurvivor(headSurvives, baseSurvives) {
-  return headSurvives && !baseSurvives;
 }
 
 export function audit(ts, root, baseline, base, head) {
@@ -157,7 +171,7 @@ export function audit(ts, root, baseline, base, head) {
         baselineChecked = true;
         baseSurvives = survives(baseline, oldTarget, mutant.old);
       }
-      const isNew = isNewSurvivor(headSurvives, baseSurvives);
+      const isNew = headSurvives && !baseSurvives;
       if (isNew) newSurvivors++;
       console.log(JSON.stringify({ target, source: mutant.path, line: mutant.line, from: mutant.original,
         to: mutant.replacement, result: isNew ? 'new survivor' : headSurvives ? 'baseline survivor' : 'killed' }));

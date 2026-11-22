@@ -312,8 +312,7 @@ jobs:
       - name: Report PR-only scope on main
         if: github.event_name == 'push'
         run: echo 'Mutation execution requires a pull request diff.'
-      # An older PR head can predate the gate. Read the controller from the
-      # integration snapshot and execute the exact PR and merge-base trees.
+      # Compare the integration snapshot against its exact base parent.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
         with:
@@ -330,10 +329,10 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          base=$(git merge-base "$PR_BASE" "$PR_HEAD")
-          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$base" "$PR_HEAD")
+          test "$(git rev-list --parents -n 1 HEAD)" = "$GITHUB_SHA $PR_BASE $PR_HEAD"
+          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$PR_BASE" "$GITHUB_SHA")
           read -r targets workers drive proof <<< "$plan"
-          printf 'Comparing %s to %s\n' "$base" "$PR_HEAD"
+          printf 'Comparing base %s to integration %s for PR head %s\n' "$PR_BASE" "$GITHUB_SHA" "$PR_HEAD"
           if [[ "$targets" == 0 && "$proof" == 0 ]]; then
             echo 'Mutation pass: 0 target(s), 0 new survivor(s)'
             exit 0
@@ -341,10 +340,8 @@ jobs:
 
           export MUTATION_HEAD="$RUNNER_TEMP/mutation-head"
           baseline="$RUNNER_TEMP/mutation-base"
-          git worktree add --detach "$MUTATION_HEAD" "$PR_HEAD"
-          git worktree add --detach "$baseline" "$base"
-          test "$(git -C "$MUTATION_HEAD" rev-parse HEAD)" = "$PR_HEAD"
-          test "$(git -C "$baseline" rev-parse HEAD)" = "$base"
+          git worktree add --detach "$MUTATION_HEAD" "$GITHUB_SHA"
+          git worktree add --detach "$baseline" "$PR_BASE"
           test "$(npm --version)" = '11.19.0'
 
           install_locked() {
@@ -375,7 +372,7 @@ jobs:
           if [[ "$proof" == 1 ]]; then
             MUTATION_PROOF=1 node --test scripts/pr-mutation.test.mjs
           fi
-          node scripts/pr-mutation.mjs run "$MUTATION_HEAD" "$base" "$PR_HEAD" "$baseline"
+          node scripts/pr-mutation.mjs run "$MUTATION_HEAD" "$PR_BASE" "$GITHUB_SHA" "$baseline"
 
   sealed-output-reader:
     name: sealed output reader

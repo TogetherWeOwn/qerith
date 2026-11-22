@@ -1,8 +1,9 @@
 # PR test mutations
 
-The `ci / PR test mutations` check runs on GitHub Actions. It uses the exact PR
-head and its merge base with the event's base SHA. The main-branch check reports
-success without running mutants. This check stands outside `ci-ok` during rollout.
+The `ci / PR test mutations` check compares the GitHub PR integration commit
+against its base parent. It verifies that both parents match the event's base
+and PR head SHAs. This excludes changes already on the base branch. On main,
+the check reports success without running mutants. It stands outside `ci-ok`.
 
 - Targets are added, modified or Git-detected renamed `*.test.mjs` files. The
   first four paths in lexical order are sampled. The job logs omitted targets.
@@ -20,8 +21,9 @@ success without running mutants. This check stands outside `ci-ok` during rollou
   it to a base line and the old test directly imports that base module with
   the same operator at the same column. Git-detected renames use the old paths.
 - The selected test first runs on clean source. Node runs ordinary tests and
-  Vitest runs the offline D1 tests. A mutant survives when that same file
-  exits successfully with the changed operator. On an unchanged line, a
+  Vitest runs the offline D1 tests. The migration test enables its local
+  Wrangler assertion. A mutant survives when the same file reports passing
+  tests with the changed operator. On an unchanged line, a
   survivor is grandfathered only if the corresponding base mutant also
   survives the old test on its own cleanly passing checkout. A survivor on
   an added or edited line or one the base test killed fails the job.
