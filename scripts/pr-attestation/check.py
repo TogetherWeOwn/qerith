@@ -133,7 +133,7 @@ def test_issues(policy, history, base, head, body, files):
         old_path = changes[path]
         baseline = history.blob(base, old_path, baseline=True) if supported(old_path) else None
         try:
-            current, prior = compare(path, candidate, old_path, baseline)
+            current, prior = compare(path, candidate, old_path, baseline, {name for _, name in names})
         except (SyntaxError, ValueError):
             for claim, _ in names:
                 yield claim, "test_source_unsupported_or_invalid"

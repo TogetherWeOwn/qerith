@@ -19,6 +19,10 @@ LANGUAGES = {".js": JS, ".mjs": JS, ".cjs": JS, ".ts": TS, ".mts": TS, ".cts": T
              ".tsx": TSX, ".jsx": JS, ".rs": RUST}
 RUST_TEST = re.compile(rb"#\[\s*(?:tokio\s*::\s*)?test(?:\s*\(.*\))?\s*\]", re.S)
 JS_ESCAPE = re.compile(r"\\(?:u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|\r\n|[\s\S])")
+FUNCTIONS = {"arrow_function", "function_declaration", "function_expression", "generator_function",
+             "generator_function_declaration", "method_definition"}
+BINDING_FIELDS = {"assignment_pattern": "left", "object_assignment_pattern": "left", "pair_pattern": "value",
+                  "required_parameter": "pattern", "optional_parameter": "pattern"}
 
 
 def descendants(root):
@@ -113,20 +117,57 @@ def tuple_items(node):
 
 
 def binds(pattern, name):
-    return pattern is not None and any(
-        node.type in {"identifier", "shorthand_property_identifier_pattern"} and text(node) == name
-        for node in descendants(pattern)
-    )
+    if pattern is None:
+        return False
+    if pattern.type in {"identifier", "shorthand_property_identifier_pattern"}:
+        return text(pattern) == name
+    if pattern.type in BINDING_FIELDS:
+        return binds(pattern.child_by_field_name(BINDING_FIELDS[pattern.type]), name)
+    if pattern.type in {"array_pattern", "object_pattern", "formal_parameters", "rest_pattern"}:
+        return any(binds(child, name) for child in pattern.named_children)
+    return False
+
+
+def declares(statement, name):
+    if statement is None:
+        return False
+    if statement.type in {"function_declaration", "generator_function_declaration", "class_declaration"}:
+        return text(statement.child_by_field_name("name")) == name
+    if statement.type in {"lexical_declaration", "variable_declaration"}:
+        return any(binds(binding.child_by_field_name("name"), name) for binding in statement.named_children)
+    return False
+
+
+def hoists_var(body, name):
+    pending = [body] if body is not None else []
+    while pending:
+        node = pending.pop()
+        if node.type in FUNCTIONS or node.type == "class_static_block":
+            continue
+        if node.type == "variable_declaration" and declares(node, name):
+            return True
+        if (node.type == "for_in_statement" and text(node.child_by_field_name("kind")) == "var"
+                and binds(node.child_by_field_name("left"), name)):
+            return True
+        pending.extend(node.named_children)
+    return False
 
 
 def shadows(scope, name):
     if any(binds(scope.child_by_field_name(field), name) for field in ("parameters", "parameter")):
         return True
-    if scope.type != "statement_block":
-        return False
-    return any(binds(binding.child_by_field_name("name"), name)
-               for statement in scope.named_children if statement.type in {"lexical_declaration", "variable_declaration"}
-               for binding in statement.named_children if binding.type == "variable_declarator")
+    if scope.type in FUNCTIONS:
+        return (text(scope.child_by_field_name("name")) == name
+                or hoists_var(scope.child_by_field_name("body"), name))
+    if scope.type == "class":
+        return text(scope.child_by_field_name("name")) == name
+    if scope.type == "statement_block":
+        return any(declares(statement, name) for statement in scope.named_children)
+    if scope.type == "for_statement":
+        return declares(scope.child_by_field_name("initializer"), name)
+    if scope.type == "switch_body":
+        return any(declares(statement, name) for case in scope.named_children for statement in case.named_children)
+    return False
 
 
 def js_loop_values(call, name):
@@ -275,7 +316,7 @@ def scan(path, source, grammar=None):
     return by_name
 
 
-def compare(path, source, old_path, baseline):
+def compare(path, source, old_path, baseline, selectors=None):
     current = scan(path, source)
     if baseline is None:
         return current, {}
@@ -284,11 +325,11 @@ def compare(path, source, old_path, baseline):
     js_grammars = {JS, TS, TSX}
     if head_grammar in js_grammars and base_grammar in js_grammars and head_grammar != base_grammar:
         # Both sides must use the same AST grammar for an extension-only rename.
-        names = {name: len(matches) for name, matches in current.items()}
+        names = current.keys() if selectors is None else selectors
         for grammar in dict.fromkeys((head_grammar, TSX, base_grammar)):
             try:
                 candidate = current if grammar == head_grammar else scan(path, source, grammar=grammar)
-                if {name: len(matches) for name, matches in candidate.items()} == names:
+                if all(len(candidate.get(name, ())) == len(current.get(name, ())) for name in names):
                     return candidate, scan(old_path, baseline, grammar=grammar)
             except ValueError:
                 continue

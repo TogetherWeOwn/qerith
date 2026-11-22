@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from check import CheckError, History, REPO, load_policy, main, verdict
-from declarations import compare, scan
+from declarations import TS, compare, scan
 
 
 FILE = "test_sample.py"
@@ -180,6 +180,22 @@ class DeclarationsTests(unittest.TestCase):
         self.assertEqual(set(baseline), {"renders"})
         self.assertNotEqual(head["renders"], baseline["renders"])
 
+    def test_rename_fallback_checks_only_cited_declarations(self):
+        def grammar_scan(path, source, grammar=None):
+            if source == b"head":
+                tests = {"cited": ["head fingerprint"]}
+                if grammar is None:
+                    tests["unrelated"] = ["unrelated fingerprint"]
+                return tests
+            if grammar == TS:
+                raise ValueError("unsupported baseline")
+            return {"cited": ["baseline fingerprint"]}
+
+        with patch("declarations.scan", side_effect=grammar_scan):
+            head, baseline = compare("test.ts", b"head", "test.jsx", b"baseline", {"cited"})
+        self.assertEqual(head["cited"], ["head fingerprint"])
+        self.assertEqual(baseline["cited"], ["baseline fingerprint"])
+
     def test_loop_titles_resolve_in_callbacks_that_capture_the_binding(self):
         source = b"""
           import test from 'node:test';
@@ -195,6 +211,41 @@ class DeclarationsTests(unittest.TestCase):
         """
         self.assertEqual(set(scan("sample.test.mjs", source)), {
             "parent", "${kind} verified", "registration verified", "authentication verified", "${kind} shadowed",
+        })
+
+    def test_defaults_that_read_loop_variables_do_not_shadow_them(self):
+        source = b"""
+          import test from 'node:test';
+          for (const kind of ['outer']) {
+            const { label = kind, [kind]: property } = {};
+            [undefined].forEach((value = kind) => test(`${kind} child`, () => {}));
+            {
+              const { nested: kind = label } = {};
+              test(`${kind} shadowed`, () => {});
+            }
+          }
+        """
+        self.assertEqual(set(scan("sample.test.mjs", source)), {
+            "${kind} child", "outer child", "${kind} shadowed",
+        })
+
+    def test_loop_initializers_and_hoisted_declarations_stop_title_expansion(self):
+        source = b"""
+          import test from 'node:test';
+          for (const kind of ['outer']) {
+            for (let kind = 'inner', i = 0; i < 1; i++) test(`${kind} child`, () => {});
+            (function kind() { test(`${kind} named`, () => {}); })();
+            (() => {
+              if (true) { var kind = 'inner'; }
+              test(`${kind} hoisted`, () => {});
+            })();
+            switch (1) {
+              case 1: const kind = 'inner'; test(`${kind} switched`, () => {});
+            }
+          }
+        """
+        self.assertEqual(set(scan("sample.test.mjs", source)), {
+            "${kind} child", "${kind} named", "${kind} hoisted", "${kind} switched",
         })
 
     def test_typescript_const_table_resolves_each_name_and_row_change(self):
