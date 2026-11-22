@@ -2,8 +2,9 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import {
-  isQualificationRunNumber, qualificationTimeLeft, qualificationWindowMs, readinessHeaders, readinessPath, stagingOrigin,
+  qualificationTimeLeft, qualificationWindowMs, readinessHeaders, readinessPath, stagingOrigin,
 } from '../src/lib/server/qualification-readiness.ts';
+import { isQualificationRunNumber } from '../src/lib/server/qualification-scope.mjs';
 import { stagingStorage, validateStagingConfig, validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
 import { uploadVersion } from './staging-qualification-upload.mjs';

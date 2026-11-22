@@ -1,5 +1,5 @@
 import type { LivePrincipalMode } from '../identity/sessions';
-import type { qualificationPrefix } from '../qualification-readiness';
+import type { qualificationPrefix } from '../qualification-scope.mjs';
 import { MAX_PART_BYTES } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
 

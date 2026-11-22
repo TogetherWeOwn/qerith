@@ -45,6 +45,7 @@ const storageProof = JSON.stringify({ version: 1, storageConfigId, region: confi
 
 function candidateEnv(db, overrides = {}) {
   return wireUploadStorage({ DB: db, DRIVE_ORIGIN: stagingOrigin,
+    DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
     DRIVE_QUALIFICATION_SHA: 'a'.repeat(40), DRIVE_QUALIFICATION_RUN_ID: '18', DRIVE_QUALIFICATION_RUN_ATTEMPT: '2',
     DRIVE_QUALIFICATION_VERSION: { id: '00000000-0000-4000-8000-000000000001' },
     DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 60_000),
@@ -68,7 +69,7 @@ it.each([
   ['ordinary app', origin, 'member', '{"size":4}', false],
   ['ordinary staging', stagingOrigin, 'owner', '{"size":4}', false],
   ['qualification preview', stagingOrigin, 'owner', '{"size":4}', true],
-  ['qualification multipart', stagingOrigin, 'member', boundBody(0, empty), true],
+  ['qualification digest-bound with synthetic invite opt-in', stagingOrigin, 'member', boundBody(0, empty), true],
 ])('reserves the exact server-selected key before multipart dispatch for %s', async (_mode, target, role, body, candidate) => {
   const { db, owner, post, row, fetch } = await allocationFixture(target, role);
   const overrides = candidate ? candidateEnv(db, role === 'member' ? multipart : {}) : {};
@@ -94,6 +95,13 @@ it.each([
   expect(await row()).toMatchObject({ object_key: claimed.object_key, state: 'allocated', upload_id: 'provider-only' });
   expect(fetch).toHaveBeenCalledOnce();
   expect(fetch.mock.calls[0][0].url).toBe(`${config.endpoint}/${config.bucket}/${claimed.object_key}?uploads=`);
+});
+
+it('keeps digest-bound upload admission closed under uploaded candidate settings', async () => {
+  const { db, post, row, fetch } = await allocationFixture();
+  expect((await post(boundBody(0, empty), { overrides: candidateEnv(db) })).status).toBe(400);
+  expect(await row()).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 it('fails closed for partial, stale, non-staging and unqualified candidate uploads', async () => {

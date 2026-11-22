@@ -1,3 +1,5 @@
+import { isQualificationRunNumber, qualificationPrefix } from './qualification-scope.mjs';
+
 export const stagingOrigin = 'https://qerith-drive-staging.5150.workers.dev';
 export const readinessPath = '/api/deployer/qualification-readiness';
 export const readinessHeaders = {
@@ -17,20 +19,8 @@ export interface QualificationReadinessEnv {
 }
 
 export const qualificationWindowMs = 25 * 60_000;
-export const qualificationFixtureNamespace = 'drive-qualification/full-v0/';
 const shaPattern = /^[0-9a-f]{40}$/;
 const versionPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-
-export function isQualificationRunNumber(value: unknown): value is string {
-  return typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
-}
-
-export function qualificationPrefix({ runId, attempt }: { runId: unknown; attempt: unknown }) {
-  if (!isQualificationRunNumber(runId) || !isQualificationRunNumber(attempt)) {
-    throw new Error('Invalid qualification run or attempt.');
-  }
-  return `${qualificationFixtureNamespace}${runId}/${attempt}/` as const;
-}
 
 export function qualificationTimeLeft(expiresAt: unknown, now = Date.now()): number {
   if (typeof expiresAt !== 'string' || !/^[1-9][0-9]{12}$/.test(expiresAt)) return 0;

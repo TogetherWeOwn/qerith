@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isQualificationRunNumber } from '../src/lib/server/qualification-readiness.ts';
-export { qualificationFixtureNamespace, qualificationPrefix } from '../src/lib/server/qualification-readiness.ts';
+import { isQualificationRunNumber } from '../src/lib/server/qualification-scope.mjs';
+export { qualificationFixtureNamespace, qualificationPrefix } from '../src/lib/server/qualification-scope.mjs';
 
 const repo = 'TogetherWeOwn/qerith';
 const main = 'refs/heads/main';
