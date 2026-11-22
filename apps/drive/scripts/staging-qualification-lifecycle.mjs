@@ -7,7 +7,7 @@ import { createQualificationR2RecoveryStore } from './staging-qualification-reco
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import {
-  probeQualificationWorker, qualificationMigrationTimeLeft, runQualificationPhase, uploadQualificationWorker,
+  probeQualificationWorker, qualificationMigrationTimeLeft, runQualificationPhase,
   withQualificationRecovery, withQualificationWorker,
 } from './staging-qualification-worker.mjs';
 
@@ -15,7 +15,6 @@ const recordBudget = 15_000;
 const insufficientWindow = () => new Error('Staging candidate has insufficient time left for migrations and activation.');
 
 const stagingAdapters = (send = fetch) => ({
-  upload: (env, cwd, signal, admission) => uploadQualificationWorker(env, cwd, signal, send, undefined, admission),
   migrate: applyQualificationMigrations,
   worker: (ops, env, cwd, signal) => withQualificationWorker(ops, env, cwd, signal, send),
   probe: (context, signal) => probeQualificationWorker(context, signal, send),
@@ -23,12 +22,15 @@ const stagingAdapters = (send = fetch) => ({
 
 // Offline composition only. No provider I/O during construction. A protected
 // caller must hold the lifecycle lock and supply real admission, estate,
-// app case and writer-fence adapters. `stageOverrides` is an offline test seam.
+// app case and writer-fence adapters. There is no default candidate uploader.
+// A protected uploader must keep the build inputs isolated through bundling.
+// `stageOverrides` is an offline test seam.
 export async function createQualificationLifecycle(env, cwd, { readAdmissionEvidence, readWriterFence, readEstate,
-  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send } = {}, stageOverrides) {
+  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, uploadCandidate, send } = {}, stageOverrides) {
   if (typeof readAdmissionEvidence !== 'function' || typeof send !== 'function') {
     throw new Error('Qualification lifecycle requires reviewed admission and an explicit transport.');
   }
+  if (typeof uploadCandidate !== 'function') throw new Error('Qualification requires an explicit candidate uploader.');
   const settings = Object.freeze({ ...env });
   const source = assertQualificationJob(settings, cwd);
   await assertQualificationSettings(settings, cwd);
@@ -50,7 +52,7 @@ export async function createQualificationLifecycle(env, cwd, { readAdmissionEvid
         // Check retention before uploading, without replacing the per-write checks.
         await store.assertRetention(signal);
         signal?.throwIfAborted();
-        return stages.upload(env, cwd, signal, admission);
+        return uploadCandidate(env, cwd, signal, admission);
       },
     });
   };
@@ -64,6 +66,7 @@ export async function runQualificationLifecycle({ readAdmissionEvidence, recordR
   if ([readAdmissionEvidence, recordRecovery, inventory, exercise, cleanup].some(fn => typeof fn !== 'function')) {
     throw new Error('Qualification lifecycle requires full-v0 checks, recovery, inventory and cleanup.');
   }
+  if (typeof upload !== 'function') throw new Error('Qualification requires an explicit candidate uploader.');
   const context = { ...identity, prefix: qualificationPrefix(identity) };
   const requireProof = async (task, input, parentSignal, timeout, message) => {
     if (await runQualificationPhase(task, input, parentSignal, timeout) !== true) throw new Error(message);

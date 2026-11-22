@@ -325,7 +325,7 @@ test('Worker inventory rejects cron, unknown bindings, candidates, deployment dr
   }
 });
 
-function uploadFixture({ cwd, app, env }, admission) {
+function uploadFixture({ cwd, app, env }) {
   const state = { current: deployment(prior, baseline), tag: `${env.GITHUB_SHA}-18-2` };
   const calls = [];
   const controller = new AbortController();
@@ -336,7 +336,7 @@ function uploadFixture({ cwd, app, env }, admission) {
     uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
   const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
     [expiryBinding]: expiresAt, ...attemptVars, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
-    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled', ...(admission && candidateAppSettings) };
+    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
   async function request(url, { method, body, headers }) {
     const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/`;
@@ -386,7 +386,7 @@ function uploadFixture({ cwd, app, env }, admission) {
   }
   const run = override => uploadQualificationWorker({ ...env, ...storageEnv,
     WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override },
-    cwd, controller.signal, request, runner, admission);
+    cwd, controller.signal, request, runner);
   return { setup, calls, scratch: () => scratch, run };
 }
 
@@ -398,26 +398,11 @@ test('uploads only the exact-attempt version with inherited secrets and an uncha
   assert.ok(!existsSync(scratch()));
 });
 
-test('uploads admitted settings and verifies the immutable version readback', async t => {
-  const source = fixture(t, true);
-  source.git('restore', '--', 'apps/drive/scripts/staging-storage-qualification.json');
-  const admission = await assertFullV0(source.env, source.cwd, fakeQualificationAdmission);
-  const good = uploadFixture(source, admission);
-  assert.deepEqual(await good.run({ DRIVE_SIGN_IN_FIXTURE: '1', DRIVE_STAGING_READ_GRANTS: '0' }),
+test('stock version upload keeps its admission defaults despite environment opt-ins', async t => {
+  const { run } = uploadFixture(fixture(t, true));
+  assert.deepEqual(await run({ DRIVE_SIGN_IN_FIXTURE: '1', DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+    DRIVE_STAGING_READ_GRANTS: '1', DRIVE_STAGING_SHARED_LISTING: '1', DRIVE_OWNER_ENROLLMENT_RELEASE: 'enabled' }),
     { version: candidate, expiresAt, previousVersion: baseline, previousDeployment: prior });
-  const bad = uploadFixture(source, admission);
-  bad.setup.adjust = bindings => bindings.filter(binding => binding.name !== 'DRIVE_STAGING_READ_GRANTS');
-  await assert.rejects(bad.run(), /incompatible resource/);
-  assert.ok(bad.calls.includes('upload'));
-
-  for (const incorrect of [true, { ...admission }]) {
-    const forged = uploadFixture(source, incorrect);
-    await assert.rejects(forged.run(), /admission is unverified/);
-    assert.deepEqual(forged.calls, []);
-  }
-  const wrongAttempt = uploadFixture(source, admission);
-  await assert.rejects(wrongAttempt.run({ GITHUB_RUN_ATTEMPT: '3' }), /admission is unverified/);
-  assert.deepEqual(wrongAttempt.calls, []);
 });
 
 test('rejects a newer undeployed version before inheriting staging secrets', async t => {
@@ -500,7 +485,15 @@ test('activation requires exact admitted settings under the correct version tag'
   await assert.rejects(run(), /requires reviewed app admission/);
   assert.deepEqual(calls.splice(0), ['current', 'version']);
 
-  options.admission = await assertFullV0(env, cwd, fakeQualificationAdmission);
+  const admission = await assertFullV0(env, cwd, fakeQualificationAdmission);
+  for (const wrong of [true, { ...admission }]) {
+    options.admission = wrong;
+    await assert.rejects(run(), /admission is unverified/);
+    assert.deepEqual(calls, []);
+  }
+  options.admission = admission;
+  await assert.rejects(run({ GITHUB_RUN_ATTEMPT: '3' }), /admission is unverified/);
+  assert.deepEqual(calls, []);
   for (const name of Object.keys(candidateAppSettings)) {
     for (const bad of [null, { name, type: 'plain_text', text: 'invalid' },
       { name, type: 'json', text: candidateAppSettings[name] }]) {

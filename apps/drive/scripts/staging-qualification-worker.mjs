@@ -275,10 +275,8 @@ export async function inspectQualificationWorker(env, cwd, signal, request = fet
 
 // Unwired: the protected caller must hold the lifecycle lock and supply a fresh
 // build of the checked-out SHA. This prepares a version, not a deployment.
-export async function uploadQualificationWorker(env, cwd = process.cwd(), signal, request = fetch, run = spawn, admission) {
-  const source = assertQualificationJob(env, cwd);
-  const { sha, runId, attempt } = source;
-  const appSettings = admission === undefined ? stockAppSettings : admittedAppSettings(admission, source, cwd);
+export async function uploadQualificationWorker(env, cwd = process.cwd(), signal, request = fetch, run = spawn) {
+  const { sha, runId, attempt } = assertQualificationJob(env, cwd);
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
   if (typeof token !== 'string' || !token.trim()) throw new Error('Staging Worker upload requires the protected credentials.');
   const root = join(cwd, 'apps/drive');
@@ -305,7 +303,7 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   }
   const expiresAt = String(Date.now() + qualificationWindowMs);
   const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
-    [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), ...appSettings };
+    [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), ...stockAppSettings };
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
   const candidate = checkedBindings(await api.assertUploaded(version, tag, signal), config, vars);

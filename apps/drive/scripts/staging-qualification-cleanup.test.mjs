@@ -14,7 +14,7 @@ import { createQualificationRecovery } from './staging-qualification-recovery.mj
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
-import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 import { fixture as accessFixture } from './staging-qualification-access.test.mjs';
 import { setup as fileFixture } from './staging-qualification-files.test.mjs';
@@ -554,6 +554,15 @@ function composedLifecycle({ cwd, env, active, phases, exercise, signal, after =
 }
 
 const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
+
+test('composed lifecycle requires explicit admission, transport and candidate upload', async t => {
+  const { env, cwd } = job(t);
+  const unused = () => assert.fail('Preparation must not call adapters');
+  await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { readAdmissionEvidence: unused }), /requires.*explicit transport/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { readAdmissionEvidence: unused, send: unused }),
+    /requires an explicit candidate uploader/);
+});
 
 test('lifecycle aborts and drains an escaped access callback before recovery', { timeout: 10_000 }, async t => {
   const { cwd, env, context } = job(t);

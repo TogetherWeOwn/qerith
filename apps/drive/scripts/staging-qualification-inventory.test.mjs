@@ -12,6 +12,7 @@ import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } fr
 import { candidateAppSettings, fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
 import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { admittedAppSettings } from './staging-qualification-admission.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
 import { qualificationReadiness, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 
@@ -224,13 +225,6 @@ function fixture(t, { migrationLimit } = {}) {
   return { context, create, trace, env, cwd, reads, seed, get state() { return state; } };
 }
 
-test('composed lifecycle has no default admission or transport', async t => {
-  const { env, cwd } = fixture(t);
-  const unused = () => assert.fail('Preparation must not call adapters');
-  await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
-  await assert.rejects(createQualificationLifecycle(env, cwd, { readAdmissionEvidence: unused }), /requires.*explicit transport/);
-});
-
 for (const [label, migrationLimit] of [['an uninitialized', null], ['a partially migrated', 1]]) {
   test(`composed lifecycle refuses ${label} D1 before upload or migration`, async t => {
     const { cwd, env, reads, trace } = fixture(t, { migrationLimit });
@@ -239,8 +233,8 @@ for (const [label, migrationLimit] of [['an uninitialized', null], ['a partially
       readAdmissionEvidence(scope) { trace.push('admission'); return fakeQualificationAdmission(scope); },
       readEstate: reads.readEstate, readWriterFence: unused,
       withAccessFixtures: unused, readFileFixtures: unused, openTransferClient: unused, openDeletion: unused,
-      send: reads.request,
-    }, { upload: unused, migrate: unused });
+      uploadCandidate: unused, send: reads.request,
+    }, { migrate: unused });
     await assert.rejects(run(), { message: 'Qualification estate inventory is unverified.' });
     assert.deepEqual(trace, ['admission', ...beforeD1Census]);
   });
@@ -338,6 +332,13 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
       signal.throwIfAborted(); assert.deepEqual(scope, context); trace.push('admission');
       return fault === 'admission' ? null : fakeQualificationAdmission(scope);
     },
+    uploadCandidate(_env, worktree, signal, admission) {
+      signal?.throwIfAborted();
+      assert.deepEqual(admittedAppSettings(admission, identity, worktree), candidateAppSettings);
+      trace.push('upload');
+      if (fault === 'retention after upload') state.recordRetention = false;
+      return candidate;
+    },
     async send(request, init) {
       if (typeof request === 'string') return nativeRequest(request, init);
       const path = new URL(request.url).pathname;
@@ -361,11 +362,6 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     },
   };
   const run = await createQualificationLifecycle(env, cwd, inputs, fault === 'default retention' ? undefined : {
-    upload() {
-      trace.push('upload');
-      if (fault === 'retention after upload') state.recordRetention = false;
-      return candidate;
-    },
     async migrate({ recordRecovery }) {
       await recordRecovery({ bookmark: 'offline_bookmark' });
       if (fault === 'retention after D1') state.recordRetention = false;

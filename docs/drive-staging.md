@@ -214,10 +214,15 @@ archive. The offline tests inject synthetic records for that interface.
 
 The resulting attempt-bound admission pins invite acceptance, read grants
 and shared listing to `1`, fixture sign-in to `0`, and owner enrollment to
-`disabled`. The qualification uploader verifies these settings on the
-immutable version and the Worker lifecycle verifies them again before
-activation. Synthetic owner provisioning requires its own reviewed path
-under the writer fence after the initial clean census.
+`disabled`. The Worker lifecycle verifies the settings on the immutable
+version before activation. Full-v0 composition requires an explicit candidate
+uploader. A protected implementation must build the admitted commit in an
+exclusive checkout and keep the Worker entry, its transitive sources, assets,
+migrations, and pinned build tools isolated through Wrangler upload. It must
+verify the candidate's settings on upload readback before returning its
+version. The stock uploader continues to use closed opt-ins.
+Synthetic owner provisioning requires its own reviewed path under the writer
+fence after the initial clean census.
 
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. R2 prefix and D1 migration-fixture cleanup require a quiescence
