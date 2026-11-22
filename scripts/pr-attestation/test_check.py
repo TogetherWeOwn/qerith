@@ -48,12 +48,14 @@ class ExactHeadTests(unittest.TestCase):
         cls.git("init", "--quiet", "--template=")
         cls.write(FILE, "def test_stale():\n    assert 1\n\ndef test_unchanged():\n    assert 1\n")
         cls.write("test_baseline.py", "def test_baseline():\n    assert 1\n")
+        cls.write("server.test.mjs", "import test from 'node:test';\ntest('serves assets', (t) => { t.assert.ok(true) });\n")
         cls.base = cls.commit("baseline")
         cls.write(FILE, "raise RuntimeError('candidate must never execute')\n"
                   "def test_good():\n    assert 2\n\ndef test_unchanged():\n    assert 1\n")
         cls.write("test_other.py", "def test_other():\n    assert 3\n")
         cls.head = cls.commit("candidate")
         cls.git("mv", "test_baseline.py", "test_renamed.py")
+        cls.git("mv", "server.test.mjs", "server.test.ts")
         cls.rename = cls.commit("rename")
         cls.git("checkout", "--quiet", "--detach", cls.base)
         cls.write("README.md", "Sample documentation.\n")
@@ -104,10 +106,14 @@ class ExactHeadTests(unittest.TestCase):
                 self.assertEqual(self.evaluate(attestation(target))["issues"], [issue])
 
     def test_rename_preserves_baseline_and_proof_exemptions(self):
-        self.assertEqual(self.evaluate(attestation("test_renamed.py::test_baseline"), self.rename, 3)["issues"],
+        self.assertEqual(self.evaluate(attestation("test_renamed.py::test_baseline"), self.rename, 4)["issues"],
                          ["C1: test_declaration_unchanged"])
         self.assertEqual(self.evaluate(attestation(FILE))["issues"], [])
         self.assertEqual(self.evaluate(attestation(None, "T2"), self.docs, 1)["issues"], [])
+
+    def test_javascript_to_typescript_rename_does_not_create_new_evidence(self):
+        result = self.evaluate(attestation("server.test.ts::serves assets"), self.rename, 4)
+        self.assertEqual(result["issues"], ["C1: test_declaration_unchanged"])
 
     def test_stale_event_and_changed_pr_snapshot_are_errors(self):
         api = PullAPI(self.base, self.head, attestation(f"{FILE}::test_good"), 2)
@@ -169,7 +175,7 @@ class DeclarationsTests(unittest.TestCase):
     def test_typescript_const_table_resolves_each_name_and_row_change(self):
         source = b"""
           import test from 'node:test';
-          for (const [kind, count] of ([['registration', 1], ['authentication', 2]] as const)) {
+          for (const [, kind, /* count */ count] of ([[, /* fixture */ 'registration', 1], ['ignored', 'authentication', 2]] as const)) {
             test(`${kind} verified`, () => assert.equal(count, fixture(kind)));
           }
         """
@@ -202,8 +208,12 @@ class DeclarationsTests(unittest.TestCase):
           for (const [kind, fixture] of [['zero', 0], ['one', 1]]) {
             standAloneTest(`loop case ${kind}`, () => {});
           }
+          for (const kind of ['outer']) {
+            ['inner'].forEach((kind) => test(`nested case ${kind}`, () => {}));
+          }
         """
-        expected = {"literal", "parent", "child", "aliased", "case %s", "loop case ${kind}", "loop case zero", "loop case one"}
+        expected = {"literal", "parent", "child", "aliased", "case %s", "loop case ${kind}",
+                    "loop case zero", "loop case one", "nested case ${kind}"}
         self.assertEqual(set(scan("sample.test.mjs", source)), expected)
         self.assertEqual(set(scan("sample.test.ts", source + b"const code: number = 1;")), expected)
 

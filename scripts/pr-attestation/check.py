@@ -14,7 +14,7 @@ import tempfile
 
 # Under python -I, admit this trusted checkout's sibling module explicitly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from declarations import scan, supported
+from declarations import compare, supported
 
 
 REPO = "TogetherWeOwn/qerith"
@@ -133,8 +133,7 @@ def test_issues(policy, history, base, head, body, files):
         old_path = changes[path]
         baseline = history.blob(base, old_path, baseline=True) if supported(old_path) else None
         try:
-            current = scan(path, candidate)
-            prior = scan(old_path, baseline) if baseline is not None else {}
+            current, prior = compare(path, candidate, old_path, baseline)
         except (SyntaxError, ValueError):
             for claim, _ in names:
                 yield claim, "test_source_unsupported_or_invalid"

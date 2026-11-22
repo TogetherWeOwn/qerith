@@ -101,9 +101,22 @@ def js_bindings(root):
     return bindings
 
 
+def tuple_items(node):
+    index = 0
+    for child in node.children:
+        if child.type == ",":
+            index += 1
+        elif child.type in {"rest_pattern", "spread_element"}:
+            break
+        elif child.is_named and child.type != "comment":
+            yield index, child
+
+
 def js_loop_values(call, name):
     """Resolve literal loop rows, including the tuple cases used by node:test."""
     for parent in ancestors(call):
+        if parent.type in {"arrow_function", "function_expression", "function_declaration", "method_definition"}:
+            break
         if parent.type != "for_in_statement":
             continue
         left = parent.child_by_field_name("left")
@@ -115,10 +128,12 @@ def js_loop_values(call, name):
             continue
         if left.type == "identifier" and text(left) == name:
             rows = [(row, row) for row in right.named_children]
-        elif left.type == "array_pattern" and name in [text(item) for item in left.named_children]:
-            index = [text(item) for item in left.named_children].index(name)
-            rows = [(row.named_children[index], row) for row in right.named_children
-                    if row.type == "array" and row.named_child_count > index]
+        elif left.type == "array_pattern":
+            index = next((slot for slot, binding in tuple_items(left) if text(binding) == name), None)
+            if index is None:
+                continue
+            rows = [(value, row) for row in right.named_children if row.type == "array"
+                    for slot, value in tuple_items(row) if slot == index]
         else:
             continue
         return [(js_text(text(value)[1:-1]), fingerprint(row)) for value, row in rows
@@ -224,14 +239,14 @@ def python_declarations(source):
                 yield f"{node.name}::{method.name}", fingerprint
 
 
-def scan(path, source):
+def scan(path, source, grammar=None):
     suffix = PurePosixPath(path).suffix
     if suffix == ".py":
         declarations = python_declarations(source)
     else:
         if suffix not in LANGUAGES:
             raise ValueError("unsupported language")
-        root = Parser(LANGUAGES[suffix]).parse(source).root_node
+        root = Parser(grammar or LANGUAGES[suffix]).parse(source).root_node
         if root.has_error:
             raise ValueError("invalid source")
         declarations = rust_declarations(root) if suffix == ".rs" else js_declarations(root)
@@ -239,6 +254,25 @@ def scan(path, source):
     for label, fingerprint in declarations:
         by_name[label].append(fingerprint)
     return by_name
+
+
+def compare(path, source, old_path, baseline):
+    current = scan(path, source)
+    if baseline is None:
+        return current, {}
+    head_grammar = LANGUAGES.get(PurePosixPath(path).suffix)
+    base_grammar = LANGUAGES.get(PurePosixPath(old_path).suffix)
+    js_grammars = {JS, TS, TSX}
+    if head_grammar in js_grammars and base_grammar in js_grammars and head_grammar != base_grammar:
+        # Both sides must use the same AST grammar for an extension-only rename.
+        for grammar in dict.fromkeys((head_grammar, base_grammar, TSX)):
+            try:
+                candidate = current if grammar == head_grammar else scan(path, source, grammar=grammar)
+                return candidate, scan(old_path, baseline, grammar=grammar)
+            except ValueError:
+                continue
+        raise ValueError("no common JavaScript grammar")
+    return current, scan(old_path, baseline)
 
 
 def supported(path):
