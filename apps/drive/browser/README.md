@@ -18,9 +18,10 @@ The `drive-browser-<head SHA>` artifact contains `head.txt`, screenshots, axe
 WCAG 2/2.1 A/AA and 2.2 AA JSON reports, and keyboard JSON for 1280x800 and
 390x844. Missing files, head mismatch, axe violations and scenario failures fail
 the job. Axe `incomplete` items need human review; a passing automated scan is
-not a complete accessibility audit. Evidence is uploaded only after success.
+not a complete accessibility audit. The final artifact is published after the
+existing scenario checks pass, then the separate registry coverage check reads it.
 The artifact's `provenance.json` records the requested head, actual tested
-checkout, base, integration snapshot, run and mode. For a pull request whose
+checkout, base, integration snapshot, trusted policy commit, run and mode. For a pull request whose
 head predates the fixture introduction and contains no browser fixture, CI
 verifies both snapshot parents and runs the synthetic fixture from that separate
 integration checkout. `head.txt` always identifies the actual tested checkout;
@@ -30,13 +31,11 @@ Local runs can include uncommitted changes and must not be treated as commit
 provenance. After a CI change merges, a substantive pull request body edit starts
 a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
-On the matching head, CI builds the generated Worker once and runs `sign-in.mjs`
-and then the staging-origin fixture in separate Chromium steps. Each entrypoint,
-including its cleanup, has a 90-second timeout and a 10-second kill grace within
-the same 15-minute job. Both steps use the same build and evidence directory.
-The second step uses `staging-root-standalone.mjs` to run `staging-root.mjs` only
-on heads with the split; earlier heads either lack staging coverage or run it
-from `sign-in.mjs`. The sign-in and root-upload evidence is separate from
+On the matching head, CI builds the generated Worker once and runs the
+registered generated commands with separate 90-second deadlines and 10-second
+kill grace periods. The sign-in and staging-origin commands share the build
+and evidence directory. Earlier heads either lack the staging split or run
+staging from `sign-in.mjs`. The sign-in and root-upload evidence is separate from
 `staging-root-round-trip.json`: the latter uses the exact staging origin, a
 disposable D1, and synthetic storage with no sign-in fixture flag or remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh
 without navigation, full and range byte equality, and admission denials. For
@@ -69,12 +68,20 @@ The isolated K13 picker (`?share-recipient`) uses synthetic choices, not a provi
 `*share-recipient-*` evidence covers keyboard, axe and reflow at 1280×800, 390×844
 and 320×844. Screen reader: carried to the first route rendering `ShareRecipientPicker`.
 
-To integrate another Svelte component, replace `fixture/Fixture.svelte` and
-`scenario.mjs` in the consuming change. The scenario must wait for the intended
-fixture state before capture, assert real keyboard focus and activation behavior,
-and return a nonempty JSON-serializable record;
-the runner applies it at both sizes. Keep this test isolated and synthetic; do
-not introduce secrets, real accounts or network dependencies into artifacts.
+To add an isolated scenario, add one `<scenario>.mjs` module exporting
+`exercise(browser, origin, axe, output, entry)` and a matching entry in
+`scenarios.json`. Declare the states, widths `[390, 1280]`, and modes
+`["screenshot", "axe", "keyboard", "greyscale", "forced-colours", "reflow"]`.
+Use `captureAccessibility` for each state and width after asserting the
+fixture is ready. The helper captures the keyboard focus and ARIA tree and
+repeats the layout at 320 px for the reflow image.
+
+CI validates the fixture on the tested commit and reads acceptance policy from
+the verified main snapshot. Existing artifacts are named in the legacy
+inventory. New scenario entries add requirements for their modules and full
+accessibility sets. Coverage fails on an unregistered module, a missing
+required artifact, or an artifact outside the claimed sets. Keep fixtures
+synthetic and their artifacts free of secrets and real account data.
 
 Dependency policy: npm 11.19.0, three-day release age for new resolution, and
 lifecycle scripts disabled. The only browser-lock install-hook candidate is

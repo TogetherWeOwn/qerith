@@ -1,0 +1,187 @@
+{
+  "run": {
+    "check": "fixture",
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["empty-folder-320x844-forced-colours-focus.png","empty-folder-320x844-greyscale.png","empty-folder-320x844-modes.json","empty-folder-320x844-reduced-motion.png","empty-root-320x844-forced-colours-focus.png","empty-root-320x844-greyscale.png","empty-root-320x844-modes.json","empty-root-320x844-reduced-motion.png","head.txt","inline-details-page-zoom-200.png","inline-details-page-zoom-400.png","listing-1280x800-fonts.json","listing-unicode-page-zoom-200.json","listing-unicode-page-zoom-200.png","listing-unicode-page-zoom-400.json","listing-unicode-page-zoom-400.png","menu-clipped-1280x180.png","menu-clipped-1280x800.png","menu-clipped-390x240.png","menu-resize.json","menu-scroll-ancestor.json","menu-scroll-document.json","menu-scroll-menu.json"]},
+      "320 390 1280": {"axe": ["listing-action-menu-modes-{size}-open","unicode-{width}-fallback","unicode-{width}-segmenter"],"file": ["details-{size}.png","empty-folder-{size}.png","empty-root-{size}.png","keyboard-listing-{size}.json","listing-action-menu-modes-{size}-forced-colours-focus.png","listing-action-menu-modes-{size}-greyscale.png","listing-action-menu-modes-{size}-reduced-motion.png","listing-action-menu-modes-{size}.json","listing-action-menu-modes-{size}.png","listing-unicode-{width}-css-zoom-200.png","listing-unicode-{width}-css-zoom-400.png","listing-unicode-{width}-fallback.png","listing-unicode-{width}-font-fallback.png","listing-unicode-{width}-segmenter.png","listing-unicode-{width}-text-spacing.png","menu-modes-{size}-forced-colours-focus.png","menu-modes-{size}-greyscale.png","menu-modes-{size}-reduced-motion.png","menu-modes-{size}.json","menu-modes-{size}.png"],"pair": ["listing-action-menu-modes-{size}-closed","listing-{size}"]},
+      "390 1280": {"file": ["details-missing-{size}.png","details-one-{size}.png","details-zero-{size}.png","details-{size}-forced-colours-focus.png","details-{size}-greyscale.png","keyboard-cancelled-{size}.json","keyboard-empty-folder-{size}.json","keyboard-empty-root-{size}.json","keyboard-menu-file-{size}.json","keyboard-menu-folder-{size}.json","keyboard-menu-shared-{size}.json","keyboard-no-passkey-{size}.json","keyboard-rate-limited-{size}.json","keyboard-revoked-{size}.json","keyboard-sign-in-{size}.json","keyboard-unsupported-{size}.json","keyboard-waiting-{size}.json","keyboard-{size}.json","listing-footer-default-{width}.png","listing-footer-error-{width}.png","listing-paged-{width}.png","listing-{size}-forced-colours-focus.png","listing-{size}-greyscale.png","listing-{size}-modes.json","listing-{size}-reduced-motion.png","wait-tree-{size}.txt"],"pair": ["cancelled-{size}","details-{size}","empty-folder-{size}","empty-root-{size}","inline-details-{width}","menu-file-{size}","menu-folder-{size}","menu-shared-{size}","no-passkey-{size}","rate-limited-{size}","revoked-{size}","sign-in-{size}","unsupported-{size}","waiting-{size}","{size}"]}
+    }
+  },
+  "invite-acceptance": {
+    "exercise": "exerciseInviteAcceptance",
+    "legacy": true,
+    "inventory": {
+      "320 390 1280": {"file": ["invite-forced-colours-focus-{size}-tree.txt","invite-forced-colours-focus-{size}.png","invite-greyscale-{size}-tree.txt","invite-greyscale-{size}.png","invite-long-note-{size}-tree.txt"],"pair": ["invite-long-note-{size}"]},
+      "390 1280": {"file": ["invite-cancelled-{size}-tree.txt","invite-dead-link-{size}-tree.txt","invite-keyboard-{size}.json","invite-name-error-{size}-tree.txt","invite-rate-limited-{size}-tree.txt","invite-signed-in-{size}-tree.txt","invite-unnamed-{size}-tree.txt","invite-unsupported-{size}-tree.txt","invite-valid-{size}-tree.txt","invite-waiting-{size}-tree.txt"],"pair": ["invite-cancelled-{size}","invite-dead-link-{size}","invite-name-error-{size}","invite-rate-limited-{size}","invite-signed-in-{size}","invite-unnamed-{size}","invite-unsupported-{size}","invite-valid-{size}","invite-waiting-{size}"]}
+    }
+  },
+  "owner-invite": {
+    "exercise": "exerciseOwnerInvite",
+    "legacy": true,
+    "inventory": {
+      "320 390 1280": {"file": ["owner-invite-forced-colours-focus-{size}.png"],"pair": ["owner-invite-create-{size}"]},
+      "390 1280": {"file": ["keyboard-owner-invite-{size}.json","owner-invite-copied-{size}.png","owner-invite-greyscale-{size}.png"],"pair": ["owner-invite-clipboard-refused-{size}","owner-invite-link-{size}","owner-invite-not-issued-{size}","owner-invite-saving-{size}","owner-invite-uncertain-{size}","owner-invite-validation-{size}"]}
+    }
+  },
+  "root-upload-continuation": {
+    "exercise": "exerciseRootUploadContinuation",
+    "check": "continuation",
+    "legacy": true,
+    "inventory": {
+      "390 1280": {"axe": ["root-continuation-{width}"],"file": ["root-continuation-acknowledged-finishing-{width}.png","root-continuation-empty-acknowledged-finishing-{width}.png","root-continuation-empty-finishing-{width}.png","root-continuation-suffix-interrupted-{width}.png","root-continuation-uploaded-{width}.png","root-continuation-{width}.json"],"pair": ["root-bound-continuing-{width}","root-bound-finishing-{width}","root-bound-interrupted-{width}","root-bound-mismatch-{width}","root-bound-uploaded-{width}"]}
+    }
+  },
+  "delete-file": {
+    "exercise": "exerciseDeleteFile",
+    "check": "deletion",
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["delete-file-320-reflow.png"]},
+      "390 1280": {"file": ["delete-file-{width}-forced-colours.png","delete-file-{width}-greyscale.png","delete-file-{width}-keyboard.json"],"pair": ["delete-file-{width}-accepted","delete-file-{width}-error","delete-file-{width}-open","delete-file-{width}-saving"]}
+    }
+  },
+  "share-recipient": {
+    "exercise": "exerciseShareRecipient",
+    "check": "shareRecipient",
+    "legacy": true,
+    "inventory": {
+      "320 390 1280": {"file": ["share-recipient-{width}-forced-colours.png","share-recipient-{width}-greyscale.png","share-recipient-{width}-keyboard.json"],"pair": ["share-recipient-{width}-already-selected","share-recipient-{width}-empty","share-recipient-{width}-no-match","share-recipient-{width}-options","share-recipient-{width}-picked"]}
+    }
+  },
+  "share-dialog": {
+    "exercise": "exerciseShareDialog",
+    "legacy": true,
+    "inventory": {
+      "390 1280": {"axe": ["share-dialog-{size}-entry-invite","share-dialog-{size}-entry-partial"],"file": ["share-dialog-{size}-forced-colours.png","share-dialog-{size}-greyscale.png","share-dialog-{size}-keyboard.txt","share-dialog-{size}-reflow-320.png"],"pair": ["share-dialog-{size}"]}
+    }
+  },
+  "sign-in": {
+    "command": ["sign-in.mjs"],
+    "required": true,
+    "legacy": true
+  },
+  "staging-root-standalone": {
+    "command": ["staging-root-standalone.mjs"],
+    "legacy": true
+  },
+  "root-share": {
+    "check": "rootShare",
+    "command": ["staging-root-standalone.mjs","--root-share-only"],
+    "states": ["signed-out","root","invite-empty","dialog"],
+    "widths": [390,1280],
+    "modes": ["screenshot","axe","aria-review","greyscale","forced-colours","reflow"],
+    "legacy": true
+  },
+  "nested-share": {
+    "check": "nestedShare",
+    "command": ["staging-root-standalone.mjs","--nested-share-only"],
+    "states": ["signed-out","owner","menu","inherited","confirm","revoked","read-only","invite-empty"],
+    "widths": [390,1280],
+    "modes": ["screenshot","axe","aria-review","greyscale","forced-colours","reflow"],
+    "legacy": true
+  },
+  "folder-view": {
+    "check": "folder",
+    "requires": "apps/drive/tests/staging-folder-worker-fixture.mjs",
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["folder-forced-colours-focus-320.png","folder-greyscale-320.png","folder-reflow-320.png","staging-folder-forced-colours-focus-320.png","staging-folder-greyscale-320.png","staging-folder-reflow-320.png"]},
+      "390 1280": {"file": ["folder-continued-{width}-tree.txt","folder-denied-{width}-tree.txt","folder-empty-{width}-tree.txt","folder-end-{width}-tree.txt","folder-keyboard-{width}.json","folder-listed-{width}-tree.txt","folder-missing-{width}-tree.txt","staging-folder-continued-{width}-tree.txt","staging-folder-denied-{width}-tree.txt","staging-folder-empty-{width}-tree.txt","staging-folder-end-{width}-tree.txt","staging-folder-keyboard-{width}.json","staging-folder-listed-{width}-tree.txt","staging-folder-missing-{width}-tree.txt"],"pair": ["folder-continued-{width}","folder-denied-{width}","folder-empty-{width}","folder-end-{width}","folder-listed-{width}","folder-missing-{width}","staging-folder-continued-{width}","staging-folder-denied-{width}","staging-folder-empty-{width}","staging-folder-end-{width}","staging-folder-listed-{width}","staging-folder-missing-{width}"]}
+    }
+  },
+  "invite-runtime": {
+    "legacy": true,
+    "inventory": {
+      "390 1280": {"pair": ["generated-invite-signed-in-{width}","generated-invite-valid-{width}","staging-invite-dead-link-{width}","staging-invite-member-revoked-{width}","staging-invite-member-root-empty-{width}","staging-invite-member-root-listed-{width}","staging-invite-member-sign-in-{width}","staging-invite-saving-{width}","staging-invite-signed-in-{width}","staging-invite-unavailable-{width}","staging-invite-valid-{width}"]}
+    }
+  },
+  "member-download": {
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["staging-member-download.json"]},
+      "390 1280": {"pair": ["staging-invite-member-download-retry-{width}","staging-invite-member-download-unavailable-{width}"]}
+    }
+  },
+  "move": {
+    "legacy": true,
+    "inventory": {
+      "390 1280": {"file": ["keyboard-owner-move-{size}.json"],"pair": ["owner-move-conflict-{width}","owner-move-gone-{width}","owner-move-open-{width}","owner-move-saving-{width}","owner-move-success-{width}"]}
+    }
+  },
+  "nested-move": {
+    "legacy": true,
+    "inventory": {
+      "": {"pair": ["nested-move-unconfirmed-1280"]},
+      "390 1280": {"file": ["keyboard-nested-move-{size}.json"],"pair": ["nested-move-conflict-{width}","nested-move-current-and-self-{width}","nested-move-gone-{width}","nested-move-saving-{width}","nested-move-success-{width}"]}
+    }
+  },
+  "new-folder": {
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["member-new-folder.json","owner-new-folder.json"]},
+      "390 1280": {"pair": ["member-new-folder-success-{width}","new-folder-collision-{width}","new-folder-denied-{width}","new-folder-failure-{width}","new-folder-off-page-{width}","new-folder-open-{width}","new-folder-pending-{width}","new-folder-refresh-failed-{width}","new-folder-success-{width}","new-folder-validation-{width}"]}
+    }
+  },
+  "owner-enrollment": {
+    "legacy": true
+  },
+  "owner-invite-runtime": {
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["staging-owner-invite-copied-tree.txt","staging-owner-invite-editing-tree.txt","staging-owner-invite-issued-tree.txt","staging-owner-invite-people-tree.txt","staging-owner-invite-refused-tree.txt","staging-owner-invite-round-trip.json","staging-owner-invite-uncertain-tree.txt"]},
+      "390 1280": {"file": ["staging-owner-invite-people-forced-colours-{width}.png","staging-owner-invite-people-greyscale-{width}.png"],"pair": ["staging-owner-invite-copied-{width}","staging-owner-invite-editing-{width}","staging-owner-invite-my-drive-{width}","staging-owner-invite-people-{width}"]}
+    }
+  },
+  "rename": {
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["member-rename-accessibility.json","owner-rename-accessibility.json"]},
+      "390 1280": {"pair": ["member-rename-duplicate-{width}","member-rename-open-{width}","member-rename-success-{width}","owner-rename-duplicate-{width}","owner-rename-failure-{width}","owner-rename-open-{width}","owner-rename-pending-{width}","owner-rename-refresh-failed-{width}","owner-rename-success-{width}"]}
+    }
+  },
+  "root-listing": {
+    "check": "root",
+    "requires": "apps/drive/src/lib/RootListingView.svelte",
+    "legacy": true,
+    "inventory": {
+      "320 390 1280": {"file": ["root-listed-{width}.png"]},
+      "390 1280": {"file": ["root-forced-colours-focus-{width}.png","root-greyscale-{width}.png","root-keyboard-{width}.json"],"pair": ["root-empty-{width}","root-exhausted-{width}","root-invalid-page-{width}","root-listed-{width}","root-signed-out-{width}","root-unavailable-{width}"]}
+    }
+  },
+  "root-upload": {
+    "check": "upload",
+    "requires": "apps/drive/src/routes/api/root-listing/+server.ts",
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["root-upload-round-trip.json","root-uploading-forced-colours-320.png","root-uploading-greyscale-320.png"]},
+      "390 1280": {"pair": ["root-uploaded-{width}","root-uploading-{width}"]}
+    }
+  },
+  "scenario": {
+    "helper": true,
+    "legacy": true
+  },
+  "shared-listing": {
+    "check": "shared",
+    "legacy": true,
+    "inventory": {
+      "390 1280": {"file": ["staging-shared-keyboard-{width}.json"],"pair": ["staging-shared-empty-{width}","staging-shared-listed-{width}"]}
+    }
+  },
+  "staging-root": {
+    "check": "staging",
+    "legacy": true,
+    "inventory": {
+      "": {"file": ["staging-root-round-trip.json"]}
+    }
+  },
+  "accessibility": {
+    "helper": true,
+    "legacy": true
+  },
+  "upload-storage": {
+    "helper": true,
+    "legacy": true
+  }
+}

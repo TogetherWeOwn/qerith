@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { capture } from './root-listing.mjs';
+import { captureReviewModes } from './accessibility.mjs';
+import registry from './scenarios.json' with { type: 'json' };
+import { routedShareFiles, viewports } from '../../../scripts/browser-registry.mjs';
+
+const scenarioId = 'root-share';
+const scenario = registry[scenarioId];
 
 const folder = 'share / folder', child = 'share-child', owned = 'share-member-folder';
 const reader = 'share-reader-000', second = 'share-reader-001', third = 'share-reader-002';
@@ -44,7 +50,9 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
     method, redirect: 'manual', headers: { cookie: `${cookie(token).name}=${token}`, origin, 'sec-fetch-site': 'same-origin' },
   });
   const output = process.env.DRIVE_BROWSER_EVIDENCE_DIR;
-  for (const [width, height, id, name] of [[1280, 800, folder, folderName], [390, 844, fileId, file.name]]) {
+  for (const width of scenario.widths.toReversed()) {
+    const height = viewports[width], isFolder = width === 1280;
+    const [id, name] = isFolder ? [folder, folderName] : [fileId, file.name];
     const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce', serviceWorkers: 'block' });
     let hold = false, beforeRosterReply;
     const release = [];
@@ -65,8 +73,11 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       const page = await context.newPage(), { keyboard } = page;
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
-      const prefix = `root-share-${width}x${height}`;
-      const audit = state => capture(page, state, width, true, 'root-share');
+      const files = routedShareFiles(scenarioId, width);
+      const audit = state => {
+        assert(scenario.states.includes(state), `Unregistered ${scenarioId} state: ${state}`);
+        return capture(page, state, width, true, scenarioId);
+      };
       const visit = () => page.goto(origin + '/', { waitUntil: 'networkidle' });
       const signedOut = await target.fetch(origin + '/', { method: 'GET', redirect: 'manual',
         headers: { 'x-fixture-navigation': '1', 'sec-fetch-site': 'none' } });
@@ -155,16 +166,15 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       await tabTo('Close');
       await tabTo('Done', 'Shift+Tab');
       await audit('dialog');
-      await page.screenshot({ path: resolve(output, `${prefix}-greyscale.png`), style: 'dialog { filter: grayscale(1); }' });
-      await page.setViewportSize({ width: 320, height });
-      assert(await dialog.evaluate(el => [el, document.documentElement].every(box => box.scrollWidth <= box.clientWidth)));
-      await page.screenshot({ path: resolve(output, `${prefix}-reflow.png`) });
-      await page.setViewportSize({ width, height });
-      await page.emulateMedia({ forcedColors: 'active' });
-      await tabTo('Close');
-      assert(await button('Close').evaluate(el => getComputedStyle(el).outlineStyle === 'solid'));
-      await page.screenshot({ path: resolve(output, `${prefix}-forced-colours.png`) });
-      await page.emulateMedia({ forcedColors: 'none' });
+      await captureReviewModes(page, {
+        output, files, greyscale: 'dialog { filter: grayscale(1); }',
+        assertReflow: async () => assert(await dialog.evaluate(el =>
+          [el, document.documentElement].every(box => box.scrollWidth <= box.clientWidth))),
+        focusForced: async () => {
+          await tabTo('Close');
+          assert(await button('Close').evaluate(el => getComputedStyle(el).outlineStyle === 'solid'));
+        },
+      });
 
       await select(names[0], 1);
       const selected = dialog.getByRole('list', { name: 'Selected people' });
@@ -265,7 +275,7 @@ export async function proveRootShare(browser, { origin, DB, worker, relay, owner
       assert.equal(afterDenial.find(row => row.recipientId === third).direct, false);
       assert.equal(afterDenial.find(row => row.recipientId === 'member').direct, true);
       assert.deepEqual(errors, []);
-      await writeFile(resolve(output, `${prefix}-aria-review.txt`), [
+      await writeFile(resolve(output, files['aria-review']), [
         'ShareDialog exposes its entry-named dialog, owner and access heading, the permission description and the direct removal button.',
         'ShareRecipientPicker exposes the Add people combobox, its expanded listbox and the labelled option without exposing recipient IDs.',
         'The status region updated for paging, selection and removal. A focused alert distinguished acknowledged, uncertain and unsent shares across a read timeout.',

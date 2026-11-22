@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { captureAxe } from './accessibility.mjs';
 
 export const widths = [[390, 844], [1280, 800]];
 const axe = await readFile(createRequire(import.meta.url).resolve('axe-core/axe.min.js'), 'utf8');
@@ -13,13 +14,7 @@ const href = `/api/download/${id}`;
 export async function capture(page, state, width, audit = true, scope = 'root') {
   const label = `${scope}-${state}-${width}`;
   await page.screenshot({ path: resolve(output, `${label}.png`), fullPage: true });
-  if (!audit) return;
-  await page.evaluate(axe);
-  const result = await page.evaluate(() => window.axe.run(document, {
-    runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa'] },
-  }));
-  await writeFile(resolve(output, `axe-${label}.json`), JSON.stringify(result, null, 2));
-  assert.deepEqual(result.violations.map(({ id }) => id), [], label);
+  if (audit) await captureAxe(page, axe, output, `axe-${label}.json`);
 }
 
 export async function captureSignedOut(page) {

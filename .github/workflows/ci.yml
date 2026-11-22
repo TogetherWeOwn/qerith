@@ -461,10 +461,13 @@ jobs:
       - name: Exercise Workers runtime
         run: timeout --signal=TERM --kill-after=10s 180s node scripts/runtime-smoke.mjs
 
-  drive-browser:
-    name: drive browser fixture evidence
+  drive-browser-capture:
+    name: drive browser fixture capture
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      artifact-id: ${{ steps.browser-upload.outputs.artifact-id }}
+      policy: ${{ steps.browser-source.outputs.policy }}
     env:
       REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -473,26 +476,52 @@ jobs:
       run:
         working-directory: tested
     steps:
-      - name: Check out the immutable integration snapshot for selection
+      - &browser-integration
+        name: Check out the immutable integration snapshot
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: integration
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - &browser-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.21.0'
-      - name: Test provenance selection and evidence validation
-        working-directory: integration
-        run: node --test scripts/browser-ci.test.mjs
-      - name: Select the browser checkout
+      - &browser-source
+        name: Select the browser checkout and trusted main policy
         id: browser-source
         working-directory: integration
+        env:
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
-          node scripts/select-browser-checkout.mjs >> "$GITHUB_OUTPUT"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) policy="$(git rev-parse "$SNAPSHOT_SHA^1")" ;;
+            merge_group)
+              [[ "$MERGE_GROUP_BASE" =~ ^[a-f0-9]{40}$ ]]
+              git merge-base --is-ancestor "$MERGE_GROUP_BASE" "$SNAPSHOT_SHA"
+              policy="${VERIFIED_BROWSER_POLICY:-$(git merge-base "$MERGE_GROUP_BASE" origin/main)}"
+              git merge-base --is-ancestor "$policy" "$MERGE_GROUP_BASE"
+              ;;
+            workflow_dispatch)
+              policy="${VERIFIED_BROWSER_POLICY:-$(git merge-base "$SNAPSHOT_SHA" origin/main)}"
+              git merge-base --is-ancestor "$policy" "$SNAPSHOT_SHA"
+              ;;
+            *) policy="$SNAPSHOT_SHA" ;;
+          esac
+          [[ "$policy" =~ ^[a-f0-9]{40}$ ]]
+          if [[ -v VERIFIED_BROWSER_POLICY ]]; then
+            test "$policy" = "$VERIFIED_BROWSER_POLICY"
+          fi
+          git merge-base --is-ancestor "$policy" origin/main
+          git show "$policy:scripts/select-browser-checkout.mjs" > "$RUNNER_TEMP/select-browser-checkout.mjs"
+          node "$RUNNER_TEMP/select-browser-checkout.mjs" >> "$GITHUB_OUTPUT"
+          echo "policy=$policy" >> "$GITHUB_OUTPUT"
+      - name: Test browser provenance and evidence fixtures
+        working-directory: integration
+        run: node --test scripts/browser-ci.test.mjs
       - name: Check out the selected browser source separately
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -530,61 +559,171 @@ jobs:
       - name: Install pinned Chromium on the runner
         working-directory: tested/apps/drive/browser
         run: npx --no-install playwright install --with-deps chromium
+      - name: Load the browser scheduler
+        working-directory: integration
+        env:
+          BROWSER_POLICY_SHA: ${{ steps.browser-source.outputs.policy }}
+        run: |
+          set -euo pipefail
+          source="$BROWSER_POLICY_SHA"
+          if ! git cat-file -e "$source:scripts/browser-job.mjs"; then source="$SNAPSHOT_SHA"; fi
+          mkdir "$RUNNER_TEMP/browser-policy"
+          git archive "$source" scripts/browser-job.mjs scripts/browser-registry.mjs scripts/browser-evidence.mjs apps/drive/browser/scenarios.json |
+            tar -x -C "$RUNNER_TEMP/browser-policy"
       - name: Exercise fixture and require complete evidence
         env:
           DRIVE_BROWSER_HEAD: ${{ steps.browser-source.outputs.tested }}
           DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+          BROWSER_GIT_DIR: ${{ github.workspace }}/integration
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
         run: |
+          set -euo pipefail
+          DRIVE_BROWSER_ISOLATED="$(node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" isolated)"
+          export DRIVE_BROWSER_ISOLATED
           git diff --exit-code
           git diff --cached --exit-code
           npm test --prefix apps/drive/browser
           git diff --exit-code
           git diff --cached --exit-code
-      - name: Exercise generated sign-in in Chromium with local D1
+      - name: Exercise registered generated fixtures in Chromium with local D1
         if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD
         env:
-          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
+          BROWSER_GIT_DIR: ${{ github.workspace }}/integration
+          BROWSER_TESTED_DIR: ${{ github.workspace }}/tested
+          TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
+          EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
         run: |
-          test -f apps/drive/browser/sign-in.mjs
+          set -euo pipefail
           npm run build --prefix apps/drive
-          (cd apps/drive/browser && timeout --signal=TERM --kill-after=10s 90s node sign-in.mjs)
-      - name: Exercise generated staging-origin fixture in Chromium with local D1
-        # Earlier heads either lack this fixture or already run it from sign-in.mjs.
-        if: steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root-standalone.mjs') != ''
-        working-directory: tested/apps/drive/browser
+          node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" capture
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: browser-upload
+        with:
+          name: drive-browser-capture
+          path: ${{ runner.temp }}/drive-browser-evidence/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  drive-browser:
+    name: drive browser fixture evidence
+    needs: drive-browser-capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ steps.browser-upload.outputs.artifact-id }}
+      policy: ${{ steps.browser-source.outputs.policy }}
+    env:
+      REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SNAPSHOT_SHA: ${{ github.sha }}
+      VERIFIED_BROWSER_POLICY: ${{ needs.drive-browser-capture.outputs.policy }}
+    steps:
+      - *browser-integration
+      - *browser-node
+      - *browser-source
+      - name: Require the upstream evidence artifact
         env:
-          DRIVE_BROWSER_EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
-        run: |
-          timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs
-          [[ ! -f root-share.mjs ]] || timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs --root-share-only
-          [[ ! -f nested-share.mjs ]] || timeout --signal=TERM --kill-after=10s 90s node staging-root-standalone.mjs --nested-share-only
+          ARTIFACT_ID: ${{ needs.drive-browser-capture.outputs.artifact-id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.drive-browser-capture.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/drive-browser-evidence
       - name: Verify evidence and record both provenance identities
-        env:
+        working-directory: integration
+        env: &browser-verification
+          BROWSER_GIT_DIR: ${{ github.workspace }}/integration
+          BROWSER_POLICY_SHA: ${{ steps.browser-source.outputs.policy }}
           EVIDENCE_DIR: ${{ runner.temp }}/drive-browser-evidence
           TESTED_SHA: ${{ steps.browser-source.outputs.tested }}
-          ROOT_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/lib/RootListingView.svelte') != '' }}
-          UPLOAD_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/src/routes/api/root-listing/+server.ts') != '' }}
-          CONTINUATION_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/root-upload-continuation.mjs') != '' }}
-          DELETE_FILE_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/delete-file.mjs') != '' }}
-          SHARE_RECIPIENT_EVIDENCE: ${{ hashFiles('tested/apps/drive/browser/share-recipient.mjs') != '' }}
-          ROOT_SHARE_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/root-share.mjs') != '' }}
-          NESTED_SHARE_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/nested-share.mjs') != '' }}
-          STAGING_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/staging-root.mjs') != '' }}
-          STAGING_FOLDER_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/tests/staging-folder-worker-fixture.mjs') != '' }}
-          STAGING_SHARED_EVIDENCE: ${{ steps.browser-source.outputs.tested == env.REQUESTED_HEAD && hashFiles('tested/apps/drive/browser/shared-listing.mjs') != '' }}
           COMPATIBILITY_MODE: ${{ steps.browser-source.outputs.mode }}
           SNAPSHOT_BASE: ${{ steps.browser-source.outputs.snapshot_base }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
-          git -C ../integration show "$SNAPSHOT_SHA:scripts/browser-evidence.mjs" > "$RUNNER_TEMP/browser-evidence.mjs"
-          node "$RUNNER_TEMP/browser-evidence.mjs"
+          if git cat-file -e "$BROWSER_POLICY_SHA:scripts/browser-job.mjs"; then
+            mkdir "$RUNNER_TEMP/browser-policy"
+            git archive "$BROWSER_POLICY_SHA" scripts/browser-job.mjs scripts/browser-registry.mjs scripts/browser-evidence.mjs apps/drive/browser/scenarios.json |
+              tar -x -C "$RUNNER_TEMP/browser-policy"
+            node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" baseline
+          else
+            # Preserve the preceding main snapshot's checks during the registry rollout.
+            has_file() { if git cat-file -e "$TESTED_SHA:$1"; then echo true; else echo false; fi; }
+            has_exact_file() {
+              if [[ "$TESTED_SHA" == "$REQUESTED_HEAD" ]]; then has_file "$1"; else echo false; fi
+            }
+            browser=apps/drive/browser
+            ROOT_EVIDENCE="$(has_exact_file apps/drive/src/lib/RootListingView.svelte)"
+            export ROOT_EVIDENCE
+            UPLOAD_EVIDENCE="$(has_exact_file apps/drive/src/routes/api/root-listing/+server.ts)"
+            export UPLOAD_EVIDENCE
+            ROOT_SHARE_EVIDENCE="$(has_exact_file "$browser/root-share.mjs")"
+            export ROOT_SHARE_EVIDENCE
+            NESTED_SHARE_EVIDENCE="$(has_exact_file "$browser/nested-share.mjs")"
+            export NESTED_SHARE_EVIDENCE
+            STAGING_EVIDENCE="$(has_exact_file "$browser/staging-root.mjs")"
+            export STAGING_EVIDENCE
+            STAGING_SHARED_EVIDENCE="$(has_exact_file "$browser/shared-listing.mjs")"
+            export STAGING_SHARED_EVIDENCE
+            STAGING_FOLDER_EVIDENCE="$(has_exact_file apps/drive/tests/staging-folder-worker-fixture.mjs)"
+            export STAGING_FOLDER_EVIDENCE
+            CONTINUATION_EVIDENCE="$(has_file "$browser/root-upload-continuation.mjs")"
+            export CONTINUATION_EVIDENCE
+            DELETE_FILE_EVIDENCE="$(has_file "$browser/delete-file.mjs")"
+            export DELETE_FILE_EVIDENCE
+            SHARE_RECIPIENT_EVIDENCE="$(has_file "$browser/share-recipient.mjs")"
+            export SHARE_RECIPIENT_EVIDENCE
+            git show "$BROWSER_POLICY_SHA:scripts/browser-evidence.mjs" > "$RUNNER_TEMP/browser-evidence.mjs"
+            node "$RUNNER_TEMP/browser-evidence.mjs"
+            jq --arg policy "$BROWSER_POLICY_SHA" '. + {policy: $policy}' "$EVIDENCE_DIR/provenance.json" > "$RUNNER_TEMP/provenance.json"
+            mv "$RUNNER_TEMP/provenance.json" "$EVIDENCE_DIR/provenance.json"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: browser-upload
         with:
-          name: drive-browser-${{ github.event.pull_request.head.sha || github.sha }}
+          name: drive-browser-${{ env.REQUESTED_HEAD }}
           path: ${{ runner.temp }}/drive-browser-evidence/
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
+
+  drive-browser-coverage:
+    name: drive browser registry coverage
+    needs: drive-browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      REQUESTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SNAPSHOT_SHA: ${{ github.sha }}
+      VERIFIED_BROWSER_POLICY: ${{ needs.drive-browser.outputs.policy }}
+    steps:
+      - *browser-integration
+      - *browser-node
+      - *browser-source
+      - name: Require the upstream evidence artifact
+        env:
+          ARTIFACT_ID: ${{ needs.drive-browser.outputs.artifact-id }}
+        run: '[[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.drive-browser.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/drive-browser-evidence
+      - name: Require registered sources and complete claimed evidence
+        working-directory: integration
+        env: *browser-verification
+        run: |
+          set -euo pipefail
+          # During the first rollout, run the proposed gate after main's original checks.
+          source="$BROWSER_POLICY_SHA"
+          if ! git cat-file -e "$source:scripts/browser-job.mjs"; then source="$SNAPSHOT_SHA"; fi
+          mkdir "$RUNNER_TEMP/browser-policy"
+          git archive "$source" scripts/browser-job.mjs scripts/browser-registry.mjs scripts/browser-evidence.mjs apps/drive/browser/scenarios.json |
+            tar -x -C "$RUNNER_TEMP/browser-policy"
+          node "$RUNNER_TEMP/browser-policy/scripts/browser-job.mjs" coverage
 
   drive-release-preflight:
     name: Drive release preflight (synthetic)
