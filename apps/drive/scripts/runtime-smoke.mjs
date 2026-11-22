@@ -13,6 +13,7 @@ import { exerciseOwnerRoutes } from '../tests/owner-worker-fixture.mjs';
 import { exerciseReadGrants, exerciseStagingReadGrants, readGrantPath, readGrantWorker, refusePreviewReadGrants } from '../tests/read-grant-worker-fixture.mjs';
 import { exerciseStagingFolder } from '../tests/staging-folder-worker-fixture.mjs';
 import { exerciseStagingFolderCreate } from '../tests/staging-folder-create-worker-fixture.mjs';
+import { exerciseStagingQualificationFiles } from '../tests/staging-qualification-files-worker-fixture.mjs';
 import { exerciseExpectedParts, expectedPartsWorker } from '../tests/upload-expected-parts-worker-fixture.mjs';
 import { exerciseUploadResume, uploadResumePath, uploadResumeWorker } from '../tests/upload-resume-worker-fixture.mjs';
 
@@ -100,7 +101,7 @@ async function assertRootUploadData(response, mode) {
   assert.equal(data[data[0].uploadMode], mode);
 }
 
-async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false } = {}) {
+async function exercisePrivateBoundary(main, { preview = false, staging = false, rawOutsideStaging = false, qualificationFiles = false } = {}) {
   const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
   const rawStorage = staging || rawOutsideStaging;
   const release = 'a'.repeat(40);
@@ -193,6 +194,10 @@ export default {
         .bind(createHash('sha256').update(token).digest('hex'), id, Date.now() + 60_000).run();
       return `__Host-drive-session=${token}`;
     };
+    if (qualificationFiles) {
+      await exerciseStagingQualificationFiles({ worker, DB, origin, session });
+      return;
+    }
     const assertProvisioningUnavailable = async (cookie, role) => {
       for (const path of ['/owner/bootstrap', '/api/owner/provisioning']) {
         const response = await worker.fetch(`${origin}${path}`, {
@@ -660,11 +665,13 @@ async function exerciseRootPages(DB, worker, origin, cookie, fileId) {
 const root = '.svelte-kit/cloudflare';
 const asset = '/_app/version.json';
 await access(`${root}${asset}`);
+const appWorker = `${root}/_worker.js`;
+await exercisePrivateBoundary(appWorker, { staging: true, qualificationFiles: true });
+if (process.argv.includes('--qualification-files-only')) process.exit();
 const unavailable = ['/', '/f/private', asset].map(path => [path, 503, 'Service unavailable']);
 for (const config of ['wrangler.jsonc', 'wrangler.build.jsonc']) {
   await exercise(['--config', config], unavailable);
 }
-const appWorker = `${root}/_worker.js`;
 const generatedUnavailable = [...unavailable, ...['/_app/env.js', '/_app/%65nv.js'].map(
   (path) => [path, 503, 'Service unavailable']
 )];
