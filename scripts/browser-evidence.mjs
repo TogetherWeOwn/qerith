@@ -9,9 +9,11 @@ const rootFiles = ['root-listed-320.png', ...[390, 1280].flatMap(width => [
   `root-greyscale-${width}.png`, `root-forced-colours-focus-${width}.png`, `root-keyboard-${width}.json`,
 ])];
 
-function hasViewportImageData(png, width, height) {
+function hasViewportImageData(png, width, height, fullPage = false) {
   if (png.length < 45 || !png.subarray(0, 16).equals(Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')) ||
-      png.readUInt32BE(16) !== width || png.readUInt32BE(20) !== height) return false;
+      png.readUInt32BE(16) !== width) return false;
+  const imageHeight = png.readUInt32BE(20);
+  if (fullPage ? imageHeight < height : imageHeight !== height) return false;
   let hasData = false;
   for (let offset = 33; offset + 12 <= png.length;) {
     const length = png.readUInt32BE(offset);
@@ -73,8 +75,43 @@ async function verifyShareRecipientEvidence(dir) {
   }
 }
 
+async function verifyRoutedShareEvidence(dir, scope) {
+  const root = scope === 'root-share';
+  const states = root ? ['signed-out', 'root', 'invite-empty', 'dialog'] :
+    ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only'];
+  const reviewNodes = ['dialog "Share “', 'heading "People with access"', 'combobox "Add people" [expanded]',
+    'listbox "Available people"', ...(root
+      ? ['option "Root Reader"', 'button "Remove Root Reader’s access"', 'button "Invite someone"', 'heading "Users and invites"']
+      : ['option "New Reader"', 'menuitem "Share"', 'menuitem "Move"', 'text: Through Shared project',
+        'button "Confirm removal of direct access for Folder Reader"', 'status: Removed direct access for Folder Reader.'])];
+  const requireScreenshot = async (label, width, height, fullPage) => {
+    if (!hasViewportImageData(await readFile(join(dir, `${label}.png`)), width, height, fullPage)) {
+      throw new Error(`Invalid Share screenshot: ${label}`);
+    }
+  };
+  for (const [width, height] of [[390, 844], [1280, 800]]) {
+    for (const state of states) {
+      const label = `${scope}-${state}-${width}`;
+      // The shared capture helper takes full-page screenshots.
+      await requireScreenshot(label, width, height, true);
+      const axe = JSON.parse(await readFile(join(dir, `axe-${label}.json`), 'utf8'));
+      if (!Array.isArray(axe?.violations) || axe.violations.length) throw new Error(`Invalid Share axe evidence: ${label}`);
+    }
+    const detailLabel = state => root ? `${scope}-${width}x${height}-${state}` : `${scope}-${state}-${width}`;
+    await requireScreenshot(detailLabel('greyscale'), width, height, false);
+    await requireScreenshot(detailLabel('forced-colours'), width, height, !root);
+    await requireScreenshot(detailLabel('reflow'), 320, height, !root);
+    const reviewLabel = detailLabel('aria-review');
+    const review = await readFile(join(dir, `${reviewLabel}.txt`), 'utf8');
+    const lines = review.split('\n').map(line => line.trimStart());
+    if (!reviewNodes.every(node => lines.some(line => line.startsWith(`- ${node}`)))) {
+      throw new Error(`Invalid Share ARIA review: ${reviewLabel}`);
+    }
+  }
+}
+
 export async function verifyEvidence(dir, tested, root = false, upload = false, staging = false, folder = false,
-  continuation = false, shared = false, deletion = false, shareRecipient = false) {
+  continuation = false, shared = false, deletion = false, shareRecipient = false, { rootShare = false, nestedShare = false } = {}) {
   const names = ['head.txt', ...['1280x800', '390x844'].flatMap(size =>
     [`${size}.png`, `axe-${size}.json`, `keyboard-${size}.json`])];
   for (const name of root ? [...names, ...rootFiles] : names) {
@@ -155,6 +192,8 @@ export async function verifyEvidence(dir, tested, root = false, upload = false, 
   }
   if (deletion) await verifyDeletionEvidence(dir);
   if (shareRecipient) await verifyShareRecipientEvidence(dir);
+  if (rootShare) await verifyRoutedShareEvidence(dir, 'root-share');
+  if (nestedShare) await verifyRoutedShareEvidence(dir, 'nested-share');
   if (shared) for (const [width, height] of [[390, 844], [1280, 800]]) {
     const keyboard = JSON.parse(await readFile(join(dir, `staging-shared-keyboard-${width}.json`), 'utf8'));
     if (!isDeepStrictEqual(keyboard, { viewport: [width, height], visibleFocus: true, skipToMain: true, keyboardDownload: true }))
@@ -193,7 +232,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const folder = process.env.STAGING_FOLDER_EVIDENCE === 'true';
   await verifyEvidence(dir, tested, root, process.env.UPLOAD_EVIDENCE === 'true', process.env.STAGING_EVIDENCE === 'true',
     folder, process.env.CONTINUATION_EVIDENCE === 'true', process.env.STAGING_SHARED_EVIDENCE === 'true',
-    process.env.DELETE_FILE_EVIDENCE === 'true', process.env.SHARE_RECIPIENT_EVIDENCE === 'true');
+    process.env.DELETE_FILE_EVIDENCE === 'true', process.env.SHARE_RECIPIENT_EVIDENCE === 'true', {
+      rootShare: process.env.ROOT_SHARE_EVIDENCE === 'true',
+      nestedShare: process.env.NESTED_SHARE_EVIDENCE === 'true',
+    });
   const generated = root ? 'generated sign-in and My Drive (disposable D1)' : 'generated sign-in (disposable D1)';
   await writeFile(join(dir, 'provenance.json'), JSON.stringify({ requestedHead, testedCheckout: tested,
     base: base || null, snapshotBase: snapshotBase || null, integrationSnapshot: snapshot, mode, workflow, runId, runAttempt,
