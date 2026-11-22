@@ -22,7 +22,7 @@ export const load: PageServerLoad = async ({ request, params, locals, setHeaders
   const result = await folderPage(request, params.folderId, {
     authorize: async () => session.token,
     metadataWriteAllowed: inviteMode && (role === 'owner' || role === 'member'),
-    shareAllowed: admitsStagingReadGrants(env),
+    shareAllowed: inviteMode && admitsStagingReadGrants(env),
     readAccess: { get: (...args) => primary().get(...args), list: (...args) => primary().list(...args) },
   });
   return { result, ownerInvites: role === 'owner' && inviteMode,

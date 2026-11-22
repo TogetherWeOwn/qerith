@@ -42,7 +42,8 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         { recipientId: 'member', displayName: reader, direct, inheritedFrom: parentName });
     };
     assert.equal((await ask(grant(parent), ownerToken, 'PUT')).status, 204);
-    for (const [index, [width, height]] of widths.entries()) {
+    const ariaReviews = new Map();
+    for (const [width, height] of widths) {
       const isFolder = width === 1280, id = isFolder ? folder : fileId, name = isFolder ? folderName : file.name;
       const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce', serviceWorkers: 'block' });
       context.setDefaultTimeout(8_000);
@@ -101,17 +102,24 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         await evidence('signed-out');
         await context.addCookies([{ ...cookie(ownerToken), url: origin }]);
         invite = false;
+        flag = undefined;
         assert.equal((await visit()).status(), 404);
+        assert.equal((await ask(roster(id))).status, 404);
+        flag = '1';
+        assert.equal((await visit()).status(), 404, 'Share grants alone do not admit the folder route');
+        assert.equal((await ask('/people')).status, 404);
+        assert.equal((await ask(downloadPath, memberToken)).status, 403);
         invite = true;
         for (const value of [undefined, 'true']) {
           flag = value;
-          await visit();
+          assert.equal((await visit()).status(), 200);
           await trigger.press('ArrowDown');
           await focused(menu.getByRole('menuitem', { name: 'Move' }));
           assert.equal(await menu.getByRole('menuitem', { name: 'Share' }).count(), 0);
           await keyboard.press('Escape');
           await focused(trigger);
           assert.equal((await ask(roster(id))).status, 404);
+          assert.equal((await ask(grant(id, candidateId), ownerToken, 'PUT')).status, 404);
         }
 
         flag = '1';
@@ -248,7 +256,10 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         assert.equal((await page.goto(`${origin}/f/${memberParent}`)).status(), 200);
         const [memberRead] = await Promise.all([responseFor(roster(memberChild)), openShare(memberChildName)]);
         assert.equal(memberRead.status(), 200);
-        await dialogFor(memberChildName).getByRole('option', { name: candidate }).waitFor();
+        const memberDialog = dialogFor(memberChildName);
+        await memberDialog.getByRole('option', { name: candidate }).waitFor();
+        assert.equal(await memberDialog.getByRole('button', { name: 'Invite someone' }).count(), 0);
+        assert.equal((await ask('/people', memberToken)).status, 404);
         await context.addCookies([{ ...cookie(ownerToken), url: origin }]);
         await visit();
         assert.equal((await ask(grant(id), ownerToken, 'PUT')).status, 204);
@@ -267,10 +278,21 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         assert.doesNotMatch(await raceStatus.textContent(), /Access through/);
         await through.waitFor({ state: 'hidden' });
         assert.equal((await ask(grant(parent), ownerToken, 'PUT')).status, 204);
-        const inviteTrees = [];
-        if (index === widths.length - 1) {
+        assert(![inheritedTree, pickerTree, confirmedTree, revokedTree].some(tree => tree.includes(candidateId) || tree.includes(id)));
+        ariaReviews.set(width, [
+          'RowActions exposes the named menu and Share and Move menu items. The trigger’s aria-controls references the open menu.',
+          'ShareDialog names the entry and exposes the owner, access heading, folder-derived access, and the confirmation controls for direct access.',
+          'ShareRecipientPicker exposes the labelled combobox and listbox. A reader who already has inherited access is absent from the choices.',
+          'The status region exposes the direct-access removal message. The refreshed list describes access through the folder. Focus returns to the access heading and then the originating row.',
+          'This review uses the Chromium accessibility tree and did not capture spoken output.',
+          menuTree, inheritedTree, pickerTree, confirmedTree, revokedTree,
+        ]);
+        if (width === widths.at(-1)[0]) {
           // Run after both widths' grant and session checks because revocation clears them.
           await DB.prepare("UPDATE drive_principals SET status = 'revoked' WHERE id IN ('member', ?)").bind(candidateId).run();
+          const stored = () => DB.prepare(`SELECT (SELECT count(*) FROM drive_invitations) AS invitations,
+            (SELECT count(*) FROM drive_read_grants) AS grants`).first();
+          const before = await stored();
           const writes = [];
           page.on('request', request => { if (request.method() !== 'GET') writes.push(request.url()); });
           for (const [inviteWidth, inviteHeight] of widths) {
@@ -281,28 +303,26 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
             await keyboard.press('Tab');
             await keyboard.press('Tab');
             await focused(inviteDialog.getByRole('button', { name: 'Invite someone' }));
-            inviteTrees.push(`${inviteWidth} × ${inviteHeight}`, await inviteDialog.ariaSnapshot());
+            const inviteTree = await inviteDialog.ariaSnapshot();
+            assert.match(inviteTree, /button "Invite someone"/);
             await capture(page, 'invite-empty', inviteWidth, true, 'nested-share');
             const [people] = await Promise.all([responseFor('/people'), keyboard.press('Enter')]);
             assert(people.request().isNavigationRequest());
             assert.equal(people.status(), 200);
             await page.getByRole('heading', { name: 'Users and invites' }).waitFor();
-            inviteTrees.push(await page.getByRole('main').ariaSnapshot());
+            const peopleTree = await page.getByRole('main').ariaSnapshot();
+            assert.match(peopleTree, /heading "Users and invites"/);
             await page.waitForLoadState('networkidle');
+            ariaReviews.get(inviteWidth).push(
+              'Tab reached the named Invite someone button. Enter opened Users and invites without a write.', inviteTree, peopleTree);
           }
           assert.deepEqual(writes, []);
-          inviteTrees.unshift('Tab reached the named Invite someone button. Enter opened Users and invites without a write.');
+          assert.deepEqual(await stored(), before);
+          for (const [reviewWidth, review] of ariaReviews) {
+            await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-aria-review-${reviewWidth}.txt`), review.join('\n\n'));
+          }
         }
         assert.deepEqual(errors, []);
-        assert(![inheritedTree, pickerTree, confirmedTree, revokedTree].some(tree => tree.includes(candidateId) || tree.includes(id)));
-        await writeFile(resolve(process.env.DRIVE_BROWSER_EVIDENCE_DIR, `nested-share-aria-review-${width}.txt`), [
-          'RowActions exposes the named menu and Share and Move menu items. The trigger’s aria-controls references the open menu.',
-          'ShareDialog names the entry and exposes the owner, access heading, folder-derived access, and the confirmation controls for direct access.',
-          'ShareRecipientPicker exposes the labelled combobox and listbox. A reader who already has inherited access is absent from the choices.',
-          'The status region exposes the direct-access removal message. The refreshed list describes access through the folder. Focus returns to the access heading and then the originating row.',
-          'This review uses the Chromium accessibility tree and did not capture spoken output.',
-          menuTree, inheritedTree, pickerTree, confirmedTree, revokedTree, ...inviteTrees,
-        ].join('\n\n'));
       } finally { await context.close(); }
     }
   } finally {
