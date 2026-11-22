@@ -41,7 +41,11 @@ export function fixture({ resume = false, small = false, fault, controller, lost
         assert.equal(redirect, 'error');
         if (path === readinessPath) {
           assert.equal(method, 'HEAD');
-          return ready(fault === 'wrong-ready' ? { ...expected, sha: 'b'.repeat(40) } : expected, headers);
+          if (fault === 'wrong-ready' || (reopened && fault === 'reopen-sha')) {
+            return ready({ ...expected, sha: 'b'.repeat(40) }, headers);
+          }
+          if (reopened && fault === 'reopen-version') return ready({ ...expected, version: file }, headers);
+          return ready(expected, headers);
         }
         if (path === '/api/uploads') {
           assert.equal(client, 1);
@@ -160,6 +164,15 @@ test('rejects foreign member, intent or candidate scope before reading the journ
     const { openClient, calls } = fixture({ small: true, resume: true, fault });
     await assert.rejects(exerciseQualificationResumeFixture(context, active(), openClient, revokedMember), redacted);
     assert.deepEqual(calls, ['allocate', `PUT ${upload}/parts/1`]);
+  }
+});
+
+test('requires matching runtime SHA and version again after reconnecting', async () => {
+  for (const fault of ['reopen-sha', 'reopen-version']) {
+    const f = fixture({ small: true, resume: true, fault });
+    await assert.rejects(exerciseQualificationResumeFixture(context, active(), f.openClient, revokedMember), redacted);
+    assert.equal(f.clients, 2);
+    assert.deepEqual(f.calls, ['allocate', `PUT ${upload}/parts/1`]);
   }
 });
 
