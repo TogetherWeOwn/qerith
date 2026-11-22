@@ -813,13 +813,13 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser, drive-release-preflight]
+    needs: [rust-test, rust-wasm, rust-msrv, cargo-deny, archive-clients, d1-test, sealed-output-reader, drive-lock-verifier, bundle-acquisition, drive-bootstrap, drive-browser, drive-browser-coverage, drive-release-preflight]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - run: |
-          if ! jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$NEEDS_JSON" > /dev/null; then
+          if ! jq -e 'has("drive-browser-coverage") and all(.[]; .result == "success")' <<< "$NEEDS_JSON" > /dev/null; then
             echo "ci-ok: a required job did not succeed"
             exit 1
           fi
