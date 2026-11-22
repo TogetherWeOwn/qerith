@@ -5,6 +5,8 @@ import { exerciseQualificationFiles } from '../scripts/staging-qualification-fil
 export async function exerciseStagingQualificationFiles({ worker, DB, origin, session }) {
   const ownerId = randomUUID(), recipientId = randomUUID();
   const ownerCookie = await session(ownerId, 'owner'), recipientCookie = await session(recipientId, 'member');
+  // This offline fixture opts in to exercise the emitted folder contract.
+  // Protected candidate admission is a separate prerequisite.
   const request = async (cookie, path, { headers, ...init } = {}) => {
     const url = origin + path;
     const response = await worker.fetch(url, {

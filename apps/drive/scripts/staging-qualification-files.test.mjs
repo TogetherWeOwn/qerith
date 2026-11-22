@@ -19,12 +19,7 @@ const folderRow = row => `<li data-row="${row.id}" class="svelte-proof"><svg vie
 const move = '<!--[0--><!--$s1--><dialog class="drive-dialog" aria-labelledby="s1-title" closedby="closerequest"><div class="panel"><header><h2 id="s1-title">Move</h2></header><!--$s2--><dialog class="drive-dialog" aria-labelledby="s2-title" closedby="closerequest"><form class="panel" autocomplete="off"><header><h2 id="s2-title">New folder</h2></header></form></dialog></div></dialog><!----> <div class="svelte-proof"><p role="status" class="svelte-proof status"><!--[-1--><!--]--></p></div><!--]-->';
 const main = (name, listing) => `<main data-sveltekit-reload="" class="svelte-proof"><!--[0--><h1 dir="auto" tabindex="-1" class="svelte-proof">${name}</h1> ${move} <!--[-1--><!--]--><!--[0-->${listing}<!--]--><!--]--></main>`;
 const start = '../_app/immutable/entry/start.A1.js', app = '../_app/immutable/entry/app.B2.js';
-const document = (name, content, rows = []) => `<!doctype html><html lang="en"><head><meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link href="${start}" rel="modulepreload"><link href="${app}" rel="modulepreload">
-<link href="../_app/immutable/nodes/3.C3.js" rel="modulepreload">
-<!--proof--><!----><title>${name} · Drive</title><link href="../_app/immutable/assets/folder.A1.css" rel="stylesheet"></head><body><div style="display: contents"><!--[-->${content}<!--]-->
-<script>
+const hydration = (name, rows) => `<script>
 {
   __sveltekit_fixture = {
     base: new URL("..", location).pathname.slice(0, -1),
@@ -42,7 +37,13 @@ const document = (name, content, rows = []) => `<!doctype html><html lang="en"><
     });
   });
 }
-</script></div></body></html>`;
+</script>`;
+const document = (name, content, rows = [], script = hydration(name, rows)) => `<!doctype html><html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link href="${start}" rel="modulepreload"><link href="${app}" rel="modulepreload">
+<link href="../_app/immutable/nodes/3.C3.js" rel="modulepreload">
+<!--proof--><!----><title>${name} · Drive</title><link href="../_app/immutable/assets/folder.A1.css" rel="stylesheet"></head><body><div style="display: contents"><!--[-->${content}<!--]-->
+${script}</div></body></html>`;
 const folderPage = (name, listing, rows) => reply(200, document(name, main(name, listing), rows), html);
 const entries = rows => `<ul role="list" class="svelte-proof">${rows}</ul>`;
 const empty = '<section class="empty svelte-empty" aria-labelledby="empty-title"><div><h2 id="empty-title" class="svelte-empty">This folder is empty.</h2></div></section>';
@@ -212,7 +213,7 @@ for (const [name, response] of [
   ['an open Move dialog', () => reply(200, validAnchor.replace('<dialog ', '<dialog open '), html)],
   ['a malformed Move dialog', () => reply(200, validAnchor.replace('</form>', ''), html)],
   ['an unrecognized hydration script', () => reply(200, validAnchor.replace('<script>', '<script>extra();'), html)],
-  ['a missing hydration script', () => reply(200, validAnchor.replace(/<script>[\s\S]*?<\/script>/, ''), html)],
+  ['a missing hydration script', () => reply(200, document('Attempt anchor', main('Attempt anchor', empty), [], ''), html)],
   ['malformed UTF-8', () => reply(200, Buffer.concat([Buffer.from(validAnchor), Buffer.of(255)]), html)],
 ]) {
   test(`rejects ${name} before folder mutation`, async () => {
