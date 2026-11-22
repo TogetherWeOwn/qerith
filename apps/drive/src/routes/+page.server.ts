@@ -2,7 +2,7 @@ import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
+import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, admitsStagingReadGrants, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import { wireUploadStorage } from '../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
@@ -34,7 +34,8 @@ export const load: PageServerLoad = async (event) => {
   }
   const pages = preview ? event.url.searchParams.getAll('page') : [];
   const listing = preview ? await loadRootListing(event.request, env, pages) : null;
-  const role = event.locals.driveSession?.principal.role;
+  const principal = event.locals.driveSession?.principal;
+  const role = principal?.role;
   const downloadAllowed = !staging || role === 'owner' || (role === 'member' && inviteMode);
   const uploadPolicy = driveUploadMode(env, role);
   const uploadStorageReady = uploadPolicy !== 'disabled' && (staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
@@ -43,6 +44,8 @@ export const load: PageServerLoad = async (event) => {
   return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
     folderLinks: fixture || inviteMode,
     metadataWriteAllowed: inviteMode && (role === 'owner' || role === 'member'),
+    shareOwner: principal && inviteMode && listing?.status === 'ok' && admitsStagingReadGrants(env)
+      ? { recipientId: principal.id, driveOwner: role === 'owner' } : undefined,
     ownerInvites: role === 'owner' && inviteMode,
     sharedListing: role === 'member' && admitsSharedListing(env),
     downloadNotice: downloadAllowed ? await readDownloadNotice(event) : undefined };
