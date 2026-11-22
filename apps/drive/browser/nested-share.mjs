@@ -327,6 +327,7 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
     }
   } finally {
     await DB.batch([
+      DB.prepare("DELETE FROM drive_read_grants WHERE entry_id = ? AND recipient_id = 'member'").bind(fileId),
       DB.prepare('UPDATE drive_entries SET parent_id = NULL WHERE id = ?').bind(fileId),
       DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(folder),
       DB.prepare('DELETE FROM drive_entries WHERE id = ?').bind(parent),
