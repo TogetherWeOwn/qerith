@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import {
   assertNoQualificationD1MigrationFixtures, cleanQualificationD1, readQualificationD1AppFixtures, recoverQualificationD1,
 } from './staging-qualification-d1.mjs';
-import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './staging-qualification-d1-fixture.mjs';
+import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './fixtures/qualification-d1.mjs';
 
 const config = new URL('../wrangler.staging.json', import.meta.url);
 const migrations = new URL('../migrations/', import.meta.url);

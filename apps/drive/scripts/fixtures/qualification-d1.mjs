@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const directory = 'apps/drive/migrations';
-const repo = fileURLToPath(new URL('../../../', import.meta.url));
+const repo = fileURLToPath(new URL('../../../../', import.meta.url));
 const committed = (...args) => execFileSync('git', args, { cwd: repo });
 const names = committed('ls-tree', '--name-only', '-z', `HEAD:${directory}`).toString().slice(0, -1).split('\0');
 const migrations = names.map(name => [name, committed('show', `HEAD:${directory}/${name}`)]);

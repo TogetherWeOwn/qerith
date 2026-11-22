@@ -255,7 +255,8 @@ list to contain only the database UUID and name pinned in the tested commit.
 The check uses a bounded first page and rejects conflicting pagination or partial
 responses. This checks the roster visible to the existing credential. The
 estate reader must independently cover every required surface and verify D1
-on-demand compute.
+on-demand compute. Writer exclusion and restore attribution require separate
+evidence.
 
 Both passes also check the native R2 bucket roster in the account from the
 reviewed storage binding. The headerless list and the explicit `default` list
@@ -271,41 +272,37 @@ or direct object and multipart listings.
 Both passes require an empty, unfiltered native Durable Objects namespace list
 in the pinned Worker account. The first page must explicitly report zero total
 namespaces, with no conflicting pagination, within five seconds and 64 KiB.
-Denied or partial reads are not evidence of absence. This check covers only
-namespaces visible to the existing credential in that account; it does not
-replace the estate or app-fixture reader or independently prove alarm absence.
+Denied or partial reads make the namespace roster unverified. The check covers
+namespaces visible to the existing credential in that account. The estate reader
+must separately establish alarm absence.
 
 Both passes also read the unfiltered native Containers application list in the
 pinned Worker account. The result must be an explicit empty array with no
 continuation within five seconds and 64 KiB. An existing application fails even
 if it has zero instances. Denied, partial, and nonterminal responses fail.
 This covers only applications visible to the existing credential in that
-account; it does not replace the separate estate or app-fixture readers.
+account.
 
 Both passes also read the native Stream live-input roster in the pinned Worker
 account. The unfiltered list requests counts and must return an explicitly empty
 `liveInputs` array with `total` and `range` both zero, within five seconds and
 64 KiB. Disabled inputs, missing counts, denied reads, and continuation evidence
-all fail. The empty-response shape is tested with offline fixtures, not confirmed
-against a live account. If the provider omits either count even when requested,
-qualification fails closed. This does not cover recordings, billing, or other
-accounts and does not replace the estate or app-fixture reader.
+all fail. Offline fixtures cover the empty-response shape. The read is scoped
+to live inputs visible to the existing credential in the pinned account.
 
 Both passes also read the unfiltered native Workflows definition roster in the
 pinned Worker account. The first page must explicitly contain no definitions,
 report `total_count: 0`, and give no evidence of continuation, within five
 seconds and 64 KiB. Workflows and Durable Object page counts must be written
-as canonical JSON integers; rounded numeric values do not prove absence. Any
-Workflows definition fails, even with no active instances. This read does not
-prove instance absence, cover other accounts, or replace the estate or
-app-fixture reader. The response shape is verified only offline.
+as canonical JSON integers. Any Workflows definition fails, even with no active
+instances. Offline fixtures cover the definition response shape. Instance
+absence and other accounts require separate evidence.
 
 Both passes also require an explicitly empty native Queues roster in the pinned
 Worker account. The unfiltered first page uses the provider's default page size
 and must report `total_count: 0` with no continuation, within five seconds and
-64 KiB. Even a queue without consumers fails. The response shape is tested only
-offline; this does not cover other accounts or replace the estate or app-fixture
-reader.
+64 KiB. Even a queue without consumers fails. Offline fixtures cover the roster
+response shape for the pinned account.
 
 The native R2 bucket and lifecycle, Durable Objects, Containers, Stream,
 Workflows, and Queues inventory reads reject duplicate JSON fields, even when

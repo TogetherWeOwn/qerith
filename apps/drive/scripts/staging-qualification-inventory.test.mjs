@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { qualificationPrefix } from './staging-qualification.mjs';
 import { createQualificationInventory } from './staging-qualification-inventory.mjs';
-import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './staging-qualification-d1-fixture.mjs';
+import { applyReviewedD1FixtureMigrations, stageReviewedD1FixtureMigrations } from './fixtures/qualification-d1.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
 import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
 import { runQualificationPhase } from './staging-qualification-worker.mjs';
@@ -40,6 +40,11 @@ const r2RosterOrder = ['r2-roster', ...r2Jurisdictions.map(jurisdiction => `r2-r
 const uuid = digit => `${digit.repeat(8)}-0000-0000-0000-000000000000`;
 const scan = (items = []) => ({ complete: true, items });
 const error = { message: 'Qualification estate inventory is unverified.' };
+const permanentReservation = "INSERT INTO drive_upload_key_reservations VALUES ('offline-fixture')";
+
+function waitForFixtureStep(step, operation) {
+  return Promise.race([step, operation.then(() => assert.fail('Operation finished before the fixture step'))]);
+}
 
 function fixture(t, { migrationLimit } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'drive-inventory-'));
@@ -290,8 +295,11 @@ function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
   };
 }
 
-for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1', 'worker', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
-  const { context, trace, env, cwd, reads, state } = fixture(t);
+for (const fault of ['admission', 'retention', 'default retention', 'retention after upload', 'd1', 'retention after D1',
+  'worker', 'app residue after restore', null]) test(`composed lifecycle fails closed: ${fault ?? 'case failure after activation'}`, async t => {
+  const { context, trace, env, cwd, reads, state, seed } = fixture(t);
+  const hasResidue = fault === 'app residue after restore';
+  const reachesCases = hasResidue || !fault;
   const noRetention = ['retention', 'default retention'].includes(fault);
   state.recordRetention = !noRetention;
   const stored = new Map();
@@ -299,7 +307,7 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     expiresAt: String(Date.now() + 25 * 60_000) };
   const unused = () => assert.fail('Unexpected app adapter');
   const unexpectedNetwork = t.mock.method(globalThis, 'fetch', () => assert.fail('Unexpected network request'));
-  const reachesWorker = ['retention after D1', 'worker', null].includes(fault);
+  const reachesWorker = reachesCases || ['retention after D1', 'worker'].includes(fault);
   const nativeRequest = reachesWorker ? nativeWorkerFixture(cwd, candidate, context, reads, state, trace) : reads.request;
   const identity = { sha: context.sha, runId: context.runId, attempt: context.attempt };
   const { expiresAt, version } = candidate;
@@ -309,6 +317,7 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
       assert.deepEqual(scope, { ...context, version });
       assert.equal(state.version, version);
       trace.push('cases');
+      if (hasResidue) seed(permanentReservation);
       throw new Error('Synthetic case failure');
     },
     readWriterFence(source, signal) {
@@ -362,8 +371,21 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     },
   });
   assert.deepEqual(trace, []);
-  await assert.rejects(run(), fault === 'admission' ? /admission is unverified/ : noRetention ? /recovery retention is unverified/ :
-    fault ? /recovery record is unverified/ : /access.*unverified|unverified.*access/);
+  const accessFailure = /access.*unverified|unverified.*access/;
+  const operation = run();
+  if (hasResidue) {
+    await assert.rejects(operation, failure => {
+      assert.ok(failure instanceof AggregateError);
+      assert.equal(failure.errors.length, 2);
+      assert.match(failure.errors[0].message, accessFailure);
+      assert.equal(failure.errors[1].message, error.message);
+      return true;
+    });
+    assert.equal(trace.at(-1), 'd1-census');
+  } else {
+    await assert.rejects(operation, fault === 'admission' ? /admission is unverified/ :
+      noRetention ? /recovery retention is unverified/ : fault ? /recovery record is unverified/ : accessFailure);
+  }
   await assert.rejects(run(), /already started/);
   const milestones = ['admission', 'estate', 'd1-census', 'upload', 'd1 PUT', 'd1 GET', 'migrate', 'worker PUT', 'worker GET',
     'activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'];
@@ -373,11 +395,11 @@ for (const fault of ['admission', 'retention', 'default retention', 'retention a
     ...(fault === 'admission' || noRetention || fault === 'retention after upload' ? [] : ['d1 PUT', 'd1 GET']),
     ...(reachesWorker ? ['migrate'] : []),
     ...(reachesWorker && fault !== 'retention after D1' ? ['worker PUT', 'worker GET'] : []),
-    ...(!fault ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
+    ...(reachesCases ? ['activate', 'probe', 'cases', 'fence', 'restore', 'restore-readback'] : []),
     ...(fault === 'admission' ? [] : ['estate', 'd1-census'])]);
-  const cleanup = fault ? trace : trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
+  const cleanup = reachesCases ? trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore')) : trace;
   assert.deepEqual(cleanup.filter(step => step.endsWith('-cleanup')).sort(),
-    fault ? [] : ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')]);
+    reachesCases ? ['d1-cleanup', 'd1-cleanup', ...Array(4).fill('r2-cleanup')] : []);
   assert.equal(unexpectedNetwork.mock.callCount(), 0);
 });
 
@@ -458,18 +480,20 @@ for (const mode of ['held', 'foreign', 'lost before headers', 'lost during body 
         }
       },
     });
-    const rejected = assert.rejects(run, mode === 'held' ? /Offline case failed/ :
-      mode === 'foreign' ? /writer quiescence is unverified/ : r2Fails ? /estate cleanup is unverified/ : { name: 'AbortError' });
     const lost = mode.startsWith('lost ');
     let recoveryBeforeDrain = [];
     if (lost || r2Fails) {
-      await (lost ? entered.promise : r2Failed.promise);
-      if (lost) fence.abort();
-      await new Promise(resolve => setImmediate(resolve));
-      recoveryBeforeDrain = trace.slice(trace.indexOf('fence') + 1).filter(step => step === 'restore' || step === 'estate');
-      release.resolve();
+      try {
+        await waitForFixtureStep(lost ? entered.promise : r2Failed.promise, run);
+        if (lost) fence.abort();
+        await new Promise(resolve => setImmediate(resolve));
+        recoveryBeforeDrain = trace.slice(trace.indexOf('fence') + 1).filter(step => step === 'restore' || step === 'estate');
+      } finally {
+        release.resolve();
+      }
     }
-    await rejected;
+    await assert.rejects(run, mode === 'held' ? /Offline case failed/ :
+      mode === 'foreign' ? /writer quiescence is unverified/ : r2Fails ? /estate cleanup is unverified/ : { name: 'AbortError' });
     assert.deepEqual(recoveryBeforeDrain, []);
     const cleanupTrace = trace.slice(trace.indexOf('fence') + 1, trace.indexOf('restore'));
     assert.deepEqual(trace.filter(step => ['estate', 'cases', 'fence', 'restore'].includes(step)),
@@ -505,7 +529,7 @@ for (const [fault, change, expected] of [
     beforeD1Census.slice(0, -1)],
   ['partial catalog', f => { f.state.partialCensus = true; }, beforeD1Census],
   ['unknown catalog', f => f.seed('CREATE TABLE unknown_table (id INTEGER)'), beforeD1Census],
-  ['permanent residue', f => f.seed("INSERT INTO drive_upload_key_reservations VALUES ('earlier-fixture')"), beforeD1Census],
+  ['permanent residue', f => f.seed(permanentReservation), beforeD1Census],
 ]) {
   test(`inventory refuses ${fault} at both D1 census boundaries`, async t => {
     for (const phase of ['before', 'after']) await t.test(phase, async t => {
@@ -531,15 +555,17 @@ test('inventory drains an aborted D1 census before settling', { timeout: 10_000 
     assert.fail('Census transport was not cancelled');
   };
   let settled = false;
-  const rejection = assert.rejects(run('before', {}, controller.signal), error).finally(() => { settled = true; });
-  const signal = await entered.promise;
-  controller.abort(new Error('private error'));
-  await new Promise(resolve => setImmediate(resolve));
-  const settledBeforeDrain = settled;
-  release.resolve();
-  await rejection;
-  assert.equal(signal.aborted, true);
-  assert.equal(settledBeforeDrain, false);
+  const operation = run('before', {}, controller.signal).finally(() => { settled = true; });
+  try {
+    const signal = await waitForFixtureStep(entered.promise, operation);
+    controller.abort(new Error('private error'));
+    assert.equal(signal.aborted, true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+  } finally {
+    release.resolve();
+  }
+  await assert.rejects(operation, error);
   await assert.rejects(run('after'), error);
   assert.deepEqual(f.trace, beforeD1Census);
 });
