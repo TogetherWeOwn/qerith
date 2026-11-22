@@ -201,12 +201,11 @@ It checks the same commit's successful main-push CI run, exact-head browser
 policy and checkout, generated fixture step, verified artifact identity and
 digest, and selected passkey, invite, grant and shared-listing observations.
 The latest CI attempt must contain the capture, verification, registry
-coverage, and `ci-ok` successes. The aggregate can pass independently of
-registry coverage, and a failed-jobs-only rerun can leave some successes in
-an earlier attempt. A full rerun can also fail if an earlier artifact already
-uses a required upload name. A candidate without a complete record remains
-ineligible. If CI cannot produce that record for the commit, a new candidate
-needs its own review and successful main-push evidence.
+coverage, and `ci-ok` successes. A failed-jobs-only rerun can leave some
+successes in an earlier attempt. A full rerun can also fail if an earlier
+artifact already uses a required upload name. A candidate without a complete
+record remains ineligible. If CI cannot produce that record for the commit, a
+new candidate needs its own review and successful main-push evidence.
 
 The future protected evidence reader must authenticate the approvals and CI
 metadata independently and extract the claims from the same digest-verified
