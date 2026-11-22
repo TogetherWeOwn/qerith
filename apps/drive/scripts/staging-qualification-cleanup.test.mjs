@@ -14,7 +14,8 @@ import { createQualificationRecovery } from './staging-qualification-recovery.mj
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
-import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { createQualificationLifecycle, runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 import { fixture as accessFixture } from './staging-qualification-access.test.mjs';
 import { setup as fileFixture } from './staging-qualification-files.test.mjs';
 import { fixture as transferFixture } from './staging-qualification-app-transfer.test.mjs';
@@ -538,19 +539,30 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
 });
 
 function composedLifecycle({ cwd, env, active, phases, exercise, signal, after = () => true }) {
-  return runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
+  return runQualificationLifecycle({
+    exercise: exercise ?? (() => assert.fail('Unexpected exercise invocation')),
+    readAdmissionEvidence: fakeQualificationAdmission, recordRecovery: () => true,
     inventory({ phase }) { phases.push(phase); return phase === 'after' ? after() : true; },
     cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
   }, env, cwd, signal, {
     upload: () => ({ ...active, expiresAt: String(Date.now() + 25 * 60_000) }), migrate: () => null,
-    async worker({ exercise, cleanup }, _env, _cwd, workerSignal) {
-      try { return await exercise(active, workerSignal); }
+    async worker({ exercise: runCases, cleanup }, _env, _cwd, workerSignal) {
+      try { return exercise ? await runCases(active, workerSignal) : { cases: 'completed' }; }
       finally { await cleanup(active, workerSignal); phases.push('restore'); }
     },
   });
 }
 
 const lifecycleOrder = ['before', 'cleanup', 'restore', 'after'];
+
+test('composed lifecycle requires explicit admission, transport and candidate upload', async t => {
+  const { env, cwd } = job(t);
+  const unused = () => assert.fail('Preparation must not call adapters');
+  await assert.rejects(createQualificationLifecycle(env, cwd, { send: unused }), /requires reviewed admission/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { readAdmissionEvidence: unused }), /requires.*explicit transport/);
+  await assert.rejects(createQualificationLifecycle(env, cwd, { readAdmissionEvidence: unused, send: unused }),
+    /requires an explicit candidate uploader/);
+});
 
 test('lifecycle aborts and drains an escaped access callback before recovery', { timeout: 10_000 }, async t => {
   const { cwd, env, context } = job(t);
@@ -585,8 +597,7 @@ test('lifecycle aborts and drains an escaped access callback before recovery', {
   assert.deepEqual(phases, lifecycleOrder);
 });
 
-for (const ending of ['success and replay', 'unverified final inventory', 'cancelled at final inventory']) test(
-  `lifecycle runs all 19 cases for one candidate: ${ending}`, { timeout: 90_000 }, async t => {
+test('lifecycle runs all 19 cases and rejects evidence replay', { timeout: 90_000 }, async t => {
   const { cwd, env, context } = job(t);
   const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
   const binding = { endpoint, bucket, epoch: env.QERITH_S3_STORAGE_EPOCH };
@@ -611,12 +622,7 @@ for (const ending of ['success and replay', 'unverified final inventory', 'cance
     },
   });
   const controller = new AbortController();
-  const run = exercise => composedLifecycle({ cwd, env, active, phases, exercise, signal: controller.signal,
-    after() {
-      if (ending === 'cancelled at final inventory') controller.abort();
-      return ending !== 'unverified final inventory';
-    },
-  });
+  const run = exercise => composedLifecycle({ cwd, env, active, phases, exercise, signal: controller.signal });
   let cases;
   const result = run(async (invocation, phaseSignal) => {
     cases = await compose(invocation, phaseSignal);
@@ -624,19 +630,34 @@ for (const ending of ['success and replay', 'unverified final inventory', 'cance
     assert.throws(() => verifyQualificationExercise(cases, invocation, new AbortController().signal), /case evidence/);
     return cases;
   });
-  if (ending === 'success and replay') assert.equal((await result).deployment, cases);
-  else await assert.rejects(result, ending === 'unverified final inventory' ? /inventory is unverified \(after\)/ : { name: 'AbortError' });
+  assert.equal((await result).deployment, cases);
   assert.deepEqual(cases, Object.fromEntries(qualificationExerciseCases.map(name => [name, 'pass'])));
   assert.deepEqual(access.transcript, []);
   assert.deepEqual(storage.trace, storageCalls);
   assert.deepEqual([large.clients, resume.clients, scopeReads, trees.size], [1, 2, 1, 8]);
   assert.deepEqual(phases, lifecycleOrder);
-  if (ending === 'success and replay') {
-    // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
-    await assert.rejects(run(() => cases), /case evidence/);
-    assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
-  }
+  // Even the same SHA/version/attempt cannot reuse evidence from an earlier invocation.
+  await assert.rejects(run(() => cases), /case evidence/);
+  assert.deepEqual(phases, [...lifecycleOrder, ...lifecycleOrder]);
 });
+
+for (const cancelled of [false, true]) {
+  test(`lifecycle refuses ${cancelled ? 'cancellation at' : 'unverified'} final inventory after successful cases`, async t => {
+    const { cwd, env, context } = job(t);
+    const active = { ...context, version: '11111111-1111-1111-1111-111111111111' };
+    const phases = [];
+    const controller = new AbortController();
+    // The completed Worker stub isolates the final boundary from the 5 GiB transfer.
+    const result = composedLifecycle({ cwd, env, active, phases, signal: controller.signal,
+      after() {
+        if (cancelled) controller.abort();
+        return cancelled;
+      },
+    });
+    await assert.rejects(result, cancelled ? { name: 'AbortError' } : /inventory is unverified \(after\)/);
+    assert.deepEqual(phases, lifecycleOrder);
+  });
+}
 
 test('signed R2 cleanup includes a key exactly equal to the attempt prefix', async t => {
   const { cwd, env, context } = job(t);

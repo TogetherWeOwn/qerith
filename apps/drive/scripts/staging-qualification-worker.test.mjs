@@ -9,6 +9,8 @@ import { test } from 'node:test';
 import { allowsQualificationTraffic, qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 import { inspectQualificationWorker, probeQualificationWorker, recoverQualificationWorker,
   uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
+import { assertFullV0 } from './staging-qualification-admission.mjs';
+import { candidateAppSettings, fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -382,8 +384,10 @@ function uploadFixture({ cwd, app, env }) {
     });
     return child;
   }
-  return { setup, calls, scratch: () => scratch, run: override => uploadQualificationWorker({ ...env, ...storageEnv,
-    WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override }, cwd, controller.signal, request, runner) };
+  const run = override => uploadQualificationWorker({ ...env, ...storageEnv,
+    WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override },
+    cwd, controller.signal, request, runner);
+  return { setup, calls, scratch: () => scratch, run };
 }
 
 test('uploads only the exact-attempt version with inherited secrets and an unchanged baseline', async t => {
@@ -392,6 +396,13 @@ test('uploads only the exact-attempt version with inherited secrets and an uncha
   assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['subdomain', 'qerith-drive-staging', 'deployments',
     baseline, 'versions', 'upload', candidate, 'versions', 'deployments']);
   assert.ok(!existsSync(scratch()));
+});
+
+test('stock version upload keeps its admission defaults despite environment opt-ins', async t => {
+  const { run } = uploadFixture(fixture(t, true));
+  assert.deepEqual(await run({ DRIVE_SIGN_IN_FIXTURE: '1', DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+    DRIVE_STAGING_READ_GRANTS: '1', DRIVE_STAGING_SHARED_LISTING: '1', DRIVE_OWNER_ENROLLMENT_RELEASE: 'enabled' }),
+    { version: candidate, expiresAt, previousVersion: baseline, previousDeployment: prior });
 });
 
 test('rejects a newer undeployed version before inheriting staging secrets', async t => {
@@ -464,6 +475,36 @@ test('activation rejects missing or mismatched attempt bindings under the correc
     ? { ...binding, text: '3' } : binding);
   await assert.rejects(run(), /incompatible resource/);
   assert.deepEqual(calls, ['current', 'version']);
+});
+
+test('activation requires exact admitted settings under the correct version tag', async t => {
+  const { cwd, env, run, calls, options, state } = fixture(t);
+  const original = state.candidateBindings;
+  const allBindings = [...original, ...varsToBindings(candidateAppSettings)];
+  state.candidateBindings = allBindings;
+  await assert.rejects(run(), /requires reviewed app admission/);
+  assert.deepEqual(calls.splice(0), ['current', 'version']);
+
+  const admission = await assertFullV0(env, cwd, fakeQualificationAdmission);
+  for (const wrong of [true, { ...admission }]) {
+    options.admission = wrong;
+    await assert.rejects(run(), /admission is unverified/);
+    assert.deepEqual(calls, []);
+  }
+  options.admission = admission;
+  await assert.rejects(run({ GITHUB_RUN_ATTEMPT: '3' }), /admission is unverified/);
+  assert.deepEqual(calls, []);
+  for (const name of Object.keys(candidateAppSettings)) {
+    for (const bad of [null, { name, type: 'plain_text', text: 'invalid' },
+      { name, type: 'json', text: candidateAppSettings[name] }]) {
+      state.candidateBindings = allBindings.filter(binding => binding.name !== name).concat(bad ? [bad] : []);
+      await assert.rejects(run(), /incompatible resource/);
+      assert.deepEqual(calls.splice(0), ['current', 'version']);
+    }
+  }
+  state.candidateBindings = allBindings;
+  assert.equal((await run()).version, candidate);
+  assert.ok(calls.includes('activate'));
 });
 
 test('refuses activation when the deadline differs or recovery recording consumes the activation window', async t => {

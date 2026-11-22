@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { assertDispatch, assertQualificationJob, qualificationReceiptName, requiredCases } from './staging-qualification.mjs';
 import { qualificationExerciseCases } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 import { cleanQualificationR2 } from './staging-qualification-cleanup.mjs';
 import { exerciseQualificationStorage } from './staging-qualification-storage-cases.mjs';
 import { qualificationRecoveryWriter, readQualificationRecoveryRecord } from './staging-qualification-recovery-record.mjs';
@@ -475,7 +476,7 @@ function lifecycle(t, failure, driftKind) {
     },
   });
   const ops = {
-    assertFullV0: () => step('full-v0'),
+    readAdmissionEvidence: scope => step('full-v0') && fakeQualificationAdmission(scope),
     inventory({ phase, sha }, signal) {
       assert.equal(sha, env.TESTED_SHA);
       assert.equal(signal.aborted, false);

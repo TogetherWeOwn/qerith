@@ -16,5 +16,7 @@ and column to a module directly imported by the base test. Renames use old paths
 fails only if the base test kills it. New tests of unchanged source have no eligible mutants.
 
 Node enables the local Wrangler case. Vitest runs the offline Workers tests. Missing test results,
-clean failures and timeouts are execution errors. Limits are 30 seconds per run and 25 minutes per
-job. Logs record commit SHAs, omitted targets, candidate counts and verdicts.
+clean failures and timeouts are execution errors. Each test run has a 30-second limit.
+`staging-qualification-inventory.test.mjs` has 60 seconds for its isolated Git and
+SQLite fixtures. The job has a 25-minute limit. Logs record commit SHAs, omitted
+targets, candidate counts and verdicts.

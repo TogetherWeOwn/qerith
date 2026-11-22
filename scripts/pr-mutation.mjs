@@ -140,7 +140,9 @@ function runTest(root, target, clean) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   if (target === 'apps/drive/scripts/staging-qualification-migrations.test.mjs') env.DRIVE_QUALIFICATION_WRANGLER_LOCAL = '1';
-  const run = spawnSync('timeout', ['--kill-after=2s', '30s', process.execPath, ...args],
+  // The inventory cases build separate committed Git and migrated SQLite fixtures.
+  const timeout = target === 'apps/drive/scripts/staging-qualification-inventory.test.mjs' ? '60s' : '30s';
+  const run = spawnSync('timeout', ['--kill-after=2s', timeout, process.execPath, ...args],
     { cwd, env, encoding: 'utf8', maxBuffer: 2 ** 20 });
   const verdict = testVerdict(run, isWorkers(target), file);
   if (verdict === true || (!clean && verdict === false)) return verdict;

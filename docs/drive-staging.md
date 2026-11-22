@@ -191,9 +191,44 @@ The offline entry point rechecks the committed staging target and reviewed R2
 binding, then binds the case runner, estate checks, and signed recovery writer
 to a single SHA/run/attempt. It verifies recovery record retention before the
 candidate upload and again before each record write. It requires explicit
-admission, app case, estate, writer-fence, and transport adapters. Admission
-must pass. The case runner requires every case to pass and binds the results to
-the exact invocation.
+admission evidence, app case, estate, writer-fence, and transport adapters. The
+case runner requires every case to pass and binds the results to the exact
+invocation.
+
+Before the first inventory read, app admission requires two independent
+approvals for the exact main commit, browser workflow and candidate settings.
+It checks the same commit's successful main-push CI run, exact-head browser
+policy and checkout, generated fixture step, verified artifact identity and
+digest, and selected passkey, invite, grant and shared-listing observations.
+The latest CI attempt must contain the capture, verification, registry
+coverage, and `ci-ok` successes. The aggregate can pass independently of
+registry coverage, and a failed-jobs-only rerun can leave some successes in
+an earlier attempt. A full rerun can also fail if an earlier artifact already
+uses a required upload name. A candidate without a complete record remains
+ineligible. If CI cannot produce that record for the commit, a new candidate
+needs its own review and successful main-push evidence.
+
+The future protected evidence reader must authenticate the approvals and CI
+metadata independently and extract the claims from the same digest-verified
+archive. The offline tests inject synthetic records for that interface.
+
+The resulting attempt-bound admission pins invite acceptance, read grants
+and shared listing to `1`, fixture sign-in to `0`, and owner enrollment to
+`disabled`. The Worker lifecycle verifies the settings on the immutable
+version before activation. Full-v0 composition requires an explicit candidate
+uploader. A protected implementation must build the admitted commit in an
+exclusive checkout and keep the Worker entry, its transitive sources, assets,
+migrations, and pinned build tools isolated through Wrangler upload. Before
+Wrangler inherits bindings, require the version serving all staging traffic
+to be the latest upload. After upload, require the candidate to immediately
+follow that version in upload history and require the serving deployment to
+stay the same. Verify the candidate's complete binding set, including the
+exact admitted settings and inherited secret names, on version readback.
+These checks must finish before the adapter returns a version for migration
+or activation. The stock uploader continues to use closed opt-ins.
+Synthetic owner provisioning requires its own reviewed path under the writer
+fence after the initial clean census.
+
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. R2 prefix and D1 migration-fixture cleanup require a quiescence
 snapshot for the exact attempt and a fence-loss signal. The composer waits for

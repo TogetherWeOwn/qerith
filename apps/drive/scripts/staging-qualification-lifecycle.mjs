@@ -1,4 +1,5 @@
 import { assertQualificationJob, qualificationPrefix } from './staging-qualification.mjs';
+import { assertFullV0 } from './staging-qualification-admission.mjs';
 import { createQualificationEstate } from './staging-qualification-estate.mjs';
 import { createQualificationExercise, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
 import { applyQualificationMigrations } from './staging-qualification-migrations.mjs';
@@ -6,7 +7,7 @@ import { createQualificationR2RecoveryStore } from './staging-qualification-reco
 import { qualificationRecoveryWriter } from './staging-qualification-recovery-record.mjs';
 import { assertQualificationSettings } from './staging-qualification-settings.mjs';
 import {
-  probeQualificationWorker, qualificationMigrationTimeLeft, runQualificationPhase, uploadQualificationWorker,
+  probeQualificationWorker, qualificationMigrationTimeLeft, runQualificationPhase,
   withQualificationRecovery, withQualificationWorker,
 } from './staging-qualification-worker.mjs';
 
@@ -14,7 +15,6 @@ const recordBudget = 15_000;
 const insufficientWindow = () => new Error('Staging candidate has insufficient time left for migrations and activation.');
 
 const stagingAdapters = (send = fetch) => ({
-  upload: (env, cwd, signal) => uploadQualificationWorker(env, cwd, signal, send),
   migrate: applyQualificationMigrations,
   worker: (ops, env, cwd, signal) => withQualificationWorker(ops, env, cwd, signal, send),
   probe: (context, signal) => probeQualificationWorker(context, signal, send),
@@ -22,12 +22,15 @@ const stagingAdapters = (send = fetch) => ({
 
 // Offline composition only. No provider I/O during construction. A protected
 // caller must hold the lifecycle lock and supply real admission, estate,
-// app case and writer-fence adapters. `stageOverrides` is an offline test seam.
-export async function createQualificationLifecycle(env, cwd, { assertFullV0, readWriterFence, readEstate,
-  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send } = {}, stageOverrides) {
-  if (typeof assertFullV0 !== 'function' || typeof send !== 'function') {
+// app case and writer-fence adapters. There is no default candidate uploader.
+// A protected uploader must keep the build inputs isolated through bundling.
+// `stageOverrides` is an offline test seam.
+export async function createQualificationLifecycle(env, cwd, { readAdmissionEvidence, readWriterFence, readEstate,
+  withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, uploadCandidate, send } = {}, stageOverrides) {
+  if (typeof readAdmissionEvidence !== 'function' || typeof send !== 'function') {
     throw new Error('Qualification lifecycle requires reviewed admission and an explicit transport.');
   }
+  if (typeof uploadCandidate !== 'function') throw new Error('Qualification requires an explicit candidate uploader.');
   const settings = Object.freeze({ ...env });
   const source = assertQualificationJob(settings, cwd);
   await assertQualificationSettings(settings, cwd);
@@ -42,14 +45,14 @@ export async function createQualificationLifecycle(env, cwd, { assertFullV0, rea
   return async signal => {
     if (started) throw new Error('Qualification lifecycle already started.');
     started = true;
-    return runQualificationLifecycle({ ...estate, assertFullV0, exercise, recordRecovery }, settings, cwd, signal, {
+    return runQualificationLifecycle({ ...estate, readAdmissionEvidence, exercise, recordRecovery }, settings, cwd, signal, {
       ...stages,
-      async upload(env, cwd, signal) {
+      async upload(env, cwd, signal, admission) {
         // A stranded, undeployed upload would make the next baseline ineligible.
         // Check retention before uploading, without replacing the per-write checks.
         await store.assertRetention(signal);
         signal?.throwIfAborted();
-        return stages.upload(env, cwd, signal);
+        return uploadCandidate(env, cwd, signal, admission);
       },
     });
   };
@@ -57,12 +60,13 @@ export async function createQualificationLifecycle(env, cwd, { assertFullV0, rea
 
 // No workflow caller yet. The caller must hold the shared staging lock, build
 // the exact SHA, and supply reviewed, abortable operations that drain on abort.
-export async function runQualificationLifecycle({ assertFullV0, recordRecovery, inventory, exercise, cleanup },
+export async function runQualificationLifecycle({ readAdmissionEvidence, recordRecovery, inventory, exercise, cleanup },
   env, cwd, signal, { upload, migrate, worker, probe } = stagingAdapters()) {
   const identity = assertQualificationJob(env, cwd);
-  if ([assertFullV0, recordRecovery, inventory, exercise, cleanup].some(fn => typeof fn !== 'function')) {
+  if ([readAdmissionEvidence, recordRecovery, inventory, exercise, cleanup].some(fn => typeof fn !== 'function')) {
     throw new Error('Qualification lifecycle requires full-v0 checks, recovery, inventory and cleanup.');
   }
+  if (typeof upload !== 'function') throw new Error('Qualification requires an explicit candidate uploader.');
   const context = { ...identity, prefix: qualificationPrefix(identity) };
   const requireProof = async (task, input, parentSignal, timeout, message) => {
     if (await runQualificationPhase(task, input, parentSignal, timeout) !== true) throw new Error(message);
@@ -73,13 +77,14 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
     { ...evidence, ...context, kind }, parentSignal, recordBudget, 'Qualification recovery record is unverified.');
 
   // No staging mutation before reviewed admission and inventory checks.
-  await requireProof(assertFullV0, context, signal, 30_000, 'Reviewed full-v0 admission is unverified.');
+  const admission = await runQualificationPhase(
+    (_, active) => assertFullV0(env, cwd, readAdmissionEvidence, active), null, signal, 30_000);
   await inspect('before', signal);
   const result = await withQualificationRecovery(async () => {
     signal?.throwIfAborted();
     // Reject a stale upload-history baseline before any D1 changes. Do not
     // force inheritance or automatically republish a baseline to make it eligible.
-    const candidate = await upload(env, cwd, signal);
+    const candidate = await upload(env, cwd, signal, admission);
     signal?.throwIfAborted();
     const { expiresAt } = candidate ?? {};
     const started = performance.now();
@@ -94,6 +99,7 @@ export async function runQualificationLifecycle({ assertFullV0, recordRecovery, 
     signal?.throwIfAborted();
     const deployment = await worker({
       upload: candidate,
+      admission,
       recordRecovery: record('worker'),
       probe,
       exercise: async (active, phaseSignal) => {
