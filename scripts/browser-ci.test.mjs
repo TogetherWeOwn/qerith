@@ -270,7 +270,7 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
       '- main:',
       '  - heading "Users and invites" [level=1]',
     ]],
-    ['nested', 'NESTED_SHARE_EVIDENCE', ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only'], [
+    ['nested', 'NESTED_SHARE_EVIDENCE', ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only', 'invite-empty'], [
       '- menu:',
       '  - menuitem "Share"',
       '  - menuitem "Move"',
@@ -279,6 +279,9 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
       '  - text: Through Shared project Can view',
       '  - button "Confirm removal of direct access for Folder Reader"',
       '  - status: Removed direct access for Folder Reader.',
+      '  - button "Invite someone"',
+      '- main:',
+      '  - heading "Users and invites" [level=1]',
     ]],
   ];
   for (const [scope, flag, states, review] of fixtures) {
@@ -323,12 +326,14 @@ test('routed Share gates bind to the exact head and require each fixture’s evi
         await writeFile(missing, original);
         const mobilePng = viewportPng(390, 844);
         const headerOnly = Buffer.concat([mobilePng.subarray(0, 33), mobilePng.subarray(-12)]);
+        const ariaReview = `${detail('aria-review', 1280, 800)}.txt`;
+        const originalReview = await readFile(join(dir, ariaReview), 'utf8');
         const invalid = [
           [`${stem}-${states.at(-1)}-390.png`, headerOnly, 'screenshot'],
           [`axe-${stem}-${states.at(-1)}-1280.json`, '{"violations":[{}]}', 'axe evidence'],
           [`${detail('greyscale', 390, 844)}.png`, viewportPng(390, 845), 'screenshot'],
           [`${detail('reflow', 1280, 800)}.png`, viewportPng(1280, 800), 'screenshot'],
-          [`${detail('aria-review', 1280, 800)}.txt`, 'Share controls checked.', 'ARIA review'],
+          [ariaReview, originalReview.replace('  - heading "Users and invites" [level=1]', ''), 'ARIA review'],
         ];
         for (const [file, content, kind] of invalid) {
           const path = join(dir, file);

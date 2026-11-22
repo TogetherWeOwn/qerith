@@ -78,10 +78,10 @@ async function verifyShareRecipientEvidence(dir) {
 async function verifyRoutedShareEvidence(dir, scope) {
   const root = scope === 'root-share';
   const states = root ? ['signed-out', 'root', 'invite-empty', 'dialog'] :
-    ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only'];
+    ['signed-out', 'owner', 'menu', 'inherited', 'confirm', 'revoked', 'read-only', 'invite-empty'];
   const reviewNodes = ['dialog "Share “', 'heading "People with access"', 'combobox "Add people" [expanded]',
-    'listbox "Available people"', ...(root
-      ? ['option "Root Reader"', 'button "Remove Root Reader’s access"', 'button "Invite someone"', 'heading "Users and invites"']
+    'listbox "Available people"', 'button "Invite someone"', 'heading "Users and invites"', ...(root
+      ? ['option "Root Reader"', 'button "Remove Root Reader’s access"']
       : ['option "New Reader"', 'menuitem "Share"', 'menuitem "Move"', 'text: Through Shared project',
         'button "Confirm removal of direct access for Folder Reader"', 'status: Removed direct access for Folder Reader.'])];
   const requireScreenshot = async (label, width, height, fullPage) => {
