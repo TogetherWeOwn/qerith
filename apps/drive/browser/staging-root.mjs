@@ -11,6 +11,7 @@ import { proveMove } from './move.mjs';
 import { proveNestedMove } from './nested-move.mjs';
 import { captureFolderView } from './folder-view.mjs';
 import { proveInvite } from './invite-runtime.mjs';
+import { proveNestedShare } from './nested-share.mjs';
 import { proveRootShare } from './root-share.mjs';
 import { fixture, userHandle } from '../tests/ceremony-fixture.ts';
 
@@ -175,6 +176,11 @@ stagingRoot: try {
   assert.deepEqual(partial, [206, 'bytes 1-3/6', Array.from(file.buffer.subarray(1, 4))]);
   if (process.argv.includes('--root-share-only')) {
     await proveRootShare(browser, { origin, DB, worker, relay, ownerToken: session.value, memberToken,
+      file, downloadPath: await row.getAttribute('href') });
+    break stagingRoot;
+  }
+  if (process.argv.includes('--nested-share-only')) {
+    await proveNestedShare(browser, { origin, DB, worker, relay, ownerToken: session.value, memberToken,
       file, downloadPath: await row.getAttribute('href') });
     break stagingRoot;
   }

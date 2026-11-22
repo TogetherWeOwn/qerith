@@ -3,24 +3,51 @@
   import { page } from '$app/state';
   import { onMount, tick } from 'svelte';
   import EmptyFolder from '../../../lib/EmptyFolder.svelte';
+  import EntryShareDialog from '../../../lib/EntryShareDialog.svelte';
   import KindGlyph from '../../../lib/KindGlyph.svelte';
   import MoveDialog from '../../../lib/MoveDialog.svelte';
-  import RowActions from '../../../lib/RowActions.svelte';
+  import RowActions, { type RowAction } from '../../../lib/RowActions.svelte';
   import { moveNeighbor, readMoveReceipt, type MoveReload } from './move-action';
   import { isLinkableFolderId } from '../../../lib/drive-navigation';
-  import type { FolderPage } from '../../../lib/server/folder-page';
+  import type { PageData } from './$types';
 
-  export let data: { result: FolderPage };
+  export let data: PageData;
   const label = (name: string) => name.trim() ? name : `${name} (Whitespace-only name)`;
+  type FolderEntry = Extract<PageData['result'], { status: 'ok' }>['folder']['entries'][number];
+  type ShareSession = { data: PageData; entry: FolderEntry; current: () => boolean };
 
   let mounted = false, movedId: string | undefined;
   let main: HTMLElement, heading: HTMLHeadingElement;
   let picker: ReturnType<typeof MoveDialog>;
+  let sharing: ShareSession | undefined;
   let receipt: Awaited<ReturnType<typeof readMoveReceipt>> | undefined;
   const shallow = { shallow: true, replace: true } as const;
   const row = (id: string) => main.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
-  const restoreTrigger = (id: string) => row(id)?.querySelector('button')?.focus();
+  const trigger = (id: string) => row(id)?.querySelector('button');
+  const restoreTrigger = (id: string) => trigger(id)?.focus();
   const focusNeighbor = (id?: string) => (id && row(id)?.querySelector<HTMLElement>('[data-name]') || heading).focus();
+
+  function rowActions(entry: FolderEntry): RowAction[] {
+    const actions: RowAction[] = [];
+    if (entry.shareable) actions.push('Share');
+    if (entry.movable) actions.push('Move');
+    return actions;
+  }
+
+  function selectAction(action: RowAction, entry: FolderEntry) {
+    if (action === 'Move' && entry.movable) picker?.open({ ...entry, expectedParent: page.params.folderId });
+    if (action === 'Share' && entry.shareable && data.shareOwner && movedId === undefined &&
+        data.result.status === 'ok' && data.result.folder.entries.includes(entry)) {
+      const target: ShareSession = { data, entry, current: () => sharing === target && data === target.data && movedId === undefined };
+      sharing = target;
+    }
+  }
+
+  function closeShare(target: ShareSession) {
+    if (!target.current()) return;
+    sharing = undefined;
+    (trigger(target.entry.id) ?? heading).focus();
+  }
 
   onMount(() => {
     mounted = true;
@@ -64,7 +91,7 @@
     {@const folder = data.result.folder}
     {@const entries = movedId === undefined ? folder.entries : folder.entries.filter(entry => entry.id !== movedId)}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
-    <h1 dir="auto" bind:this={heading} tabindex={folder.canMove ? -1 : undefined}>{label(folder.name)}</h1>
+    <h1 dir="auto" bind:this={heading} tabindex={folder.canMove || data.shareOwner ? -1 : undefined}>{label(folder.name)}</h1>
     {#if folder.canMove}
       <MoveDialog bind:this={picker} onrootcreated={async () => {}} onmoved={moved} onreturn={restoreTrigger} />
       <div class:move-notice={receipt !== undefined}>
@@ -73,10 +100,18 @@
         {#if movedId}<a href={page.url.pathname + page.url.search}>Refresh this folder</a>{/if}
       </div>
     {/if}
+    {#if sharing && sharing.data === data && data.shareOwner && movedId === undefined}
+      {#key sharing}
+        {@const target = sharing}
+        <EntryShareDialog entryId={target.entry.id} name={target.entry.name} kind={target.entry.kind === 'folder' ? 'Folder' : 'File'}
+          onInvite={data.ownerInvites ? () => location.assign('/people') : undefined}
+          owner={data.shareOwner} isCurrent={target.current} onreturn={() => closeShare(target)} />
+      {/key}
+    {/if}
     {#if entries.length}
       <ul role="list">
         {#each entries as entry (entry.id)}
-          <li data-row={folder.canMove ? entry.id : undefined}>
+          <li data-row={folder.canMove || entry.shareable ? entry.id : undefined}>
             <KindGlyph kind={entry.kind} />
             {#if entry.kind === 'folder' && isLinkableFolderId(entry.id)}<a href={'/f/' + entry.id} dir="auto" data-name>{label(entry.name)}</a>
             {:else if entry.downloadable}<a href={'/api/download/' + entry.id} dir="auto" data-name>{label(entry.name)}</a>
@@ -85,8 +120,8 @@
               <span dir="auto" data-name tabindex={folder.canMove ? -1 : undefined}>{label(entry.name)}</span>
             {/if}
             <span class="kind">{entry.kind === 'folder' ? 'Folder' : 'File'}</span>
-            {#if mounted && entry.movable && movedId === undefined}
-              <RowActions name={entry.name} moveOnly onAction={() => picker?.open({ ...entry, expectedParent: page.params.folderId })} onTab={() => false} />
+            {#if mounted && movedId === undefined && (entry.movable || entry.shareable)}
+              <RowActions name={entry.name} previewActions={rowActions(entry)} onAction={action => selectAction(action, entry)} onTab={() => false} />
             {/if}
           </li>
         {/each}
