@@ -148,7 +148,7 @@ async function exerciseStagingRoutes(worker, origin, owner, member) {
     }
     for (const method of routeMethods) {
       if (stagingRoutes.some(peer => peer.path === route.path && peer.methods.includes(method))) continue;
-      await probe(method, { ...enabled, cookie: owner }, 404);
+      await probe(method, { ...enabled, cookie: route.access === 'member' ? member : owner }, 404);
     }
   }
   console.log('Generated Worker fixture: staging routes honor declared methods, flags and signed-out behavior');
