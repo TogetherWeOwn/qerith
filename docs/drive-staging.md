@@ -213,6 +213,13 @@ it validates both listings before any deletion and rereads both after cleanup.
 The cases must stop all writes before cleanup and keep all fixture keys in that
 prefix. This is not evidence of D1 cleanup.
 
+The qualification version uploader binds the dispatch run and attempt to the
+immutable candidate and verifies both at upload and before activation. An
+admitted candidate allocates a random key under that prefix in the same D1
+claim that reserves the key, before multipart initiation. A lost initiation
+response leaves a key that the attempt inventory can enumerate. Ordinary app
+deployments allocate bare UUIDs, and existing intents keep their stored keys.
+
 A separate, unwired [native R2 lifecycle readback](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/lifecycle/methods/get/)
 uses the same reviewed bucket and requires a scoped object deletion rule within
 three days and a multipart abort rule within seven days. Both must cover the

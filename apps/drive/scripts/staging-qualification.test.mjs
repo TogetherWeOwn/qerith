@@ -360,6 +360,14 @@ test('dispatch, checkout and fetched main history must independently agree', t =
   assert.throws(() => assertDispatch(env, cwd), /origin\/main/);
 });
 
+test('qualification source command validates the dispatch with TypeScript loading disabled', t => {
+  const { cwd, env } = history(t);
+  const source = fileURLToPath(new URL('./staging-qualification.mjs', import.meta.url));
+  execFileSync(process.execPath, ['--no-experimental-strip-types', source], {
+    cwd, env: { PATH: process.env.PATH, ...env }, timeout: 30_000,
+  });
+});
+
 test('the protected job requires the workflow definition itself to match the dispatch SHA', t => {
   const { cwd, env, ancestor } = history(t);
   Object.assign(env, { GITHUB_ACTIONS: 'true', GITHUB_JOB: 'qualification', GITHUB_WORKFLOW_SHA: env.TESTED_SHA,

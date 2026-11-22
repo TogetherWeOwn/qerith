@@ -225,6 +225,8 @@ function nativeWorkerFixture(cwd, candidate, context, reads, state, trace) {
       return json({ id: version, annotations: { 'workers/tag': tag }, resources: { bindings: [...resourceBindings,
         { name: 'DRIVE_QUALIFICATION_SHA', type: 'plain_text', text: sha },
         { name: 'DRIVE_QUALIFICATION_EXPIRES_AT', type: 'plain_text', text: expiresAt },
+        { name: 'DRIVE_QUALIFICATION_RUN_ID', type: 'plain_text', text: runId },
+        { name: 'DRIVE_QUALIFICATION_RUN_ATTEMPT', type: 'plain_text', text: attempt },
         { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }] } });
     }
     if (url === `${script}/deployments` && init.method === 'POST') {

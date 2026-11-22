@@ -1,6 +1,7 @@
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type ExpectedUploadPart, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
+import { qualificationAllocationPrefix, type QualificationReadinessEnv } from './qualification-readiness';
 import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES } from './s3/multipart-completion';
@@ -10,7 +11,7 @@ import { createMultipartCreate } from './s3/multipart-create';
 export const maxUploadIntentBytes = MAX_PART_BYTES;
 // Match the v0 multipart client ceiling; individual parts remain bounded separately.
 const maxInviteUploadIntentBytes = 5 * 1024 ** 3;
-export interface UploadIntentEnv extends DriveAuthEnv {
+export interface UploadIntentEnv extends DriveAuthEnv, QualificationReadinessEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
   DRIVE_UPLOAD_EPOCH?: string;
@@ -86,10 +87,9 @@ export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
   const input = await readIntent(request, admitsStagingInvite(env));
   if (!input) return reply(400);
-  const { DB, DRIVE_ORIGIN, DRIVE_STAGING_INVITE_ACCEPTANCE, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
-    DRIVE_UPLOAD_VERIFIER: verifier } = env;
+  const { DRIVE_UPLOAD_VERIFIER: verifier } = env;
   return createUploadIntent(request, input.size, {
-    DB, DRIVE_ORIGIN, DRIVE_STAGING_INVITE_ACCEPTANCE, DRIVE_UPLOAD_S3, DRIVE_UPLOAD_EPOCH,
+    ...env,
     // Do not allocate against storage the part and completion routes cannot use.
     DRIVE_UPLOAD_VERIFIER: verifier && { async isQualified(id, signal) {
       return await verifier.isQualified(id, signal) === true && uploadCompletionBudget(verifier, id) !== null;
@@ -106,6 +106,9 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!origin || !db) return reply(503);
   if (request.method !== 'POST') return reply(405);
   if (!allowsOrigin(request, origin.origin)) return reply(403);
+  const prefix = qualificationAllocationPrefix(env);
+  if (prefix === null) return reply(503);
+  if (prefix && request.url !== stagingOrigin + '/api/uploads') return reply(404);
   // Allocation only; staging request admission and part/publication policy are separate.
   const inviteMode = admitsStagingInvite(env);
   const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
@@ -132,6 +135,7 @@ export async function createUploadIntent(request: Request, size: number, env: Up
         await verifier.isQualified(storageConfigId, input.signal) !== true) throw new Error('Allocation not admitted');
       const expires = await sessionDeadline();
       if (input.signal.aborted || request.signal.aborted ||
+        (prefix && qualificationAllocationPrefix(env) !== prefix) ||
         !(performance.now() < Math.min(deadline, expires))) throw new Error('Allocation not admitted');
       sent = true;
       return fetch(input);
@@ -156,9 +160,10 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     const intents = new UploadIntents(db);
     const { endpoint, bucket } = settings;
     const sessionHash = await tokenHash(token);
+    if (prefix && (request.signal.aborted || qualificationAllocationPrefix(env) !== prefix)) return reply(503);
     const claim = expectedParts
-      ? await intents.claimNewExpectedAllocation(owner, sessionHash, size, endpoint, bucket, epoch, 'active', expectedParts)
-      : await intents.claimNewAllocation(owner, sessionHash, size, endpoint, bucket, epoch, ownerOnly);
+      ? await intents.claimNewExpectedAllocation(owner, sessionHash, size, endpoint, bucket, epoch, 'active', expectedParts, prefix)
+      : await intents.claimNewAllocation(owner, sessionHash, size, endpoint, bucket, epoch, ownerOnly, prefix);
     if (!claim) return reply(401);
     const { id, object_key: key, version } = claim;
     try {

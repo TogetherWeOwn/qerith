@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   qualificationTimeLeft, qualificationWindowMs, readinessHeaders, readinessPath, stagingOrigin,
 } from '../src/lib/server/qualification-readiness.ts';
+import { isQualificationRunNumber } from '../src/lib/server/qualification-scope.mjs';
 import { stagingStorage, validateStagingConfig, validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
 import { uploadVersion } from './staging-qualification-upload.mjs';
@@ -12,6 +13,9 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const isUuid = value => typeof value === 'string' && uuid.test(value);
 const sameDeployment = (left, right) => left.id === right.id && left.version === right.version;
 const expiryBinding = 'DRIVE_QUALIFICATION_EXPIRES_AT';
+const runBinding = 'DRIVE_QUALIFICATION_RUN_ID';
+const attemptBinding = 'DRIVE_QUALIFICATION_RUN_ATTEMPT';
+const attemptBindings = (runId, attempt) => ({ [runBinding]: runId, [attemptBinding]: attempt });
 const hasCandidateBinding = bindings => [...bindings.keys()].some(name => name.startsWith('DRIVE_QUALIFICATION_'));
 const apiTimeout = 15_000;
 const probeBudget = 30_000;
@@ -189,7 +193,7 @@ export async function recoverQualificationWorker(source, record, env, cwd, signa
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
   try {
     if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha) ||
-        ![runId, attempt].every(value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)) ||
+        ![runId, attempt].every(isQualificationRunNumber) ||
         kind !== 'worker' || record.sha !== sha || record.runId !== runId || record.attempt !== attempt ||
         ![version, previousVersion, previousDeployment].every(isUuid) || version === previousVersion ||
         typeof expiresAt !== 'string' || !/^[1-9][0-9]{12}$/.test(expiresAt) ||
@@ -213,6 +217,10 @@ export async function recoverQualificationWorker(source, record, env, cwd, signa
         DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt,
       });
       if (bindings.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata') throw new Error();
+      // Older source versions used the exact attempt tag without separate bindings.
+      if ((bindings.has(runBinding) || bindings.has(attemptBinding)) &&
+          Object.entries(attemptBindings(runId, attempt)).some(([name, text]) =>
+            bindings.get(name)?.type !== 'plain_text' || bindings.get(name).text !== text)) throw new Error();
     }
     const confirmed = await api.current(signal);
     if (!sameDeployment(before, confirmed) || before.message !== confirmed.message) throw new Error();
@@ -291,7 +299,7 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   }
   const expiresAt = String(Date.now() + qualificationWindowMs);
   const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
-    [expiryBinding]: expiresAt, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
+    [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
     DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
@@ -372,9 +380,12 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
   if (!sameDeployment(previous, { id: previousDeployment, version: previousVersion })) {
     throw new Error('Staging baseline changed since candidate upload.');
   }
-  checkedBindings(await api.assertUploaded(candidate, tag, signal), config, {
-    DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt,
+  const bindings = checkedBindings(await api.assertUploaded(candidate, tag, signal), config, {
+    DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt),
   });
+  if (bindings.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata') {
+    throw new Error('Staging Worker version has incompatible resource or storage bindings.');
+  }
   const identity = { sha, runId, attempt, version: candidate };
   await recordRecovery({ ...identity, expiresAt, previousVersion: previous.version, previousDeployment: previous.id });
   if (!sameDeployment(await api.current(signal), previous)) throw new Error('Staging deployment changed before activation.');

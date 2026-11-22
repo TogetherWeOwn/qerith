@@ -1,4 +1,5 @@
 import { uploadStorageEvidence } from './metadata/upload-storage-evidence';
+import type { QualificationReadinessEnv } from './qualification-readiness';
 import type { DriveAuthEnv } from './request-auth';
 import { createS3Listing } from './s3/listing';
 import { MAX_PARTS, type CompletedPart } from './s3/multipart-completion';
@@ -84,13 +85,19 @@ function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity
   };
 }
 
-export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB } &
-  Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>,
+export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB } & QualificationReadinessEnv &
+  Pick<DriveAuthEnv, 'DRIVE_STAGING_INVITE_ACCEPTANCE'>,
   transport: typeof fetch = (input, init) => fetch(input, init)) {
   const identity = storageIdentity(env);
   return {
     DB: env.DB,
     DRIVE_ORIGIN: env.DRIVE_ORIGIN,
+    DRIVE_SIGN_IN_FIXTURE: env.DRIVE_SIGN_IN_FIXTURE,
+    DRIVE_QUALIFICATION_SHA: env.DRIVE_QUALIFICATION_SHA,
+    DRIVE_QUALIFICATION_VERSION: env.DRIVE_QUALIFICATION_VERSION,
+    DRIVE_QUALIFICATION_EXPIRES_AT: env.DRIVE_QUALIFICATION_EXPIRES_AT,
+    DRIVE_QUALIFICATION_RUN_ID: env.DRIVE_QUALIFICATION_RUN_ID,
+    DRIVE_QUALIFICATION_RUN_ATTEMPT: env.DRIVE_QUALIFICATION_RUN_ATTEMPT,
     DRIVE_STAGING_INVITE_ACCEPTANCE: env.DRIVE_STAGING_INVITE_ACCEPTANCE,
     DRIVE_UPLOAD_S3: identity?.settings,
     DRIVE_UPLOAD_EPOCH: identity?.epoch,
