@@ -5,7 +5,7 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
-import { stagingRoutes } from '../src/lib/server/staging-routes.ts';
+import { routeMethods, stagingRoutes } from '../src/lib/server/staging-routes.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
 import { assertEntryChangeClosed, entryChangeWorker, exerciseEntryChange } from '../tests/entry-change-worker-fixture.mjs';
@@ -94,7 +94,7 @@ function fixtureStorage() {
 
 const rootDataPath = '/__data.json?x-sveltekit-invalidated=01';
 
-async function exerciseStagingRoutes(worker, origin, owner) {
+async function exerciseStagingRoutes(worker, origin, owner, member) {
   const flags = {
     invite: { 'x-test-invite': '1' },
     'read-grants': { 'x-test-read-grants': '1' },
@@ -104,11 +104,12 @@ async function exerciseStagingRoutes(worker, origin, owner) {
   for (const route of stagingRoutes) {
     const path = route.path.replaceAll(/\[(\w+)\]/g, (_, parameter) =>
       parameter === 'partNumber' ? '1' : '00000000-0000-4000-8000-000000000001');
-    const probe = async (method, headers, status, location = null) => {
+    const probe = async (method, headers, status, location = null, body) => {
       const response = await worker.fetch(origin + path, { method, headers: { origin, ...headers }, redirect: 'manual' });
       assert.deepEqual([response.status, response.headers.get('location'), response.headers.get('cache-control')],
         [status, location, 'private, no-store'], `${method} ${path} (${Object.keys(headers).join(', ') || 'default'})`);
-      await response.body?.cancel();
+      if (body) assert.match(await response.text(), body);
+      else await response.body?.cancel();
     };
     if ('excluded' in route) {
       for (const method of route.methods) {
@@ -123,9 +124,14 @@ async function exerciseStagingRoutes(worker, origin, owner) {
         await probe(method, {}, 404);
         await probe(method, { cookie: owner }, 404);
       }
+      if (route.gate === 'invite') await probe(method, flags['read-grants'], 404);
+      if (route.gate === 'read-grants') await probe(method, flags.invite, 404);
       if (route.gate === 'shared') {
-        await probe(method, flags.invite, 404);
-        await probe(method, { 'x-test-shared-listing': '1' }, 404);
+        await probe(method, { ...flags.invite, cookie: member }, 404);
+        await probe(method, { 'x-test-shared-listing': '1', cookie: member }, 404);
+        await probe(method, { ...enabled, cookie: owner }, 404);
+        const body = method === 'GET' ? /Nothing is shared with you yet\./ : undefined;
+        await probe(method, { ...enabled, cookie: member }, 200, null, body);
       }
       if (route.signedOut === 'dispatch') {
         const { target } = route;
@@ -140,7 +146,10 @@ async function exerciseStagingRoutes(worker, origin, owner) {
         await probe(method, { ...enabled, ...navigation }, location === null ? 401 : 303, location);
       }
     }
-    await probe('OPTIONS', enabled, 404);
+    for (const method of routeMethods) {
+      if (stagingRoutes.some(peer => peer.path === route.path && peer.methods.includes(method))) continue;
+      await probe(method, { ...enabled, cookie: owner }, 404);
+    }
   }
   console.log('Generated Worker fixture: staging routes honor declared methods, flags and signed-out behavior');
 }
@@ -266,8 +275,6 @@ export default {
       assert.equal(await DB.prepare('SELECT singleton FROM drive_owner_registration').first(), null);
     };
     let cookie = await session('fixture', staging ? 'owner' : 'member');
-    if (staging) await exerciseStagingRoutes(worker, origin, cookie);
-    if (stagingRoutesOnly) return;
     if (rawOutsideStaging) {
       await refusePreviewReadGrants({ worker, origin, cookie });
       const refused = await worker.fetch(`${origin}/api/uploads`, {
@@ -278,6 +285,8 @@ export default {
       return;
     }
     const member = staging ? await session('member', 'member') : cookie;
+    if (staging) await exerciseStagingRoutes(worker, origin, cookie, member);
+    if (stagingRoutesOnly) return;
     // Probe before an existing owner would make the bootstrap operation refuse by itself.
     await assertProvisioningUnavailable(member, 'member');
     await DB.prepare("INSERT INTO drive_principals (id, role, status) VALUES ('other', 'member', 'active')").run();
@@ -561,13 +570,12 @@ export default {
       assert.deepEqual([root.status, root.headers.get('cache-control')], [201, 'private, no-store']);
       const { id } = await root.json();
       const recipients = `/api/entries/${id}/eligible-recipients`;
-      const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie }, redirect: 'manual' });
+      const lookup = (path, method = 'GET') => worker.fetch(`${origin}${path}`, { method, headers: { cookie, origin }, redirect: 'manual' });
       for (const [path, method, status, allow] of [
         [`${recipients}?x-sveltekit-test=1`, 'GET', 400, null],
         [`${recipients}/__data.json`, 'GET', 404, null],
         [`${recipients}/__route.js`, 'GET', 404, null],
-        [recipients, 'OPTIONS', 405, 'GET'],
-        [recipients, 'HEAD', 405, 'GET'],
+        ...routeMethods.filter(method => method !== 'GET').map(method => [recipients, method, 405, 'GET']),
       ]) {
         const response = await lookup(path, method);
         assert.deepEqual([response.status, response.headers.get('cache-control'), response.headers.get('allow'),

@@ -1,4 +1,5 @@
-export type RouteMethod = 'GET' | 'HEAD' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'OPTIONS';
+export const routeMethods = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
+export type RouteMethod = typeof routeMethods[number];
 export type StagingGate = 'invite' | 'read-grants' | 'shared';
 export type RouteAccess = 'public' | 'owner' | 'member' | 'owner-or-member' | 'owner-or-invited-member' | 'owner-or-multipart-member';
 export type SignedOut = 'dispatch' | 401 | 'return-to-route' | 'return-to-root';
@@ -15,6 +16,7 @@ type Route = {
   path: string;
   methods: readonly RouteMethod[];
   source: 'page' | 'endpoint' | 'worker';
+  adapterFallback?: 'excluded';
 };
 export type StagingRoute = Route & {
   target: StagingRouteTarget;
@@ -64,7 +66,7 @@ export const stagingRoutes: readonly (StagingRoute | StagingExclusion)[] = [
   { path: '/api/owner/invitations/[id]/cancel', methods: ['POST'], source: 'endpoint', ...owner },
   { path: '/api/owner/members/[id]/revoke', methods: ['POST'], source: 'endpoint', ...owner },
   { path: '/api/entries/[entryId]/eligible-recipients', methods: ['GET'], source: 'endpoint',
-    target: { kind: 'eligible-recipients' }, ...grants },
+    adapterFallback: 'excluded', target: { kind: 'eligible-recipients' }, ...grants },
   { path: '/api/entries/[entryId]/read-grants', methods: ['GET'], source: 'endpoint', target: { kind: 'read-grant' }, ...grants },
   { path: '/api/entries/[entryId]/read-grants/[recipientId]', methods: ['PUT', 'DELETE'], source: 'endpoint',
     target: { kind: 'read-grant' }, ...grants },
