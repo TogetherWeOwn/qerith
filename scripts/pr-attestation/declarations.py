@@ -157,7 +157,7 @@ def shadows(scope, name):
     if any(binds(scope.child_by_field_name(field), name) for field in ("parameters", "parameter")):
         return True
     if scope.type in FUNCTIONS:
-        return (text(scope.child_by_field_name("name")) == name
+        return ((scope.type != "method_definition" and text(scope.child_by_field_name("name")) == name)
                 or hoists_var(scope.child_by_field_name("body"), name))
     if scope.type == "class":
         return text(scope.child_by_field_name("name")) == name

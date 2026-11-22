@@ -9,9 +9,9 @@ template's path-only citations and documentation-only exemption still apply.
 Use the literal Node or Vitest test title, the `each` format title, the Rust
 test function name, or the Python `test_` function or method name. The checker
 also resolves Node subtests, Rust module-qualified names, Python class-qualified
-names, and JavaScript templates with one variable bound by a literal `for…of`
-array or tuple table. For titles computed by other code, cite the source
-template or use the existing path-only form and describe the run in `proof=`.
+names, and JavaScript templates with one `const` loop variable bound by a
+literal `for…of` array or tuple table. For titles computed by other code, cite
+the source template or use the path-only form and describe the run in `proof=`.
 The matcher compares declarations and does not verify execution or test results.
 
 ## CI rollout

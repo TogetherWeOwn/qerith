@@ -200,6 +200,8 @@ class DeclarationsTests(unittest.TestCase):
         source = b"""
           import test from 'node:test';
           for (const kind of ['registration', 'authentication']) {
+            const fixture = { kind() { test(`${kind} method`, () => {}); } };
+            fixture.kind();
             test('parent', (t) => {
               t.test(`${kind} verified`, () => {});
               {
@@ -211,6 +213,7 @@ class DeclarationsTests(unittest.TestCase):
         """
         self.assertEqual(set(scan("sample.test.mjs", source)), {
             "parent", "${kind} verified", "registration verified", "authentication verified", "${kind} shadowed",
+            "${kind} method", "registration method", "authentication method",
         })
 
     def test_defaults_that_read_loop_variables_do_not_shadow_them(self):
