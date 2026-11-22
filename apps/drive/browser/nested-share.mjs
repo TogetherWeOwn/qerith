@@ -35,11 +35,11 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
     const ask = (pathname, token = ownerToken, method = 'GET') => target.fetch(origin + pathname, {
       method, redirect: 'manual', headers: { cookie: `${cookie(token).name}=${token}`, origin, 'sec-fetch-site': 'same-origin' },
     });
-    const readback = async (id, direct) => {
+    const readback = async (id, direct, inheritedFrom = parentName) => {
       const response = await ask(roster(id));
       assert.equal(response.status, 200);
       assert.deepEqual((await response.json()).recipients.find(row => row.displayName === reader),
-        { recipientId: 'member', displayName: reader, direct, inheritedFrom: parentName });
+        { recipientId: 'member', displayName: reader, direct, inheritedFrom });
     };
     assert.equal((await ask(grant(parent), ownerToken, 'PUT')).status, 204);
     const ariaReviews = new Map();
@@ -271,8 +271,7 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
           responseFor(grant(id), 'DELETE'), responseFor(roster(id)), confirm.press('Enter'),
         ]);
         assert.deepEqual([raceRevoke.status(), freshRoster.status()], [204, 200]);
-        assert.deepEqual((await freshRoster.json()).recipients.find(row => row.displayName === reader),
-          { recipientId: 'member', displayName: reader, direct: false, inheritedFrom: null });
+        await readback(id, false, null);
         const raceStatus = dialog.getByRole('status').filter({ hasText: `Removed direct access for ${reader}.` });
         await raceStatus.waitFor();
         assert.doesNotMatch(await raceStatus.textContent(), /Access through/);
