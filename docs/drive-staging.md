@@ -191,20 +191,34 @@ The offline entry point rechecks the committed staging target and reviewed R2
 binding, then binds the case runner, estate checks, and signed recovery writer
 to a single SHA/run/attempt. It verifies recovery record retention before the
 candidate upload and again before each record write. It requires explicit
-admission, app fixture, estate and writer-fence adapters; it has no passing
-admission default. The case runner requires every case to pass and binds
-its evidence to the exact invocation.
+admission, app case, estate, writer-fence, and transport adapters. Admission
+must pass. The case runner requires every case to pass and binds the results to
+the exact invocation.
 The estate composer runs the bounded inventory before mutation and after Worker
-restore. It checks exact-attempt writer quiescence and a held, abortable fence
-before R2 prefix and D1 migration-fixture cleanup, then waits for both to settle
-before restore. D1 fixture cleanup does not roll back migrations or clean app
-fixtures. Before and after the lifecycle, inventory also queries the pinned D1
-for migration fixture keys across all full-v0 attempts. This read-only check
-returns presence only, including for redeemed or expired fixture rows; missing
-tables or an incomplete result fail closed. It does not replace the injected
-all-app-fixture reader, estate reader, or writer fence. Offline passing tests
-are not provider evidence. The protected job still stops and cannot issue a
-receipt.
+restore. R2 prefix and D1 migration-fixture cleanup require a quiescence
+snapshot for the exact attempt and a fence-loss signal. The composer waits for
+both adapters to settle before Worker restore. Both inventory passes run the
+native, read-only app census for the exact SHA, run, attempt, staging account,
+and pinned database.
+The census requires the reviewed committed migration tree, a complete ledger,
+the exact schema catalog, and zero rows across all app tables. The narrower
+migration-fixture check still covers both fixture keys across every full-v0
+attempt. Missing tables, unknown schema, any app rows, denied reads, and
+incomplete responses make inventory unverified. The tests execute this
+point-in-time census against SQLite through a synthetic transport. The
+protected job still stops before inventory.
+
+The first inventory runs before upload and migration, so the pinned database
+must already be fully migrated and empty. An uninitialized or partly migrated
+database needs separate, reviewed preparation before it can enter this
+lifecycle. The qualification migration adapter records its pre-apply
+bookmark before ledger initialization. A reset to that bookmark can satisfy
+the final census only if independent evidence ties it to the same verified,
+fully migrated baseline. A bookmark from before the required schema was
+applied would restore an incompatible catalog. The final inventory runs after
+Worker recovery. The current D1 cleanup removes only migration fixtures.
+App fixtures can leave permanent upload key reservations, so clearing them
+requires a verified D1 reset before the final census.
 
 The unwired R2 cleanup callback uses the reviewed binding from the tested SHA
 and the exact `drive-qualification/full-v0/<run>/<attempt>/` prefix. It rejects
@@ -239,9 +253,9 @@ establish that a lost runner's deployment was restored.
 Both offline inventory passes also require the unfiltered Cloudflare D1 account
 list to contain only the database UUID and name pinned in the tested commit.
 The check uses a bounded first page and rejects conflicting pagination or partial
-responses. This checks the roster visible to the existing credential, not D1
-compute mode, writer exclusion or historical restore attribution. It does not
-replace the separate estate and app-fixture readers.
+responses. This checks the roster visible to the existing credential. The
+estate reader must independently cover every required surface and verify D1
+on-demand compute.
 
 Both passes also check the native R2 bucket roster in the account from the
 reviewed storage binding. The headerless list and the explicit `default` list
@@ -375,11 +389,19 @@ obtain the authenticated response under its bounded case signal.
 
 Remaining source slices, in dependency order:
 
-1. Implement whole-estate zero-idle inventory, D1 fixture cleanup, and verified
-   native stop or expiry for resources not covered by R2. Wire the protected
-   caller only with those implementations, the durable recovery writer and
-   reviewed full-v0 prerequisites. Keep artifact publication disabled.
-2. Wire the real app and storage checks: live virtual-authenticator pass/fail,
+1. Establish complete estate enumeration, native D1 on-demand compute
+   evidence, and verified stop or expiry for resources outside R2. Establish
+   an authoritative abortable writer fence covering the runner, candidate,
+   external writers, issued storage URLs, and pending provider operations.
+   Prove native census response compatibility on the pinned synthetic estate.
+2. Verify a reset to an independently attributed, fully migrated empty D1
+   checkpoint for app cases that leave permanent rows. Bind recovery to the
+   exact attempt, account and database, independently prove the before state
+   and all intervening writes, and hold the fence through reset and readback.
+   Stop on an unknown checkpoint or ambiguous restore. Wire the protected
+   caller only once these checks, durable recovery recording, and reviewed
+   full-v0 prerequisites are available. Keep artifact publication disabled.
+3. Wire the real app and storage checks: live virtual-authenticator pass/fail,
    invite acceptance and revocation, cross-user and signed-out denial,
    authenticated reads, multipart/range/retry/persistence, a ≥5 GiB upload and
    download with matching digests, a ≥1 GiB interrupted/resumed transfer,
@@ -387,7 +409,7 @@ Remaining source slices, in dependency order:
    boundary and safe fallback, rollback/retry, and exact-provider cleanup).
    Keep the receipt disabled until all these cases and lifecycle checks are
    wired and covered offline.
-3. Wire the sole upload, last and success-only after verified cleanup, named
+4. Wire the sole upload, last and success-only after verified cleanup, named
    `drive-staging-qualification-<tested-sha>-attempt-<GITHUB_RUN_ATTEMPT>`.
    The consumer also requires the matching successful workflow attempt on
    `main`. Preview, fixture, skipped, failed and cancelled runs do not qualify.

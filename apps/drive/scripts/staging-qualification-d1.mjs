@@ -111,20 +111,21 @@ function d1(source, env, cwd, send, active, { census = false, strict = false } =
   };
 }
 
-// Unwired inventory reader for a fully migrated, exclusively synthetic staging
-// database. The caller must independently establish scope and writer quiescence.
+// Point-in-time inventory for a fully migrated, exclusively synthetic staging
+// database. The caller must independently establish writer quiescence.
 // An explicit transport is required so offline callers cannot fall back to fetch.
 export async function readQualificationD1AppFixtures(scope, env, cwd, signal, send) {
   try {
     signal?.throwIfAborted();
     if (typeof send !== 'function') throw new Error();
     const identity = assertQualificationJob(env, cwd);
+    if (!sameAttempt(identity, scope)) throw new Error();
     return await runQualificationPhase(async (_, active) => {
       const tree = `${identity.sha}:apps/drive/migrations`;
       if (git(cwd, 'rev-parse', '--verify', tree).trim() !== reviewedMigrationTree) throw new Error();
       const names = git(cwd, 'ls-tree', '--full-tree', '--name-only', '-z', tree).slice(0, -1).split('\0');
       const db = d1(identity, env, cwd, send, active, { strict: true });
-      if (scope?.account !== db.accountId || scope.database !== db.databaseId) throw new Error();
+      if (scope.account !== db.accountId || scope.database !== db.databaseId) throw new Error();
       await db.verifyTarget();
       const [rows] = await db.query([{ sql: censusSql, params: [JSON.stringify(names)] }]);
       assertReviewedEmptyCatalog(rows);

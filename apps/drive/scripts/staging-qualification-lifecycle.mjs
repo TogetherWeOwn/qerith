@@ -21,9 +21,9 @@ const stagingAdapters = (send = fetch) => ({
 });
 
 // Offline composition only. No provider I/O during construction. A protected
-// caller must hold the lifecycle lock and supply real admission and estate,
-// app fixture and writer-fence adapters. `stages` is an offline test seam.
-export async function createQualificationLifecycle(env, cwd, { assertFullV0, readWriterFence, readEstate, readFixtures,
+// caller must hold the lifecycle lock and supply real admission, estate,
+// app case and writer-fence adapters. `stageOverrides` is an offline test seam.
+export async function createQualificationLifecycle(env, cwd, { assertFullV0, readWriterFence, readEstate,
   withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send } = {}, stageOverrides) {
   if (typeof assertFullV0 !== 'function' || typeof send !== 'function') {
     throw new Error('Qualification lifecycle requires reviewed admission and an explicit transport.');
@@ -31,7 +31,7 @@ export async function createQualificationLifecycle(env, cwd, { assertFullV0, rea
   const settings = Object.freeze({ ...env });
   const source = assertQualificationJob(settings, cwd);
   await assertQualificationSettings(settings, cwd);
-  const estate = createQualificationEstate(settings, cwd, { readWriterFence, readEstate, readFixtures, request: send, send });
+  const estate = createQualificationEstate(settings, cwd, { readWriterFence, readEstate, request: send, send });
   const exercise = await createQualificationExercise(settings, cwd, {
     withAccessFixtures, readFileFixtures, openTransferClient, openDeletion, send,
   });
