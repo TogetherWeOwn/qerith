@@ -1048,6 +1048,16 @@ test('inventory refuses active or unverified native R2 bucket jobs at both bound
     ['unknown status', () => r2JobRoster({ jobs: [{ ...prefixDelete, status: 'PAUSED' }] })],
     ['unknown type', () => r2JobRoster({ jobs: [{ ...prefixDelete, jobType: 'other', status: 'COMPLETED' }] })],
     ['missing descriptor', () => r2JobRoster({ jobs: [{ ...prefixDelete, prefixDelete: undefined, status: 'COMPLETED' }] })],
+    ['incomplete prefix-delete descriptor', () => r2JobRoster({ jobs: [
+      { ...prefixDelete, prefixDelete: { prefix: '' }, status: 'COMPLETED' },
+    ] })],
+    ['incomplete storage-class migration descriptor', () => r2JobRoster({ jobs: [
+      { ...storageMigration, storageClassMigration: { migratedObjects: 1 }, status: 'COMPLETED' },
+    ] })],
+    ['identical source and destination storage classes', () => r2JobRoster({ jobs: [
+      { ...storageMigration, storageClassMigration: { ...storageMigration.storageClassMigration,
+        destinationStorageClass: 'Standard' }, status: 'COMPLETED' },
+    ] })],
     ['invalid start time', () => r2JobRoster({ jobs: [{ ...prefixDelete, startTime: 'unknown', status: 'COMPLETED' }] })],
     ['blank job ID', () => r2JobRoster({ jobs: [{ ...prefixDelete, id: ' ', status: 'COMPLETED' }] })],
     ['duplicate job', () => r2JobRoster({ jobs: Array(2).fill({ ...prefixDelete, status: 'COMPLETED' }) })],
@@ -1077,23 +1087,34 @@ test('inventory refuses active or unverified native R2 bucket jobs at both bound
   });
 });
 
-test('inventory drains an aborted R2 bucket jobs body before returning', async t => {
+test('inventory drains an aborted R2 bucket jobs body before returning', { timeout: 10_000 }, async t => {
   const f = fixture(t), run = f.create(), controller = new AbortController();
-  let pulling;
-  const started = new Promise(resolve => { pulling = resolve; });
+  const entered = Promise.withResolvers(), aborted = Promise.withResolvers(), release = Promise.withResolvers();
   f.state.readBucketJobs = signal => new Response(new ReadableStream({
     start(stream) {
-      signal.addEventListener('abort', () => {
-        f.trace.push('bucket-jobs-drained');
+      signal.addEventListener('abort', async () => {
+        aborted.resolve();
+        await release.promise;
         stream.error(signal.reason);
+        f.trace.push('bucket-jobs-drained');
       }, { once: true });
     },
-    pull() { pulling(); },
+    pull() { entered.resolve(); },
   }, { highWaterMark: 0 }));
-  const operation = run('before', {}, controller.signal);
-  await waitForFixtureStep(started, operation);
-  controller.abort(new Error('private fixture abort'));
-  await assert.rejects(operation, error);
+  let finished = false;
+  const operation = run('before', {}, controller.signal).finally(() => { finished = true; });
+  const rejected = assert.rejects(operation, error);
+  try {
+    await waitForFixtureStep(entered.promise, operation);
+    controller.abort(new Error('private fixture abort'));
+    await waitForFixtureStep(aborted.promise, operation);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+  } finally {
+    controller.abort();
+    release.resolve();
+    await rejected;
+  }
   assert.deepEqual(f.trace, [...beforeR2, ...r2RosterOrder, 'expiry', 'bucket-jobs', 'bucket-jobs-drained']);
 });
 

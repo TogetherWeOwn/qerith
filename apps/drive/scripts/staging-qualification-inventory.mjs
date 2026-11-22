@@ -76,6 +76,19 @@ async function assertR2Roster(account, bucket, token, request, signal) {
   }, null, signal, 15_000);
 }
 
+function validBucketJobDetails({ jobType, prefixDelete, storageClassMigration }) {
+  if (jobType === 'prefixDelete') {
+    return typeof prefixDelete?.prefix === 'string' &&
+      Number.isSafeInteger(prefixDelete.deletedObjects) && prefixDelete.deletedObjects >= 0;
+  }
+  if (jobType !== 'storageClassMigration') return false;
+  const { sourceStorageClass, destinationStorageClass, migratedObjects } = storageClassMigration ?? {};
+  const classes = ['Standard', 'InfrequentAccess'];
+  return classes.includes(sourceStorageClass) && classes.includes(destinationStorageClass) &&
+    sourceStorageClass !== destinationStorageClass &&
+    Number.isSafeInteger(migratedObjects) && migratedObjects >= 0;
+}
+
 // A terminal roster covers native bucket jobs only. Other writes and provider
 // operations still require the held writer fence.
 async function assertNoActiveR2BucketJobs(account, bucket, token, request, signal) {
@@ -96,9 +109,8 @@ async function assertNoActiveR2BucketJobs(account, bucket, token, request, signa
     const ids = new Set();
     for (const job of result.jobs) {
       if (typeof job?.id !== 'string' || !job.id.trim() || ids.has(job.id) ||
-          !['prefixDelete', 'storageClassMigration'].includes(job.jobType) ||
           typeof job.startTime !== 'string' || !Number.isFinite(Date.parse(job.startTime)) ||
-          !job[job.jobType] || typeof job[job.jobType] !== 'object' || Array.isArray(job[job.jobType]) ||
+          !validBucketJobDetails(job) ||
           !['COMPLETED', 'FAILED', 'CANCELLED'].includes(job.status)) throw unverified();
       ids.add(job.id);
     }
