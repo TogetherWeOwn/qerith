@@ -302,6 +302,81 @@ jobs:
         working-directory: apps/drive-test
         run: npm test
 
+  pr-mutation:
+    name: PR test mutations
+    # Keep the check separate from ci-ok during rollout.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Report PR-only scope on main
+        if: github.event_name == 'push'
+        run: echo 'Mutation execution requires a pull request diff.'
+      # Compare the integration snapshot against its exact base parent.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: '24.21.0'
+      - name: Check new surviving mutants and prove the ratchet
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$PR_BASE" "$PR_HEAD" "$GITHUB_SHA" "$BASE_BRANCH")
+          read -r base targets workers drive proof <<< "$plan"
+          printf 'Comparing base %s to integration %s for PR head %s\n' "$base" "$GITHUB_SHA" "$PR_HEAD"
+          if [[ "$targets" == 0 && "$proof" == 0 ]]; then
+            echo 'Mutation pass: 0 target(s), 0 new survivor(s)'
+            exit 0
+          fi
+
+          export MUTATION_HEAD="$RUNNER_TEMP/mutation-head"
+          baseline="$RUNNER_TEMP/mutation-base"
+          git worktree add --detach "$MUTATION_HEAD" "$GITHUB_SHA"
+          git worktree add --detach "$baseline" "$base"
+          test "$(npm --version)" = '11.19.0'
+
+          install_locked() {
+            bash apps/drive/scripts/reject-shrinkwrap.sh "$1"
+            node --input-type=module - "$1/package-lock.json" <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { verifyLock } from './apps/drive/scripts/verify-lock-age.mjs';
+          await verifyLock(JSON.parse(readFileSync(process.argv[2], 'utf8')), async name => {
+            const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
+              signal: AbortSignal.timeout(10000), redirect: 'error',
+            });
+            if (!response.ok) throw new Error(`Registry metadata unavailable: ${name}`);
+            return response.json();
+          });
+          JS
+            npm ci --ignore-scripts --no-audit --no-fund --prefix "$1"
+          }
+          install_locked "$MUTATION_HEAD/apps/drive"
+          if [[ "$drive" == 1 ]]; then
+            install_locked "$baseline/apps/drive"
+            (cd "$MUTATION_HEAD/apps/drive" && node node_modules/@sveltejs/kit/svelte-kit.js sync)
+            (cd "$baseline/apps/drive" && node node_modules/@sveltejs/kit/svelte-kit.js sync)
+          fi
+          if [[ "$workers" == 1 || "$proof" == 1 ]]; then
+            install_locked "$MUTATION_HEAD/apps/drive-test"
+          fi
+          if [[ "$workers" == 1 ]]; then
+            install_locked "$baseline/apps/drive-test"
+          fi
+          if [[ "$proof" == 1 ]]; then
+            MUTATION_PROOF=1 node --test scripts/pr-mutation.test.mjs
+          fi
+          node scripts/pr-mutation.mjs run "$MUTATION_HEAD" "$base" "$GITHUB_SHA" "$baseline"
+
   sealed-output-reader:
     name: sealed output reader
     runs-on: ubuntu-24.04
