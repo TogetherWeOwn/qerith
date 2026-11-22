@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test as nodeTest } from 'node:test';
 import { exerciseQualificationFiles } from './staging-qualification-files.mjs';
+import { verifyOwnedFolder } from './staging-qualification-folder.mjs';
 import { stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 
 const test = import.meta.main ? nodeTest : () => {};
@@ -201,6 +202,14 @@ for (const [name, caseName, intercept] of [
 }
 
 const validAnchor = document('Attempt anchor', main('Attempt anchor', empty));
+const layout = '<div class="announcements svelte-layout" data-drive-announcements=""><div role="status" aria-live="polite" aria-atomic="true"></div> <div aria-live="assertive" aria-atomic="true"></div></div>';
+test('accepts only empty shared live regions in the emitted folder document', () => {
+  const body = regions => new TextEncoder().encode(validAnchor.replace('</main>', `</main><!----> ${regions}`));
+  const folder = { name: 'Attempt anchor' };
+  verifyOwnedFolder(body(layout), folder, [], id(1));
+  assert.throws(() => verifyOwnedFolder(body(layout.replace('aria-atomic="true"></div>', 'aria-atomic="true">Unexpected</div>')), folder, [], id(1)), /Invalid owned folder document/);
+});
+
 for (const [name, response] of [
   ['signed-out folder access', () => reply(401)],
   ['a rejected origin', () => reply(403)],

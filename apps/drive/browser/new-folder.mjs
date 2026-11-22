@@ -122,7 +122,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
       await open();
       await submit(earlier, 201);
       await opener.and(active).waitFor();
-      await page.getByText('It isn’t on this page.', { exact: false }).waitFor();
+      await page.getByRole('main').getByText(`Created “${earlier}”. It isn’t on this page.`, { exact: true }).waitFor();
       assert.deepEqual([page.url(), await page.getByText(earlier, { exact: true }).count()], [continuation, 0]);
       assert.ok(await folderId(earlier));
       await evidence('off-page');
@@ -141,7 +141,7 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
         await page.getByText("This folder didn't load.", { exact: false }).waitFor();
       }
       await recovery.and(active).waitFor();
-      await status(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`).waitFor();
+      await page.getByRole('main').getByText(`Created “${nameAfterFailure}”. Refresh My Drive to see it.`, { exact: true }).waitFor();
       await evidence('refresh-failed');
       const [document] = await Promise.all([
         page.waitForResponse(r => r.request().isNavigationRequest() && r.url() === continuation), recovery.press('Enter'),

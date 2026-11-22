@@ -194,7 +194,7 @@ stagingRoot: try {
   const recordUpload = request => { if (new URL(request.url()).pathname.startsWith('/api/uploads')) uploadRequests.push(request.method()); };
   page.on('request', recordUpload);
   await page.locator('input[type="file"]').setInputFiles({ ...file, name: oversized, buffer: Buffer.alloc(size) });
-  await page.getByRole('status').filter({ hasText: `${oversized}: Upload interrupted.` }).waitFor();
+  await page.locator('[data-drive-announcements] [aria-live="assertive"]').filter({ hasText: `${oversized}: Upload interrupted.` }).waitFor();
   page.off('request', recordUpload);
   assert.deepEqual(uploadRequests, [], 'preview rejects before allocation');
 
@@ -245,7 +245,8 @@ stagingRoot: try {
   const [failedRefreshChooser] = await Promise.all([page.waitForEvent('filechooser'), page.keyboard.press('Enter')]);
   await failedRefreshChooser.setFiles({ ...file, name: 'B.bin' });
   await listingRetry.and(page.locator(':focus')).waitFor();
-  const receipt = page.getByRole('status').filter({ hasText: 'B.bin: Uploaded. Refresh My Drive to see it.' });
+  const receipt = page.getByRole('main').getByText('B.bin: Uploaded. Refresh My Drive to see it.', { exact: true });
+  await receipt.waitFor();
   assert.ok((await receipt.boundingBox())?.height > 1, 'the upload receipt remains visible');
   assert.equal(await page.getByRole('link', { name: 'A.bin', exact: true }).count(), 0, 'stale rows are removed');
   assert.equal(await listingRetry.getAttribute('href'), '/');
