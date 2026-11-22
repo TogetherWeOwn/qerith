@@ -35,6 +35,11 @@ const bucketRoster = (overrides, init) => Response.json({ success: true, errors:
 const streamEmpty = { liveInputs: [], range: 0, total: 0 };
 const streamRoster = (overrides, init) => Response.json({ success: true, errors: [], messages: [],
   result: streamEmpty, ...overrides }, init);
+const r2JobRoster = (result, init) => Response.json({ success: true, errors: [], messages: [], result }, init);
+const prefixDelete = { id: 'delete-job', jobType: 'prefixDelete', startTime: '2026-11-01T00:00:00Z',
+  prefixDelete: { prefix: '', isBucketClear: true, deletedObjects: 1 } };
+const storageMigration = { id: 'migration-job', jobType: 'storageClassMigration', startTime: '2026-11-01T00:00:00Z',
+  storageClassMigration: { sourceStorageClass: 'Standard', destinationStorageClass: 'InfrequentAccess', migratedObjects: 1 } };
 const beforeD1Census = ['estate', 'd1-roster', 'd1-census'];
 const beforeR2 = [...beforeD1Census, 'd1-fixtures', 'namespaces', 'containers', 'stream', 'workflows', 'queues'];
 const r2Jurisdictions = ['default', 'eu', 'us', 'fedramp', 'fedramp-high'];
@@ -153,6 +158,13 @@ function fixture(t, { migrationLimit } = {}) {
         if (state.partial === 'expiry') response.headers.set('Content-Range', 'bytes 0-99/200');
         if (state.expiryLink) response.headers.set('Link', '</schema>; rel="describedby"');
         return response;
+      }
+      if (url === `${root}${storageAccount}/r2/buckets/${bucket}/jobs?maxKeys=100`) {
+        trace.push('bucket-jobs');
+        assert.equal(init.headers.authorization, 'Bearer fixture-token');
+        assert.equal(init.headers['cf-r2-jurisdiction'], 'default');
+        return state.readBucketJobs?.(init.signal) ?? r2JobRoster({ jobs: [] },
+          state.partial === 'bucket-jobs' ? { headers: { 'Content-Range': 'bytes 0-99/200' } } : undefined);
       }
       if (url === `${root}${account}/workers/durable_objects/namespaces?page=1&per_page=10`) {
         trace.push('namespaces');
@@ -516,7 +528,7 @@ test('inventory reads only pinned resources and compares the exact attempt basel
   f.state.expiryLink = true;
   assert.equal(await run('after'), true);
   await assert.rejects(run('after'), error);
-  const expected = [...beforeR2, ...r2RosterOrder, 'expiry', 'uploads', 'objects',
+  const expected = [...beforeR2, ...r2RosterOrder, 'expiry', 'bucket-jobs', 'uploads', 'objects',
     'scripts', 'deployments', 'versions', 'schedules', 'deployments'];
   assert.deepEqual(f.trace, [...expected, ...expected]);
 });
@@ -1005,7 +1017,7 @@ test('inventory rejects incomplete reads, extra resources, fixtures and unverifi
   }
 });
 
-const r2ReadOrder = [...r2RosterOrder, 'expiry', 'uploads', 'objects'];
+const r2ReadOrder = [...r2RosterOrder, 'expiry', 'bucket-jobs', 'uploads', 'objects'];
 for (const [index, kind] of r2ReadOrder.entries()) {
   test(`inventory rejects HTTP 200 with Content-Range on R2 ${kind}`, async t => {
     const f = fixture(t), run = f.create();
@@ -1014,6 +1026,95 @@ for (const [index, kind] of r2ReadOrder.entries()) {
     assert.deepEqual(f.trace, [...beforeR2, ...r2ReadOrder.slice(0, index + 1)]);
   });
 }
+
+test('inventory accepts an empty or terminal native R2 bucket job roster', async t => {
+  const f = fixture(t), run = f.create();
+  assert.equal(await run('before'), true);
+  f.state.readBucketJobs = () => r2JobRoster({ jobs: [
+    { ...prefixDelete, status: 'COMPLETED' },
+    { ...storageMigration, status: 'FAILED' },
+    { ...prefixDelete, id: 'cancelled-job', status: 'CANCELLED' },
+  ] });
+  assert.equal(await run('after'), true);
+});
+
+test('inventory refuses active or unverified native R2 bucket jobs at both boundaries', async t => {
+  const f = fixture(t);
+  const checks = [
+    ['running bucket clear', () => r2JobRoster({ jobs: [{ ...prefixDelete, status: 'RUNNING' }] })],
+    ['enqueued storage migration', () => r2JobRoster({ jobs: [{ ...storageMigration, status: 'ENQUEUED' }] })],
+    ['unknown status', () => r2JobRoster({ jobs: [{ ...prefixDelete, status: 'PAUSED' }] })],
+    ['unknown type', () => r2JobRoster({ jobs: [{ ...prefixDelete, jobType: 'other', status: 'COMPLETED' }] })],
+    ['missing descriptor', () => r2JobRoster({ jobs: [{ ...prefixDelete, prefixDelete: undefined, status: 'COMPLETED' }] })],
+    ['incomplete prefix-delete descriptor', () => r2JobRoster({ jobs: [
+      { ...prefixDelete, prefixDelete: { prefix: '' }, status: 'COMPLETED' },
+    ] })],
+    ['incomplete storage-class migration descriptor', () => r2JobRoster({ jobs: [
+      { ...storageMigration, storageClassMigration: { migratedObjects: 1 }, status: 'COMPLETED' },
+    ] })],
+    ['identical source and destination storage classes', () => r2JobRoster({ jobs: [
+      { ...storageMigration, storageClassMigration: { ...storageMigration.storageClassMigration,
+        destinationStorageClass: 'Standard' }, status: 'COMPLETED' },
+    ] })],
+    ['invalid start time', () => r2JobRoster({ jobs: [{ ...prefixDelete, startTime: 'unknown', status: 'COMPLETED' }] })],
+    ['blank job ID', () => r2JobRoster({ jobs: [{ ...prefixDelete, id: ' ', status: 'COMPLETED' }] })],
+    ['duplicate job', () => r2JobRoster({ jobs: Array(2).fill({ ...prefixDelete, status: 'COMPLETED' }) })],
+    ['empty page with continuation', () => r2JobRoster({ jobs: [], nextContinuationToken: 'more' })],
+    ['link continuation', () => r2JobRoster({ jobs: [] }, { headers: { Link: '</more>; rel="next"' } })],
+    ['missing roster', () => r2JobRoster({})],
+    ['unexpected pagination envelope', () => Response.json({ success: true, errors: [], messages: [],
+      result: { jobs: [] }, result_info: { cursor: 'more' } })],
+    ['provider error in success envelope', () => Response.json({ success: true, errors: [{ code: 1 }], messages: [],
+      result: { jobs: [] } })],
+    ['duplicate status', () => new Response(JSON.stringify({ success: true, errors: [], messages: [],
+      result: { jobs: [{ ...prefixDelete, status: 'COMPLETED' }] } }).replace('"status":', '"status":"RUNNING","status":'))],
+    ['denied', () => new Response(null, { status: 403 })],
+    ['over job limit', () => r2JobRoster({ jobs: Array.from({ length: 101 }, (_, i) =>
+      ({ ...prefixDelete, id: String(i), status: 'COMPLETED' })) })],
+    ['over byte limit', () => r2JobRoster({ jobs: [{ ...prefixDelete, id: 'x'.repeat(65_536), status: 'COMPLETED' }] })],
+  ];
+  for (const [label, read] of checks) await t.test(label, async () => {
+    for (const phase of ['before', 'after']) {
+      const run = f.create();
+      if (phase === 'after') assert.equal(await run('before'), true);
+      f.trace.length = 0;
+      f.state.readBucketJobs = read;
+      await assert.rejects(run(phase), error);
+      assert.deepEqual(f.trace, [...beforeR2, ...r2RosterOrder, 'expiry', 'bucket-jobs']);
+    }
+  });
+});
+
+test('inventory drains an aborted R2 bucket jobs body before returning', { timeout: 10_000 }, async t => {
+  const f = fixture(t), run = f.create(), controller = new AbortController();
+  const entered = Promise.withResolvers(), aborted = Promise.withResolvers(), release = Promise.withResolvers();
+  f.state.readBucketJobs = signal => new Response(new ReadableStream({
+    start(stream) {
+      signal.addEventListener('abort', async () => {
+        aborted.resolve();
+        await release.promise;
+        stream.error(signal.reason);
+        f.trace.push('bucket-jobs-drained');
+      }, { once: true });
+    },
+    pull() { entered.resolve(); },
+  }, { highWaterMark: 0 }));
+  let finished = false;
+  const operation = run('before', {}, controller.signal).finally(() => { finished = true; });
+  const rejected = assert.rejects(operation, error);
+  try {
+    await waitForFixtureStep(entered.promise, operation);
+    controller.abort(new Error('private fixture abort'));
+    await waitForFixtureStep(aborted.promise, operation);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+  } finally {
+    controller.abort();
+    release.resolve();
+    await rejected;
+  }
+  assert.deepEqual(f.trace, [...beforeR2, ...r2RosterOrder, 'expiry', 'bucket-jobs', 'bucket-jobs-drained']);
+});
 
 test('inventory rejects final drift and does not rebaseline after cancellation', async t => {
   const f = fixture(t);
