@@ -15,6 +15,7 @@ import { assertQualificationSettings } from './staging-qualification-settings.mj
 import { createQualificationStorageCases } from './staging-qualification-storage-cases.mjs';
 import { createQualificationExercise, qualificationExerciseCases, verifyQualificationExercise } from './staging-qualification-exercise.mjs';
 import { runQualificationLifecycle } from './staging-qualification-lifecycle.mjs';
+import { fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 import { fixture as accessFixture } from './staging-qualification-access.test.mjs';
 import { setup as fileFixture } from './staging-qualification-files.test.mjs';
 import { fixture as transferFixture } from './staging-qualification-app-transfer.test.mjs';
@@ -538,7 +539,7 @@ test('storage cases use signed calls against only the reviewed bucket and attemp
 });
 
 function composedLifecycle({ cwd, env, active, phases, exercise, signal, after = () => true }) {
-  return runQualificationLifecycle({ exercise, assertFullV0: () => true, recordRecovery: () => true,
+  return runQualificationLifecycle({ exercise, readAdmissionEvidence: fakeQualificationAdmission, recordRecovery: () => true,
     inventory({ phase }) { phases.push(phase); return phase === 'after' ? after() : true; },
     cleanup(scope) { assert.deepEqual(scope, active); phases.push('cleanup'); return true; },
   }, env, cwd, signal, {

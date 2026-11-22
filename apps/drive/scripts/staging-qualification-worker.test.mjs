@@ -9,6 +9,8 @@ import { test } from 'node:test';
 import { allowsQualificationTraffic, qualificationReadiness, readinessHeaders, readinessPath, stagingOrigin } from '../src/lib/server/qualification-readiness.ts';
 import { inspectQualificationWorker, probeQualificationWorker, recoverQualificationWorker,
   uploadQualificationWorker, withQualificationWorker } from './staging-qualification-worker.mjs';
+import { assertFullV0 } from './staging-qualification-admission.mjs';
+import { candidateAppSettings, fakeQualificationAdmission } from './fixtures/qualification-admission.mjs';
 
 const id = n => `00000000-0000-4000-8000-00000000000${n}`;
 const [baseline, candidate, prior, active, restored, foreign] = [1, 2, 3, 4, 5, 6].map(id);
@@ -323,7 +325,7 @@ test('Worker inventory rejects cron, unknown bindings, candidates, deployment dr
   }
 });
 
-function uploadFixture({ cwd, app, env }) {
+function uploadFixture({ cwd, app, env }, admission) {
   const state = { current: deployment(prior, baseline), tag: `${env.GITHUB_SHA}-18-2` };
   const calls = [];
   const controller = new AbortController();
@@ -334,7 +336,7 @@ function uploadFixture({ cwd, app, env }) {
     uploadId: candidate, readbackTag: state.tag, adjust: bindings => bindings, history: [baseline] };
   const vars = { ...storageVars, DRIVE_ORIGIN: stagingOrigin, DRIVE_QUALIFICATION_SHA: env.GITHUB_SHA,
     [expiryBinding]: expiresAt, ...attemptVars, DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
-    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
+    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled', ...(admission && candidateAppSettings) };
   const uploaded = [...shared, ...varsToBindings(vars), { name: 'DRIVE_QUALIFICATION_VERSION', type: 'version_metadata' }];
   async function request(url, { method, body, headers }) {
     const prefix = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/workers/`;
@@ -382,8 +384,10 @@ function uploadFixture({ cwd, app, env }) {
     });
     return child;
   }
-  return { setup, calls, scratch: () => scratch, run: override => uploadQualificationWorker({ ...env, ...storageEnv,
-    WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override }, cwd, controller.signal, request, runner) };
+  const run = override => uploadQualificationWorker({ ...env, ...storageEnv,
+    WRANGLER_CI_OVERRIDE_NAME: 'unsafe-override', CLOUDFLARE_API_BASE_URL: 'unsafe-override', ...override },
+    cwd, controller.signal, request, runner, admission);
+  return { setup, calls, scratch: () => scratch, run };
 }
 
 test('uploads only the exact-attempt version with inherited secrets and an unchanged baseline', async t => {
@@ -392,6 +396,28 @@ test('uploads only the exact-attempt version with inherited secrets and an uncha
   assert.deepEqual(calls.map(path => path.split('/').at(-1)), ['subdomain', 'qerith-drive-staging', 'deployments',
     baseline, 'versions', 'upload', candidate, 'versions', 'deployments']);
   assert.ok(!existsSync(scratch()));
+});
+
+test('uploads admitted settings and verifies the immutable version readback', async t => {
+  const source = fixture(t, true);
+  source.git('restore', '--', 'apps/drive/scripts/staging-storage-qualification.json');
+  const admission = await assertFullV0(source.env, source.cwd, fakeQualificationAdmission);
+  const good = uploadFixture(source, admission);
+  assert.deepEqual(await good.run({ DRIVE_SIGN_IN_FIXTURE: '1', DRIVE_STAGING_READ_GRANTS: '0' }),
+    { version: candidate, expiresAt, previousVersion: baseline, previousDeployment: prior });
+  const bad = uploadFixture(source, admission);
+  bad.setup.adjust = bindings => bindings.filter(binding => binding.name !== 'DRIVE_STAGING_READ_GRANTS');
+  await assert.rejects(bad.run(), /incompatible resource/);
+  assert.ok(bad.calls.includes('upload'));
+
+  for (const incorrect of [true, { ...admission }]) {
+    const forged = uploadFixture(source, incorrect);
+    await assert.rejects(forged.run(), /admission is unverified/);
+    assert.deepEqual(forged.calls, []);
+  }
+  const wrongAttempt = uploadFixture(source, admission);
+  await assert.rejects(wrongAttempt.run({ GITHUB_RUN_ATTEMPT: '3' }), /admission is unverified/);
+  assert.deepEqual(wrongAttempt.calls, []);
 });
 
 test('rejects a newer undeployed version before inheriting staging secrets', async t => {
@@ -464,6 +490,28 @@ test('activation rejects missing or mismatched attempt bindings under the correc
     ? { ...binding, text: '3' } : binding);
   await assert.rejects(run(), /incompatible resource/);
   assert.deepEqual(calls, ['current', 'version']);
+});
+
+test('activation requires exact admitted settings under the correct version tag', async t => {
+  const { cwd, env, run, calls, options, state } = fixture(t);
+  const original = state.candidateBindings;
+  const allBindings = [...original, ...varsToBindings(candidateAppSettings)];
+  state.candidateBindings = allBindings;
+  await assert.rejects(run(), /requires reviewed app admission/);
+  assert.deepEqual(calls.splice(0), ['current', 'version']);
+
+  options.admission = await assertFullV0(env, cwd, fakeQualificationAdmission);
+  for (const name of Object.keys(candidateAppSettings)) {
+    for (const bad of [null, { name, type: 'plain_text', text: 'invalid' },
+      { name, type: 'json', text: candidateAppSettings[name] }]) {
+      state.candidateBindings = allBindings.filter(binding => binding.name !== name).concat(bad ? [bad] : []);
+      await assert.rejects(run(), /incompatible resource/);
+      assert.deepEqual(calls.splice(0), ['current', 'version']);
+    }
+  }
+  state.candidateBindings = allBindings;
+  assert.equal((await run()).version, candidate);
+  assert.ok(calls.includes('activate'));
 });
 
 test('refuses activation when the deadline differs or recovery recording consumes the activation window', async t => {

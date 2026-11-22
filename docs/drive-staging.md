@@ -191,9 +191,26 @@ The offline entry point rechecks the committed staging target and reviewed R2
 binding, then binds the case runner, estate checks, and signed recovery writer
 to a single SHA/run/attempt. It verifies recovery record retention before the
 candidate upload and again before each record write. It requires explicit
-admission, app case, estate, writer-fence, and transport adapters. Admission
-must pass. The case runner requires every case to pass and binds the results to
-the exact invocation.
+admission evidence, app case, estate, writer-fence, and transport adapters. The
+case runner requires every case to pass and binds the results to the exact
+invocation.
+
+Before the first inventory read, app admission requires two independent
+approvals for the exact main commit, browser workflow and candidate settings.
+It checks the same commit's successful main-push CI run, exact-head browser
+policy and checkout, generated fixture step, verified artifact identity and
+digest, and selected passkey, invite, grant and shared-listing observations.
+The future protected evidence reader must authenticate the approvals and CI
+metadata independently and extract the claims from the same digest-verified
+archive. The offline tests inject synthetic records for that interface.
+
+The resulting attempt-bound admission pins invite acceptance, read grants
+and shared listing to `1`, fixture sign-in to `0`, and owner enrollment to
+`disabled`. The qualification uploader verifies these settings on the
+immutable version and the Worker lifecycle verifies them again before
+activation. Synthetic owner provisioning requires its own reviewed path
+under the writer fence after the initial clean census.
+
 The estate composer runs the bounded inventory before mutation and after Worker
 restore. R2 prefix and D1 migration-fixture cleanup require a quiescence
 snapshot for the exact attempt and a fence-loss signal. The composer waits for

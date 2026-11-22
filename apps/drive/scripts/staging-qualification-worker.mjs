@@ -7,6 +7,7 @@ import {
 import { isQualificationRunNumber } from '../src/lib/server/qualification-scope.mjs';
 import { stagingStorage, validateStagingConfig, validateStagingTarget } from './staging-publish.mjs';
 import { assertQualificationJob } from './staging-qualification.mjs';
+import { admittedAppSettings } from './staging-qualification-admission.mjs';
 import { uploadVersion } from './staging-qualification-upload.mjs';
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -16,6 +17,9 @@ const expiryBinding = 'DRIVE_QUALIFICATION_EXPIRES_AT';
 const runBinding = 'DRIVE_QUALIFICATION_RUN_ID';
 const attemptBinding = 'DRIVE_QUALIFICATION_RUN_ATTEMPT';
 const attemptBindings = (runId, attempt) => ({ [runBinding]: runId, [attemptBinding]: attempt });
+const stockAppSettings = Object.freeze({
+  DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0', DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled',
+});
 const hasCandidateBinding = bindings => [...bindings.keys()].some(name => name.startsWith('DRIVE_QUALIFICATION_'));
 const apiTimeout = 15_000;
 const probeBudget = 30_000;
@@ -271,8 +275,10 @@ export async function inspectQualificationWorker(env, cwd, signal, request = fet
 
 // Unwired: the protected caller must hold the lifecycle lock and supply a fresh
 // build of the checked-out SHA. This prepares a version, not a deployment.
-export async function uploadQualificationWorker(env, cwd = process.cwd(), signal, request = fetch, run = spawn) {
-  const { sha, runId, attempt } = assertQualificationJob(env, cwd);
+export async function uploadQualificationWorker(env, cwd = process.cwd(), signal, request = fetch, run = spawn, admission) {
+  const source = assertQualificationJob(env, cwd);
+  const { sha, runId, attempt } = source;
+  const appSettings = admission === undefined ? stockAppSettings : admittedAppSettings(admission, source, cwd);
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
   if (typeof token !== 'string' || !token.trim()) throw new Error('Staging Worker upload requires the protected credentials.');
   const root = join(cwd, 'apps/drive');
@@ -299,8 +305,7 @@ export async function uploadQualificationWorker(env, cwd = process.cwd(), signal
   }
   const expiresAt = String(Date.now() + qualificationWindowMs);
   const vars = { ...storage.vars, DRIVE_ORIGIN: config.vars.DRIVE_ORIGIN, DRIVE_QUALIFICATION_SHA: sha,
-    [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), DRIVE_SIGN_IN_FIXTURE: '0', DRIVE_STAGING_INVITE_ACCEPTANCE: '0',
-    DRIVE_OWNER_ENROLLMENT_RELEASE: 'disabled' };
+    [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), ...appSettings };
   const version = await uploadVersion(root, config, vars, tag, secrets, account, token, signal, run);
   if (!isUuid(version) || version === previous.version) throw new Error('Staging Worker upload did not return a new version ID.');
   const candidate = checkedBindings(await api.assertUploaded(version, tag, signal), config, vars);
@@ -363,9 +368,11 @@ export async function withQualificationRecovery(task, recover) {
 
 // No workflow caller. Hold the lifecycle lock from upload through restore and
 // supply abortable probe, case and scoped cleanup callbacks.
-export async function withQualificationWorker({ upload, recordRecovery, probe, exercise, cleanup },
+export async function withQualificationWorker({ upload, admission, recordRecovery, probe, exercise, cleanup },
   env, cwd = process.cwd(), signal, request = fetch) {
-  const { sha, runId, attempt } = assertQualificationJob(env, cwd);
+  const source = assertQualificationJob(env, cwd);
+  const { sha, runId, attempt } = source;
+  const appSettings = admission === undefined ? {} : admittedAppSettings(admission, source, cwd);
   const { CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: token } = env;
   const { version: candidate, expiresAt, previousDeployment, previousVersion } = upload ?? {};
   if (typeof token !== 'string' || !token.trim() || ![candidate, previousDeployment, previousVersion].every(isUuid) ||
@@ -381,10 +388,15 @@ export async function withQualificationWorker({ upload, recordRecovery, probe, e
     throw new Error('Staging baseline changed since candidate upload.');
   }
   const bindings = checkedBindings(await api.assertUploaded(candidate, tag, signal), config, {
-    DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt),
+    DRIVE_QUALIFICATION_SHA: sha, [expiryBinding]: expiresAt, ...attemptBindings(runId, attempt), ...appSettings,
   });
   if (bindings.get('DRIVE_QUALIFICATION_VERSION')?.type !== 'version_metadata') {
     throw new Error('Staging Worker version has incompatible resource or storage bindings.');
+  }
+  if (admission === undefined && (['DRIVE_STAGING_READ_GRANTS', 'DRIVE_STAGING_SHARED_LISTING'].some(name => bindings.has(name)) ||
+      Object.entries(stockAppSettings).some(([name, text]) =>
+        bindings.has(name) && (bindings.get(name).type !== 'plain_text' || bindings.get(name).text !== text)))) {
+    throw new Error('Staging Worker version requires reviewed app admission.');
   }
   const identity = { sha, runId, attempt, version: candidate };
   await recordRecovery({ ...identity, expiresAt, previousVersion: previous.version, previousDeployment: previous.id });
