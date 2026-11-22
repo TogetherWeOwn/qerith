@@ -276,6 +276,9 @@ export async function proveNestedShare(browser, { origin, DB, worker, relay, own
         await raceStatus.waitFor();
         assert.doesNotMatch(await raceStatus.textContent(), /Access through/);
         await through.waitFor({ state: 'hidden' });
+        // The refreshed roster must make the former reader eligible again.
+        await input.fill(reader);
+        await dialog.getByRole('option', { name: reader, exact: true }).waitFor();
         assert.equal((await ask(grant(parent), ownerToken, 'PUT')).status, 204);
         assert(![inheritedTree, pickerTree, confirmedTree, revokedTree].some(tree => tree.includes(candidateId) || tree.includes(id)));
         ariaReviews.set(width, [
