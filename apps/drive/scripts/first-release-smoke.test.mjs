@@ -133,6 +133,13 @@ test('locked Wrangler applies smoke migrations through the pinned D1 binding', a
   assert.deepEqual(JSON.parse(output)[0].results, [{ name: 'drive_principals' }]);
 });
 
+test('invalid source cannot replace a queued staging deployment', async () => {
+  const workflow = await readFile(new URL('../../../.github/workflows/drive-first-release-smoke.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(workflow, /^concurrency:/m);
+  assert.match(workflow, /  source:\n[\s\S]+Verify protected dispatch[\s\S]+EXPECTED_MAIN_SHA[^\n]+GITHUB_SHA/);
+  assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:\n      group: drive-staging-lifecycle/);
+});
+
 test('protected workflow has one success-only attempt receipt', async () => {
   const source = await readFile(new URL('../../../.github/workflows/drive-first-release-smoke.yml', import.meta.url), 'utf8');
   assert.equal([...source.matchAll(/^  [a-z_]+:$/gm)].filter(([text]) => text === '  workflow_dispatch:').length, 1);

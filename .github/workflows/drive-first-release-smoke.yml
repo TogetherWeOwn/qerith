@@ -11,22 +11,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: drive-staging-lifecycle
-  cancel-in-progress: false
+env:
+  EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
 
 jobs:
-  smoke:
+  # An invalid dispatch must stay out of the shared staging queue.
+  source:
     if: github.repository == 'TogetherWeOwn/qerith' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    environment: staging
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: apps/drive
-    env:
-      EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
-      WRANGLER_SEND_METRICS: 'false'
+    timeout-minutes: 5
     steps:
       - name: Verify protected dispatch
         shell: bash
@@ -38,7 +31,21 @@ jobs:
             printf '%s\n' 'Invalid first-release smoke dispatch.' >&2
             exit 1
           fi
-        working-directory: .
+  smoke:
+    needs: source
+    if: success() && needs.source.result == 'success'
+    concurrency:
+      group: drive-staging-lifecycle
+      cancel-in-progress: false
+    environment: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/drive
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}

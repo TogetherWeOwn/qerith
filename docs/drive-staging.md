@@ -4,7 +4,8 @@
 
 Rank 10 runs [the staging smoke workflow](../.github/workflows/drive-first-release-smoke.yml)
 from protected `main` with `expected_main_sha` set to the reviewed full commit
-SHA. Confirm required checks and both reviews for the release candidate before
+SHA. The workflow validates the dispatch before entering the shared staging
+queue. Confirm required checks and both reviews for the release candidate before
 dispatch. The `staging` GitHub environment must allow the `main` branch only.
 Use a new disposable D1 database for each attempt. The published Worker and the
 database are removed during cleanup.
