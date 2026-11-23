@@ -76,7 +76,9 @@ export function generatedCommands(paths, trusted = registry, exactHead = true) {
     if (!command) return [];
     const present = paths.has(`${browserPath}${id}.mjs`) && paths.has(browserPath + command[0]);
     if (required && !present) throw new Error(`Missing required generated browser module: ${id}`);
-    return present ? [command] : [];
+    // The standalone round trip captures both widths for folder creation, rename, and move.
+    const deadline = id === 'staging-root-standalone' ? '150s' : '90s';
+    return present ? [{ args: command, deadline }] : [];
   });
 }
 

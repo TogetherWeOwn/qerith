@@ -45,8 +45,9 @@ if (command === 'isolated') {
   console.log(JSON.stringify(isolatedSchedule(paths, readRegistration())));
 } else if (command === 'capture') {
   if (!testedDir || !dir || !exactHead) throw new Error('Generated browser fixtures require the exact requested head');
-  for (const args of generatedCommands(paths, registry, exactHead)) {
-    execFileSync('timeout', ['--signal=TERM', '--kill-after=10s', '90s', process.execPath, ...args], {
+  for (const { args, deadline } of generatedCommands(paths, registry, exactHead)) {
+    console.log(`Generated Chromium: ${args.join(' ')} (deadline ${deadline})`);
+    execFileSync('timeout', ['--signal=TERM', '--kill-after=10s', deadline, process.execPath, ...args], {
       cwd: join(testedDir, browserPath), stdio: 'inherit',
       env: { ...process.env, DRIVE_BROWSER_EVIDENCE_DIR: dir },
     });

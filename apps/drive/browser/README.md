@@ -31,10 +31,11 @@ Local runs can include uncommitted changes and must not be treated as commit
 provenance. After a CI change merges, a substantive pull request body edit starts
 a fresh run on an unchanged head; rerunning an older run uses its old workflow.
 
-On the matching head, CI builds the generated Worker once and runs the
-registered generated commands with separate 90-second deadlines and 10-second
-kill grace periods. The sign-in and staging-origin commands share the build
-and evidence directory. Earlier heads either lack the staging split or run
+On the matching head, CI builds the generated Worker once and gives each
+registered command a separate 90-second deadline, or 150 seconds for the staging
+root round trip with its owner mutation and accessibility captures. Each command
+has a 10-second kill grace period. The sign-in and staging-origin commands share
+the build and evidence directory. Earlier heads either lack the staging split or run
 staging from `sign-in.mjs`. The sign-in and root-upload evidence is separate from
 `staging-root-round-trip.json`: the latter uses the exact staging origin, a
 disposable D1, and synthetic storage with no sign-in fixture flag or remote requests. It asserts passkey sign-in, keyboard picker, a root data refresh

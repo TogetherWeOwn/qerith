@@ -29,7 +29,10 @@ export async function proveNewFolder(page, origin, DB, principal, intercept, lis
   page.on('request', observe);
   try {
     for (const [width, height] of widths) {
-      const evidence = state => capture(page, state, width, true, owner ? 'new-folder' : 'member-new-folder');
+      const evidence = state => {
+        if (owner) console.log(`Owner folder creation (${width}×${height}): capturing ${state}`);
+        return capture(page, state, width, true, owner ? 'new-folder' : 'member-new-folder');
+      };
       await page.setViewportSize({ width, height });
       await page.goto(`${origin}/`, { waitUntil: 'networkidle' });
       const name = `A Receipts ${width} 🗂️`; // Before the existing Folder NNN fixtures.
