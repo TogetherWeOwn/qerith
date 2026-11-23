@@ -1,7 +1,10 @@
 # PR test mutations
 
-GitHub Actions compares the integration commit with its first parent. The second parent must match
-the PR head. The first must contain the event base and belong to the target branch. Main is a no-op.
+For pull requests, GitHub Actions compares the integration commit with its first parent. The second
+parent must match the PR head. The first must contain the event base and belong to the target branch.
+For merge groups, the checked-out snapshot must match both the event head and the workflow SHA.
+The comparison uses the event base, which must be a distinct ancestor of the snapshot. Main pushes
+are a successful no-op. The check is advisory and manual dispatch skips it.
 
 The first four added, modified or Git-detected renamed `*.test.mjs` paths in lexical order are
 targets. Source-only PRs have no targets. Synthetic proofs run with Node and Vitest.

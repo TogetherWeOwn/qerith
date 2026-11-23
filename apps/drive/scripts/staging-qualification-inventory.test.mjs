@@ -1032,6 +1032,8 @@ test('inventory accepts an empty or terminal native R2 bucket job roster', async
   assert.equal(await run('before'), true);
   f.state.readBucketJobs = () => r2JobRoster({ jobs: [
     { ...prefixDelete, status: 'COMPLETED' },
+    { ...prefixDelete, id: 'empty-delete-job', status: 'COMPLETED',
+      prefixDelete: { ...prefixDelete.prefixDelete, deletedObjects: 0 } },
     { ...storageMigration, status: 'FAILED' },
     { ...prefixDelete, id: 'cancelled-job', status: 'CANCELLED' },
   ] });
