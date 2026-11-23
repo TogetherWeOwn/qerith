@@ -5,7 +5,7 @@ import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { scopedSmokeTarget, smokeDispatch, smokeMigrationArgs, smokeProvider, smokeWorkerConfig } from './first-release-smoke-target.mjs';
+import { checkedSmokeDispatch, scopedSmokeTarget, smokeDispatch, smokeMigrationArgs, smokeProvider, smokeWorkerConfig } from './first-release-smoke-target.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const token = 't'.repeat(40), key = 'b'.repeat(32), now = 1_800_000_000_000;
@@ -18,6 +18,27 @@ const declaration = { accountId: 'a'.repeat(32), databaseId: '00000000-0000-4000
   deployTokenHash: hash(token), accessKeyIdHash: hash(key) };
 const env = { ...dispatch, CLOUDFLARE_API_TOKEN: token, QERITH_FIRST_RELEASE_SMOKE_R2_ACCESS_KEY_ID: key,
   QERITH_FIRST_RELEASE_SMOKE_R2_SECRET_ACCESS_KEY: 'e'.repeat(64), QERITH_FIRST_RELEASE_SMOKE_TARGET: JSON.stringify(declaration) };
+
+function checkoutDispatch() {
+  const checkoutSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  return { ...dispatch, GITHUB_SHA: checkoutSha, EXPECTED_MAIN_SHA: checkoutSha };
+}
+
+test('checked smoke dispatch accepts a matching checkout SHA', () => {
+  const matching = checkoutDispatch();
+  assert.deepEqual(checkedSmokeDispatch({ ...matching, RUNNER_TEMP: tmpdir() }), smokeDispatch(matching));
+});
+
+test('checked smoke dispatch rejects a mismatched checkout SHA', () => {
+  const checkoutSha = checkoutDispatch().GITHUB_SHA;
+  const mismatchedSha = checkoutSha === sha ? 'd'.repeat(40) : sha;
+  assert.throws(() => checkedSmokeDispatch({ ...dispatch, GITHUB_SHA: mismatchedSha, EXPECTED_MAIN_SHA: mismatchedSha,
+    RUNNER_TEMP: tmpdir() }), { message: 'Invalid smoke execution context' });
+});
+
+test('checked smoke dispatch rejects missing runner temp', () => {
+  assert.throws(() => checkedSmokeDispatch(checkoutDispatch()), { message: 'Invalid smoke execution context' });
+});
 
 test('binds the protected staging source and target to an exact run attempt', () => {
   const scope = smokeDispatch(dispatch);
