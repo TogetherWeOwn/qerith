@@ -67,8 +67,13 @@ disabled.
 
 ## Configure the durable production boundary
 
-Store `DRIVE_PRODUCTION_BOUNDARY` as a variable in the main-only GitHub
-`production` environment. Its JSON object contains exactly two string fields.
+Store `DRIVE_PRODUCTION_BOUNDARY` as a secret in the main-only GitHub
+`production` environment. Encode the UTF-8 JSON as a single line of standard
+Base64, with no line wrapping. The release script decodes it in process. Never
+place the encoded or raw pin in Actions variables or dispatch inputs. The JSON
+object contains exactly two string fields. If either the boundary or target
+was stored as a `production` environment variable, remove that variable before
+setting the corresponding secret.
 `accountId` is the dedicated Cloudflare account ID (32 lowercase hex
 characters). `workerSubdomain` is the account's workers.dev subdomain as a
 single lowercase DNS label, up to 63 ASCII letters, digits and hyphens,
@@ -99,9 +104,10 @@ protected custody and use it only for switch-off.
 
 The release operator updates the repository Actions variable
 `PRODUCTION_ACCEPTED_SHA` from `UNAPPROVED` only after independent acceptance.
-Set the following JSON variables in the `production` environment.
+Set the release inputs in the `production` environment.
 
-- `DRIVE_PRODUCTION_TARGET` contains `accountId`, `worker`, `origin`, `d1Id`,
+- The `DRIVE_PRODUCTION_TARGET` secret uses the same single-line Base64 format
+  as the boundary. Its JSON contains `accountId`, `worker`, `origin`, `d1Id`,
   `r2Bucket`, `storageEpoch` (a dedicated `prod-…` epoch), and
   `credentials`. The account and origin must match the durable boundary. The
   credential keys are `cfRead`, `cfDeploy`, `r2Read`,
@@ -109,7 +115,7 @@ Set the following JSON variables in the `production` environment.
   secret, or of the access key ID and secret joined by one NUL byte in that
   order for R2. Compute the digests in credential custody. Keep raw values and
   operator input out of shell history and the release record.
-- `DRIVE_PRODUCTION_APPROVAL` contains `sourceSha`, `buildDigest`,
+- The `DRIVE_PRODUCTION_APPROVAL` JSON variable contains `sourceSha`, `buildDigest`,
   `stagingRunId` (string), `stagingRunAttempt` (integer), `targetDigest`,
   `bookmarkDigest`, and `expiresAt` (UTC, at most one hour from deployment).
   Use lowercase SHA-256 of the target's sorted-key compact UTF-8 JSON with no
@@ -157,8 +163,9 @@ D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
 checked Worker is deployed with the route and previews off, and its version
 and bindings are read back before the route can be enabled. After enablement,
-the workflow checks the serving version, `HEAD /sign-in` and anonymous denial
-on `GET /api/owner/invitations`. A serving probe failure triggers switch-off.
+the workflow checks the serving version, HTTP 200 on `HEAD /sign-in`, and HTTP
+401 on anonymous `GET /api/owner/invitations`. Both origin checks use the same
+curl transport as switch-off. A serving probe failure triggers switch-off.
 
 A failed or interrupted migration or deploy may leave provider writes in flight
 or committed. Stop, keep admission off, and reconcile the exact Worker,
@@ -206,8 +213,11 @@ could delay switch-off. A running deploy may hold the queue up to its
 15-minute job timeout. Switch-off uses the durable boundary and incident pair
 after the temporary inputs and release credentials have been withdrawn. It
 verifies the account namespace, disables the workers.dev route and preview
-URLs, and verifies both provider flags and HTTP 404 on `HEAD /sign-in`
-without following redirects. Alert the release reviewer and incident owner
+URLs, and verifies both provider flags and HTTP 404 on HTTPS `HEAD /sign-in`
+using curl with redirects disabled. Each sign-in probe uses a fresh query key.
+The invitations probe uses the query-free route required by owner API
+admission. The workflow rejects cache hits, stale responses, and unrecognized
+`CF-Cache-Status` values. Alert the release reviewer and incident owner
 immediately if either verification is unavailable or fails.
 
 The initial release has no earlier serving Worker. Route disablement stops
@@ -227,16 +237,19 @@ Record both substitutions and the exact source SHA used for the rehearsal.
 - Confirm protected main and its main-only environment policy, both jobs'
   input visibility, and refusal when the protected pin is absent or available
   only at repository or organization scope. Confirm the pin and incident
-  secrets resolve in the protected job and are unavailable outside it.
+  secrets resolve in the protected job and are unavailable outside it. Verify
+  that the runner output contains neither the raw pin, its encoded value, its
+  account ID or namespace, nor any incident credential values.
 - In the disposable repository, set an incident secret name at repository
   scope to a synthetic value with no provider access. Dispatch both operations
   without acceptance or a staging receipt and verify each stops at the
   input-scope preflight step before reaching any protected job. Remove the
   synthetic secret before continuing.
 - With only the durable inputs present, record the transition from HTTP 200 to
-  404 on `HEAD /sign-in` and both provider flags reading false. Verify the
-  incident pair's effective permissions and denial outside the scoped
-  synthetic account using disposable targets.
+  404 on `HEAD /sign-in`, the refusal's `CF-Cache-Status` or its absence, and
+  both provider flags reading false. Verify the incident pair's effective
+  permissions and denial outside the scoped synthetic account using
+  disposable targets.
 - Occupy the shared queue, advance main, and confirm an ancestor switch-off
   dispatch still works without release acceptance, receipt or credentials.
   Record queue and disablement timing, cancellation of an unstarted release

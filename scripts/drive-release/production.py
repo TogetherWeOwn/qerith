@@ -1,5 +1,6 @@
 """First-ever Drive deploy to the dedicated production Cloudflare targets."""
 
+from base64 import b64decode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -7,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from secrets import token_hex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -31,6 +33,7 @@ PRISTINE_SCHEMA = (
     "AND NOT (type = 'index' AND name = 'sqlite_autoindex__cf_KV_1' AND tbl_name = '_cf_KV') LIMIT 1"
 )
 MAX_MIGRATIONS = 100
+MAX_PROTECTED_JSON_BYTES = 4096
 CREDENTIALS = {
     "cfRead": ("DRIVE_PRODUCTION_CF_READ_TOKEN",),
     "cfDeploy": ("DRIVE_PRODUCTION_CF_DEPLOY_TOKEN",),
@@ -54,14 +57,21 @@ class Boundary:
         return f"https://{self.account_id}.r2.cloudflarestorage.com"
 
 
-def production_boundary(env):
-    message = "Missing or invalid dedicated production boundary."
-    raw = env.get("DRIVE_PRODUCTION_BOUNDARY", "")
-    require(0 < len(raw) <= 4096, message)
+def protected_json(encoded, message):
+    # Keep structured values out of the runner environment. GitHub masks the
+    # single-line secret, and decoding happens only inside this process.
+    require(0 < len(encoded) <= 4 * ((MAX_PROTECTED_JSON_BYTES + 2) // 3), message)
     try:
-        pin = json_object(raw)
+        raw = b64decode(encoded, validate=True)
+        require(0 < len(raw) <= MAX_PROTECTED_JSON_BYTES, message)
+        return json_object(raw.decode("utf-8"))
     except (ValueError, RecursionError):
         raise SystemExit(message) from None
+
+
+def production_boundary(env):
+    message = "Missing or invalid dedicated production boundary."
+    pin = protected_json(env.get("DRIVE_PRODUCTION_BOUNDARY", ""), message)
     require(
         type(pin) is dict and set(pin) == {"accountId", "workerSubdomain"}
         and type(pin["accountId"]) is str and re.fullmatch(r"[0-9a-f]{32}", pin["accountId"])
@@ -90,7 +100,9 @@ def canonical(data):
 
 
 def target_and_approval(boundary, env, sha, now):
-    target = json_object(env.get("DRIVE_PRODUCTION_TARGET", ""))
+    target = protected_json(
+        env.get("DRIVE_PRODUCTION_TARGET", ""), "Missing or invalid dedicated production target.",
+    )
     require(
         set(target) == {"accountId", "worker", "origin", "d1Id", "r2Bucket", "storageEpoch", "credentials"}
         and target["accountId"] == boundary.account_id and target["worker"] == NAME
@@ -263,15 +275,28 @@ def verify_surface(read, on):
 
 
 def probe_status(boundary, path, *, method="HEAD"):
-    request = Request(f"{boundary.origin}{path}", method=method, headers={"Cache-Control": "no-cache"})
+    # The workers.dev edge can reject urllib's request signature. Curl
+    # reached the synthetic route before and after switch-off.
+    url = f"{boundary.origin}{path}"
+    # Owner API admission requires the exact route and rejects unknown queries.
+    if path == "/sign-in":
+        url += f"?qerith_probe={token_hex(16)}"
     try:
-        with HTTPS.open(request, timeout=5) as response:
-            return response.status
-    except HTTPError as error:
-        with error:
-            return error.code
-    except (OSError, URLError):
+        result = subprocess.run(
+            ["curl", "--disable", {"HEAD": "--head", "GET": "--get"}[method],
+             "--no-location", "--proto", "=https", "--header", "Cache-Control: no-cache, no-store",
+             "--max-time", "5", "--silent", "--output", "/dev/null",
+             "--write-out", "%{http_code}\n%header{cf-cache-status}", url],
+            env={}, timeout=6, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
+    status, separator, cache_status = result.stdout.partition(b"\n")
+    if (separator and re.fullmatch(rb"[1-5][0-9]{2}", status)
+            and cache_status.upper() in (b"", b"MISS", b"BYPASS", b"DYNAMIC")):
+        return int(status)
+    return None
 
 
 def verify_deployment(read, version_id):

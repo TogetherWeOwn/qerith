@@ -1,9 +1,18 @@
+from base64 import b64encode
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from io import StringIO
+import os
 from pathlib import Path
-import sys
+import re
+import runpy
+import shlex
 import sqlite3
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
+from textwrap import dedent
 import unittest
 from unittest.mock import MagicMock, Mock, call, patch
 
@@ -36,16 +45,27 @@ ATTEMPT = "2"
 
 OBJECTS = {"Name": prod.NAME, "KeyCount": 0, "IsTruncated": False}
 MULTIPART = {"Bucket": prod.NAME, "IsTruncated": False}
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def d1(response):
     return [{"success": True, "results": response}]
 
 
+def encoded_json(value):
+    return b64encode(prod.canonical(value).encode()).decode()
+
+
+def workflow_jobs():
+    workflow = REPO_ROOT / ".github/workflows/deploy-drive-production.yml"
+    jobs = re.split(r"(?m)^  ([a-z-]+):\n", workflow.read_text().split("\njobs:\n", 1)[1])
+    return dict(zip(jobs[1::2], jobs[2::2], strict=True))
+
+
 class ProductionFixture(unittest.TestCase):
     def setUp(self):
         self.now = datetime.now(timezone.utc)
-        self.boundary = prod.production_boundary({"DRIVE_PRODUCTION_BOUNDARY": prod.canonical(PIN)})
+        self.boundary = prod.production_boundary({"DRIVE_PRODUCTION_BOUNDARY": encoded_json(PIN)})
         self.credentials = {
             key: tuple(str(index) * (43 if key == "owner" else 40) for _ in names)
             for index, (key, names) in enumerate(prod.CREDENTIALS.items(), 1)
@@ -61,7 +81,7 @@ class ProductionFixture(unittest.TestCase):
             "bookmarkDigest": prod.fingerprint(BOOKMARK), "expiresAt": (self.now + timedelta(minutes=30)).isoformat(),
         }
         self.env = DISPATCH | {
-            "DRIVE_PRODUCTION_BOUNDARY": prod.canonical(PIN),
+            "DRIVE_PRODUCTION_BOUNDARY": encoded_json(PIN),
             "CHECKED_BUILD_DIGEST": DIGEST, "STAGING_RUN_ID": RUN_ID, "STAGING_RUN_ATTEMPT": ATTEMPT,
             "ACCEPTED_SHA": SHA, "PRODUCTION_ACCEPTED_SHA": SHA,
         }
@@ -85,7 +105,7 @@ class ProductionFixture(unittest.TestCase):
         return self.responses[path]
 
     def release_env(self):
-        return self.env | {"DRIVE_PRODUCTION_TARGET": prod.canonical(self.target),
+        return self.env | {"DRIVE_PRODUCTION_TARGET": encoded_json(self.target),
                            "DRIVE_PRODUCTION_APPROVAL": prod.canonical(self.approval)}
 
     def gate(self):
@@ -94,8 +114,8 @@ class ProductionFixture(unittest.TestCase):
 
 class ProductionTests(ProductionFixture):
     def test_both_operations_refuse_missing_invalid_or_shared_pin_before_provider_access(self):
-        invalid = (
-            None, "", "null", "[]", "{", " " * 4097, "[" * 2000,
+        invalid_json = (
+            "", "null", "[]", "{", " " * 4097, "[" * 2000,
             prod.canonical({"accountId": ACCOUNT}),
             prod.canonical(PIN | {"origin": ORIGIN}),
             '{"accountId":"' + ACCOUNT + '","workerSubdomain":"first","workerSubdomain":"second"}',
@@ -103,6 +123,10 @@ class ProductionTests(ProductionFixture):
               (prod.SHARED_ACCOUNT, ACCOUNT.upper(), ACCOUNT[:-1], ACCOUNT + "\n", 123)),
             *(prod.canonical(PIN | {"workerSubdomain": label}) for label in
               (prod.SHARED_SUBDOMAIN, "Uppercase", "a.b", "-a", "a-", "a" * 64, "a\n", "é", True)),
+        )
+        invalid = (
+            None, "", "not-base64", prod.canonical(PIN), encoded_json(PIN) + "\n",
+            *(b64encode(pin.encode()).decode() for pin in invalid_json),
         )
         for operation in ("release", "switch-off"):
             for pin in invalid:
@@ -120,7 +144,7 @@ class ProductionTests(ProductionFixture):
 
     def test_release_refuses_pin_account_or_origin_mismatch_before_provider_access(self):
         for pin in (PIN | {"accountId": "c" * 32}, PIN | {"workerSubdomain": "another-dedicated"}):
-            env = self.release_env() | {"DRIVE_PRODUCTION_BOUNDARY": prod.canonical(pin)}
+            env = self.release_env() | {"DRIVE_PRODUCTION_BOUNDARY": encoded_json(pin)}
             with self.subTest(pin=pin), patch.object(sys, "argv", ["production.py", "release"]), \
                  patch.object(prod.HTTPS, "open") as request, patch.object(prod, "cloud_run") as command:
                 with self.assertRaisesRegex(SystemExit, "dedicated release namespace"):
@@ -128,8 +152,14 @@ class ProductionTests(ProductionFixture):
                 request.assert_not_called()
                 command.assert_not_called()
 
-    def test_switch_off_uses_only_durable_inputs_and_incident_credentials(self):
-        env = DISPATCH | INCIDENT | {"DRIVE_PRODUCTION_BOUNDARY": prod.canonical(PIN)}
+    def test_switch_off_workflow_uses_only_protected_inputs_and_does_not_log_them(self):
+        job = workflow_jobs()["switch-off"]
+        self.assertIn("    needs: preflight\n    if: inputs.operation == 'switch-off'\n    environment: production\n", job)
+        mapping = dict(re.findall(r"(?m)^          (\w+): (\$\{\{.*\}\})$", job.split("        env:\n", 1)[1]))
+        secret_values = INCIDENT | {"DRIVE_PRODUCTION_BOUNDARY": encoded_json(PIN)}
+        self.assertEqual(mapping, {name: "${{ secrets." + name + " }}" for name in secret_values})
+        command = shlex.split(job.split("        run: ", 1)[1])
+        self.assertEqual(command, ["python3", "-EsB", "scripts/drive-release/production.py", "switch-off"])
         api = f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}"
         state = {"enabled": False, "previews_enabled": False}
         read_token, write_token = INCIDENT.values()
@@ -137,7 +167,6 @@ class ProductionTests(ProductionFixture):
             (api + "/workers/subdomain", "GET", read_token, None, {"subdomain": SUBDOMAIN}),
             (api + prod.WORKER + "/subdomain", "POST", write_token, state, state),
             (api + prod.WORKER + "/subdomain", "GET", read_token, None, state),
-            (ORIGIN + "/sign-in", "HEAD", None, None, None),
         ])
 
         def provider(request, **_):
@@ -148,19 +177,57 @@ class ProductionTests(ProductionFixture):
             self.assertEqual(prod.json_object(request.data) if request.data else None, body)
             response = MagicMock()
             response.__enter__.return_value = response
-            response.status = 404
             response.read.return_value = prod.canonical({"success": True, "errors": [], "result": result}).encode()
             return response
 
-        with patch.object(sys, "argv", ["production.py", "switch-off"]), \
-             patch.object(prod.HTTPS, "open", side_effect=provider) as request, \
-             patch.object(prod, "cloud_run") as command:
-            prod.main(env)
-            self.assertEqual(request.call_count, 4)
-            command.assert_not_called()
-            request.reset_mock()
-            with self.assertRaisesRegex(SystemExit, "incident read and write credentials"):
-                prod.main(self.release_env())
+        def curl(args, **options):
+            self.assertRegex(args[-1], rf"^{re.escape(ORIGIN)}/sign-in\?qerith_probe=[a-f0-9]{{32}}$")
+            self.assertEqual(options["env"], {})
+            self.assertEqual(options["stderr"], subprocess.DEVNULL)
+            self.assertEqual(options["stdout"], subprocess.PIPE)
+            self.assertIsNone(next(requests, None), "Origin probed before provider flag readback")
+            return subprocess.CompletedProcess(args, 0, stdout=b"404\nDYNAMIC")
+
+        output = StringIO()
+        with patch.object(sys, "argv", command[2:]), patch.dict(os.environ, DISPATCH | secret_values, clear=True), \
+             patch("urllib.request.OpenerDirector.open", side_effect=provider) as request, \
+             patch.object(subprocess, "run", side_effect=curl) as probe, \
+             redirect_stdout(output), redirect_stderr(output):
+            runpy.run_path(str(REPO_ROOT / command[2]), run_name="__main__")
+        self.assertEqual(request.call_count, 3)
+        probe.assert_called_once()
+        self.assertEqual(output.getvalue(), "Production Worker route switched off. Provider and origin deny serving.\n")
+        for value in (*secret_values.values(), prod.canonical(PIN), ACCOUNT, SUBDOMAIN):
+            self.assertNotIn(value, output.getvalue())
+
+    def test_workflow_rejects_unprotected_inputs_without_printing_them(self):
+        jobs = workflow_jobs()
+        preflight = jobs["preflight"]
+        self.assertIn("vars.DRIVE_PRODUCTION_BOUNDARY != '' || secrets.DRIVE_PRODUCTION_BOUNDARY != ''", preflight)
+        self.assertIn("secrets.DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN != '' || secrets.DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN != ''", preflight)
+        scope_guard = dedent(preflight.split("        run: |\n", 1)[1].split("      - uses:", 1)[0])
+        for boundary, incident in ((False, False), (True, False), (False, True)):
+            with self.subTest(boundary=boundary, incident=incident):
+                result = subprocess.run(
+                    ["/bin/bash", "-e", "-o", "pipefail", "-c", scope_guard], capture_output=True, timeout=5,
+                    env={"UNPROTECTED_BOUNDARY": str(boundary).lower(), "UNPROTECTED_INCIDENT": str(incident).lower()},
+                )
+                self.assertEqual(result.returncode, int(boundary or incident))
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, (
+                    b"Production boundary and incident inputs must be set only in the production environment.\n"
+                    if boundary or incident else b""
+                ))
+        for name in ("DRIVE_PRODUCTION_BOUNDARY", "DRIVE_PRODUCTION_TARGET"):
+            self.assertIn("          " + name + ": ${{ secrets." + name + " }}\n", jobs["deploy"])
+            self.assertNotIn("          " + name + ": ${{ vars.", jobs["deploy"])
+
+    def test_switch_off_refuses_missing_or_identical_incident_credentials(self):
+        for env in (self.release_env(), self.env | dict.fromkeys(INCIDENT, "r" * 40)):
+            with patch.object(sys, "argv", ["production.py", "switch-off"]), \
+                 patch.object(prod.HTTPS, "open") as request, \
+                 self.assertRaisesRegex(SystemExit, "incident read and write credentials"):
+                prod.main(env)
             request.assert_not_called()
 
     def test_switch_off_refuses_different_provider_namespace_before_write(self):
@@ -309,6 +376,59 @@ class ProductionTests(ProductionFixture):
             prod.switch_off(self.boundary, self.read, self.write)
         self.write.assert_called_once_with(f"{prod.WORKER}/subdomain", body={"enabled": False, "previews_enabled": False})
         probe.assert_called_once_with(self.boundary, "/sign-in")
+
+    def test_origin_probe_uses_fresh_cache_keys_and_bounded_curl(self):
+        urls = set()
+        with patch.object(prod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=b"404\n")) as run:
+            for method, path, flag in (("HEAD", "/sign-in", "--head"),
+                                       ("HEAD", "/sign-in", "--head"),
+                                       ("GET", "/api/owner/invitations", "--get")):
+                self.assertEqual(prod.probe_status(self.boundary, path, method=method), 404)
+                url = run.call_args.args[0][-1]
+                if method == "HEAD":
+                    self.assertRegex(url, rf"^{re.escape(ORIGIN + path)}\?qerith_probe=[a-f0-9]{{32}}$")
+                else:
+                    self.assertEqual(url, f"{ORIGIN}/api/owner/invitations")
+                self.assertNotIn(url, urls)
+                urls.add(url)
+                command = [
+                    "curl", "--disable", flag, "--no-location", "--proto", "=https",
+                    "--header", "Cache-Control: no-cache, no-store", "--max-time", "5",
+                    "--silent", "--output", "/dev/null",
+                    "--write-out", "%{http_code}\n%header{cf-cache-status}", url,
+                ]
+                run.assert_called_once_with(command, env={}, timeout=6, stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+                run.reset_mock()
+
+    def test_origin_probe_rejects_unconfirmed_transport_and_cache_status(self):
+        for response, expected in (
+            (b"404\n", 404), (b"404\nMISS", 404), (b"404\nDYNAMIC", 404), (b"404\nBYPASS", 404),
+            (b"200\n", 200), (b"401\n", 401), (b"403\n", 403), (b"302\n", 302),
+            (b"404\nHIT", None), (b"404\nSTALE", None), (b"404\nUPDATING", None), (b"404\nREVALIDATED", None),
+            (b"404\nEXPIRED", None), (b"404\nUNKNOWN", None), (b"404", None), (b"000\n", None),
+        ):
+            with self.subTest(response=response), patch.object(
+                prod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=response),
+            ):
+                self.assertEqual(prod.probe_status(self.boundary, "/sign-in"), expected)
+        for error in (subprocess.CalledProcessError(60, [], output=b"404\n"),
+                      subprocess.TimeoutExpired([], 6), OSError()):
+            with self.subTest(error=type(error)), patch.object(prod.subprocess, "run", side_effect=error):
+                self.assertIsNone(prod.probe_status(self.boundary, "/sign-in"))
+
+    def test_switch_off_fails_closed_on_unverified_provider_flags_or_origin(self):
+        with patch.object(prod, "probe_status", side_effect=(403, 302, None, 200, None, 403)) as probe, \
+             patch.object(prod, "sleep"):
+            for enabled, previews in ((True, False), (False, True)):
+                self.responses[f"{prod.WORKER}/subdomain"] = {"enabled": enabled, "previews_enabled": previews}
+                with self.assertRaisesRegex(SystemExit, "preview isolation could not be verified"):
+                    prod.switch_off(self.boundary, self.read, self.write)
+            probe.assert_not_called()
+            self.responses[f"{prod.WORKER}/subdomain"] = {"enabled": False, "previews_enabled": False}
+            with self.assertRaisesRegex(SystemExit, "origin denial was not verified"):
+                prod.switch_off(self.boundary, self.read, self.write)
+            self.assertEqual(probe.call_count, 6)
 
 
 class DeploymentOrderTests(ProductionFixture):

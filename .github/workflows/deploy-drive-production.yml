@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Reject production boundary and incident inputs outside the protected environment
         env:
-          UNPROTECTED_BOUNDARY: ${{ vars.DRIVE_PRODUCTION_BOUNDARY != '' }}
+          UNPROTECTED_BOUNDARY: ${{ vars.DRIVE_PRODUCTION_BOUNDARY != '' || secrets.DRIVE_PRODUCTION_BOUNDARY != '' }}
           UNPROTECTED_INCIDENT: ${{ secrets.DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN != '' || secrets.DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN != '' }}
         run: |
           if [[ "$UNPROTECTED_BOUNDARY" != false || "$UNPROTECTED_INCIDENT" != false ]]; then
@@ -168,8 +168,8 @@ jobs:
           PRODUCTION_ACCEPTED_SHA: ${{ vars.PRODUCTION_ACCEPTED_SHA }}
           STAGING_RUN_ID: ${{ inputs.staging_run_id }}
           STAGING_RUN_ATTEMPT: ${{ inputs.staging_run_attempt }}
-          DRIVE_PRODUCTION_BOUNDARY: ${{ vars.DRIVE_PRODUCTION_BOUNDARY }}
-          DRIVE_PRODUCTION_TARGET: ${{ vars.DRIVE_PRODUCTION_TARGET }}
+          DRIVE_PRODUCTION_BOUNDARY: ${{ secrets.DRIVE_PRODUCTION_BOUNDARY }}
+          DRIVE_PRODUCTION_TARGET: ${{ secrets.DRIVE_PRODUCTION_TARGET }}
           DRIVE_PRODUCTION_APPROVAL: ${{ vars.DRIVE_PRODUCTION_APPROVAL }}
           DRIVE_PRODUCTION_CF_READ_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_READ_TOKEN }}
           DRIVE_PRODUCTION_CF_DEPLOY_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_DEPLOY_TOKEN }}
@@ -198,7 +198,7 @@ jobs:
           persist-credentials: false
       - name: Disable and verify the dedicated production Worker route
         env:
-          DRIVE_PRODUCTION_BOUNDARY: ${{ vars.DRIVE_PRODUCTION_BOUNDARY }}
+          DRIVE_PRODUCTION_BOUNDARY: ${{ secrets.DRIVE_PRODUCTION_BOUNDARY }}
           DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN }}
           DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN }}
         run: python3 -EsB scripts/drive-release/production.py switch-off
