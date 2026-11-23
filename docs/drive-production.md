@@ -107,9 +107,12 @@ Dispatch `release` from protected `main` with `accepted_sha`,
 protected main SHA, exact green push runs, the production branch policy,
 and the trusted smoke workflow's current successful attempt. It verifies the
 unexpired archive against GitHub's digest and requires the exact SHA, build
-digest, cap and complete passing case set. The deploy job rebuilds without
-production credentials, compares the Worker and asset digest, and rechecks
-the receipt before obtaining provider access.
+digest, cap and complete passing case set. A separate job outside the
+production environment rebuilds the Worker and assets and compares their
+digest. On a fresh runner, the deploy job installs the pinned deployment
+CLI with lifecycle scripts disabled, rechecks the receipt, and restores the
+bounded current-attempt build artifact. It verifies the restored Worker
+and asset digest before receiving production credentials.
 
 The workflow verifies the approved target, custody fingerprints and release
 window, checks emptiness with read-only credentials, and reads back the approved
@@ -117,8 +120,8 @@ D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
 checked Worker is deployed with the route and previews off, and its version
 and bindings are read back before the route can be enabled. After enablement,
-the workflow checks the serving version, sign-in reachability and anonymous
-API denial. A serving probe failure triggers switch-off.
+the workflow checks the serving version, `HEAD /sign-in` and anonymous denial
+on `GET /api/owner/invitations`. A serving probe failure triggers switch-off.
 
 A failed or interrupted migration or deploy may leave provider writes in flight
 or committed. Stop, keep admission off, and reconcile the exact Worker,
@@ -159,9 +162,11 @@ URLs, member identifiers and response bodies out of evidence.
 ## Switch off the first release
 
 On regression, stop inviting users and immediately dispatch `switch-off` from
-the currently protected `main`. This operation requires the dedicated Worker
-credentials and namespace and works after the release receipt or approval
-expires. It disables the workers.dev route and preview URLs, verifies the
+protected `main`. A queued switch-off remains valid if main advances and the
+dispatch SHA is still on main. The two production jobs share a durable Actions
+queue. This operation requires the dedicated Worker credentials and namespace
+and works after the release receipt or approval expires. It disables the
+workers.dev route and preview URLs, verifies the
 provider flags and probes the production origin for denial without following
 redirects. Alert the release reviewer and incident owner immediately if either
 verification is unavailable or fails.

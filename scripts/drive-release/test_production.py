@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import production as prod
 
@@ -263,8 +263,9 @@ class DeploymentOrderTests(ProductionFixture):
     def promote(self, status=(200, 401)):
         self.write.side_effect = self.fake_switch
         with patch.object(prod, "wrangler", side_effect=self.fake_wrangler), \
-             patch.object(prod, "probe_status", side_effect=status), patch.object(prod, "sleep"):
+             patch.object(prod, "probe_status", side_effect=status) as probe, patch.object(prod, "sleep"):
             prod.promote(self.target, self.credentials, self.approval, self.read, self.write, self.list_r2)
+        return probe.call_args_list
 
     def test_no_write_if_empty_target_or_snapshot_changes(self):
         before = deepcopy(self.responses)
@@ -282,7 +283,8 @@ class DeploymentOrderTests(ProductionFixture):
             self.responses = deepcopy(before)
 
     def test_migrates_after_snapshot_and_activates_only_verified_closed_version(self):
-        self.promote()
+        probes = self.promote()
+        self.assertEqual(probes, [call("/sign-in"), call("/api/owner/invitations", method="GET")])
         positions = [key for key, _ in self.events]
         snapshot = f"{DB}/time_travel/bookmark"
         self.assertEqual(positions.count(snapshot), 2)

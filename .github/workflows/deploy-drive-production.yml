@@ -20,10 +20,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: drive-production-release
-  cancel-in-progress: false
-
 jobs:
   preflight:
     if: github.repository == 'TogetherWeOwn/qerith' && github.ref == 'refs/heads/main'
@@ -50,15 +46,15 @@ jobs:
           STAGING_RUN_ATTEMPT: ${{ inputs.staging_run_attempt }}
         run: python3 -IB scripts/drive-release/preflight.py "$OPERATION"
 
-  deploy:
+  build:
     needs: preflight
     if: inputs.operation == 'release'
-    environment: production
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
-      actions: read
       contents: read
+    outputs:
+      package_id: ${{ steps.package.outputs.artifact-id }}
     defaults:
       run:
         working-directory: apps/drive
@@ -78,8 +74,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          bash ../../scripts/reject-shrinkwrap.sh .
-          node ../../scripts/verify-lock-age.mjs
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
           test "$(npm --version)" = 11.19.0
           test "$(npm config get min-release-age)" = 3
           test "$(npm config get ignore-scripts)" = true
@@ -89,6 +85,50 @@ jobs:
             --config wrangler.build.jsonc --dry-run --outdir .svelte-kit/first-release-package
           digest="$(node scripts/first-release-build-digest.mjs)"
           test "$digest" = "$CHECKED_BUILD_DIGEST"
+      - name: Preserve the checked Worker and assets
+        id: package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: drive-production-package-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            apps/drive/.svelte-kit/first-release-package/_worker.js
+            apps/drive/.svelte-kit/cloudflare/
+            !apps/drive/.svelte-kit/cloudflare/_worker.js
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    needs: [preflight, build]
+    if: inputs.operation == 'release'
+    environment: production
+    concurrency:
+      group: drive-production-release
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Install the pinned deployment CLI without lifecycle scripts
+        working-directory: apps/drive
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          bash scripts/reject-shrinkwrap.sh .
+          node scripts/verify-lock-age.mjs
+          test "$(npm --version)" = 11.19.0
+          test "$(npm config get min-release-age)" = 3
+          test "$(npm config get ignore-scripts)" = true
+          npm ci --ignore-scripts --no-audit --no-fund
       - name: Recheck the exact staging receipt before accessing production
         id: recheck
         working-directory: .
@@ -99,10 +139,21 @@ jobs:
           STAGING_RUN_ID: ${{ inputs.staging_run_id }}
           STAGING_RUN_ATTEMPT: ${{ inputs.staging_run_attempt }}
         run: python3 -IB scripts/drive-release/preflight.py release
+      - name: Restore and verify the checked package before receiving production credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_ID: ${{ needs.build.outputs.package_id }}
+          INITIAL_BUILD_DIGEST: ${{ needs.preflight.outputs.build_digest }}
+          CHECKED_BUILD_DIGEST: ${{ steps.recheck.outputs.build_digest }}
+        run: |
+          set -euo pipefail
+          test "$INITIAL_BUILD_DIGEST" = "$CHECKED_BUILD_DIGEST"
+          python3 -EsB scripts/drive-release/package_artifact.py
+          cd apps/drive
+          test "$(node scripts/first-release-build-digest.mjs)" = "$CHECKED_BUILD_DIGEST"
       - name: Prove empty targets and snapshot, then migrate and activate
         working-directory: .
         env:
-          INITIAL_BUILD_DIGEST: ${{ needs.preflight.outputs.build_digest }}
           CHECKED_BUILD_DIGEST: ${{ steps.recheck.outputs.build_digest }}
           ACCEPTED_SHA: ${{ inputs.accepted_sha }}
           PRODUCTION_ACCEPTED_SHA: ${{ vars.PRODUCTION_ACCEPTED_SHA }}
@@ -117,15 +168,15 @@ jobs:
           DRIVE_PRODUCTION_R2_APP_ID: ${{ secrets.DRIVE_PRODUCTION_R2_APP_ID }}
           DRIVE_PRODUCTION_R2_APP_SECRET: ${{ secrets.DRIVE_PRODUCTION_R2_APP_SECRET }}
           DRIVE_PRODUCTION_OWNER_TOKEN: ${{ secrets.DRIVE_PRODUCTION_OWNER_TOKEN }}
-        run: |
-          set -euo pipefail
-          test "$INITIAL_BUILD_DIGEST" = "$CHECKED_BUILD_DIGEST"
-          python3 -EsB scripts/drive-release/production.py release
+        run: python3 -EsB scripts/drive-release/production.py release
 
   switch-off:
     needs: preflight
     if: inputs.operation == 'switch-off'
     environment: production
+    concurrency:
+      group: drive-production-release
+      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

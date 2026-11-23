@@ -230,8 +230,8 @@ def verify_surface(read, on):
     )
 
 
-def probe_status(path):
-    request = Request(f"{ORIGIN}{path}", method="HEAD", headers={"Cache-Control": "no-cache"})
+def probe_status(path, *, method="HEAD"):
+    request = Request(f"{ORIGIN}{path}", method=method, headers={"Cache-Control": "no-cache"})
     try:
         with HTTPS.open(request, timeout=5) as response:
             return response.status
@@ -255,7 +255,7 @@ def verify_deployment(read, version_id):
 def verify_serving(read, version_id, sha):
     verify_deployment(read, version_id)
     for retry in range(6):
-        if probe_status("/sign-in") == 200 and probe_status("/api/root-listing") == 401:
+        if probe_status("/sign-in") == 200 and probe_status("/api/owner/invitations", method="GET") == 401:
             print(f"Private serving probes passed. SHA {sha}, Worker version {version_id}.", flush=True)
             return
         if retry < 5:

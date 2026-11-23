@@ -108,6 +108,16 @@ class PreflightTests(unittest.TestCase):
         self.responses["branches/main"] = {"protected": True, "commit": {"sha": "f" * 40}}
         self.reject("current protected main tip")
 
+    def test_switch_off_remains_available_from_a_queued_protected_main_dispatch(self):
+        tip = "e" * 40
+        comparison = f"compare/{SHA}...{tip}?per_page=1"
+        self.responses["branches/main"]["commit"]["sha"] = tip
+        self.responses[comparison] = {"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": SHA}}
+        protected_main(SHA, self.get, allow_ancestor=True)
+        self.responses[comparison]["status"] = "diverged"
+        with self.assertRaisesRegex(SystemExit, "no longer on protected main"):
+            protected_main(SHA, self.get, allow_ancestor=True)
+
     def test_rejects_missing_environment_or_noncustom_policy(self):
         temporary = self.responses.pop(ENV)
         with self.assertRaises(KeyError):

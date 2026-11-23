@@ -56,11 +56,21 @@ def utc_time(value):
     return parsed
 
 
-def protected_main(sha, get=github_get):
+def protected_main(sha, get=github_get, *, allow_ancestor=False):
     require(SHA.fullmatch(sha), "Dispatch SHA must be lowercase 40-hex.")
     main = get("branches/main")
     require(main["protected"] is True, "main must be protected.")
-    require(main["commit"]["sha"] == sha, "Dispatch SHA must equal the current protected main tip.")
+    tip = main["commit"]["sha"]
+    if allow_ancestor and tip != sha:
+        require(SHA.fullmatch(tip), "Invalid protected main tip.")
+        comparison = get(f"compare/{sha}...{tip}?per_page=1")
+        require(
+            comparison["status"] == "ahead" and comparison["behind_by"] == 0
+            and comparison["merge_base_commit"]["sha"] == sha,
+            "Switch-off dispatch SHA is no longer on protected main.",
+        )
+    else:
+        require(tip == sha, "Dispatch SHA must equal the current protected main tip.")
 
     env = get("environments/production")
     policy = env["deployment_branch_policy"]
@@ -106,12 +116,16 @@ def require_main_checks(sha, get):
         )
 
 
-def read_receipt(archive, artifact):
+def verify_archive(archive, artifact):
     require(
         len(archive) == artifact["size_in_bytes"]
         and artifact["digest"] == f"sha256:{sha256(archive).hexdigest()}",
-        "Staging receipt archive does not match GitHub's recorded size and digest.",
+        "Artifact archive does not match GitHub's recorded size and digest.",
     )
+
+
+def read_receipt(archive, artifact):
+    verify_archive(archive, artifact)
     try:
         with ZipFile(BytesIO(archive)) as zipped:
             files = zipped.infolist()
@@ -191,7 +205,7 @@ if __name__ == "__main__":
     try:
         sha = dispatch_sha(os.environ)
         if sys.argv[1:] == ["switch-off"]:
-            protected_main(sha)
+            protected_main(sha, allow_ancestor=True)
         else:
             require(sys.argv[1:] == ["release"], "Invalid production operation.")
             digest = preflight(
