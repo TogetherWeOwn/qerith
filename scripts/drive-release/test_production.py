@@ -385,7 +385,10 @@ class ProductionTests(ProductionFixture):
                                        ("GET", "/api/owner/invitations", "--get")):
                 self.assertEqual(prod.probe_status(self.boundary, path, method=method), 404)
                 url = run.call_args.args[0][-1]
-                self.assertRegex(url, rf"^{re.escape(ORIGIN + path)}\?qerith_probe=[a-f0-9]{{32}}$")
+                if method == "HEAD":
+                    self.assertRegex(url, rf"^{re.escape(ORIGIN + path)}\?qerith_probe=[a-f0-9]{{32}}$")
+                else:
+                    self.assertEqual(url, f"{ORIGIN}/api/owner/invitations")
                 self.assertNotIn(url, urls)
                 urls.add(url)
                 command = [

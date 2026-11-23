@@ -214,8 +214,9 @@ could delay switch-off. A running deploy may hold the queue up to its
 after the temporary inputs and release credentials have been withdrawn. It
 verifies the account namespace, disables the workers.dev route and preview
 URLs, and verifies both provider flags and HTTP 404 on HTTPS `HEAD /sign-in`
-using curl with redirects disabled. Each origin probe uses a fresh query key.
-The workflow rejects cache hits, stale responses, and unrecognized
+using curl with redirects disabled. Each sign-in probe uses a fresh query key.
+The invitations probe uses the query-free route required by owner API
+admission. The workflow rejects cache hits, stale responses, and unrecognized
 `CF-Cache-Status` values. Alert the release reviewer and incident owner
 immediately if either verification is unavailable or fails.
 

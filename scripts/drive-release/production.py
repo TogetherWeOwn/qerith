@@ -277,7 +277,10 @@ def verify_surface(read, on):
 def probe_status(boundary, path, *, method="HEAD"):
     # The workers.dev edge can reject urllib's request signature. Curl
     # reached the synthetic route before and after switch-off.
-    url = f"{boundary.origin}{path}?qerith_probe={token_hex(16)}"
+    url = f"{boundary.origin}{path}"
+    # Owner API admission requires the exact route and rejects unknown queries.
+    if path == "/sign-in":
+        url += f"?qerith_probe={token_hex(16)}"
     try:
         result = subprocess.run(
             ["curl", "--disable", {"HEAD": "--head", "GET": "--get"}[method],
