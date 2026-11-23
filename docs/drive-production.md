@@ -67,8 +67,11 @@ disabled.
 
 ## Configure the durable production boundary
 
-Store `DRIVE_PRODUCTION_BOUNDARY` as a variable in the main-only GitHub
-`production` environment. Its JSON object contains exactly two string fields.
+Store `DRIVE_PRODUCTION_BOUNDARY` as a secret in the main-only GitHub
+`production` environment. Encode the UTF-8 JSON as a single line of standard
+Base64, with no line wrapping. The release script decodes it in process. Never
+place the encoded or raw pin in Actions variables or dispatch inputs. The JSON
+object contains exactly two string fields.
 `accountId` is the dedicated Cloudflare account ID (32 lowercase hex
 characters). `workerSubdomain` is the account's workers.dev subdomain as a
 single lowercase DNS label, up to 63 ASCII letters, digits and hyphens,
@@ -99,9 +102,10 @@ protected custody and use it only for switch-off.
 
 The release operator updates the repository Actions variable
 `PRODUCTION_ACCEPTED_SHA` from `UNAPPROVED` only after independent acceptance.
-Set the following JSON variables in the `production` environment.
+Set the release inputs in the `production` environment.
 
-- `DRIVE_PRODUCTION_TARGET` contains `accountId`, `worker`, `origin`, `d1Id`,
+- The `DRIVE_PRODUCTION_TARGET` secret uses the same single-line Base64 format
+  as the boundary. Its JSON contains `accountId`, `worker`, `origin`, `d1Id`,
   `r2Bucket`, `storageEpoch` (a dedicated `prod-…` epoch), and
   `credentials`. The account and origin must match the durable boundary. The
   credential keys are `cfRead`, `cfDeploy`, `r2Read`,
@@ -109,7 +113,7 @@ Set the following JSON variables in the `production` environment.
   secret, or of the access key ID and secret joined by one NUL byte in that
   order for R2. Compute the digests in credential custody. Keep raw values and
   operator input out of shell history and the release record.
-- `DRIVE_PRODUCTION_APPROVAL` contains `sourceSha`, `buildDigest`,
+- The `DRIVE_PRODUCTION_APPROVAL` JSON variable contains `sourceSha`, `buildDigest`,
   `stagingRunId` (string), `stagingRunAttempt` (integer), `targetDigest`,
   `bookmarkDigest`, and `expiresAt` (UTC, at most one hour from deployment).
   Use lowercase SHA-256 of the target's sorted-key compact UTF-8 JSON with no
@@ -206,9 +210,10 @@ could delay switch-off. A running deploy may hold the queue up to its
 15-minute job timeout. Switch-off uses the durable boundary and incident pair
 after the temporary inputs and release credentials have been withdrawn. It
 verifies the account namespace, disables the workers.dev route and preview
-URLs, and verifies both provider flags and HTTP 404 on `HEAD /sign-in`
-without following redirects. Alert the release reviewer and incident owner
-immediately if either verification is unavailable or fails.
+URLs, and verifies both provider flags and HTTP 404 on an uncached HTTPS
+`HEAD /sign-in` using curl with redirects disabled. Alert the release
+reviewer and incident owner immediately if either verification is unavailable
+or fails.
 
 The initial release has no earlier serving Worker. Route disablement stops
 serving and leaves D1 and R2 intact. Review any accepted writes and current
@@ -227,7 +232,9 @@ Record both substitutions and the exact source SHA used for the rehearsal.
 - Confirm protected main and its main-only environment policy, both jobs'
   input visibility, and refusal when the protected pin is absent or available
   only at repository or organization scope. Confirm the pin and incident
-  secrets resolve in the protected job and are unavailable outside it.
+  secrets resolve in the protected job and are unavailable outside it. Verify
+  that the runner output contains neither the raw pin, its encoded value, its
+  account ID or namespace, nor any incident credential values.
 - In the disposable repository, set an incident secret name at repository
   scope to a synthetic value with no provider access. Dispatch both operations
   without acceptance or a staging receipt and verify each stops at the

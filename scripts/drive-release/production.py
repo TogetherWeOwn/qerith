@@ -1,5 +1,6 @@
 """First-ever Drive deploy to the dedicated production Cloudflare targets."""
 
+from base64 import b64decode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -31,6 +32,7 @@ PRISTINE_SCHEMA = (
     "AND NOT (type = 'index' AND name = 'sqlite_autoindex__cf_KV_1' AND tbl_name = '_cf_KV') LIMIT 1"
 )
 MAX_MIGRATIONS = 100
+MAX_PROTECTED_JSON_BYTES = 4096
 CREDENTIALS = {
     "cfRead": ("DRIVE_PRODUCTION_CF_READ_TOKEN",),
     "cfDeploy": ("DRIVE_PRODUCTION_CF_DEPLOY_TOKEN",),
@@ -54,14 +56,21 @@ class Boundary:
         return f"https://{self.account_id}.r2.cloudflarestorage.com"
 
 
-def production_boundary(env):
-    message = "Missing or invalid dedicated production boundary."
-    raw = env.get("DRIVE_PRODUCTION_BOUNDARY", "")
-    require(0 < len(raw) <= 4096, message)
+def protected_json(encoded, message):
+    # Keep structured values out of the runner environment. GitHub masks the
+    # single-line secret, and decoding happens only inside this process.
+    require(0 < len(encoded) <= 4 * ((MAX_PROTECTED_JSON_BYTES + 2) // 3), message)
     try:
-        pin = json_object(raw)
+        raw = b64decode(encoded, validate=True)
+        require(0 < len(raw) <= MAX_PROTECTED_JSON_BYTES, message)
+        return json_object(raw.decode("utf-8"))
     except (ValueError, RecursionError):
         raise SystemExit(message) from None
+
+
+def production_boundary(env):
+    message = "Missing or invalid dedicated production boundary."
+    pin = protected_json(env.get("DRIVE_PRODUCTION_BOUNDARY", ""), message)
     require(
         type(pin) is dict and set(pin) == {"accountId", "workerSubdomain"}
         and type(pin["accountId"]) is str and re.fullmatch(r"[0-9a-f]{32}", pin["accountId"])
@@ -90,7 +99,9 @@ def canonical(data):
 
 
 def target_and_approval(boundary, env, sha, now):
-    target = json_object(env.get("DRIVE_PRODUCTION_TARGET", ""))
+    target = protected_json(
+        env.get("DRIVE_PRODUCTION_TARGET", ""), "Missing or invalid dedicated production target.",
+    )
     require(
         set(target) == {"accountId", "worker", "origin", "d1Id", "r2Bucket", "storageEpoch", "credentials"}
         and target["accountId"] == boundary.account_id and target["worker"] == NAME
@@ -426,12 +437,29 @@ def switch_off(boundary, read, write):
     require(read("/workers/subdomain")["subdomain"] == boundary.worker_subdomain, "Production Worker namespace differs.")
     switch_state(read, write, False)
     for retry in range(6):
-        if probe_status(boundary, "/sign-in") == 404:
+        if origin_refuses_sign_in(boundary):
             print("Production Worker route switched off. Provider and origin deny serving.", flush=True)
             return
         if retry < 5:
             sleep(3)
     raise SystemExit("Provider route is off but origin denial was not verified. Escalate immediately.")
+
+
+def origin_refuses_sign_in(boundary):
+    # The workers.dev edge can reject urllib's request signature. Use the
+    # same curl HEAD probe that reached the synthetic route during rehearsal.
+    try:
+        result = subprocess.run(
+            ["curl", "--disable", "--head", "--no-location", "--proto", "=https",
+             "--header", "Cache-Control: no-cache, no-store", "--max-time", "5",
+             "--silent", "--output", "/dev/null", "--write-out", "%{http_code}",
+             f"{boundary.origin}/sign-in"],
+            env={}, timeout=6, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout == b"404"
 
 
 def main(env):
