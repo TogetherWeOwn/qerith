@@ -140,7 +140,8 @@ test('invalid source cannot replace a queued staging deployment', async () => {
   assert.doesNotMatch(workflow, /^concurrency:/m);
   assert.doesNotMatch(source, /^    concurrency:/m);
   assert.match(source, /Verify protected dispatch[\s\S]+EXPECTED_MAIN_SHA[^\n]+GITHUB_SHA/);
-  assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:\n      group: drive-staging-lifecycle/);
+  assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:/);
+  assert.match(workflow, /group: \$\{\{ inputs\.staging_venue == 'cloudflare' && 'drive-staging-lifecycle' \|\| 'drive-first-release-smoke-local' \}\}/);
 });
 
 test('protected workflow has one success-only attempt receipt', async () => {

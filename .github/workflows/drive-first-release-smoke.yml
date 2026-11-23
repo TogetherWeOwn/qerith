@@ -43,7 +43,8 @@ jobs:
     needs: source
     if: success() && needs.source.result == 'success'
     concurrency:
-      group: drive-staging-lifecycle
+      # Only the Cloudflare venue touches the shared provider estate.
+      group: ${{ inputs.staging_venue == 'cloudflare' && 'drive-staging-lifecycle' || 'drive-first-release-smoke-local' }}
       cancel-in-progress: false
     environment: staging
     runs-on: ubuntu-24.04
