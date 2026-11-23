@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock
 from zipfile import ZipFile
 
-from preflight import CAP, CASES, REPO, SMOKE, dispatch_sha, preflight, protected_main
+from preflight import CAP, CASES, LOCAL_STORAGE, LOCAL_VENUE, REPO, SMOKE, dispatch_sha, preflight, protected_main
 
 SHA = "a" * 40
 BUILD = "b" * 64
@@ -39,9 +39,9 @@ class PreflightTests(unittest.TestCase):
     def setUp(self):
         self.run = run(SMOKE, "workflow_dispatch")
         self.receipt = {
-            "version": 1, "sourceSha": SHA, "runId": RUN, "runAttempt": int(ATTEMPT),
+            "version": 2, "stagingVenue": LOCAL_VENUE, "sourceSha": SHA, "runId": RUN, "runAttempt": int(ATTEMPT),
             "buildDigest": BUILD, "workerVersion": "01234567-1234-4321-1234-0123456789ab",
-            "testedSizeCapBytes": CAP, "cases": dict.fromkeys(CASES, "pass"),
+            "testedSizeCapBytes": CAP, "cases": dict.fromkeys(CASES, "pass"), "localStorage": LOCAL_STORAGE.copy(),
         }
         self.artifact = {"id": 456, "name": RECEIPT, "expired": False, "expires_at": "2026-11-24T00:00:00Z"}
         self.responses = {
@@ -78,8 +78,28 @@ class PreflightTests(unittest.TestCase):
             self.check()
 
     def test_passes_only_the_exact_checked_build_digest(self):
-        self.assertEqual(self.check(), BUILD)
+        self.assertEqual(self.check(), (BUILD, LOCAL_VENUE))
         self.get.assert_called_with(ZIP, raw=True)
+
+    def test_accepts_explicit_cloudflare_receipt(self):
+        del self.receipt["localStorage"]
+        self.receipt["stagingVenue"] = "cloudflare"
+        self.set_archive()
+        self.assertEqual(self.check(), (BUILD, "cloudflare"))
+
+    def test_requires_declared_venue_with_matching_storage_evidence(self):
+        base = self.receipt.copy()
+        for change in (
+            {"stagingVenue": None}, {"stagingVenue": "anything"}, {"stagingVenue": "cloudflare"},
+            {"localStorage": None}, {"localStorage": LOCAL_STORAGE | {"minioRelease": "latest"}},
+            {"localStorage": LOCAL_STORAGE | {"incompleteUploadAbort": "fail"}},
+            {"localStorage": LOCAL_STORAGE | {"bucketEmpty": "fail"}},
+            {"localStorage": LOCAL_STORAGE | {"objectExpiryRule": "fail"}},
+        ):
+            self.receipt = base | change
+            self.set_archive()
+            with self.subTest(change=change):
+                self.reject("supported staging venue and its cleanup")
 
     def test_rejects_wrong_dispatch_or_unaccepted_candidate_before_api_access(self):
         for sha, accepted, configured, attempt, error in (
@@ -177,7 +197,7 @@ class PreflightTests(unittest.TestCase):
         for key, value in (
             ("sourceSha", "c" * 40), ("runId", "124"), ("runAttempt", 1),
             ("testedSizeCapBytes", CAP + 1), ("cases", {"invite": "pass"}), ("buildDigest", "bad"),
-            ("workerVersion", "another-worker"),
+            ("workerVersion", "another-worker"), ("version", 1),
         ):
             before = self.receipt[key]
             self.receipt[key] = value

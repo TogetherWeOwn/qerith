@@ -127,6 +127,29 @@ test('lists multipart uploads with opaque paired cursors', async () => {
   assert.equal(finalUrl.searchParams.get('upload-id-marker'), '../%2F');
 });
 
+test('strict bucket-wide listings reject a wrong bucket, hidden prefix or delimiter', async () => {
+  const cases = [
+    { operation: 'objects', query: 'list-type', root: 'ListBucketResult', identity: '<Name>test-bucket</Name><KeyCount>0</KeyCount>', entries: { keys: [] } },
+    { operation: 'uploads', query: 'uploads', root: 'ListMultipartUploadsResult', identity: '<Bucket>test-bucket</Bucket>', entries: { uploads: [] } },
+  ] as const;
+  for (const { operation, query, root, identity, entries } of cases) {
+    for (const extra of ['', '<Prefix>hidden%2F</Prefix>', '<Delimiter>%2F</Delimiter>', '<CommonPrefixes/>']) {
+      const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async (input) => {
+        assert.equal(new URL((input as Request).url).searchParams.has(query), true);
+        assert.equal(new URL((input as Request).url).searchParams.has('prefix'), false);
+        return new Response(`<${root}>${identity}<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>${extra}</${root}>`);
+      } });
+      if (extra) await assert.rejects(listing[operation]({ verifyScope: true }), /Invalid S3 listing response/);
+      else assert.deepEqual(Object.entries(await listing[operation]({ verifyScope: true })).filter(([, value]) => value !== undefined),
+        Object.entries(entries));
+    }
+    const wrongBucket = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(
+      `<${root}>${identity.replace('test-bucket', 'other-bucket')}<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated></${root}>`
+    ) });
+    await assert.rejects(wrongBucket[operation]({ verifyScope: true }), /Invalid S3 listing response/);
+  }
+});
+
 test('rejects unsupported addressed keys before transport', async () => {
   let calls = 0;
   const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async () => { calls++; return new Response(); } });

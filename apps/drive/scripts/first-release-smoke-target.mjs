@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { readBoundedBody } from '../src/lib/server/bounded-io.ts';
@@ -20,6 +21,14 @@ export function smokeDispatch(env) {
   const worker = `${namePrefix}-${runId}-${attempt}`;
   if (!resourceName.test(worker) || !Number.isSafeInteger(Number(attempt))) throw new Error('Smoke Worker name is too long');
   return { sha, runId, runAttempt: Number(attempt), worker, prefix: firstReleaseSmokePrefix({ runId, attempt }) };
+}
+
+export function checkedSmokeDispatch(env) {
+  const scope = smokeDispatch(env);
+  if (!env.RUNNER_TEMP || execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim() !== scope.sha) {
+    throw new Error('Invalid smoke execution context');
+  }
+  return scope;
 }
 
 export function scopedSmokeTarget(env, scope, { cleanup = false, now = Date.now() } = {}) {
@@ -136,6 +145,39 @@ export function smokeProvider(target, scope, request = fetch) {
   };
 }
 
+export function smokeWorkerVars(scope, origin, now) {
+  return {
+    DRIVE_ORIGIN: origin,
+    DRIVE_FIRST_RELEASE_ORIGIN: origin,
+    DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+    DRIVE_STAGING_READ_GRANTS: '1',
+    DRIVE_STAGING_SHARED_LISTING: '1',
+    DRIVE_OWNER_ENROLLMENT_RELEASE: scope.sha,
+    DRIVE_QUALIFICATION_SHA: scope.sha,
+    DRIVE_FIRST_RELEASE_BUILD_DIGEST: scope.buildDigest,
+    DRIVE_QUALIFICATION_RUN_ID: scope.runId,
+    DRIVE_QUALIFICATION_RUN_ATTEMPT: String(scope.runAttempt),
+    DRIVE_QUALIFICATION_EXPIRES_AT: String(now + 12 * 60_000),
+  };
+}
+
+export function smokeWorkerSecrets(scope, s3, { bootstrapToken, smokeToken, now }) {
+  const { endpoint, bucket, region, accessKeyId, secretAccessKey } = s3;
+  const epoch = `smoke-${scope.runId}-${scope.runAttempt}`;
+  return {
+    DRIVE_FIRST_RELEASE_SMOKE_TOKEN: smokeToken,
+    DRIVE_OWNER_ENROLLMENT: `${scope.sha}:${now + 290_000}:${bootstrapToken}`,
+    DRIVE_S3_ENDPOINT: endpoint,
+    DRIVE_S3_BUCKET: bucket,
+    DRIVE_S3_REGION: region,
+    DRIVE_S3_ACCESS_KEY_ID: accessKeyId,
+    DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,
+    DRIVE_S3_STORAGE_EPOCH: epoch,
+    DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, sourceSha: scope.sha, runId: scope.runId,
+      runAttempt: scope.runAttempt, region, storageConfigId: JSON.stringify([endpoint, bucket, epoch]), completionTimeoutMs: 3000 }),
+  };
+}
+
 export function smokeWorkerConfig(config, scope, target, now) {
   return {
     ...config,
@@ -148,19 +190,7 @@ export function smokeWorkerConfig(config, scope, target, now) {
     d1_databases: [{ binding: 'DB', database_id: target.databaseId, database_name: target.databaseName,
       migrations_dir: resolve('migrations') }],
     version_metadata: { binding: 'DRIVE_QUALIFICATION_VERSION' },
-    vars: {
-      DRIVE_ORIGIN: target.origin,
-      DRIVE_FIRST_RELEASE_ORIGIN: target.origin,
-      DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
-      DRIVE_STAGING_READ_GRANTS: '1',
-      DRIVE_STAGING_SHARED_LISTING: '1',
-      DRIVE_OWNER_ENROLLMENT_RELEASE: scope.sha,
-      DRIVE_QUALIFICATION_SHA: scope.sha,
-      DRIVE_FIRST_RELEASE_BUILD_DIGEST: scope.buildDigest,
-      DRIVE_QUALIFICATION_RUN_ID: scope.runId,
-      DRIVE_QUALIFICATION_RUN_ATTEMPT: String(scope.runAttempt),
-      DRIVE_QUALIFICATION_EXPIRES_AT: String(now + 12 * 60_000),
-    },
+    vars: smokeWorkerVars(scope, target.origin, now),
   };
 }
 
