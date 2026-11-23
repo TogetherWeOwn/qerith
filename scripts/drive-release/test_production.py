@@ -181,12 +181,12 @@ class ProductionTests(ProductionFixture):
             return response
 
         def curl(args, **options):
-            self.assertEqual(args[-1], f"{ORIGIN}/sign-in")
+            self.assertRegex(args[-1], rf"^{re.escape(ORIGIN)}/sign-in\?qerith_probe=[a-f0-9]{{32}}$")
             self.assertEqual(options["env"], {})
             self.assertEqual(options["stderr"], subprocess.DEVNULL)
             self.assertEqual(options["stdout"], subprocess.PIPE)
             self.assertIsNone(next(requests, None), "Origin probed before provider flag readback")
-            return subprocess.CompletedProcess(args, 0, stdout=b"404")
+            return subprocess.CompletedProcess(args, 0, stdout=b"404\nDYNAMIC")
 
         output = StringIO()
         with patch.object(sys, "argv", command[2:]), patch.dict(os.environ, DISPATCH | secret_values, clear=True), \
@@ -232,7 +232,7 @@ class ProductionTests(ProductionFixture):
 
     def test_switch_off_refuses_different_provider_namespace_before_write(self):
         self.responses["/workers/subdomain"] = {"subdomain": "another-account"}
-        with patch.object(prod, "origin_refuses_sign_in") as probe, self.assertRaisesRegex(SystemExit, "namespace differs"):
+        with patch.object(prod, "probe_status") as probe, self.assertRaisesRegex(SystemExit, "namespace differs"):
             prod.switch_off(self.boundary, self.read, self.write)
         self.write.assert_not_called()
         probe.assert_not_called()
@@ -372,33 +372,51 @@ class ProductionTests(ProductionFixture):
 
     def test_switch_off_touches_only_dedicated_subdomain_and_verifies_denial(self):
         self.responses[f"{prod.WORKER}/subdomain"] = {"enabled": False, "previews_enabled": False}
-        with patch.object(prod, "origin_refuses_sign_in", return_value=True) as probe:
+        with patch.object(prod, "probe_status", return_value=404) as probe:
             prod.switch_off(self.boundary, self.read, self.write)
         self.write.assert_called_once_with(f"{prod.WORKER}/subdomain", body={"enabled": False, "previews_enabled": False})
-        probe.assert_called_once_with(self.boundary)
+        probe.assert_called_once_with(self.boundary, "/sign-in")
 
-    def test_origin_refusal_requires_a_successful_head_with_exact_404(self):
-        command = [
-            "curl", "--disable", "--head", "--no-location", "--proto", "=https",
-            "--header", "Cache-Control: no-cache, no-store", "--max-time", "5",
-            "--silent", "--output", "/dev/null", "--write-out", "%{http_code}", f"{ORIGIN}/sign-in",
-        ]
-        for response in (b"404", b"403", b"302", b"200", b"000", b"404\n"):
+    def test_origin_probe_uses_fresh_cache_keys_and_bounded_curl(self):
+        urls = set()
+        with patch.object(prod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=b"404\n")) as run:
+            for method, path, flag in (("HEAD", "/sign-in", "--head"),
+                                       ("HEAD", "/sign-in", "--head"),
+                                       ("GET", "/api/owner/invitations", "--get")):
+                self.assertEqual(prod.probe_status(self.boundary, path, method=method), 404)
+                url = run.call_args.args[0][-1]
+                self.assertRegex(url, rf"^{re.escape(ORIGIN + path)}\?qerith_probe=[a-f0-9]{{32}}$")
+                self.assertNotIn(url, urls)
+                urls.add(url)
+                command = [
+                    "curl", "--disable", flag, "--no-location", "--proto", "=https",
+                    "--header", "Cache-Control: no-cache, no-store", "--max-time", "5",
+                    "--silent", "--output", "/dev/null",
+                    "--write-out", "%{http_code}\n%header{cf-cache-status}", url,
+                ]
+                run.assert_called_once_with(command, env={}, timeout=6, stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+                run.reset_mock()
+
+    def test_origin_probe_rejects_unconfirmed_transport_and_cache_status(self):
+        for response, expected in (
+            (b"404\n", 404), (b"404\nMISS", 404), (b"404\nDYNAMIC", 404), (b"404\nBYPASS", 404),
+            (b"200\n", 200), (b"401\n", 401), (b"403\n", 403), (b"302\n", 302),
+            (b"404\nHIT", None), (b"404\nSTALE", None), (b"404\nUPDATING", None), (b"404\nREVALIDATED", None),
+            (b"404\nEXPIRED", None), (b"404\nUNKNOWN", None), (b"404", None), (b"000\n", None),
+        ):
             with self.subTest(response=response), patch.object(
-                prod.subprocess, "run", return_value=subprocess.CompletedProcess(command, 0, stdout=response),
-            ) as run:
-                self.assertEqual(prod.origin_refuses_sign_in(self.boundary), response == b"404")
-                run.assert_called_once_with(
-                    command, env={}, timeout=6, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, check=True,
-                )
-        for error in (subprocess.CalledProcessError(60, command, output=b"404"),
-                      subprocess.TimeoutExpired(command, 6), OSError()):
+                prod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=response),
+            ):
+                self.assertEqual(prod.probe_status(self.boundary, "/sign-in"), expected)
+        for error in (subprocess.CalledProcessError(60, [], output=b"404\n"),
+                      subprocess.TimeoutExpired([], 6), OSError()):
             with self.subTest(error=type(error)), patch.object(prod.subprocess, "run", side_effect=error):
-                self.assertFalse(prod.origin_refuses_sign_in(self.boundary))
+                self.assertIsNone(prod.probe_status(self.boundary, "/sign-in"))
 
     def test_switch_off_fails_closed_on_unverified_provider_flags_or_origin(self):
-        with patch.object(prod, "origin_refuses_sign_in", return_value=False) as probe, patch.object(prod, "sleep"):
+        with patch.object(prod, "probe_status", side_effect=(403, 302, None, 200, None, 403)) as probe, \
+             patch.object(prod, "sleep"):
             for enabled, previews in ((True, False), (False, True)):
                 self.responses[f"{prod.WORKER}/subdomain"] = {"enabled": enabled, "previews_enabled": previews}
                 with self.assertRaisesRegex(SystemExit, "preview isolation could not be verified"):
@@ -481,8 +499,7 @@ class DeploymentOrderTests(ProductionFixture):
     def promote(self, status=(200, 401)):
         self.write.side_effect = self.fake_switch
         with patch.object(prod, "wrangler", side_effect=self.fake_wrangler), \
-             patch.object(prod, "probe_status", side_effect=status) as probe, patch.object(prod, "sleep"), \
-             patch.object(prod, "origin_refuses_sign_in", return_value=True):
+             patch.object(prod, "probe_status", side_effect=status) as probe, patch.object(prod, "sleep"):
             prod.promote(self.boundary, self.target, self.credentials, self.approval, self.read, self.write, self.list_r2)
         return probe.call_args_list
 
@@ -515,6 +532,6 @@ class DeploymentOrderTests(ProductionFixture):
 
     def test_failed_serving_probe_switches_the_route_off(self):
         with self.assertRaisesRegex(SystemExit, "Serving probes failed"):
-            self.promote([503] * 6)
+            self.promote([503] * 6 + [404])
         self.assertEqual([event for event in self.events if event[0] == "switch"], [("switch", True), ("switch", False)])
         self.assertFalse(self.active)

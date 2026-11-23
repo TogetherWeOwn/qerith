@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from secrets import token_hex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -274,15 +275,25 @@ def verify_surface(read, on):
 
 
 def probe_status(boundary, path, *, method="HEAD"):
-    request = Request(f"{boundary.origin}{path}", method=method, headers={"Cache-Control": "no-cache"})
+    # The workers.dev edge can reject urllib's request signature. Curl
+    # reached the synthetic route before and after switch-off.
+    url = f"{boundary.origin}{path}?qerith_probe={token_hex(16)}"
     try:
-        with HTTPS.open(request, timeout=5) as response:
-            return response.status
-    except HTTPError as error:
-        with error:
-            return error.code
-    except (OSError, URLError):
+        result = subprocess.run(
+            ["curl", "--disable", {"HEAD": "--head", "GET": "--get"}[method],
+             "--no-location", "--proto", "=https", "--header", "Cache-Control: no-cache, no-store",
+             "--max-time", "5", "--silent", "--output", "/dev/null",
+             "--write-out", "%{http_code}\n%header{cf-cache-status}", url],
+            env={}, timeout=6, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
+    status, separator, cache_status = result.stdout.partition(b"\n")
+    if (separator and re.fullmatch(rb"[1-5][0-9]{2}", status)
+            and cache_status.upper() in (b"", b"MISS", b"BYPASS", b"DYNAMIC")):
+        return int(status)
+    return None
 
 
 def verify_deployment(read, version_id):
@@ -437,29 +448,12 @@ def switch_off(boundary, read, write):
     require(read("/workers/subdomain")["subdomain"] == boundary.worker_subdomain, "Production Worker namespace differs.")
     switch_state(read, write, False)
     for retry in range(6):
-        if origin_refuses_sign_in(boundary):
+        if probe_status(boundary, "/sign-in") == 404:
             print("Production Worker route switched off. Provider and origin deny serving.", flush=True)
             return
         if retry < 5:
             sleep(3)
     raise SystemExit("Provider route is off but origin denial was not verified. Escalate immediately.")
-
-
-def origin_refuses_sign_in(boundary):
-    # The workers.dev edge can reject urllib's request signature. Use the
-    # same curl HEAD probe that reached the synthetic route during rehearsal.
-    try:
-        result = subprocess.run(
-            ["curl", "--disable", "--head", "--no-location", "--proto", "=https",
-             "--header", "Cache-Control: no-cache, no-store", "--max-time", "5",
-             "--silent", "--output", "/dev/null", "--write-out", "%{http_code}",
-             f"{boundary.origin}/sign-in"],
-            env={}, timeout=6, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, check=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.stdout == b"404"
 
 
 def main(env):

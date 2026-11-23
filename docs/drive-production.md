@@ -71,7 +71,9 @@ Store `DRIVE_PRODUCTION_BOUNDARY` as a secret in the main-only GitHub
 `production` environment. Encode the UTF-8 JSON as a single line of standard
 Base64, with no line wrapping. The release script decodes it in process. Never
 place the encoded or raw pin in Actions variables or dispatch inputs. The JSON
-object contains exactly two string fields.
+object contains exactly two string fields. If either the boundary or target
+was stored as a `production` environment variable, remove that variable before
+setting the corresponding secret.
 `accountId` is the dedicated Cloudflare account ID (32 lowercase hex
 characters). `workerSubdomain` is the account's workers.dev subdomain as a
 single lowercase DNS label, up to 63 ASCII letters, digits and hyphens,
@@ -161,8 +163,9 @@ D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
 checked Worker is deployed with the route and previews off, and its version
 and bindings are read back before the route can be enabled. After enablement,
-the workflow checks the serving version, `HEAD /sign-in` and anonymous denial
-on `GET /api/owner/invitations`. A serving probe failure triggers switch-off.
+the workflow checks the serving version, HTTP 200 on `HEAD /sign-in`, and HTTP
+401 on anonymous `GET /api/owner/invitations`. Both origin checks use the same
+curl transport as switch-off. A serving probe failure triggers switch-off.
 
 A failed or interrupted migration or deploy may leave provider writes in flight
 or committed. Stop, keep admission off, and reconcile the exact Worker,
@@ -210,10 +213,11 @@ could delay switch-off. A running deploy may hold the queue up to its
 15-minute job timeout. Switch-off uses the durable boundary and incident pair
 after the temporary inputs and release credentials have been withdrawn. It
 verifies the account namespace, disables the workers.dev route and preview
-URLs, and verifies both provider flags and HTTP 404 on an uncached HTTPS
-`HEAD /sign-in` using curl with redirects disabled. Alert the release
-reviewer and incident owner immediately if either verification is unavailable
-or fails.
+URLs, and verifies both provider flags and HTTP 404 on HTTPS `HEAD /sign-in`
+using curl with redirects disabled. Each origin probe uses a fresh query key.
+The workflow rejects cache hits, stale responses, and unrecognized
+`CF-Cache-Status` values. Alert the release reviewer and incident owner
+immediately if either verification is unavailable or fails.
 
 The initial release has no earlier serving Worker. Route disablement stops
 serving and leaves D1 and R2 intact. Review any accepted writes and current
@@ -241,9 +245,10 @@ Record both substitutions and the exact source SHA used for the rehearsal.
   input-scope preflight step before reaching any protected job. Remove the
   synthetic secret before continuing.
 - With only the durable inputs present, record the transition from HTTP 200 to
-  404 on `HEAD /sign-in` and both provider flags reading false. Verify the
-  incident pair's effective permissions and denial outside the scoped
-  synthetic account using disposable targets.
+  404 on `HEAD /sign-in`, the refusal's `CF-Cache-Status` or its absence, and
+  both provider flags reading false. Verify the incident pair's effective
+  permissions and denial outside the scoped synthetic account using
+  disposable targets.
 - Occupy the shared queue, advance main, and confirm an ancestor switch-off
   dispatch still works without release acceptance, receipt or credentials.
   Record queue and disablement timing, cancellation of an unstarted release
