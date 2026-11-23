@@ -135,8 +135,11 @@ test('locked Wrangler applies smoke migrations through the pinned D1 binding', a
 
 test('invalid source cannot replace a queued staging deployment', async () => {
   const workflow = await readFile(new URL('../../../.github/workflows/drive-first-release-smoke.yml', import.meta.url), 'utf8');
+  const source = workflow.match(/^  source:\n([\s\S]*?)^  smoke:\n/m)?.[1];
+  assert.ok(source);
   assert.doesNotMatch(workflow, /^concurrency:/m);
-  assert.match(workflow, /  source:\n[\s\S]+Verify protected dispatch[\s\S]+EXPECTED_MAIN_SHA[^\n]+GITHUB_SHA/);
+  assert.doesNotMatch(source, /^    concurrency:/m);
+  assert.match(source, /Verify protected dispatch[\s\S]+EXPECTED_MAIN_SHA[^\n]+GITHUB_SHA/);
   assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:\n      group: drive-staging-lifecycle/);
 });
 
