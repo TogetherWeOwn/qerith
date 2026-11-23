@@ -305,35 +305,34 @@ jobs:
   pr-mutation:
     name: PR test mutations
     # Keep the check separate from ci-ok during rollout.
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Report PR-only scope on main
+      - name: Report mutation scope on main
         if: github.event_name == 'push'
-        run: echo 'Mutation execution requires a pull request diff.'
-      # Compare the integration snapshot against its exact base parent.
+        run: echo 'Mutation execution requires a pull request or merge group diff.'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         with:
           node-version: '24.21.0'
       - name: Check new surviving mutants and prove the ratchet
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$PR_BASE" "$PR_HEAD" "$GITHUB_SHA" "$BASE_BRANCH")
+          plan=$(node scripts/pr-mutation.mjs plan "$PWD" "$GITHUB_EVENT_NAME" "$EVENT_BASE" "$EVENT_HEAD" "$GITHUB_SHA" "$BASE_BRANCH")
           read -r base targets workers drive proof <<< "$plan"
-          printf 'Comparing base %s to integration %s for PR head %s\n' "$base" "$GITHUB_SHA" "$PR_HEAD"
+          printf 'Comparing base %s to %s snapshot %s (event head %s)\n' "$base" "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$EVENT_HEAD"
           if [[ "$targets" == 0 && "$proof" == 0 ]]; then
             echo 'Mutation pass: 0 target(s), 0 new survivor(s)'
             exit 0

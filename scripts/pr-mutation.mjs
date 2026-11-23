@@ -23,6 +23,22 @@ export function integrationBase(root, snapshot, eventBase, head, branch) {
   return base;
 }
 
+function comparisonBase(root, event, base, head, snapshot, branch) {
+  if (![base, head, snapshot].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+    throw new Error('Expected immutable commit SHAs');
+  }
+  if (git(root, ['rev-parse', 'HEAD']).trim() !== snapshot) throw new Error('Unexpected mutation checkout');
+  if (event === 'pull_request') return integrationBase(root, snapshot, base, head, branch);
+  if (event === 'merge_group') {
+    if (head !== snapshot || base === snapshot || git(root, ['cat-file', '-t', base]).trim() !== 'commit') {
+      throw new Error('Unexpected merge group base or head');
+    }
+    git(root, ['merge-base', '--is-ancestor', base, snapshot]);
+    return base;
+  }
+  throw new Error('Unexpected mutation event');
+}
+
 export function plan(root, base, head) {
   const fields = git(root, ['diff', '--name-status', '-z', '-M', '--diff-filter=AMR', base, head]).split('\0');
   const changes = new Map();
@@ -192,16 +208,18 @@ export function audit(ts, root, baseline, base, head) {
 }
 
 if (import.meta.main) {
-  const [mode, root, base, head, tree, branch] = process.argv.slice(2);
+  const [mode, root, ...args] = process.argv.slice(2);
   if (mode === 'plan') {
-    const parent = integrationBase(root, tree, base, head, branch);
-    const { changes, targets } = plan(root, parent, tree);
+    const [event, base, head, snapshot, branch] = args;
+    const parent = comparisonBase(root, event, base, head, snapshot, branch);
+    const { changes, targets } = plan(root, parent, snapshot);
     const proof = ['scripts/pr-mutation.mjs', 'scripts/pr-mutation.test.mjs'].some(path => changes.has(path));
     console.log([parent, targets.length, targets.some(isWorkers) ? 1 : 0,
       targets.some(path => isWorkers(path) || isDrive(path)) ? 1 : 0, proof ? 1 : 0].join(' '));
   } else if (mode === 'run') {
+    const [base, head, baseline] = args;
     const ts = await import(join(root, 'apps/drive/node_modules/typescript/lib/typescript.js'));
-    process.exitCode = Number(audit(ts.default, root, tree, base, head) > 0);
+    process.exitCode = Number(audit(ts.default, root, baseline, base, head) > 0);
   } else {
     throw new Error('Expected mutation plan or run');
   }
