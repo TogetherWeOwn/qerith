@@ -34,7 +34,7 @@ jobs:
       - name: Reject production boundary and incident inputs outside the protected environment
         env:
           UNPROTECTED_BOUNDARY: ${{ vars.DRIVE_PRODUCTION_BOUNDARY != '' }}
-          UNPROTECTED_INCIDENT: ${{ inputs.operation == 'switch-off' && (secrets.DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN != '' || secrets.DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN != '') }}
+          UNPROTECTED_INCIDENT: ${{ secrets.DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN != '' || secrets.DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN != '' }}
         run: |
           if [[ "$UNPROTECTED_BOUNDARY" != false || "$UNPROTECTED_INCIDENT" != false ]]; then
             printf '%s\n' 'Production boundary and incident inputs must be set only in the production environment.' >&2

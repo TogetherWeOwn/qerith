@@ -60,7 +60,7 @@ def production_boundary(env):
     require(0 < len(raw) <= 4096, message)
     try:
         pin = json_object(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise SystemExit(message) from None
     require(
         type(pin) is dict and set(pin) == {"accountId", "workerSubdomain"}

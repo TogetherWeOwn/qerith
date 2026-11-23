@@ -79,9 +79,11 @@ the pin. Use the same pin for release and switch-off.
 Keep the verified pin and incident pair in protected custody across release
 windows. Changes to the pin are protected target changes and require a
 separately reviewed production change. Keep it stable while production jobs are
-queued or running and while the Worker serves. Configure these names only in
-the `production` environment. Preflight refuses a boundary visible outside
-that environment or an incident secret visible outside it during switch-off.
+queued or running and while the Worker serves. Keep administration of the
+boundary and incident secret names under the same custody at all scopes.
+Configure these names only in the `production` environment. Preflight refuses
+a boundary or incident secret visible outside that environment before either
+operation.
 
 | Durable production environment secrets | Effective scope |
 | --- | --- |
@@ -218,7 +220,9 @@ private admission, binding and data checks.
 
 Before live use, qualify the effective incident permissions and GitHub gates
 with synthetic resources in an approved disposable repository and Cloudflare
-account.
+account. In the disposable copy, substitute only the repository identity in
+the workflow's repository guard and the preflight script's `REPO` constant.
+Record both substitutions and the exact source SHA used for the rehearsal.
 
 - Confirm protected main and its main-only environment policy, both jobs'
   input visibility, and refusal when the protected pin is absent or available

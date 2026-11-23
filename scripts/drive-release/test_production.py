@@ -95,7 +95,7 @@ class ProductionFixture(unittest.TestCase):
 class ProductionTests(ProductionFixture):
     def test_both_operations_refuse_missing_invalid_or_shared_pin_before_provider_access(self):
         invalid = (
-            None, "", "null", "[]", "{", " " * 4097,
+            None, "", "null", "[]", "{", " " * 4097, "[" * 2000,
             prod.canonical({"accountId": ACCOUNT}),
             prod.canonical(PIN | {"origin": ORIGIN}),
             '{"accountId":"' + ACCOUNT + '","workerSubdomain":"first","workerSubdomain":"second"}',
