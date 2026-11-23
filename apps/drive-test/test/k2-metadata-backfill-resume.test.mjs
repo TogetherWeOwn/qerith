@@ -19,7 +19,7 @@ it('rolls back a failed page and resumes from the last committed binary checkpoi
   const { nextAfterId } = await backfillK2MetadataPage(db, null, 1);
   expect(nextAfterId).toBe('page-0');
 
-  // FAIL preserves writes within the statement unless the D1 batch rolls back.
+  // D1 rolls back the page's INSERT statement when the trigger fails.
   await db.prepare(`CREATE TRIGGER fail_k2_page AFTER INSERT ON drive_k2_metadata
     WHEN NEW.entry_id > 'page-a'
     BEGIN SELECT RAISE(FAIL, 'K2 fixture failure'); END`).run();

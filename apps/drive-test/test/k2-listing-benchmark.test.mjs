@@ -31,15 +31,18 @@ function fixture(count) {
   const unknownFrom = (count - 1) * 3 / 4;
   return Array.from({ length: count }, (_, i) => {
     const kind = i % 5 === 0 && i < count - 1 ? 'folder' : 'file';
-    const unknown = kind === 'file' && i >= unknownFrom;
-    const zero = i < 503 || i % 2 === 0;
+    const sizeUnknown = kind === 'folder' || i >= unknownFrom;
+    // Keep the unknown count equal while separating the size and time order.
+    const modifiedUnknown = i % 5 === 1 || i === count - 1;
+    const zeroSize = i < 503 || i % 2 === 0;
+    const zeroModified = i < 503 || i % 3 === 0;
     return {
       id: `entry-${String(i).padStart(5, '0')}`,
       kind,
       kindLabel: kind === 'folder' ? 'Folder' : labels[i < 503 ? i % 2 : i % labels.length],
       name: i < 503 ? tied[i % tied.length] : `${prefixes[i % prefixes.length]} ${count - i}`,
-      size: kind === 'folder' || unknown ? null : zero ? 0 : 4096,
-      modified: unknown ? null : zero ? 0 : 1_800_000_000_000,
+      size: sizeUnknown ? null : zeroSize ? 0 : 4096,
+      modified: modifiedUnknown ? null : zeroModified ? 0 : 1_800_000_000_000,
     };
   });
 }
