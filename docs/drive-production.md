@@ -228,6 +228,11 @@ Record both substitutions and the exact source SHA used for the rehearsal.
   input visibility, and refusal when the protected pin is absent or available
   only at repository or organization scope. Confirm the pin and incident
   secrets resolve in the protected job and are unavailable outside it.
+- In the disposable repository, set an incident secret name at repository
+  scope to a synthetic value with no provider access. Dispatch both operations
+  without acceptance or a staging receipt and verify each stops at the
+  input-scope preflight step before reaching any protected job. Remove the
+  synthetic secret before continuing.
 - With only the durable inputs present, record the transition from HTTP 200 to
   404 on `HEAD /sign-in` and both provider flags reading false. Verify the
   incident pair's effective permissions and denial outside the scoped
