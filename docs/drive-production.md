@@ -25,10 +25,13 @@ disabled.
    variables resolve from that environment. Check scope and custody through the
    established provider and GitHub authorities. Use dedicated production
    identities throughout. Verify the production-only D1 database and private
-   R2 bucket named `qerith-drive-production` in the existing Cloudflare account.
-   Record the actual D1 UUID, bucket jurisdiction, storage epoch, Worker name
-   and `https://qerith-drive-production.5150.workers.dev` origin. Confirm the
-   dedicated Worker does not exist, both R2 public-domain surfaces are off,
+   R2 bucket named `qerith-drive-production` in the dedicated Cloudflare
+   account. Independently compare the account ID with the attested staging
+   account ID and verify they differ. Read back the account's workers.dev
+   namespace and the production boundary in GitHub. Record the actual D1 UUID,
+   default bucket jurisdiction, storage epoch, Worker name and
+   `https://qerith-drive-production.<workerSubdomain>.workers.dev` origin. Confirm
+   the dedicated Worker does not exist, both R2 public-domain surfaces are off,
    and no custom route, preview, trigger or service binding can reach the
    Worker. The workers.dev route is the sole intended serving surface and the
    switch-off control.
@@ -58,9 +61,39 @@ disabled.
    required before the first schema change.
 6. Have the independent release reviewer record `APPROVE` on the dedicated
    release task for the SHA, staging run/attempt, build digest, provider
-   evidence, verified bookmark, writer exclusion, owner bootstrap, switch-off
-   procedure and watch. If the evidence changes or any recovery condition is
-   unsafe, stop and obtain a new decision.
+   evidence, production boundary, verified bookmark, writer exclusion, owner
+   bootstrap, switch-off procedure and watch. If the evidence changes or any
+   recovery condition is unsafe, stop and obtain a new decision.
+
+## Configure the durable production boundary
+
+Store `DRIVE_PRODUCTION_BOUNDARY` as a variable in the main-only GitHub
+`production` environment. Its JSON object contains exactly two string fields.
+`accountId` is the dedicated Cloudflare account ID (32 lowercase hex
+characters). `workerSubdomain` is the account's workers.dev subdomain as a
+single lowercase DNS label, up to 63 ASCII letters, digits and hyphens,
+starting and ending with a letter or digit. The guard rejects either legacy
+shared identifier and derives the Worker origin and default R2 endpoint from
+the pin. Use the same pin for release and switch-off.
+
+Keep the verified pin and incident pair in protected custody across release
+windows. Changes to the pin are protected target changes and require a
+separately reviewed production change. Keep it stable while production jobs are
+queued or running and while the Worker serves. Keep administration of the
+boundary and incident secret names under the same custody at all scopes.
+Configure these names only in the `production` environment. Preflight refuses
+a boundary or incident secret visible outside that environment before either
+operation.
+
+| Durable production environment secrets | Effective scope |
+| --- | --- |
+| `DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN` | Workers Scripts Read on the dedicated account for account and Worker subdomain readback |
+| `DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN` | Workers Scripts Write on the dedicated account for route disablement |
+
+The custodian issues distinct, account-scoped incident identities without
+D1, R2 or zone grants and rotates them under incident custody. Workers Scripts
+Write also grants script and binding edits. Keep the incident writer in
+protected custody and use it only for switch-off.
 
 ## Configure the accepted release
 
@@ -70,7 +103,8 @@ Set the following JSON variables in the `production` environment.
 
 - `DRIVE_PRODUCTION_TARGET` contains `accountId`, `worker`, `origin`, `d1Id`,
   `r2Bucket`, `storageEpoch` (a dedicated `prod-…` epoch), and
-  `credentials`. The credential keys are `cfRead`, `cfDeploy`, `r2Read`,
+  `credentials`. The account and origin must match the durable boundary. The
+  credential keys are `cfRead`, `cfDeploy`, `r2Read`,
   `r2App` and `owner`. Each value is the lowercase SHA-256 of the matching
   secret, or of the access key ID and secret joined by one NUL byte in that
   order for R2. Compute the digests in credential custody. Keep raw values and
@@ -95,8 +129,10 @@ Set the following JSON variables in the `production` environment.
 Plan the owner ceremony before dispatch. The workflow binds the token to the
 approved SHA and a five-minute expiry just before the Worker upload. The owner
 enrolls over the production origin with a passkey. A successful owner enrollment
-closes bootstrap permanently for that D1. Reset acceptance to `UNAPPROVED`
-and clear the temporary approval and bootstrap secret after the attempt.
+closes bootstrap permanently for that D1. Reset acceptance to `UNAPPROVED`,
+clear the temporary target, approval and bootstrap inputs, and withdraw the
+release-only credentials when the release window closes. Retain the durable
+boundary and incident pair. Keep the runtime R2 signer in approved custody.
 A failed or expired bootstrap requires the switch-off procedure and a reviewed
 recovery plan. Never insert or reset the owner directly in D1.
 
@@ -114,8 +150,9 @@ CLI with lifecycle scripts disabled, rechecks the receipt, and restores the
 bounded current-attempt build artifact. It verifies the restored Worker
 and asset digest before receiving production credentials.
 
-The workflow verifies the approved target, custody fingerprints and release
-window, checks emptiness with read-only credentials, and reads back the approved
+Before contacting Cloudflare, the workflow matches the durable boundary to
+the approved target and verifies the custody fingerprints and release window.
+It checks emptiness with read-only credentials and reads back the approved
 D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
 checked Worker is deployed with the route and previews off, and its version
@@ -164,15 +201,46 @@ URLs, member identifiers and response bodies out of evidence.
 On regression, stop inviting users and immediately dispatch `switch-off` from
 protected `main`. A queued switch-off remains valid if main advances and the
 dispatch SHA is still on main. The two production jobs share a durable Actions
-queue. This operation requires the dedicated Worker credentials and namespace
-and works after the release receipt or approval expires. It disables the
-workers.dev route and preview URLs, verifies the
-provider flags and probes the production origin for denial without following
-redirects. Alert the release reviewer and incident owner immediately if either
-verification is unavailable or fails.
+queue. Freeze new release dispatches and cancel any unstarted release that
+could delay switch-off. A running deploy may hold the queue up to its
+15-minute job timeout. Switch-off uses the durable boundary and incident pair
+after the temporary inputs and release credentials have been withdrawn. It
+verifies the account namespace, disables the workers.dev route and preview
+URLs, and verifies both provider flags and HTTP 404 on `HEAD /sign-in`
+without following redirects. Alert the release reviewer and incident owner
+immediately if either verification is unavailable or fails.
 
 The initial release has no earlier serving Worker. Route disablement stops
 serving and leaves D1 and R2 intact. Review any accepted writes and current
 data before reopening or considering a restore. A D1 snapshot never rolls
 back R2. Reopening requires a separately reviewed recovery plan and observed
 private admission, binding and data checks.
+
+### Hosted switch-off rehearsal evidence
+
+Before live use, qualify the effective incident permissions and GitHub gates
+with synthetic resources in an approved disposable repository and Cloudflare
+account. In the disposable copy, substitute only the repository identity in
+the workflow's repository guard and the preflight script's `REPO` constant.
+Record both substitutions and the exact source SHA used for the rehearsal.
+
+- Confirm protected main and its main-only environment policy, both jobs'
+  input visibility, and refusal when the protected pin is absent or available
+  only at repository or organization scope. Confirm the pin and incident
+  secrets resolve in the protected job and are unavailable outside it.
+- In the disposable repository, set an incident secret name at repository
+  scope to a synthetic value with no provider access. Dispatch both operations
+  without acceptance or a staging receipt and verify each stops at the
+  input-scope preflight step before reaching any protected job. Remove the
+  synthetic secret before continuing.
+- With only the durable inputs present, record the transition from HTTP 200 to
+  404 on `HEAD /sign-in` and both provider flags reading false. Verify the
+  incident pair's effective permissions and denial outside the scoped
+  synthetic account using disposable targets.
+- Occupy the shared queue, advance main, and confirm an ancestor switch-off
+  dispatch still works without release acceptance, receipt or credentials.
+  Record queue and disablement timing, cancellation of an unstarted release
+  and the running deploy timeout bound.
+- Exercise provider denial or an unconfirmed origin probe and verify
+  escalation. Record the responsible incident operator and verify cleanup of
+  all rehearsal resources and credentials.
