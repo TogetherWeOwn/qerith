@@ -27,7 +27,7 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
   }
   function verifyListingScope(root: ReturnType<typeof parseListingXml>, bucketField: string, prefix?: string) {
     const echoedPrefix = listingText(root, 'Prefix', prefix !== undefined);
-    if (listingText(root, bucketField) !== bucket ||
+    if (prefix === '' || listingText(root, bucketField) !== bucket ||
         decodeURIComponent((echoedPrefix ?? '').replace(/\+/g, '%20')) !== (prefix ?? '') ||
         listingText(root, 'Delimiter', false) || listingChildren(root, 'CommonPrefixes').length !== 0) throw new Error();
   }

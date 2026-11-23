@@ -147,6 +147,10 @@ test('strict bucket-wide listings reject a wrong bucket, hidden prefix or delimi
       `<${root}>${identity.replace('test-bucket', 'other-bucket')}<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated></${root}>`
     ) });
     await assert.rejects(wrongBucket[operation]({ verifyScope: true }), /Invalid S3 listing response/);
+    const emptyPrefix = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(
+      `<${root}>${identity}<Prefix/><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated></${root}>`
+    ) });
+    await assert.rejects(emptyPrefix[operation]({ verifyScope: true, prefix: '' }), /Invalid S3 listing response/);
   }
 });
 
