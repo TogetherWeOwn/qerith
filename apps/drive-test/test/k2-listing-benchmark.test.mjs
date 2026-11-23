@@ -5,6 +5,14 @@ import { compareK2Entries, compareK2Names } from '../../drive/src/lib/server/met
 const pageSize = 200;
 const tied = ['café 2', 'café 02', 'café ٢', 'café 002'];
 const folderRank = (entry) => entry.kind === 'folder' ? 0 : 1;
+const sorts = ['name', 'size', 'modified', 'kind'];
+const directions = ['asc', 'desc'];
+const unknownColumn = (sort) => sort === 'size' || sort === 'modified' ? `${sort}_unknown` : null;
+function seekColumns(sort, direction) {
+  const primary = `${direction}_${sort}`;
+  const unknown = unknownColumn(sort);
+  return ['folder_rank', ...(unknown ? [unknown] : []), primary, ...(sort === 'name' ? [] : ['asc_name']), 'id'];
+}
 
 it('honors pinned numeric and NFC expectations in the Worker collation runtime', () => {
   // Rank materialization and the traversal oracle share the comparator. These
@@ -17,65 +25,79 @@ it('honors pinned numeric and NFC expectations in the Worker collation runtime',
 
 function fixture(count) {
   const prefixes = ['file', 'File', 'café', 'café', '📁 file', 'file-'];
-  // For both fixture counts the folder/file and known/unknown transitions
-  // land exactly on page seams, with enough tied zero-byte files to span pages.
+  const labels = ['Type ２', 'Type 02', 'Type 10', 'PDF'];
+  // For both fixture counts the folder/file and known/unknown file transitions
+  // land exactly on page seams, with enough fully tied files to span pages.
   const unknownFrom = (count - 1) * 3 / 4;
   return Array.from({ length: count }, (_, i) => {
     const kind = i % 5 === 0 && i < count - 1 ? 'folder' : 'file';
+    const unknown = kind === 'file' && i >= unknownFrom;
+    const zero = i < 503 || i % 2 === 0;
     return {
       id: `entry-${String(i).padStart(5, '0')}`,
       kind,
-      kindLabel: kind === 'folder' ? 'Folder' : 'File',
+      kindLabel: kind === 'folder' ? 'Folder' : labels[i < 503 ? i % 2 : i % labels.length],
       name: i < 503 ? tied[i % tied.length] : `${prefixes[i % prefixes.length]} ${count - i}`,
-      size: kind === 'folder' || i >= unknownFrom ? null : i < 503 || i % 2 === 0 ? 0 : 4096,
-      modified: null,
+      size: kind === 'folder' || unknown ? null : zero ? 0 : 4096,
+      modified: unknown ? null : zero ? 0 : 1_800_000_000_000,
     };
   });
 }
 
-async function seed(db, entries) {
-  await db.exec(`DROP TABLE IF EXISTS k2_bench;
-    CREATE TABLE k2_bench (scope TEXT NOT NULL, folder_rank INTEGER NOT NULL, asc_rank INTEGER NOT NULL, desc_rank INTEGER NOT NULL, size_unknown INTEGER NOT NULL, asc_size INTEGER NOT NULL, desc_size INTEGER NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL);
-    CREATE INDEX k2_bench_name_asc ON k2_bench (scope, folder_rank, asc_rank, id);
-    CREATE INDEX k2_bench_name_desc ON k2_bench (scope, folder_rank, desc_rank, id);
-    CREATE INDEX k2_bench_size_asc ON k2_bench (scope, folder_rank, size_unknown, asc_size, asc_rank, id);
-    CREATE INDEX k2_bench_size_desc ON k2_bench (scope, folder_rank, size_unknown, desc_size, asc_rank, id);`);
-  // Dense ranks model already-materialized keys on an immutable synthetic
-  // dataset. They are not a key encoder: real writes cannot rely on these ranks.
-  const names = [...new Set(entries.map(({ name }) => name))].sort(compareK2Names);
-  const ranks = new Map();
+// Dense ranks model already-materialized keys on an immutable synthetic
+// dataset. They are not a key encoder: real writes cannot rely on these ranks.
+function denseRanks(values) {
+  const ordered = [...new Set(values)].sort(compareK2Names);
   let rank = 0;
-  for (let i = 0; i < names.length; i++) {
-    if (i > 0 && compareK2Names(names[i - 1], names[i])) rank++;
-    ranks.set(names[i], rank);
-  }
-  const statements = [];
-  for (let i = 0; i < entries.length; i += 11) {
-    const chunk = entries.slice(i, i + 11); // 9 columns; stay under D1's 100 bind slots.
-    const values = chunk.flatMap((entry) => {
-      const asc = ranks.get(entry.name);
-      // Non-null seek keys keep unknowns distinct from legitimate zero bytes.
-      // Reverse only the known size, not the unknown bucket or the tie keys.
-      const size = entry.size ?? 0;
-      return ['target', folderRank(entry), asc, -asc, Number(entry.size === null), size, -size, entry.id, entry.name];
-    });
-    statements.push(db.prepare(`INSERT INTO k2_bench VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`).bind(...values));
+  return new Map(ordered.map((value, i) => {
+    if (i > 0 && compareK2Names(ordered[i - 1], value)) rank++;
+    return [value, rank];
+  }));
+}
+
+async function seed(db, entries) {
+  const keys = ['folder_rank', 'asc_name', 'desc_name', 'size_unknown', 'asc_size', 'desc_size',
+    'modified_unknown', 'asc_modified', 'desc_modified', 'asc_kind', 'desc_kind'];
+  const indexes = sorts.flatMap((sort) => directions.map((direction) =>
+    `CREATE INDEX k2_bench_${sort}_${direction} ON k2_bench (scope, ${seekColumns(sort, direction).join(', ')});`));
+  const columns = ['scope TEXT NOT NULL', ...keys.map((key) => `${key} INTEGER NOT NULL`),
+    'id TEXT NOT NULL COLLATE BINARY', 'name TEXT NOT NULL'];
+  await db.exec(`DROP TABLE IF EXISTS k2_bench;
+    CREATE TABLE k2_bench (${columns.join(', ')});
+    ${indexes.join('\n')}`);
+  const names = denseRanks(entries.map(({ name }) => name));
+  const kinds = denseRanks(entries.map(({ kindLabel }) => kindLabel));
+  const valuesFor = (scope, entry) => {
+    const name = names.get(entry.name);
+    const kind = kinds.get(entry.kindLabel);
+    // Only the known primary key reverses, not the unknown bucket or tie keys.
+    const size = entry.size ?? 0;
+    const modified = entry.modified ?? 0;
+    return [scope, folderRank(entry), name, -name, Number(entry.size === null), size, -size,
+      Number(entry.modified === null), modified, -modified, kind, -kind, entry.id, entry.name];
+  };
+  const row = `(${Array(keys.length + 3).fill('?').join(', ')})`;
+  const chunkSize = Math.floor(100 / (keys.length + 3)); // D1 bind limit.
+  const statements = [db.prepare(`INSERT INTO k2_bench VALUES ${row}`).bind(...valuesFor('other', { ...entries[0], id: 'foreign' }))];
+  for (let i = 0; i < entries.length; i += chunkSize) {
+    const chunk = entries.slice(i, i + chunkSize);
+    statements.push(db.prepare(`INSERT INTO k2_bench VALUES ${chunk.map(() => row).join(', ')}`)
+      .bind(...chunk.flatMap((entry) => valuesFor('target', entry))));
   }
   for (let i = 0; i < statements.length; i += 16) await db.batch(statements.slice(i, i + 16));
-  await db.exec("INSERT INTO k2_bench VALUES ('other', 0, 0, 0, 1, 0, 0, 'foreign', 'File 2')");
 }
 
 async function traverse(db, entries, sort, direction) {
   const count = entries.length;
-  const prefix = sort === 'size' ? ['size_unknown', `${direction}_size`, 'asc_rank'] : [`${direction}_rank`];
-  const tieColumns = ['folder_rank', ...prefix];
-  const columns = [...tieColumns, 'id'];
+  const unknown = unknownColumn(sort);
+  const columns = seekColumns(sort, direction);
+  const tieColumns = columns.slice(0, -1);
   const tuple = columns.join(', ');
   const sql = `SELECT ${tuple}, name FROM k2_bench
     WHERE scope = ? AND (${tuple}) > (${columns.map(() => '?').join(', ')})
     ORDER BY ${tuple} LIMIT ${pageSize + 1}`;
   const query = db.prepare(sql);
-  let boundary = ['target', -1, ...prefix.map(() => 0), ''];
+  let boundary = ['target', -1, ...columns.slice(1, -1).map(() => 0), ''];
   const { results: plan } = await db.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...boundary).all();
   const detail = plan.map((row) => row.detail).join('\n');
   expect(detail).toMatch(new RegExp(`SEARCH k2_bench USING INDEX k2_bench_${sort}_${direction}.*folder_rank`));
@@ -83,7 +105,7 @@ async function traverse(db, entries, sort, direction) {
 
   const expected = [...entries].sort((a, b) => compareK2Entries(a, b, sort, direction));
   const folderCount = (count - 1) / 5;
-  const firstUnknownOffset = sort === 'size' ? 4 * folderCount : null;
+  const firstUnknownOffset = unknown ? 4 * folderCount : null;
   const deepOffset = (Math.floor(count / pageSize) - 1) * pageSize;
   const samples = new Map([[0, 'first'], [folderCount, 'firstFile'], [deepOffset, 'deep']]);
   if (firstUnknownOffset !== null) samples.set(firstUnknownOffset, 'firstUnknown');
@@ -112,9 +134,9 @@ async function traverse(db, entries, sort, direction) {
     const lookahead = results[pageSize];
     if (offset === folderCount - pageSize) expect([last.folder_rank, lookahead?.folder_rank]).toEqual([0, 1]);
     if (firstUnknownOffset !== null && offset === firstUnknownOffset - pageSize) {
-      expect([last.size_unknown, lookahead?.size_unknown]).toEqual([0, 1]);
+      expect([last[unknown], lookahead?.[unknown]]).toEqual([0, 1]);
     }
-    if (last.folder_rank === 1 && (sort === 'name' || last.size_unknown === 0) &&
+    if (last.folder_rank === 1 && (!unknown || last[unknown] === 0) &&
         lookahead && tieColumns.every((key) => lookahead[key] === last[key])) {
       splitFileTie = true;
     }
@@ -126,11 +148,11 @@ async function traverse(db, entries, sort, direction) {
   console.info('K2 synthetic D1 benchmark', { count, sort, direction, pages: Math.ceil(count / pageSize), ...metrics });
 }
 
-it.each([5_001, 10_001])('benchmarks indexed K2 name and size traversal over %i synthetic entries in Worker/D1', async (count) => {
+it.each([5_001, 10_001])('benchmarks all indexed K2 sorts over %i synthetic entries in Worker/D1', async (count) => {
   const db = env.DB;
   const entries = fixture(count);
   await seed(db, entries);
-  for (const sort of ['name', 'size']) {
-    for (const direction of ['asc', 'desc']) await traverse(db, entries, sort, direction);
+  for (const sort of sorts) {
+    for (const direction of directions) await traverse(db, entries, sort, direction);
   }
 }, 30_000);
