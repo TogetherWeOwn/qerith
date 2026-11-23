@@ -8,7 +8,7 @@ import { getMoveDestinations } from './move-destinations';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
 import { eligibleRecipientEntry, readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor } from './shared-page';
-import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import { stagingRoutes, type CeremonyStep, type InviteStep, type RouteAccess, type SignedOut, type StagingGate,
   type StagingRoute, type StagingRouteTarget } from './staging-routes';
 import { isBodylessUploadResume, uploadAdmissionRoute } from './upload-admission';
@@ -46,12 +46,13 @@ function matchesRoute(route: StagingRoute, request: Request, url: URL): boolean 
     case 'read-grant': return readGrantAdmissionRoute(request, url) === path;
     case 'eligible-recipients': return eligibleRecipientEntry(request, url) !== null;
     case 'metadata-write':
-      return target.operation === 'create-folder' ? request.url === stagingOrigin + path : entryChangeSource(request, url) !== null;
+      return target.operation === 'create-folder' ? request.url === url.origin + path : entryChangeSource(request, url) !== null;
     default: return url.pathname === path;
   }
 }
 
-function assetAdmission(request: Request, path: string, assets: PreviewAssets, gates: Record<StagingGate, boolean>): Admission | undefined {
+function assetAdmission(request: Request, url: URL, assets: PreviewAssets, gates: Record<StagingGate, boolean>): Admission | undefined {
+  const path = url.pathname;
   if ((request.method !== 'GET' && request.method !== 'HEAD') || !path.startsWith('/_app/immutable/')) return;
   // Trust exact build-time entries only. Shared dependencies needed by sign-in are public.
   if (assets.signIn.has(path)) return { target: { kind: 'public-asset' }, access: 'public', signedOut: 'dispatch' };
@@ -59,7 +60,7 @@ function assetAdmission(request: Request, path: string, assets: PreviewAssets, g
   if (assets.root.has(path)) return { target: { kind: 'private-asset' }, access: 'owner-or-invited-member', signedOut: 401 };
   if (gates.invite && assets.people.has(path)) return { target: { kind: 'people-asset' }, access: 'owner', signedOut: 401 };
   // Preserve prior classifications even if the folder shares a build dependency.
-  if (request.url !== stagingOrigin + path) return;
+  if (request.url !== url.origin + path) return;
   if (gates.invite && assets.folder.has(path)) return { target: { kind: 'folder-asset' }, access: 'owner-or-member', signedOut: 401 };
   if (gates.shared && assets.shared?.has(path)) return { target: { kind: 'shared-asset' }, access: 'member', signedOut: 401 };
 }
@@ -72,14 +73,15 @@ function deny(status: number): Response {
 // the live storage composition, never a fixture flag or request-supplied value.
 export async function admitStagingRequest(request: Request, env: DriveAuthEnv, storageReady: boolean,
   assets: PreviewAssets): Promise<Target | Response> {
-  if (env.DRIVE_ORIGIN !== stagingOrigin || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
-  if (!allowsOrigin(request, stagingOrigin)) return deny(403);
+  const origin = privateDriveOrigin(env);
+  if (origin === null || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
+  if (!allowsOrigin(request, origin)) return deny(403);
   const url = new URL(request.url);
   const { pathname, search } = url;
   const gates = { invite: admitsStagingInvite(env), 'read-grants': admitsStagingReadGrants(env), shared: admitsSharedListing(env) };
   const route = stagingRoutes.find((route): route is StagingRoute => !('excluded' in route) &&
     (!route.gate || gates[route.gate]) && route.methods.some(method => method === request.method) && matchesRoute(route, request, url));
-  const admission = route ?? assetAdmission(request, pathname, assets, gates);
+  const admission = route ?? assetAdmission(request, url, assets, gates);
   if (!admission) return deny(404);
   const { access, signedOut } = admission;
   const target = { ...admission.target };
@@ -92,11 +94,11 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       target.kind === 'move-destinations') && !allowsStagingInviteSite(request)) return deny(403);
   if (target.kind === 'invite' || target.kind === 'invite-asset' || target.kind === 'invite-ceremony') {
     // Do not admit queries (even a bare '?') or rely on decoded/rewritten paths.
-    if (request.url !== stagingOrigin + pathname) return deny(404);
+    if (request.url !== url.origin + pathname) return deny(404);
     return allowsStagingInviteSite(request, target.kind === 'invite') ? target : deny(403);
   }
   const ownerPage = target.kind === 'people' || target.kind === 'people-asset';
-  if (ownerPage && request.url !== stagingOrigin + pathname) return deny(404);
+  if (ownerPage && request.url !== url.origin + pathname) return deny(404);
   const site = request.headers.get('sec-fetch-site');
   const navigation = isTopLevelDocumentNavigation(request);
   const signInRedirect = () => downloadRedirect(`/sign-in?${new URLSearchParams({ next: pathname + search })}`);

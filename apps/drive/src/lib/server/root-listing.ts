@@ -2,7 +2,7 @@ import { entryId } from '../download-id';
 import { browseFolder, type BrowseResult } from './browse';
 import { tokenHash } from './identity/sessions';
 import { PrivateMetadata } from './metadata/private';
-import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readSession, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import { storageIdentity, type StorageBindings } from './storage-runtime';
 
 export interface RootListing {
@@ -38,7 +38,7 @@ export async function loadRootListing(request: Request, env: RootListingEnv, pag
       const cursor = rootPageCursor(pageTokens);
       if (cursor === undefined) return 'invalid-page' as const;
       const inviteMode = admitsStagingInvite(env);
-      const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
+      const ownerOnly = privateDriveOrigin(env) !== null && !inviteMode;
       const invitee = inviteMode && principal.role === 'member';
       const identity = invitee ? storageIdentity(env) : null;
       const primary = identity && db.withSession?.('first-primary');

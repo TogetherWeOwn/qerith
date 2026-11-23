@@ -7,8 +7,9 @@
   import type { DriveUploadMode } from './server/request-auth';
   import './tokens.css';
 
-  let { mode, announce, refresh, paginated, busy = $bindable(false), fixtureResumeIntentId, fixtureFetcher }: {
+  let { mode, uploadLimit, announce, refresh, paginated, busy = $bindable(false), fixtureResumeIntentId, fixtureFetcher }: {
     mode: Exclude<DriveUploadMode, 'disabled'>;
+    uploadLimit?: number;
     announce: (message: string, priority?: AnnouncementPriority) => void; refresh: () => Promise<void>; paginated: boolean; busy: boolean;
     // Only the disposable fixture supplies these for the legacy path and transport.
     fixtureResumeIntentId?: string; fixtureFetcher?: typeof fetch;
@@ -38,13 +39,18 @@
     if (!file || busy || (continuing && !canContinue)) return;
     const resumeCandidate = continuing ? candidate : undefined;
     const legacyCandidate = continuing ? fixtureResumeIntentId : undefined;
-    if (!continuing) candidate = undefined;
-    busy = true;
     const attempt = ++selection;
     selected = { name: file.name, size: file.size };
     acceptedBytes = 0;
     published = false;
+    if (uploadLimit !== undefined && file.size > uploadLimit) {
+      message = `Choose a file no larger than ${uploadLimit.toLocaleString()} bytes.`;
+      announce(`${file.name}: ${message}`);
+      return;
+    }
 
+    if (!continuing) candidate = undefined;
+    busy = true;
     try {
       announce(continuing ? `Continuing upload of ${file.name} to My Drive.` : `Uploading ${file.name} to My Drive.`);
       message = continuing ? 'Continuing upload…' : 'Uploading…';
@@ -104,8 +110,10 @@
     <h2 id={`${id}-uploads`}>Uploads</h2>
     <bdi id={`${id}-filename`}>{selected.name}</bdi>
     <p>{message}</p>
-    <p class="bytes">{acceptedBytes.toLocaleString()} of {selected.size.toLocaleString()} bytes · My Drive</p>
-    <progress aria-labelledby={`${id}-filename`} max={selected.size || 1} value={selected.size ? acceptedBytes : Number(published)}></progress>
+    {#if uploadLimit === undefined || selected.size <= uploadLimit}
+      <p class="bytes">{acceptedBytes.toLocaleString()} of {selected.size.toLocaleString()} bytes · My Drive</p>
+      <progress aria-labelledby={`${id}-filename`} max={selected.size || 1} value={selected.size ? acceptedBytes : Number(published)}></progress>
+    {/if}
   </section>
 {/if}
 

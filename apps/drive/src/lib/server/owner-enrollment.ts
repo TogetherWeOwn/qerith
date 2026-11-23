@@ -1,9 +1,11 @@
 import { readBoundedBody } from './bounded-io';
 import { OwnerBootstrap } from './identity/owner-bootstrap';
 import { OwnerProvisioning } from './identity/owner-provisioning';
-import { allowsOrigin, stagingOrigin } from './request-auth';
+import { allowsOrigin, privateDriveOrigin } from './request-auth';
 
-interface EnrollmentEnv {
+import type { DriveReleaseOrigin } from './qualification-readiness';
+
+interface EnrollmentEnv extends DriveReleaseOrigin {
   DRIVE_OWNER_ENROLLMENT?: string;
   DRIVE_OWNER_ENROLLMENT_RELEASE?: string;
   DB?: ConstructorParameters<typeof OwnerBootstrap>[0];
@@ -48,10 +50,11 @@ export function admitsOwnerEnrollment(env: EnrollmentEnv): boolean {
 }
 
 export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Promise<Response> {
+  const origin = privateDriveOrigin(env);
   const grant = enrollmentGrant(env);
-  if (!env.DB || !grant) return deny(503);
+  if (!origin || !env.DB || !grant) return deny(503);
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...headers, allow: 'POST' } });
-  if (!allowsOrigin(request, stagingOrigin) || new URL(request.url).search) return deny(403);
+  if (!allowsOrigin(request, origin) || new URL(request.url).search) return deny(403);
   const authorization = request.headers.get('authorization');
   const bearer = authorization?.length === 50 && /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization);
   if (!bearer || !subtle.timingSafeEqual(encoder.encode(bearer[1]), encoder.encode(grant.token))) return deny(403);
@@ -62,7 +65,7 @@ export async function ownerEnrollment(request: Request, env: EnrollmentEnv): Pro
     // A suspended/revoked owner also permanently closes bootstrap. The SQL in
     // OwnerBootstrap independently enforces this at challenge and commit time.
     if (await env.DB.prepare("SELECT 1 FROM drive_principals WHERE role = 'owner' LIMIT 1").first()) return deny(409);
-    const bootstrap = new OwnerBootstrap(env.DB, new URL(stagingOrigin).hostname, stagingOrigin, grant.expiresAt);
+    const bootstrap = new OwnerBootstrap(env.DB, new URL(origin).hostname, origin, grant.expiresAt);
     const result = await new OwnerProvisioning(bootstrap).execute(input);
     return Response.json(result, { status: result.ok ? 200 : 400, headers });
   } catch {

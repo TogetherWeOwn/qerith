@@ -3,33 +3,32 @@ import { driveNext, folderDocumentRoute, isDrivePageNavigation, isExactFolderDoc
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { stagingOrigin } from './qualification-readiness';
+import { privateDriveOrigin, stagingOrigin, type DriveReleaseOrigin } from './qualification-readiness';
 import { eligibleRecipientEntry, readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor, sharedRoute } from './shared-page';
 import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
 
-export interface DriveAuthEnv {
+export interface DriveAuthEnv extends DriveReleaseOrigin {
   DRIVE_SIGN_IN_FIXTURE?: string;
   DRIVE_STAGING_INVITE_ACCEPTANCE?: string;
   DRIVE_STAGING_READ_GRANTS?: string;
   DRIVE_STAGING_SHARED_LISTING?: string;
-  DRIVE_ORIGIN?: string;
   DB?: ConstructorParameters<typeof Sessions>[0];
 }
 
-export { stagingOrigin };
+export { privateDriveOrigin, stagingOrigin };
 
 export function admitsSignInFixture(env: DriveAuthEnv): boolean {
   return env.DRIVE_SIGN_IN_FIXTURE === '1' && env.DRIVE_ORIGIN === 'https://drive.example.test' && !!env.DB;
 }
 
 // Default-off staging mode for invitation lifecycle, acceptance and member My Drive access.
-export function admitsStagingInvite(env: Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'>): boolean {
-  return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
+export function admitsStagingInvite(env: DriveReleaseOrigin & Pick<DriveAuthEnv, 'DRIVE_STAGING_INVITE_ACCEPTANCE'>): boolean {
+  return privateDriveOrigin(env) !== null && env.DRIVE_STAGING_INVITE_ACCEPTANCE === '1';
 }
 
 export function admitsStagingReadGrants(env: DriveAuthEnv): boolean {
-  return env.DRIVE_ORIGIN === stagingOrigin && env.DRIVE_STAGING_READ_GRANTS === '1';
+  return privateDriveOrigin(env) !== null && env.DRIVE_STAGING_READ_GRANTS === '1';
 }
 
 export function admitsEligibleRecipients(env: DriveAuthEnv): boolean {
@@ -46,7 +45,7 @@ export type DriveUploadMode = 'disabled' | 'preview' | 'multipart';
 // write: storage readiness and the checks on each mutation are separate.
 export function driveUploadMode(env: DriveAuthEnv, role?: 'owner' | 'member'): DriveUploadMode {
   if (role === 'member' && admitsStagingInvite(env)) return 'multipart';
-  if (role === 'owner' && (env.DRIVE_ORIGIN === stagingOrigin || admitsSignInFixture(env))) return 'preview';
+  if (role === 'owner' && (privateDriveOrigin(env) !== null || admitsSignInFixture(env))) return 'preview';
   return 'disabled';
 }
 
@@ -150,7 +149,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     }
 
     const fixture = admitsSignInFixture(env);
-    const staging = origin.origin === stagingOrigin;
+    const staging = privateDriveOrigin(env) !== null;
     if (staging && eligibleRecipients) {
       if (request.method !== 'GET' || eligibleRecipientEntry(request, url) === null) return deny(404);
       if (!allowsStagingInviteSite(request)) return deny(403);
@@ -160,7 +159,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     const sharedPage = routeId === sharedRoute;
     if (sharedPage && (!admitsSharedListing(env) || !isExactSharedDocument(request, url))) return deny(404);
     if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
-    if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${stagingOrigin}/people` ||
+    if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${origin.origin}/people` ||
         (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {
       if (fixture || !admitsStagingInvite(env) || ownerLifecycleRoute(request, url) !== routeId) return deny(404);

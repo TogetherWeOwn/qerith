@@ -1,17 +1,17 @@
+import { multipartFileLimit } from '../multipart-upload-plan';
+import { firstReleaseUploadCapBytes } from './first-release-upload-limit.mjs';
 import { readBoundedBody } from './bounded-io';
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type ExpectedUploadPart, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { qualificationAllocationPrefix, type QualificationReadinessEnv } from './qualification-readiness';
-import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { firstReleaseOrigin, qualificationAllocationPrefix, type QualificationReadinessEnv } from './qualification-readiness';
+import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartCreate } from './s3/multipart-create';
 
 // The first-upload preview fits in one existing bounded part.
 export const maxUploadIntentBytes = MAX_PART_BYTES;
-// Match the v0 multipart client ceiling; individual parts remain bounded separately.
-const maxInviteUploadIntentBytes = 5 * 1024 ** 3;
 export interface UploadIntentEnv extends DriveAuthEnv, QualificationReadinessEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
@@ -26,16 +26,17 @@ const reply = (status: number) => new Response(null, { status, headers });
 
 const intentBodyLimit = 64;
 const sha256HexLength = 64;
-const boundIntentBodyLimit = JSON.stringify({ size: maxInviteUploadIntentBytes, expectedPartSha256s: '' }).length +
-  maxInviteUploadIntentBytes / MAX_PART_BYTES * sha256HexLength;
+const multipartLimit = (env: UploadIntentEnv) => firstReleaseOrigin(env) === null ? multipartFileLimit : firstReleaseUploadCapBytes;
 const intentReadMs = 2_000;
 type IntentInput = { size: number; expectedParts?: readonly ExpectedUploadPart[] };
 
-async function readIntent(request: Request, inviteMode: boolean): Promise<IntentInput | null> {
+async function readIntent(request: Request, multipartLimit: number | null): Promise<IntentInput | null> {
   const type = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
   const length = request.headers.get('content-length');
-  const bodyLimit = inviteMode ? boundIntentBodyLimit : intentBodyLimit;
-  const lengthPattern = inviteMode ? /^\d{1,5}$/ : /^\d{1,2}$/;
+  const bodyLimit = multipartLimit === null ? intentBodyLimit :
+    JSON.stringify({ size: multipartLimit, expectedPartSha256s: '' }).length +
+    Math.ceil(multipartLimit / MAX_PART_BYTES) * sha256HexLength;
+  const lengthPattern = multipartLimit === null ? /^\d{1,2}$/ : /^\d{1,5}$/;
   if (type !== 'application/json' || !request.body || request.body.locked || request.signal.aborted ||
       (length !== null && (!lengthPattern.test(length) || +length < 1 || +length > bodyLimit))) return null;
 
@@ -51,13 +52,13 @@ async function readIntent(request: Request, inviteMode: boolean): Promise<Intent
       const legacy = /^[\t\n\r ]*\{[\t\n\r ]*"size"[\t\n\r ]*:[\t\n\r ]*(0|[1-9][0-9]*)[\t\n\r ]*\}[\t\n\r ]*$/.exec(json);
       if (legacy) return { size: Number(legacy[1]) };
     }
-    if (!inviteMode) return null;
+    if (multipartLimit === null) return null;
     // Match only the compact browser serialization; no escapes, duplicate keys or numeric normalization.
     const bound = /^\{"size":(0|[1-9][0-9]{0,9}),"expectedPartSha256s":"([0-9a-f]+)"\}$/.exec(json);
     if (!bound || bound[0] !== json) return null;
     const size = Number(bound[1]), packed = bound[2];
     const count = Math.max(1, Math.ceil(size / MAX_PART_BYTES));
-    if (size > maxInviteUploadIntentBytes || packed.length !== count * sha256HexLength) return null;
+    if (size > multipartLimit || packed.length !== count * sha256HexLength) return null;
     const expectedParts = Array.from({ length: count }, (_, i) => ({
       partNumber: i + 1,
       sizeBytes: Math.min(MAX_PART_BYTES, size - i * MAX_PART_BYTES),
@@ -69,7 +70,7 @@ async function readIntent(request: Request, inviteMode: boolean): Promise<Intent
 
 export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
-  const input = await readIntent(request, admitsStagingInvite(env));
+  const input = await readIntent(request, admitsStagingInvite(env) ? multipartLimit(env) : null);
   if (!input || request.signal.aborted) return reply(400);
   const { DRIVE_UPLOAD_VERIFIER: verifier } = env;
   return createUploadIntent(request, input.size, {
@@ -92,17 +93,19 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!allowsOrigin(request, origin.origin)) return reply(403);
   const prefix = qualificationAllocationPrefix(env);
   if (prefix === null) return reply(503);
-  if (prefix && request.url !== stagingOrigin + '/api/uploads') return reply(404);
+  if (prefix && request.url !== origin.origin + '/api/uploads') return reply(404);
   // Allocation only; staging request admission and part/publication policy are separate.
   const inviteMode = admitsStagingInvite(env);
-  const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
-  const limit = inviteMode ? maxInviteUploadIntentBytes : maxUploadIntentBytes;
+  const ownerOnly = privateDriveOrigin(env) !== null && !inviteMode;
   let sent = false;
   try {
     const session = await readSession(request, db);
     if (!session || (ownerOnly && session.principal.role !== 'owner')) return reply(401);
+    const mode = driveUploadMode(env, session.principal.role);
+    const admittedMultipart = firstReleaseOrigin(env) === null ? inviteMode : mode === 'multipart';
+    const limit = admittedMultipart ? multipartLimit(env) : maxUploadIntentBytes;
     if (!Number.isSafeInteger(size) || size < 0 || size > limit ||
-        (expectedParts && driveUploadMode(env, session.principal.role) !== 'multipart')) return reply(400);
+        (expectedParts && mode !== 'multipart')) return reply(400);
     if (!config || !epoch || !verifier) return reply(503);
     const { token, principal: { id: owner } } = session;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);

@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { stagingOrigin } from '../../../lib/server/request-auth';
+import { privateDriveOrigin } from '../../../lib/server/request-auth';
 import { wireUploadStorage } from '../../../lib/server/storage-runtime';
 import { postUploadIntent } from '../../../lib/server/upload-intent';
 import type { RequestHandler } from './$types';
@@ -7,4 +7,4 @@ import type { RequestHandler } from './$types';
 export const trailingSlash = 'ignore';
 
 export const POST: RequestHandler = ({ request }) =>
-  postUploadIntent(request, env.DRIVE_ORIGIN === stagingOrigin ? wireUploadStorage(env) : env);
+  postUploadIntent(request, privateDriveOrigin(env) !== null ? wireUploadStorage(env) : env);

@@ -1,5 +1,5 @@
 import type { LivePrincipalMode } from '../identity/sessions';
-import type { qualificationPrefix } from '../qualification-scope.mjs';
+import type { firstReleaseSmokePrefix, qualificationPrefix } from '../qualification-scope.mjs';
 import { MAX_PART_BYTES } from '../s3/multipart-completion';
 import { requireActiveOwner } from './private';
 
@@ -33,7 +33,7 @@ export interface ExpectedUploadPart {
   readonly sha256: string;
 }
 
-type AllocationPrefix = '' | ReturnType<typeof qualificationPrefix>;
+type AllocationPrefix = '' | ReturnType<typeof qualificationPrefix> | ReturnType<typeof firstReleaseSmokePrefix>;
 
 const maxExpectedUploadBytes = 5 * 1024 ** 3;
 const partSha256 = /^[0-9a-f]{64}$/;

@@ -1,10 +1,10 @@
 import { downloadFile } from './download';
 import { createPublishedReadAccess } from './metadata/read-access';
-import { admitsStagingInvite, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import { createImmutableS3Reader, createS3Objects } from './s3/objects';
 import { storageIdentity, type StorageBindings } from './storage-runtime';
 
-export interface DownloadEnv extends StorageBindings, Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'> {
+export interface DownloadEnv extends StorageBindings, Pick<DriveAuthEnv, 'DRIVE_ORIGIN' | 'DRIVE_FIRST_RELEASE_ORIGIN' | 'DRIVE_STAGING_INVITE_ACCEPTANCE'> {
   DB?: Parameters<typeof createPublishedReadAccess>[0];
 }
 
@@ -15,7 +15,7 @@ export function downloadStorage(env: DownloadEnv, inviteMode: 'own-file' | 'gran
   const identity = storageIdentity(env);
   if (!env.DB || !identity) return null;
   const { settings: config, epoch } = identity;
-  const mode = admitsStagingInvite(env) ? inviteMode : env.DRIVE_ORIGIN === stagingOrigin;
+  const mode = admitsStagingInvite(env) ? inviteMode : privateDriveOrigin(env) !== null;
   return { ...createPublishedReadAccess(env.DB, epoch, config, mode), config };
 }
 
@@ -68,7 +68,7 @@ export async function publishedDownload(request: Request, id: string, token: str
   const storage = downloadStorage(env, 'grant-aware');
   if (!storage) return downloadFile(request, id);
   const { config, storageConfigId, resolveGeneration } = storage;
-  const staging = env.DRIVE_ORIGIN === stagingOrigin;
+  const staging = privateDriveOrigin(env) !== null;
   let generation: Awaited<ReturnType<typeof resolveGeneration>> = null;
   // Start before authorization and keep the same cutoff through storage and native delivery.
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(streamBudget.totalMs)]);

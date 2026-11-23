@@ -5,7 +5,9 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
-import { qualificationPrefix } from '../src/lib/server/qualification-scope.mjs';
+import { firstReleaseUploadCapBytes } from '../src/lib/server/first-release-upload-limit.mjs';
+import { firstReleaseSmokePrefix, qualificationPrefix } from '../src/lib/server/qualification-scope.mjs';
+import { exerciseFirstReleaseCases } from './first-release-smoke-cases.mjs';
 import { routeMethods, stagingRoutes } from '../src/lib/server/staging-routes.ts';
 import { fixture as passkey, userHandle } from '../tests/ceremony-fixture.ts';
 import { deletionWorker, exerciseDeletion } from '../tests/deletion-worker-fixture.mjs';
@@ -156,25 +158,27 @@ async function exerciseStagingRoutes(worker, origin, owner, member) {
   console.log('Generated Worker fixture: staging routes honor declared methods, flags and signed-out behavior');
 }
 
-async function assertRootUploadData(response, mode) {
+async function assertRootUploadData(response, mode, limit) {
   assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
   const { nodes } = JSON.parse((await response.text()).split('\n', 1)[0]);
   // SvelteKit serializes the page as a flattened devalue table; slot zero is the root object.
   const { data } = nodes.at(-1);
   assert.equal(data[data[0].uploadMode], mode);
+  if (limit !== undefined) assert.equal(data[data[0].uploadLimit], limit);
 }
 
 async function exercisePrivateBoundary(main, {
   preview = false, staging = false, rawOutsideStaging = false,
-  qualificationFiles = false, qualificationTransfer = false, stagingRoutesOnly = false,
+  qualificationFiles = false, qualificationTransfer = false, stagingRoutesOnly = false, firstRelease = false,
 } = {}) {
-  const origin = staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
-  const rawStorage = staging || rawOutsideStaging;
+  const origin = firstRelease ? 'https://drive-smoke.example.test' : staging ? 'https://qerith-drive-staging.5150.workers.dev' : 'https://drive.example.test';
+  const rawStorage = staging || rawOutsideStaging || firstRelease;
   const release = 'a'.repeat(40);
   const qualificationVersion = '00000000-0000-4000-8000-000000000002';
   const attempt = { runId: '123', attempt: '2' };
-  const transferScope = Object.freeze({ ...attempt, sha: release, version: qualificationVersion, prefix: qualificationPrefix(attempt) });
-  const enrollmentToken = staging ? randomBytes(32).toString('base64url') : undefined;
+  const transferScope = Object.freeze({ ...attempt, sha: release, version: qualificationVersion, prefix: firstRelease ? firstReleaseSmokePrefix(attempt) : qualificationPrefix(attempt) });
+  const smokeToken = randomBytes(32).toString('base64url');
+  const enrollmentToken = staging || firstRelease ? randomBytes(32).toString('base64url') : undefined;
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   await using fixture = await mkdtempDisposable('.svelte-kit/drive-boundary-');
   const configPath = resolve(join(fixture.path, 'wrangler.json'));
@@ -183,7 +187,7 @@ async function exercisePrivateBoundary(main, {
   await writeFile(entry, `import { withEnv } from 'cloudflare:workers';
 import app, { createDriveWorker } from ${JSON.stringify(resolve(main))};
 ${rawStorage ? `import adapter from ${JSON.stringify(resolve('.svelte-kit/cloudflare-tmp/adapter-worker.js'))};
-globalThis.fetch = ${qualificationTransfer ? `(${qualificationTransferStorage})(${JSON.stringify(transferScope.prefix)})` : `(${fixtureStorage})()`};` : preview ? readGrantWorker : deletionWorker}
+globalThis.fetch = ${qualificationTransfer || firstRelease ? `(${qualificationTransferStorage})(${JSON.stringify(transferScope.prefix)})` : `(${fixtureStorage})()`};` : preview ? readGrantWorker : deletionWorker}
 ${preview ? entryChangeWorker : ''}
 ${preview ? uploadResumeWorker : ''}
 ${preview ? expectedPartsWorker : ''}
@@ -246,9 +250,10 @@ export default {
     DRIVE_S3_REGION: 'test-1', DRIVE_S3_ACCESS_KEY_ID: 'fixture', DRIVE_S3_SECRET_ACCESS_KEY: 'fixture', DRIVE_S3_STORAGE_EPOCH: 'fixture',
     DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, region: 'test-1', completionTimeoutMs: 5000,
       storageConfigId: '["https://storage.example.test","fixture","fixture"]', sourceSha: release, runId: '1', runAttempt: 1 })
-  } : {}), ...(staging ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
+  } : {}), ...(firstRelease ? { DRIVE_FIRST_RELEASE_ORIGIN: origin, DRIVE_FIRST_RELEASE_SMOKE_TOKEN: smokeToken,
+    DRIVE_STAGING_READ_GRANTS: '1', DRIVE_STAGING_SHARED_LISTING: '1' } : {}), ...(staging || firstRelease ? { DRIVE_OWNER_ENROLLMENT_RELEASE: release,
     DRIVE_OWNER_ENROLLMENT: `${release}:${Date.now() + 240_000}:${enrollmentToken}`,
-    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}), ...(qualificationTransfer ? {
+    DRIVE_STAGING_DELETE_REQUESTS: '1' } : {}), ...(qualificationTransfer || firstRelease ? {
     DRIVE_STAGING_INVITE_ACCEPTANCE: '1', DRIVE_QUALIFICATION_SHA: transferScope.sha,
     DRIVE_QUALIFICATION_RUN_ID: transferScope.runId, DRIVE_QUALIFICATION_RUN_ATTEMPT: transferScope.attempt,
     DRIVE_QUALIFICATION_VERSION: { id: transferScope.version }, DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 240_000),
@@ -269,6 +274,23 @@ export default {
         .bind(createHash('sha256').update(token).digest('hex'), id, Date.now() + 60_000).run();
       return `__Host-drive-session=${token}`;
     };
+    if (firstRelease) {
+      const request = (url, init) => worker.fetch(url, { ...init, redirect: 'manual',
+        headers: { ...init.headers, 'x-drive-smoke-token': smokeToken } });
+      assert.equal((await worker.fetch(origin + readinessPath, { method: 'HEAD' })).status, 503);
+      assert.equal((await worker.fetch(origin + readinessPath, { method: 'HEAD',
+        headers: { 'x-drive-smoke-token': randomBytes(32).toString('base64url') } })).status, 503);
+      const result = await exerciseFirstReleaseCases({ ...transferScope, origin, runAttempt: Number(attempt.attempt) },
+        enrollmentToken, AbortSignal.timeout(60_000), request, async (send, cookie) =>
+          assertRootUploadData(await send('GET', '/__data.json', { cookie }), 'multipart', firstReleaseUploadCapBytes));
+      assert.deepEqual(result, { uninvitedDenial: 'pass', invite: 'pass', overCapRefusal: 'pass', multipartResume: 'pass',
+        byteIdenticalDownload: 'pass', share: 'pass', revoke: 'pass', permanentDeletionUnavailable: 'pass' });
+      assert.equal(await DB.prepare('SELECT count(*) AS total FROM drive_upload_intents').first('total'), 1);
+      assert.equal(await DB.prepare('SELECT count(*) AS total FROM drive_upload_part_operations').first('total'), 2);
+      assert.equal(await DB.prepare('SELECT count(*) AS total FROM drive_object_deletion_jobs').first('total'), 0);
+      console.log('Generated Worker: first-release admission, capped multipart resume, bytes, share and revoke, and deletion refusal passed');
+      return;
+    }
     if (qualificationFiles) {
       await exerciseStagingQualificationFiles({ worker, DB, origin, session });
       return;
@@ -743,6 +765,10 @@ const root = '.svelte-kit/cloudflare';
 const asset = '/_app/version.json';
 await access(`${root}${asset}`);
 const appWorker = `${root}/_worker.js`;
+if (process.argv.includes('--first-release-smoke-only')) {
+  await exercisePrivateBoundary(appWorker, { firstRelease: true });
+  process.exit();
+}
 if (process.argv.includes('--staging-routes-only')) {
   await exercisePrivateBoundary(appWorker, { staging: true, stagingRoutesOnly: true });
   process.exit();

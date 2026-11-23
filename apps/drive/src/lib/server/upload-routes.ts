@@ -1,3 +1,5 @@
+import { firstReleaseUploadCapBytes } from './first-release-upload-limit.mjs';
+import { firstReleaseOrigin } from './qualification-readiness';
 import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
@@ -8,7 +10,7 @@ import { readUploadResumeEvidence } from './metadata/upload-resume-evidence';
 import { decodeUploadIdentity, uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { createTrustedUploadPublication, UploadPublicationWriteError } from './metadata/upload-trusted-publication';
 import { admitsSignInFixture, admitsStagingInvite, allowsOrigin, allowsStagingInviteSite,
-  authOrigin, readSessionToken, stagingOrigin, type DriveAuthEnv } from './request-auth';
+  authOrigin, readSessionToken, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartUpload } from './s3/multipart-upload';
@@ -60,6 +62,8 @@ async function destination(request: Request): Promise<{ name: string; parentId: 
 }
 
 export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThis.fetch, timeoutMs: 5000 }) {
+  const firstRelease = firstReleaseOrigin(env) !== null;
+  const withinCap = firstRelease ? `AND i.declared_size BETWEEN 0 AND ${firstReleaseUploadCapBytes}` : '';
   async function authorize(request: Request, session: Session | undefined, intentId: string) {
     const origin = authOrigin(env.DRIVE_ORIGIN);
     const { DB: db, DRIVE_UPLOAD_EPOCH: epoch, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_VERIFIER: verifier } = env;
@@ -71,8 +75,8 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     const { token, principal: { id: ownerId, role } } = session;
     // Keep owner-admitted requests owner-only even when the internal member path is prepared.
     const mode: LivePrincipalMode | undefined = role === 'member' && admitsStagingInvite(env) ? 'active'
-      : env.DRIVE_ORIGIN === stagingOrigin ? 'owner' : undefined;
-    const bound = `${storageBound} ${requireActiveOwner(mode === 'owner', 'i.owner_id')}`;
+      : privateDriveOrigin(env) !== null ? 'owner' : undefined;
+    const bound = `${storageBound} ${withinCap} ${requireActiveOwner(mode === 'owner', 'i.owner_id')}`;
     const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const isQualified = (id: string) => verifier.isQualified(id);
@@ -105,7 +109,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       // Recheck live authority after qualification, in the evidence snapshot itself.
       const evidence = await readUploadResumeEvidence(db, intentId, { token, principalId: id, role, generation },
         { endpoint: settings.endpoint, bucket: settings.bucket, storageEpoch: epoch });
-      return evidence === null ? reply(404) : Response.json(evidence, { headers });
+      return evidence === null || (firstRelease && evidence.declaredSize > firstReleaseUploadCapBytes) ? reply(404) : Response.json(evidence, { headers });
     } catch { return reply(503); }
   }
 
@@ -210,6 +214,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         const row = await db.withSession('first-primary').prepare(`${candidates}
           SELECT operation_id, claim_version, recorded FROM c
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
+            ${firstRelease ? `AND EXISTS (SELECT 1 FROM drive_upload_intents i WHERE i.id = c.intent_id ${withinCap})` : ''}
             ${requireActiveOwner(mode === 'owner', 'c.owner_id')} AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
         if (!row) {
