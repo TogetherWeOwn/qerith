@@ -1,6 +1,9 @@
 import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
+import { firstReleaseUploadCapBytes } from '../lib/server/first-release-upload-limit.mjs';
+import { firstReleaseOrigin } from '../lib/server/qualification-readiness';
+import { maxUploadIntentBytes } from '../lib/server/upload-intent';
 import { downloadStorage } from '../lib/server/published-download';
 import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, admitsStagingReadGrants, driveUploadMode, privateDriveOrigin, type DriveUploadMode } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
@@ -41,7 +44,9 @@ export const load: PageServerLoad = async (event) => {
   const uploadStorageReady = uploadPolicy !== 'disabled' && (staging ? !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER :
     !!(env.DRIVE_UPLOAD_S3 && env.DRIVE_UPLOAD_EPOCH && env.DRIVE_UPLOAD_VERIFIER));
   const uploadMode: DriveUploadMode = uploadStorageReady ? uploadPolicy : 'disabled';
-  return { listing, uploadMode, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
+  const uploadLimit = firstReleaseOrigin(env) !== null && uploadMode !== 'disabled'
+    ? uploadMode === 'multipart' ? firstReleaseUploadCapBytes : maxUploadIntentBytes : undefined;
+  return { listing, uploadMode, uploadLimit, staging, downloadAllowed, page: rootPageCursor(pages) ?? null,
     folderLinks: fixture || inviteMode,
     metadataWriteAllowed: inviteMode && (role === 'owner' || role === 'member'),
     shareOwner: principal && inviteMode && listing?.status === 'ok' && admitsStagingReadGrants(env)

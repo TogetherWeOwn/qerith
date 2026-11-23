@@ -15,8 +15,8 @@
   import type { RootListingResult } from './server/root-listing';
   import './tokens.css';
 
-  let { result: initial, page, uploadMode, staging, downloadAllowed, metadataWriteAllowed, folderLinks, shareOwner, onInvite }: {
-    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; staging: boolean; downloadAllowed: boolean;
+  let { result: initial, page, uploadMode, uploadLimit, staging, downloadAllowed, metadataWriteAllowed, folderLinks, shareOwner, onInvite }: {
+    result: RootListingResult; page: string | null; uploadMode: DriveUploadMode; uploadLimit?: number; staging: boolean; downloadAllowed: boolean;
     metadataWriteAllowed: boolean; folderLinks: boolean;
     shareOwner?: { recipientId: string; driveOwner: boolean };
     onInvite?: () => void;
@@ -193,7 +193,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (only -1, for focus recovery) -->
   <h1 bind:this={heading} tabindex={metadataWriteAllowed || staging ? -1 : undefined}>My Drive</h1>
   {#if uploadMode !== 'disabled' && result.status === 'ok'}
-    <RootUpload mode={uploadMode} announce={uploadFeedback} {refresh} paginated={page !== null} bind:busy />
+    <RootUpload mode={uploadMode} {uploadLimit} announce={uploadFeedback} {refresh} paginated={page !== null} bind:busy />
   {/if}
   {#if metadataWriteAllowed}
     <MoveDialog bind:this={moveDialog} onrootcreated={folderCreated} onmoved={moved} onreturn={returnToRow} />

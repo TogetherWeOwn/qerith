@@ -19,8 +19,9 @@ credential can manage the disposable Worker and D1, and read the named bucket
 metadata, domain settings and lifecycle. Confirm the S3 signer is scoped to the
 dedicated bucket for object and multipart reads, writes and cleanup. Scope the
 provider policy as narrowly as the service supports. Record the effective
-policy and any limits in the custody evidence. The workflow checks the bindings
-against that evidence and verifies the named resources through the provider.
+policy and any limits in the custody evidence. The workflow checks the protected
+target declaration and credential fingerprints, then verifies the named
+resources through the provider.
 
 - Use a fresh D1 database named `qerith-drive-first-release-smoke-<fixture>`.
   Its custody record must authorize deleting that exact UUID after the attempt.
@@ -73,11 +74,12 @@ checks the saved prefix, and uploads only the remaining 257 bytes. The
 uploader and grantee downloads must match the source byte count and SHA-256.
 The run proves grant revocation and membership revocation, refuses cap plus one
 and an oversized final part, and verifies permanent deletion is unavailable.
-The existing owner preview has its own one-part limit.
+The first-release picker checks the same limit before hashing. The owner upload
+preview has a one-part limit. Shared staging keeps its existing upload policy.
 
-Cleanup first removes and verifies absence of the attempt Worker, then aborts
-and removes only the exact R2 attempt prefix, verifies it is empty, and removes
-and verifies absence of the named disposable D1 UUID. An incomplete run or
+Cleanup first removes and verifies absence of the attempt Worker. It then
+removes and verifies the exact R2 attempt prefix and the named disposable D1
+UUID. This includes aborting any remaining multipart upload in that prefix. An incomplete run or
 cleanup leaves the release without a receipt. If a runner is lost, wait for the
 Worker deadline, verify and remove the exact attempt Worker using its source,
 run, attempt, build digest and D1 bindings, then reconcile the known fixture

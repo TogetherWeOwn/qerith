@@ -7,13 +7,12 @@ import { createS3Listing } from '../src/lib/server/s3/listing.ts';
 import { createS3Transport } from '../src/lib/server/s3/transport.ts';
 import { firstReleaseBuildDigest } from './first-release-build-digest.mjs';
 import { exerciseFirstReleaseCases } from './first-release-smoke-cases.mjs';
-import { scopedSmokeTarget, smokeDispatch, smokeProvider } from './first-release-smoke-target.mjs';
+import { scopedSmokeTarget, smokeDispatch, smokeMigrationArgs, smokeProvider, smokeWorkerConfig } from './first-release-smoke-target.mjs';
 import { cleanR2Prefix, readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
 
 const cases = ['invite', 'uninvitedDenial', 'share', 'revoke', 'multipartResume', 'byteIdenticalDownload',
   'overCapRefusal', 'permanentDeletionUnavailable'];
 const versionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const expiryMs = 12 * 60_000;
 const completionTimeoutMs = 3000;
 
 function wrangler(args, target, timeout, extraEnv) {
@@ -37,32 +36,9 @@ async function publish(scope, target) {
   const epoch = `smoke-${scope.runId}-${scope.runAttempt}`;
   const bootstrapToken = randomBytes(32).toString('base64url');
   const smokeToken = randomBytes(32).toString('base64url');
-  await writeFile(configPath, JSON.stringify({
-    ...config,
-    name: scope.worker,
-    main: resolve('.svelte-kit/first-release-package/_worker.js'),
-    assets: { ...config.assets, directory: resolve(config.assets.directory) },
-    workers_dev: true,
-    preview_urls: false,
-    upload_source_maps: false,
-    d1_databases: [{ binding: 'DB', database_id: target.databaseId, database_name: target.databaseName,
-      migrations_dir: resolve('migrations') }],
-    version_metadata: { binding: 'DRIVE_QUALIFICATION_VERSION' },
-    vars: {
-      DRIVE_ORIGIN: target.origin,
-      DRIVE_FIRST_RELEASE_ORIGIN: target.origin,
-      DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
-      DRIVE_STAGING_READ_GRANTS: '1',
-      DRIVE_STAGING_SHARED_LISTING: '1',
-      DRIVE_OWNER_ENROLLMENT_RELEASE: scope.sha,
-      DRIVE_QUALIFICATION_SHA: scope.sha,
-      DRIVE_FIRST_RELEASE_BUILD_DIGEST: scope.buildDigest,
-      DRIVE_QUALIFICATION_RUN_ID: scope.runId,
-      DRIVE_QUALIFICATION_RUN_ATTEMPT: String(scope.runAttempt),
-      DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + expiryMs),
-    },
-  }), { mode: 0o600 });
-  wrangler(['d1', 'migrations', 'apply', target.databaseId, '--remote', '--config', configPath], target, 120_000);
+  const settings = smokeWorkerConfig(config, scope, target, Date.now());
+  await writeFile(configPath, JSON.stringify(settings), { mode: 0o600 });
+  wrangler([...smokeMigrationArgs(configPath), '--remote'], target, 120_000);
   await writeFile(secretsPath, JSON.stringify({
     DRIVE_FIRST_RELEASE_SMOKE_TOKEN: smokeToken,
     DRIVE_OWNER_ENROLLMENT: `${scope.sha}:${Date.now() + 290_000}:${bootstrapToken}`,

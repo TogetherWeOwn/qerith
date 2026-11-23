@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: drive-first-release-smoke
+  group: drive-staging-lifecycle
   cancel-in-progress: false
 
 jobs:

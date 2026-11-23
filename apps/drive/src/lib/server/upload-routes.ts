@@ -1,4 +1,5 @@
 import { firstReleaseUploadCapBytes } from './first-release-upload-limit.mjs';
+import { firstReleaseOrigin } from './qualification-readiness';
 import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
@@ -33,8 +34,7 @@ const reply = (status: number) => new Response(null, { status, headers });
 const owned = `JOIN drive_sessions s ON s.principal_id = i.owner_id JOIN drive_active_members m ON m.id = i.owner_id
   WHERE i.id = ? AND i.owner_id = ? AND s.token_hash = ? AND s.expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)`;
 const storageBound = `FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id ${owned}
-    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ?
-    AND i.declared_size BETWEEN 0 AND ${firstReleaseUploadCapBytes}`;
+    AND b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ?`;
 const unfenced = `NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims WHERE intent_id = i.id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones WHERE intent_id = i.id)
     AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_attempts WHERE intent_id = i.id)`;
@@ -62,6 +62,8 @@ async function destination(request: Request): Promise<{ name: string; parentId: 
 }
 
 export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThis.fetch, timeoutMs: 5000 }) {
+  const firstRelease = firstReleaseOrigin(env) !== null;
+  const withinCap = firstRelease ? `AND i.declared_size BETWEEN 0 AND ${firstReleaseUploadCapBytes}` : '';
   async function authorize(request: Request, session: Session | undefined, intentId: string) {
     const origin = authOrigin(env.DRIVE_ORIGIN);
     const { DB: db, DRIVE_UPLOAD_EPOCH: epoch, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_VERIFIER: verifier } = env;
@@ -74,7 +76,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     // Keep owner-admitted requests owner-only even when the internal member path is prepared.
     const mode: LivePrincipalMode | undefined = role === 'member' && admitsStagingInvite(env) ? 'active'
       : privateDriveOrigin(env) !== null ? 'owner' : undefined;
-    const bound = `${storageBound} ${requireActiveOwner(mode === 'owner', 'i.owner_id')}`;
+    const bound = `${storageBound} ${withinCap} ${requireActiveOwner(mode === 'owner', 'i.owner_id')}`;
     const allocated = `${bound} AND ${unfenced} AND ${unsealed}`;
     const { settings, storageConfigId } = uploadStorageEvidence(config, epoch);
     const isQualified = (id: string) => verifier.isQualified(id);
@@ -107,7 +109,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
       // Recheck live authority after qualification, in the evidence snapshot itself.
       const evidence = await readUploadResumeEvidence(db, intentId, { token, principalId: id, role, generation },
         { endpoint: settings.endpoint, bucket: settings.bucket, storageEpoch: epoch });
-      return evidence === null || evidence.declaredSize > firstReleaseUploadCapBytes ? reply(404) : Response.json(evidence, { headers });
+      return evidence === null || (firstRelease && evidence.declaredSize > firstReleaseUploadCapBytes) ? reply(404) : Response.json(evidence, { headers });
     } catch { return reply(503); }
   }
 
@@ -212,8 +214,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
         const row = await db.withSession('first-primary').prepare(`${candidates}
           SELECT operation_id, claim_version, recorded FROM c
           WHERE intent_id = ? AND owner_id = ? AND session_hash = ? AND endpoint = ? AND bucket = ? AND storage_epoch = ?
-            AND EXISTS (SELECT 1 FROM drive_upload_intents i WHERE i.id = c.intent_id
-              AND i.declared_size BETWEEN 0 AND ${firstReleaseUploadCapBytes})
+            ${firstRelease ? `AND EXISTS (SELECT 1 FROM drive_upload_intents i WHERE i.id = c.intent_id ${withinCap})` : ''}
             ${requireActiveOwner(mode === 'owner', 'c.owner_id')} AND ${availableUploadDestination('c.owner_id')}`)
           .bind(...bindings, ...destinationBindings).first<{ operation_id: string; claim_version: number; recorded: number }>();
         if (!row) {

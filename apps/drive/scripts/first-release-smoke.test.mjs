@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { scopedSmokeTarget, smokeDispatch, smokeProvider } from './first-release-smoke-target.mjs';
+import { scopedSmokeTarget, smokeDispatch, smokeMigrationArgs, smokeProvider, smokeWorkerConfig } from './first-release-smoke-target.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const token = 't'.repeat(40), key = 'b'.repeat(32), now = 1_800_000_000_000;
@@ -112,6 +115,22 @@ test('cleanup deletes only owned attempt resources and requires absence readback
   });
   await api.removeDb();
   assert.deepEqual(trace.slice(-3), [`GET ${d1}`, `DELETE ${d1}`, `GET ${d1}`]);
+});
+
+test('locked Wrangler applies smoke migrations through the pinned D1 binding', async () => {
+  const scope = smokeDispatch(dispatch), target = scopedSmokeTarget(env, scope, { now });
+  const config = JSON.parse(await readFile(new URL('../wrangler.build.jsonc', import.meta.url), 'utf8'));
+  await using temp = await mkdtempDisposable(join(tmpdir(), 'drive-smoke-d1-'));
+  const configPath = join(temp.path, 'wrangler.json'), storage = join(temp.path, 'storage');
+  const settings = smokeWorkerConfig(config, { ...scope, buildDigest: 'f'.repeat(64) }, target, now);
+  assert.equal(settings.d1_databases[0].database_id, target.databaseId);
+  await writeFile(configPath, JSON.stringify(settings));
+  const options = { encoding: 'utf8', timeout: 30_000, env: { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' } };
+  const wrangler = resolve('node_modules/.bin/wrangler');
+  execFileSync(wrangler, [...smokeMigrationArgs(configPath), '--local', '--persist-to', storage], options);
+  const output = execFileSync(wrangler, ['d1', 'execute', 'DB', '--local', '--config', configPath, '--persist-to', storage,
+    '--json', '--command', "SELECT name FROM sqlite_schema WHERE name = 'drive_principals'"], options);
+  assert.deepEqual(JSON.parse(output)[0].results, [{ name: 'drive_principals' }]);
 });
 
 test('protected workflow has one success-only attempt receipt', async () => {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
 import { readBoundedBody } from '../src/lib/server/bounded-io.ts';
 import { firstReleaseSmokeNamespace, firstReleaseSmokePrefix, isQualificationRunNumber } from '../src/lib/server/qualification-scope.mjs';
 
@@ -133,4 +134,37 @@ export function smokeProvider(target, scope, request = fetch) {
       if (await readDb() !== null) throw new Error('Disposable D1 removal could not be verified');
     },
   };
+}
+
+export function smokeWorkerConfig(config, scope, target, now) {
+  return {
+    ...config,
+    name: scope.worker,
+    main: resolve('.svelte-kit/first-release-package/_worker.js'),
+    assets: { ...config.assets, directory: resolve(config.assets.directory) },
+    workers_dev: true,
+    preview_urls: false,
+    upload_source_maps: false,
+    d1_databases: [{ binding: 'DB', database_id: target.databaseId, database_name: target.databaseName,
+      migrations_dir: resolve('migrations') }],
+    version_metadata: { binding: 'DRIVE_QUALIFICATION_VERSION' },
+    vars: {
+      DRIVE_ORIGIN: target.origin,
+      DRIVE_FIRST_RELEASE_ORIGIN: target.origin,
+      DRIVE_STAGING_INVITE_ACCEPTANCE: '1',
+      DRIVE_STAGING_READ_GRANTS: '1',
+      DRIVE_STAGING_SHARED_LISTING: '1',
+      DRIVE_OWNER_ENROLLMENT_RELEASE: scope.sha,
+      DRIVE_QUALIFICATION_SHA: scope.sha,
+      DRIVE_FIRST_RELEASE_BUILD_DIGEST: scope.buildDigest,
+      DRIVE_QUALIFICATION_RUN_ID: scope.runId,
+      DRIVE_QUALIFICATION_RUN_ATTEMPT: String(scope.runAttempt),
+      DRIVE_QUALIFICATION_EXPIRES_AT: String(now + 12 * 60_000),
+    },
+  };
+}
+
+export function smokeMigrationArgs(configPath) {
+  // Wrangler resolves D1 migrations by config binding or database name.
+  return ['d1', 'migrations', 'apply', 'DB', '--config', configPath];
 }

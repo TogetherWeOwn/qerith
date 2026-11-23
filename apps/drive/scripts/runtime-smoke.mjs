@@ -5,6 +5,7 @@ import { access, mkdtempDisposable, readdir, readFile, writeFile } from 'node:fs
 import { join, resolve } from 'node:path';
 import { createTestHarness, unstable_splitSqlQuery } from 'wrangler';
 import { readinessHeaders, readinessPath } from '../src/lib/server/qualification-readiness.ts';
+import { firstReleaseUploadCapBytes } from '../src/lib/server/first-release-upload-limit.mjs';
 import { firstReleaseSmokePrefix, qualificationPrefix } from '../src/lib/server/qualification-scope.mjs';
 import { exerciseFirstReleaseCases } from './first-release-smoke-cases.mjs';
 import { routeMethods, stagingRoutes } from '../src/lib/server/staging-routes.ts';
@@ -157,12 +158,13 @@ async function exerciseStagingRoutes(worker, origin, owner, member) {
   console.log('Generated Worker fixture: staging routes honor declared methods, flags and signed-out behavior');
 }
 
-async function assertRootUploadData(response, mode) {
+async function assertRootUploadData(response, mode, limit) {
   assert.deepEqual([response.status, response.headers.get('cache-control')], [200, 'private, no-store']);
   const { nodes } = JSON.parse((await response.text()).split('\n', 1)[0]);
   // SvelteKit serializes the page as a flattened devalue table; slot zero is the root object.
   const { data } = nodes.at(-1);
   assert.equal(data[data[0].uploadMode], mode);
+  if (limit !== undefined) assert.equal(data[data[0].uploadLimit], limit);
 }
 
 async function exercisePrivateBoundary(main, {
@@ -279,7 +281,8 @@ export default {
       assert.equal((await worker.fetch(origin + readinessPath, { method: 'HEAD',
         headers: { 'x-drive-smoke-token': randomBytes(32).toString('base64url') } })).status, 503);
       const result = await exerciseFirstReleaseCases({ ...transferScope, origin, runAttempt: Number(attempt.attempt) },
-        enrollmentToken, AbortSignal.timeout(60_000), request);
+        enrollmentToken, AbortSignal.timeout(60_000), request, async (send, cookie) =>
+          assertRootUploadData(await send('GET', '/__data.json', { cookie }), 'multipart', firstReleaseUploadCapBytes));
       assert.deepEqual(result, { uninvitedDenial: 'pass', invite: 'pass', overCapRefusal: 'pass', multipartResume: 'pass',
         byteIdenticalDownload: 'pass', share: 'pass', revoke: 'pass', permanentDeletionUnavailable: 'pass' });
       assert.equal(await DB.prepare('SELECT count(*) AS total FROM drive_upload_intents').first('total'), 1);

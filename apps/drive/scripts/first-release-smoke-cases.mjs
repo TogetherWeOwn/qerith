@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { setTimeout } from 'node:timers/promises';
 import { readBoundedBody } from '../src/lib/server/bounded-io.ts';
 import { firstReleaseUploadCapBytes as cap } from '../src/lib/server/first-release-upload-limit.mjs';
 import { MAX_PART_BYTES as partBytes } from '../src/lib/server/s3/multipart-completion.ts';
@@ -16,7 +17,7 @@ function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export async function verifyFirstReleaseWorker({ origin, sha, version }, signal, request = fetch) {
+async function verifyFirstReleaseWorker({ origin, sha, version }, signal, request = fetch) {
   const nonce = randomBytes(16).toString('hex');
   const response = await request(origin + readinessPath, { method: 'HEAD', redirect: 'error',
     cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
@@ -26,7 +27,22 @@ export async function verifyFirstReleaseWorker({ origin, sha, version }, signal,
     response.headers.get(readinessHeaders.version) === version, 'Worker readiness identity did not match');
 }
 
-export async function exerciseFirstReleaseCases(scope, bootstrapToken, signal, request = fetch) {
+async function waitForFirstReleaseWorker(scope, signal, request) {
+  const active = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await verifyFirstReleaseWorker(scope, active, request);
+      active.throwIfAborted();
+      return;
+    } catch {
+      active.throwIfAborted();
+      if (attempt < 4) await setTimeout(1500, undefined, { signal: active });
+    }
+  }
+  throw new Error('Worker did not become ready');
+}
+
+export async function exerciseFirstReleaseCases(scope, bootstrapToken, signal, request = fetch, verifyPicker) {
   const { origin, runId, runAttempt } = scope;
   const rpID = new URL(origin).hostname;
   const tag = `${runId}-${runAttempt}`;
@@ -78,7 +94,7 @@ export async function exerciseFirstReleaseCases(scope, bootstrapToken, signal, r
     } };
   }
   try {
-    await verifyFirstReleaseWorker(scope, signal, request);
+    await waitForFirstReleaseWorker(scope, signal, request);
 
     step = 'owner bootstrap';
     const path = '/api/deployer/owner-enrollment';
@@ -120,6 +136,7 @@ export async function exerciseFirstReleaseCases(scope, bootstrapToken, signal, r
     }
     const uploader = await invite('uploader');
     const recipient = await invite('recipient');
+    await verifyPicker?.(send, uploader.cookie);
     cases.invite = 'pass';
 
     step = 'over-cap refusal';
@@ -191,7 +208,7 @@ export async function exerciseFirstReleaseCases(scope, bootstrapToken, signal, r
 
     step = 'permanent deletion unavailable';
     for (const cookie of [resumedCookie, ownerCookie]) {
-      await expect(await send('POST', `/api/entries/${file}/delete`, { cookie }), 404);
+      await expect(await send('POST', `/api/entries/${file}/delete`, { cookie, body: { confirm: 'permanent-delete' } }), 404);
       await expect(await send('DELETE', `/api/entries/${file}`, { cookie }), 404);
     }
     await verifyDownload(resumedCookie);

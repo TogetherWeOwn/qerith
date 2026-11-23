@@ -7,14 +7,17 @@ export interface DriveReleaseOrigin {
 }
 
 // The additional origin comes from protected deployment bindings.
-export function privateDriveOrigin(env: DriveReleaseOrigin): string | null {
+export function firstReleaseOrigin(env: DriveReleaseOrigin): string | null {
   const { DRIVE_ORIGIN: origin, DRIVE_FIRST_RELEASE_ORIGIN: release } = env;
-  if (origin === stagingOrigin) return stagingOrigin;
   if (typeof origin !== 'string' || origin !== release) return null;
   try {
     const url = new URL(origin);
     return url.protocol === 'https:' && url.origin === origin ? origin : null;
   } catch { return null; }
+}
+
+export function privateDriveOrigin(env: DriveReleaseOrigin): string | null {
+  return env.DRIVE_ORIGIN === stagingOrigin ? stagingOrigin : firstReleaseOrigin(env);
 }
 
 export const readinessPath = '/api/deployer/qualification-readiness';

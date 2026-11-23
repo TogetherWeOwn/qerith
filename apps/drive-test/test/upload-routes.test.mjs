@@ -15,7 +15,7 @@ const origin = 'https://drive.example.test';
 const uploadId = 'provider-upload-id', tag = '"provider-part-tag"', minimum = 5 * 1024 * 1024;
 
 async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualified, endpoint = config.endpoint,
-  size = 7, expectedParts = null, completionTimeoutMs = () => 15_000, staging = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
+  size = 7, expectedParts = null, completionTimeoutMs = () => 15_000, staging = false, firstRelease = false, inviteFlag, role = staging ? 'owner' : 'member' } = {}) {
   const requestOrigin = staging ? stagingOrigin : origin;
   await applyD1Migrations(env.DB, migrations);
   const intent = crypto.randomUUID(), key = `private-storage-${intent}`, principal = `uploader-${intent}`;
@@ -28,7 +28,7 @@ async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualifi
   await sql("UPDATE drive_upload_intents SET state = 'allocated', upload_id = ?, version = 2 WHERE id = ?", uploadId, intent).run();
   const { token } = await sessions.issue(principal), foreign = (await sessions.issue(other)).token;
   const bindings = { DB: env.DB, DRIVE_ORIGIN: requestOrigin, DRIVE_UPLOAD_S3: config, DRIVE_UPLOAD_EPOCH: epoch,
-    DRIVE_STAGING_INVITE_ACCEPTANCE: inviteFlag,
+    DRIVE_STAGING_INVITE_ACCEPTANCE: inviteFlag, DRIVE_FIRST_RELEASE_ORIGIN: firstRelease ? requestOrigin : undefined,
     DRIVE_UPLOAD_VERIFIER: isQualified ? { isQualified: (id) => isQualified(id, intent, token), completionTimeoutMs,
       verifyParts: (upload) => verify ? verify(upload, parts) : [...parts].sort((a, b) => a.partNumber - b.partNumber) } : undefined };
   const routes = uploadRoutes(bindings, { timeoutMs: 5000, async fetch(request) {
@@ -101,7 +101,7 @@ it('claims only the planned slot, size and digest of a bound upload', async () =
 });
 
 it('rejects part, resume and completion for an existing intent above the first-release cap', async () => {
-  const { send, resume, intent, calls } = await fixture({ staging: true, inviteFlag: '1', role: 'member',
+  const { send, resume, intent, calls } = await fixture({ firstRelease: true, inviteFlag: '1',
     size: firstReleaseUploadCapBytes + 1, expectedParts: 'a'.repeat(128) });
   expect((await send(2, { bytes: 258 })).status).toBe(404);
   expect((await resume()).status).toBe(404);
@@ -109,6 +109,23 @@ it('rejects part, resume and completion for an existing intent above the first-r
   expect(await partClaim(intent)).toBeNull();
   expect(await sql('SELECT 1 FROM drive_upload_completion_operations WHERE intent_id = ?', intent).first()).toBeNull();
   expect(calls).toEqual([]);
+});
+
+it('keeps the first-release grant boundary on the explicit origin and exact opt-in', async () => {
+  const { principal } = await fixture();
+  const { token } = await sessions.issue(principal);
+  const entry = crypto.randomUUID();
+  const path = `/api/entries/${entry}/read-grants`;
+  for (const [release, flag, expected] of [[origin, '1', 204], [undefined, '1', 404],
+    ['https://other.example.test', '1', 404], [origin, '0', 404]]) {
+    const handle = privateRequests({ DB: env.DB, DRIVE_ORIGIN: origin, DRIVE_FIRST_RELEASE_ORIGIN: release,
+      DRIVE_STAGING_READ_GRANTS: flag });
+    const request = new Request(origin + path, { headers: { cookie: `__Host-drive-session=${token}` } });
+    const route = { id: '/api/entries/[entryId]/read-grants' };
+    const response = await handle({ event: { request, route, locals: {} },
+      resolve: () => new Response(null, { status: 204 }) });
+    expect(response.status).toBe(expected);
+  }
 });
 
 it.each([0, 16 * 1024 * 1024])('dispatches and acknowledges a bound part of %i bytes', async (size) => {

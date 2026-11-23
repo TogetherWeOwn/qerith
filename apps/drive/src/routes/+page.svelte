@@ -26,7 +26,7 @@
     </div>
   {/if}
   {#if data.listing}
-    <RootListingView result={data.listing} page={data.page} uploadMode={data.uploadMode}
+    <RootListingView result={data.listing} page={data.page} uploadMode={data.uploadMode} uploadLimit={data.uploadLimit}
       staging={data.staging} downloadAllowed={data.downloadAllowed} metadataWriteAllowed={data.metadataWriteAllowed}
       folderLinks={data.folderLinks} shareOwner={data.shareOwner}
       onInvite={data.ownerInvites ? () => location.assign('/people') : undefined} />
