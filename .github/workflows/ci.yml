@@ -814,7 +814,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - run: python3 -IB -m unittest discover -s scripts/drive-release -p test_preflight.py -v
+      - run: python3 -IB -m unittest discover -s scripts/drive-release -p "test_*.py" -v
 
   ci-ok:
     name: ci-ok
