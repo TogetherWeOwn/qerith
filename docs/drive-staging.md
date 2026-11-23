@@ -1,4 +1,98 @@
-# Drive staging preparation metadata
+# Drive staging
+
+## First private release smoke
+
+Rank 10 runs [the staging smoke workflow](../.github/workflows/drive-first-release-smoke.yml)
+from protected `main` with `expected_main_sha` set to the reviewed full commit
+SHA. Confirm required checks and both reviews for the release candidate before
+dispatch. The `staging` GitHub environment must allow the `main` branch only.
+Use a new disposable D1 database for each attempt. The published Worker and the
+database are removed during cleanup.
+
+### Provider target and access
+
+Before dispatch, record dated provider custody evidence for the exact
+Cloudflare account, workers.dev subdomain, disposable database UUID and name,
+private bucket, and credentials. Confirm exclusive use of the database and the
+reserved Worker and object namespaces for the attempt. Confirm the Cloudflare
+credential can manage the disposable Worker and D1, and read the named bucket
+metadata, domain settings and lifecycle. Confirm the S3 signer is scoped to the
+dedicated bucket for object and multipart reads, writes and cleanup. Scope the
+provider policy as narrowly as the service supports. Record the effective
+policy and any limits in the custody evidence. The workflow checks the bindings
+against that evidence and verifies the named resources through the provider.
+
+- Use a fresh D1 database named `qerith-drive-first-release-smoke-<fixture>`.
+  Its custody record must authorize deleting that exact UUID after the attempt.
+  The preflight checks for an empty schema before it applies committed migrations.
+- Use the default-jurisdiction private bucket `qerith-drive-first-release-smoke`
+  or a bucket with that name as a hyphen-delimited prefix. Disable public
+  r2.dev access and remove custom domain registrations. Preconfigure native
+  expiry scoped to `drive-first-release-smoke/` for objects within three days
+  and multipart attempts within seven days.
+- Reserve the Worker name `qerith-drive-first-release-smoke-<run-id>-<attempt>`
+  and the R2 prefix `drive-first-release-smoke/<run-id>/<attempt>/` for the
+  workflow. It verifies both are unused before mutation. The Worker requires
+  an attempt-only request secret and stops admitting requests after 12 minutes.
+
+Set these environment secrets under `staging` after verifying the provider
+evidence.
+
+| Name | Value |
+| --- | --- |
+| `QERITH_FIRST_RELEASE_SMOKE_TARGET` | JSON with `accountId`, `databaseId`, `databaseName`, `bucket`, the single-label `workerSubdomain`, SHA-256 `scopeEvidenceDigest` of the custody record, Unix milliseconds `expiresAt`, and lowercase SHA-256 `deployTokenHash` and `accessKeyIdHash` of the exact credential strings |
+| `QERITH_FIRST_RELEASE_SMOKE_CLOUDFLARE_TOKEN` | Authorized smoke Cloudflare API token |
+| `QERITH_FIRST_RELEASE_SMOKE_R2_ACCESS_KEY_ID` | Smoke bucket S3 access key ID |
+| `QERITH_FIRST_RELEASE_SMOKE_R2_SECRET_ACCESS_KEY` | Smoke bucket S3 secret access key |
+
+Target authorization must cover at least 15 minutes when the exercise starts.
+Record the claim and live run in the release task. A missing or unverified
+binding stops the workflow before staging writes. The existing shared staging
+credentials and full-qualification evidence apply to their own target.
+
+### Cases and receipt
+
+The workflow builds with the full source SHA as the asset version and packages
+with locked Wrangler. From `apps/drive` use the same Node and npm versions as
+the workflow and run these commands.
+
+```sh
+DRIVE_BUILD_SHA="$GITHUB_SHA" npm run build
+node_modules/.bin/wrangler deploy .svelte-kit/cloudflare/_worker.js \
+  --config wrangler.build.jsonc --dry-run --outdir .svelte-kit/first-release-package
+node scripts/first-release-build-digest.mjs
+```
+
+The build digest hashes the prebundled Worker and path-sorted asset hashes.
+Deployment uploads that Worker with `--no-bundle`. The smoke checks the serving
+SHA and provider version using a fresh nonce before and after the cases.
+It enrolls a synthetic owner using a short-lived, release-bound one-shot
+bootstrap and enrolls two invited members. It checks that uninvited access is
+denied. It stops after the first acknowledged 16 MiB part, signs in again,
+checks the saved prefix, and uploads only the remaining 257 bytes. The
+uploader and grantee downloads must match the source byte count and SHA-256.
+The run proves grant revocation and membership revocation, refuses cap plus one
+and an oversized final part, and verifies permanent deletion is unavailable.
+The existing owner preview has its own one-part limit.
+
+Cleanup first removes and verifies absence of the attempt Worker, then aborts
+and removes only the exact R2 attempt prefix, verifies it is empty, and removes
+and verifies absence of the named disposable D1 UUID. An incomplete run or
+cleanup leaves the release without a receipt. If a runner is lost, wait for the
+Worker deadline, verify and remove the exact attempt Worker using its source,
+run, attempt, build digest and D1 bindings, then reconcile the known fixture
+prefix and database under the same custody authorization. Record the readbacks
+before retrying with a fresh database. Provider expiry bounds orphaned R2
+fixtures while reconciliation is pending.
+
+A successful run publishes exactly one artifact
+`drive-first-release-smoke-<full-sha>-attempt-<run-attempt>` containing
+`receipt.json` for seven days. The receipt records the source SHA, run ID and
+attempt, build digest, immutable Worker version, tested cap in bytes
+(16,777,473), and the passed cases including cleanup. Rank 10 records the
+exact successful run and artifact for the production release preflight.
+
+## Shared staging preparation metadata
 
 The credential-free Drive CI job tests a closed-admission metadata contract. It
 validates an immutable source SHA, GitHub run ID and attempt, the corresponding

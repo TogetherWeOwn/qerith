@@ -15,3 +15,16 @@ export function qualificationPrefix({ runId, attempt }) {
   }
   return `${qualificationFixtureNamespace}${runId}/${attempt}/`;
 }
+
+export const firstReleaseSmokeNamespace = 'drive-first-release-smoke/';
+
+/**
+ * @param {{ runId: unknown, attempt: unknown }} identity
+ * @returns {`${typeof firstReleaseSmokeNamespace}${string}/${string}/`}
+ */
+export function firstReleaseSmokePrefix({ runId, attempt }) {
+  if (!isQualificationRunNumber(runId) || !isQualificationRunNumber(attempt)) {
+    throw new Error('Invalid first-release smoke run or attempt.');
+  }
+  return `${firstReleaseSmokeNamespace}${runId}/${attempt}/`;
+}

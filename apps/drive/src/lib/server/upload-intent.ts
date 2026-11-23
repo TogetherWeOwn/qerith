@@ -1,17 +1,16 @@
+import { firstReleaseUploadCapBytes } from './first-release-upload-limit.mjs';
 import { readBoundedBody } from './bounded-io';
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type ExpectedUploadPart, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
 import { qualificationAllocationPrefix, type QualificationReadinessEnv } from './qualification-readiness';
-import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES } from './s3/multipart-completion';
 import { createMultipartCreate } from './s3/multipart-create';
 
 // The first-upload preview fits in one existing bounded part.
 export const maxUploadIntentBytes = MAX_PART_BYTES;
-// Match the v0 multipart client ceiling; individual parts remain bounded separately.
-const maxInviteUploadIntentBytes = 5 * 1024 ** 3;
 export interface UploadIntentEnv extends DriveAuthEnv, QualificationReadinessEnv {
   DB?: UploadAllocationDatabase;
   DRIVE_UPLOAD_S3?: S3Config;
@@ -26,8 +25,8 @@ const reply = (status: number) => new Response(null, { status, headers });
 
 const intentBodyLimit = 64;
 const sha256HexLength = 64;
-const boundIntentBodyLimit = JSON.stringify({ size: maxInviteUploadIntentBytes, expectedPartSha256s: '' }).length +
-  maxInviteUploadIntentBytes / MAX_PART_BYTES * sha256HexLength;
+const boundIntentBodyLimit = JSON.stringify({ size: firstReleaseUploadCapBytes, expectedPartSha256s: '' }).length +
+  Math.ceil(firstReleaseUploadCapBytes / MAX_PART_BYTES) * sha256HexLength;
 const intentReadMs = 2_000;
 type IntentInput = { size: number; expectedParts?: readonly ExpectedUploadPart[] };
 
@@ -57,7 +56,7 @@ async function readIntent(request: Request, inviteMode: boolean): Promise<Intent
     if (!bound || bound[0] !== json) return null;
     const size = Number(bound[1]), packed = bound[2];
     const count = Math.max(1, Math.ceil(size / MAX_PART_BYTES));
-    if (size > maxInviteUploadIntentBytes || packed.length !== count * sha256HexLength) return null;
+    if (size > firstReleaseUploadCapBytes || packed.length !== count * sha256HexLength) return null;
     const expectedParts = Array.from({ length: count }, (_, i) => ({
       partNumber: i + 1,
       sizeBytes: Math.min(MAX_PART_BYTES, size - i * MAX_PART_BYTES),
@@ -92,11 +91,11 @@ export async function createUploadIntent(request: Request, size: number, env: Up
   if (!allowsOrigin(request, origin.origin)) return reply(403);
   const prefix = qualificationAllocationPrefix(env);
   if (prefix === null) return reply(503);
-  if (prefix && request.url !== stagingOrigin + '/api/uploads') return reply(404);
+  if (prefix && request.url !== origin.origin + '/api/uploads') return reply(404);
   // Allocation only; staging request admission and part/publication policy are separate.
   const inviteMode = admitsStagingInvite(env);
-  const ownerOnly = origin.origin === stagingOrigin && !inviteMode;
-  const limit = inviteMode ? maxInviteUploadIntentBytes : maxUploadIntentBytes;
+  const ownerOnly = privateDriveOrigin(env) !== null && !inviteMode;
+  const limit = inviteMode ? firstReleaseUploadCapBytes : maxUploadIntentBytes;
   let sent = false;
   try {
     const session = await readSession(request, db);

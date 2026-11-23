@@ -3,7 +3,7 @@ import { decodeClientDataJSON, isoBase64URL } from '@simplewebauthn/server/helpe
 import { readBoundedBody } from './bounded-io';
 import { CeremonyCapacityReached, ChallengeUnavailable } from './identity/challenges';
 import { PasskeyDenied, PasskeyLogin, RevokedPasskey } from './identity/login';
-import { admitsStagingInvite, allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, stagingOrigin, type DriveAuthEnv } from './request-auth';
+import { admitsStagingInvite, allowsOrigin, authOrigin, readOpaqueCookie, sessionCookie, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 
 const transactionCookie = '__Host-drive-login';
 const transactionPattern = /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/;
@@ -56,7 +56,7 @@ export async function signIn(
   }
 
   try {
-    const ownerOnly = origin.origin === stagingOrigin && !admitsStagingInvite(env);
+    const ownerOnly = privateDriveOrigin(env) !== null && !admitsStagingInvite(env);
     const login = new PasskeyLogin(env.DB, origin.hostname, origin.origin, ownerOnly);
     // A serialized restart after a lost response must leave the previous context alone.
     const transaction = step === 'restart' ? null : readOpaqueCookie(request, transactionCookie, transactionPattern);

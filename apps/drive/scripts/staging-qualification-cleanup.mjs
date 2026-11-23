@@ -26,9 +26,14 @@ export async function readQualificationR2Prefix(prefix, signal, listing) {
 
 // The caller must hold the staging lock, stop all writers to this prefix, and
 // use a reviewed, non-versioned R2 binding. This does not attest D1 cleanup.
-export async function cleanQualificationR2(context, signal, { listing, request }) {
+export async function cleanQualificationR2(context, signal, io) {
   const prefix = qualificationPrefix(context);
   if (context.prefix !== prefix) throw unverified();
+  return cleanR2Prefix(prefix, signal, io);
+}
+
+// The caller supplies an exact, verified attempt prefix and has stopped its Worker.
+export async function cleanR2Prefix(prefix, signal, { listing, request }) {
   try {
     return await runQualificationPhase(async (_, active) => {
       const inspect = () => readQualificationR2Prefix(prefix, active, listing);

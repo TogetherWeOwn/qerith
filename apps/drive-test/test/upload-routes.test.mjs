@@ -7,6 +7,7 @@ import { createTrustedUploadPublication } from '../../drive/src/lib/server/metad
 import { privateRequests, readSession, stagingOrigin } from '../../drive/src/lib/server/request-auth.ts';
 import { wireUploadStorage } from '../../drive/src/lib/server/storage-runtime.ts';
 import { postUploadIntent } from '../../drive/src/lib/server/upload-intent.ts';
+import { firstReleaseUploadCapBytes } from '../../drive/src/lib/server/first-release-upload-limit.mjs';
 import { uploadRoutes } from '../../drive/src/lib/server/upload-routes.ts';
 import { config, epoch, evidence, migrations, response, seed, sessions, sql } from './fixtures/upload-completion.mjs';
 import { etag, headOk, qualified, setup } from './fixtures/upload-publication-generation.mjs';
@@ -65,7 +66,9 @@ async function fixture({ fail, verify, beforeHead, onPart, isQualified = qualifi
       : handle({ event: { request, route, locals: {} }, resolve: ({ locals }) => execute(locals.driveSession) });
   }
   const generation = () => sql('SELECT entry_id, size_bytes, etag FROM drive_published_generations WHERE intent_id = ?', intent).first();
-  return { send, generation, calls, foreign, key, principal, other, headPins, intent };
+  const resume = () => routes.stagingResume(new Request(`${requestOrigin}/api/uploads/${intent}/resume`,
+    { headers: { cookie: `__Host-drive-session=${token}` } }), intent);
+  return { send, resume, generation, calls, foreign, key, principal, other, headPins, intent };
 }
 
 const partObservation = (key, number = 1) => sql(`SELECT o.intent_id, o.owner_id, o.object_key, o.storage_epoch, o.upload_id,
@@ -95,6 +98,17 @@ it('claims only the planned slot, size and digest of a bound upload', async () =
     kind: 'reported', etag: tag, digest });
   expect((await send(2, { bytes })).status).toBe(404);
   expect(calls).toEqual(['PUT']);
+});
+
+it('rejects part, resume and completion for an existing intent above the first-release cap', async () => {
+  const { send, resume, intent, calls } = await fixture({ staging: true, inviteFlag: '1', role: 'member',
+    size: firstReleaseUploadCapBytes + 1, expectedParts: 'a'.repeat(128) });
+  expect((await send(2, { bytes: 258 })).status).toBe(404);
+  expect((await resume()).status).toBe(404);
+  expect((await send()).status).toBe(404);
+  expect(await partClaim(intent)).toBeNull();
+  expect(await sql('SELECT 1 FROM drive_upload_completion_operations WHERE intent_id = ?', intent).first()).toBeNull();
+  expect(calls).toEqual([]);
 });
 
 it.each([0, 16 * 1024 * 1024])('dispatches and acknowledges a bound part of %i bytes', async (size) => {

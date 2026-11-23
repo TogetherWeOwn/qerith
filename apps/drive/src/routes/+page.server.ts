@@ -2,13 +2,13 @@ import { building } from '$app/env';
 import { env } from 'cloudflare:workers';
 import { downloadNoticeCookie, entryId, isDownloadNavigation } from '../lib/server/download-navigation';
 import { downloadStorage } from '../lib/server/published-download';
-import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, admitsStagingReadGrants, driveUploadMode, stagingOrigin, type DriveUploadMode } from '../lib/server/request-auth';
+import { admitsSharedListing, admitsSignInFixture, admitsStagingInvite, admitsStagingReadGrants, driveUploadMode, privateDriveOrigin, type DriveUploadMode } from '../lib/server/request-auth';
 import { loadRootListing, rootPageCursor } from '../lib/server/root-listing';
 import { wireUploadStorage } from '../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
 
 // The generated Worker admits staging only with live DB, assets and qualified storage.
-export const csr = !building && (admitsSignInFixture(env) || env.DRIVE_ORIGIN === stagingOrigin);
+export const csr = !building && (admitsSignInFixture(env) || privateDriveOrigin(env) !== null);
 
 async function readDownloadNotice({ cookies, isDataRequest, locals, request, url }: Parameters<PageServerLoad>[0]) {
   if (isDataRequest || !locals.driveSession || !isDownloadNavigation(request)) return;
@@ -24,7 +24,7 @@ async function readDownloadNotice({ cookies, isDataRequest, locals, request, url
 
 export const load: PageServerLoad = async (event) => {
   const fixture = admitsSignInFixture(env);
-  const staging = env.DRIVE_ORIGIN === stagingOrigin;
+  const staging = privateDriveOrigin(env) !== null;
   const inviteMode = admitsStagingInvite(env);
   const preview = fixture || staging;
   if (staging) {

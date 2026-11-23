@@ -91,8 +91,8 @@ import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.t
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
-import { allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
-import { admitsSignInFixture, allowsOrigin, stagingOrigin } from '../../src/lib/server/request-auth.ts';
+import { admitsFirstReleaseSmokeRequest, allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
+import { admitsSignInFixture, allowsOrigin, privateDriveOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
@@ -124,8 +124,11 @@ const handlers = {
   },
   async fetch(request, env, ctx, capability) {
     if (env.DRIVE_ORIGIN === 'disabled' || !allowsQualificationTraffic(env)) return unavailable();
+    if (!admitsFirstReleaseSmokeRequest(request, env)) return unavailable();
+    const origin = privateDriveOrigin(env);
+    if (env.DRIVE_FIRST_RELEASE_ORIGIN !== undefined && origin !== env.DRIVE_FIRST_RELEASE_ORIGIN) return unavailable();
     const url = new URL(request.url);
-    if (env.DRIVE_ORIGIN === stagingOrigin) {
+    if (origin !== null) {
       // First-owner enrollment is a separate release-bound mode, not a preview route.
       if (url.pathname === '/api/deployer/owner-enrollment' && admitsOwnerEnrollment(env)) return ownerEnrollment(request, env);
       // Upload readiness does not admit deletion.
@@ -148,7 +151,7 @@ const handlers = {
     // Keep listing denials out of the adapter's query validation.
     const listing = listingRequest(request, env);
     if (listing) return listing;
-    if (url.pathname === '/api/deployer/owner-enrollment') return ownerEnrollment(request, env);
+    if (url.pathname === '/api/deployer/owner-enrollment') return unavailable();
     let pathname;
     try {
       pathname = decodeURIComponent(url.pathname);
@@ -195,6 +198,10 @@ export default createDriveWorker();
   }
 };
 
+// Protected build jobs use the exact source SHA as the SvelteKit asset version.
+const buildSha = process.env.DRIVE_BUILD_SHA;
+if (buildSha !== undefined && !/^[a-f0-9]{40}$/.test(buildSha)) throw new Error('Invalid Drive build SHA');
+
 export default defineConfig({
-  plugins: [sveltekit({ adapter: buildAdapter })]
+  plugins: [sveltekit({ adapter: buildAdapter, ...(buildSha && { version: { name: buildSha } }) })]
 });
