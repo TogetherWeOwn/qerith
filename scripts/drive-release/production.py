@@ -1,5 +1,6 @@
 """First-ever Drive deploy to the dedicated production Cloudflare targets."""
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -15,11 +16,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from preflight import DIGEST, RUN_NUMBER, SHA, UUID, dispatch_sha, json_object, require, utc_time
 
-ACCOUNT = "209cf7dd678adfb683947dd7874d05af"
+SHARED_ACCOUNT = "209cf7dd678adfb683947dd7874d05af"
+SHARED_SUBDOMAIN = "5150"
 NAME = "qerith-drive-production"
-SUBDOMAIN = "5150"
-ORIGIN = f"https://{NAME}.{SUBDOMAIN}.workers.dev"
-ENDPOINT = f"https://{ACCOUNT}.r2.cloudflarestorage.com"
 APP = Path(__file__).resolve().parents[2] / "apps/drive"
 PACKAGE = ".svelte-kit/first-release-package/_worker.js"
 ASSETS = ".svelte-kit/cloudflare"
@@ -41,6 +40,39 @@ CREDENTIALS = {
 }
 
 
+@dataclass(frozen=True)
+class Boundary:
+    account_id: str
+    worker_subdomain: str
+
+    @property
+    def origin(self):
+        return f"https://{NAME}.{self.worker_subdomain}.workers.dev"
+
+    @property
+    def r2_endpoint(self):
+        return f"https://{self.account_id}.r2.cloudflarestorage.com"
+
+
+def production_boundary(env):
+    message = "Missing or invalid dedicated production boundary."
+    raw = env.get("DRIVE_PRODUCTION_BOUNDARY", "")
+    require(0 < len(raw) <= 4096, message)
+    try:
+        pin = json_object(raw)
+    except ValueError:
+        raise SystemExit(message) from None
+    require(
+        type(pin) is dict and set(pin) == {"accountId", "workerSubdomain"}
+        and type(pin["accountId"]) is str and re.fullmatch(r"[0-9a-f]{32}", pin["accountId"])
+        and type(pin["workerSubdomain"]) is str
+        and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", pin["workerSubdomain"])
+        and pin["accountId"] != SHARED_ACCOUNT and pin["workerSubdomain"] != SHARED_SUBDOMAIN,
+        message,
+    )
+    return Boundary(pin["accountId"], pin["workerSubdomain"])
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -57,12 +89,12 @@ def canonical(data):
     return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
-def target_and_approval(env, sha, now):
+def target_and_approval(boundary, env, sha, now):
     target = json_object(env.get("DRIVE_PRODUCTION_TARGET", ""))
     require(
         set(target) == {"accountId", "worker", "origin", "d1Id", "r2Bucket", "storageEpoch", "credentials"}
-        and target["accountId"] == ACCOUNT and target["worker"] == NAME
-        and target["origin"] == ORIGIN and target["r2Bucket"] == NAME
+        and target["accountId"] == boundary.account_id and target["worker"] == NAME
+        and target["origin"] == boundary.origin and target["r2Bucket"] == NAME
         and UUID.fullmatch(target["d1Id"]) and target["d1Id"] not in (STAGING_DB, "00000000-0000-0000-0000-000000000000")
         and re.fullmatch(r"prod-[a-z0-9-]{1,48}", target["storageEpoch"])
         and set(target["credentials"]) == set(CREDENTIALS),
@@ -103,12 +135,12 @@ def target_and_approval(env, sha, now):
     return target, credentials, approval
 
 
-def cloudflare(token, path, *, body=None, missing_worker=False):
+def cloudflare(boundary, token, path, *, body=None, missing_worker=False):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json"}
     if path.startswith(f"{BUCKET}/") or path == BUCKET:
         headers["cf-r2-jurisdiction"] = "default"
     payload = json.dumps(body).encode() if body is not None else None
-    request = Request(f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}{path}", payload, headers)
+    request = Request(f"https://api.cloudflare.com/client/v4/accounts/{boundary.account_id}{path}", payload, headers)
     try:
         with HTTPS.open(request, timeout=8) as response:
             data = response.read(65537)
@@ -152,14 +184,14 @@ def cli_env():
     }
 
 
-def r2_listing(reader, operation, limit):
+def r2_listing(boundary, reader, operation, limit):
     env = cli_env() | {
         "AWS_ACCESS_KEY_ID": reader[0], "AWS_SECRET_ACCESS_KEY": reader[1],
         "AWS_CONFIG_FILE": "/dev/null", "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
         "AWS_EC2_METADATA_DISABLED": "true", "AWS_MAX_ATTEMPTS": "1",
     }
     args = ["aws", "--no-cli-pager", "--no-paginate", "--cli-connect-timeout", "5",
-            "--cli-read-timeout", "8", "--output", "json", "--region", "auto", "--endpoint-url", ENDPOINT,
+            "--cli-read-timeout", "8", "--output", "json", "--region", "auto", "--endpoint-url", boundary.r2_endpoint,
             "s3api", operation, "--bucket", NAME, limit, "1"]
     return json_object(cloud_run(args, env, 15, "R2 read-only listing"))
 
@@ -185,7 +217,7 @@ def verify_emptiness(read, db, list_r2):
     )
 
 
-def verify_targets(read, db):
+def verify_targets(boundary, read, db):
     actual = read(db)
     require(
         actual["uuid"] == db.rsplit("/", 1)[1] and actual["name"] == NAME and actual["version"] == "production",
@@ -199,7 +231,7 @@ def verify_targets(read, db):
         "Production R2 must have no public domain.",
     )
     require(
-        read("/workers/subdomain")["subdomain"] == SUBDOMAIN
+        read("/workers/subdomain")["subdomain"] == boundary.worker_subdomain
         and read(f"{WORKER}/settings", missing_worker=True) is None,
         "Production Worker namespace differs or a prior Worker already exists.",
     )
@@ -230,8 +262,8 @@ def verify_surface(read, on):
     )
 
 
-def probe_status(path, *, method="HEAD"):
-    request = Request(f"{ORIGIN}{path}", method=method, headers={"Cache-Control": "no-cache"})
+def probe_status(boundary, path, *, method="HEAD"):
+    request = Request(f"{boundary.origin}{path}", method=method, headers={"Cache-Control": "no-cache"})
     try:
         with HTTPS.open(request, timeout=5) as response:
             return response.status
@@ -252,10 +284,11 @@ def verify_deployment(read, version_id):
     )
 
 
-def verify_serving(read, version_id, sha):
+def verify_serving(boundary, read, version_id, sha):
     verify_deployment(read, version_id)
     for retry in range(6):
-        if probe_status("/sign-in") == 200 and probe_status("/api/owner/invitations", method="GET") == 401:
+        if (probe_status(boundary, "/sign-in") == 200
+                and probe_status(boundary, "/api/owner/invitations", method="GET") == 401):
             print(f"Private serving probes passed. SHA {sha}, Worker version {version_id}.", flush=True)
             return
         if retry < 5:
@@ -272,26 +305,27 @@ def migration_names():
     return names
 
 
-def worker_config(target, approval):
+def worker_config(boundary, target, approval):
     values = {
-        "DRIVE_ORIGIN": ORIGIN,
-        "DRIVE_FIRST_RELEASE_ORIGIN": ORIGIN,
+        "DRIVE_ORIGIN": boundary.origin,
+        "DRIVE_FIRST_RELEASE_ORIGIN": boundary.origin,
         "DRIVE_STAGING_INVITE_ACCEPTANCE": "1",
         "DRIVE_STAGING_READ_GRANTS": "1",
         "DRIVE_STAGING_SHARED_LISTING": "1",
         "DRIVE_OWNER_ENROLLMENT_RELEASE": approval["sourceSha"],
-        "DRIVE_S3_ENDPOINT": ENDPOINT,
+        "DRIVE_S3_ENDPOINT": boundary.r2_endpoint,
         "DRIVE_S3_BUCKET": NAME,
         "DRIVE_S3_REGION": "auto",
         "DRIVE_S3_STORAGE_EPOCH": target["storageEpoch"],
         "DRIVE_S3_QUALIFICATION": canonical({
-            "version": 1, "storageConfigId": json.dumps([ENDPOINT, NAME, target["storageEpoch"]], separators=(",", ":")),
+            "version": 1,
+            "storageConfigId": canonical([boundary.r2_endpoint, NAME, target["storageEpoch"]]),
             "region": "auto", "sourceSha": approval["sourceSha"], "runId": approval["stagingRunId"],
             "runAttempt": approval["stagingRunAttempt"], "completionTimeoutMs": 30_000,
         }),
     }
     return {
-        "account_id": ACCOUNT, "name": NAME, "main": str(APP / PACKAGE),
+        "account_id": boundary.account_id, "name": NAME, "main": str(APP / PACKAGE),
         "compatibility_date": "2026-07-30",
         "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
         "workers_dev": False, "preview_urls": False,
@@ -306,7 +340,7 @@ def wrangler(args, env, timeout, label):
     cloud_run([str(APP / "node_modules/.bin/wrangler"), *args], env, timeout, label)
 
 
-def promote(target, credentials, approval, read, write, list_r2):
+def promote(boundary, target, credentials, approval, read, write, list_r2):
     db = f"/d1/database/{target['d1Id']}"
     names = migration_names()
     require((APP / PACKAGE).is_file() and (APP / ASSETS).is_dir(), "Checked release package is missing.")
@@ -314,7 +348,7 @@ def promote(target, credentials, approval, read, write, list_r2):
     with TemporaryDirectory(prefix="drive-first-production-") as temporary:
         tmp = Path(temporary)
         config = tmp / "wrangler.json"
-        configuration = worker_config(target, approval)
+        configuration = worker_config(boundary, target, approval)
         config.write_text(canonical(configuration), encoding="utf-8")
         dry_run = tmp / "dry-run"
         wrangler(["deploy", "--no-bundle", "--config", str(config), "--dry-run", "--outdir", str(dry_run)],
@@ -325,9 +359,9 @@ def promote(target, credentials, approval, read, write, list_r2):
         )
         output = tmp / "deployment.jsonl"
         env = cli_env() | {"CLOUDFLARE_API_TOKEN": credentials["cfDeploy"][0],
-                           "CLOUDFLARE_ACCOUNT_ID": ACCOUNT, "WRANGLER_OUTPUT_FILE_PATH": str(output)}
+                           "CLOUDFLARE_ACCOUNT_ID": boundary.account_id, "WRANGLER_OUTPUT_FILE_PATH": str(output)}
 
-        verify_targets(read, db)
+        verify_targets(boundary, read, db)
         verify_snapshot(read, db, list_r2, approval["bookmarkDigest"])
         require(datetime.now(timezone.utc) < utc_time(approval["expiresAt"]), "Independent release approval expired.")
         wrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", str(config)], env, 120, "D1 migration")
@@ -364,9 +398,9 @@ def promote(target, credentials, approval, read, write, list_r2):
         )
         try:
             switch_state(read, write, True)
-            verify_serving(read, version, approval["sourceSha"])
+            verify_serving(boundary, read, version, approval["sourceSha"])
         except BaseException:
-            switch_off(read, write)
+            switch_off(boundary, read, write)
             raise
 
 
@@ -388,11 +422,11 @@ def verify_worker_bindings(read, version, config):
     )
 
 
-def switch_off(read, write):
-    require(read("/workers/subdomain")["subdomain"] == SUBDOMAIN, "Production Worker namespace differs.")
+def switch_off(boundary, read, write):
+    require(read("/workers/subdomain")["subdomain"] == boundary.worker_subdomain, "Production Worker namespace differs.")
     switch_state(read, write, False)
     for retry in range(6):
-        if probe_status("/sign-in") == 404:
+        if probe_status(boundary, "/sign-in") == 404:
             print("Production Worker route switched off. Provider and origin deny serving.", flush=True)
             return
         if retry < 5:
@@ -402,26 +436,31 @@ def switch_off(read, write):
 
 def main(env):
     sha = dispatch_sha(env)
-    read_token = env.get("DRIVE_PRODUCTION_CF_READ_TOKEN", "")
-    write_token = env.get("DRIVE_PRODUCTION_CF_DEPLOY_TOKEN", "")
+    require(SHA.fullmatch(sha), "Dispatch SHA must be lowercase 40-hex.")
+    boundary = production_boundary(env)
 
     def read(path, **options):
-        return cloudflare(read_token, path, **options)
+        return cloudflare(boundary, read_token, path, **options)
 
     def write(path, **options):
-        return cloudflare(write_token, path, **options)
+        return cloudflare(boundary, write_token, path, **options)
 
     if sys.argv[1:] == ["switch-off"]:
+        read_token = env.get("DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN", "")
+        write_token = env.get("DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN", "")
         require(
             read_token != write_token
             and all(re.fullmatch(r"[A-Za-z0-9_-]{20,256}", token) for token in (read_token, write_token)),
-            "Production switch-off requires the scoped reader and deploy credentials.",
+            "Production switch-off requires separate scoped incident read and write credentials.",
         )
-        switch_off(read, write)
+        switch_off(boundary, read, write)
     else:
         require(sys.argv[1:] == ["release"], "Invalid production operation.")
-        target, credentials, approval = target_and_approval(env, sha, datetime.now(timezone.utc))
-        promote(target, credentials, approval, read, write, lambda *args: r2_listing(credentials["r2Read"], *args))
+        target, credentials, approval = target_and_approval(boundary, env, sha, datetime.now(timezone.utc))
+        read_token = credentials["cfRead"][0]
+        write_token = credentials["cfDeploy"][0]
+        promote(boundary, target, credentials, approval, read, write,
+                lambda *args: r2_listing(boundary, credentials["r2Read"], *args))
 
 
 if __name__ == "__main__":
