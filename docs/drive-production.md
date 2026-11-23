@@ -13,11 +13,11 @@ disabled.
 1. Confirm required CI, PR standards, secret scanning and tier reviews for the
    candidate. Wait for the successful `ci` and `gitleaks` push runs on the exact
    main SHA. Run the protected `drive-first-release-smoke.yml` workflow at that
-   SHA. Record its run ID, attempt, build digest and all passing outcomes. The
+   SHA. Record its staging venue, run ID, attempt, build digest and all passing outcomes. The
    single success-only artifact
    `drive-first-release-smoke-<full-sha>-attempt-<run-attempt>` contains
-   `receipt.json` with the source SHA, immutable build digest, staged Worker
-   version, tested cap, case outcomes and cleanup result. An expired artifact,
+   `receipt.json` with the venue, source SHA, immutable build digest, staged
+   Worker version, tested cap, case outcomes and cleanup result. An expired artifact,
    new attempt, changed build or changed main tip requires fresh evidence and
    approval.
 2. Verify the GitHub `production` environment already exists, its custom branch
@@ -26,8 +26,9 @@ disabled.
    established provider and GitHub authorities. Use dedicated production
    identities throughout. Verify the production-only D1 database and private
    R2 bucket named `qerith-drive-production` in the dedicated Cloudflare
-   account. Independently compare the account ID with the attested staging
-   account ID and verify they differ. Read back the account's workers.dev
+   account. Verify the production account differs from the shared staging
+   account and from the attested Cloudflare smoke account when that venue is
+   used. Read back the account's workers.dev
    namespace and the production boundary in GitHub. Record the actual D1 UUID,
    default bucket jurisdiction, storage epoch, Worker name and
    `https://qerith-drive-production.<workerSubdomain>.workers.dev` origin. Confirm
@@ -149,7 +150,9 @@ Dispatch `release` from protected `main` with `accepted_sha`,
 protected main SHA, exact green push runs, the production branch policy,
 and the trusted smoke workflow's current successful attempt. It verifies the
 unexpired archive against GitHub's digest and requires the exact SHA, build
-digest, cap and complete passing case set. A separate job outside the
+digest, staging venue, cap and complete passing case set. For `github-hosted-local`,
+it also verifies the pinned MinIO release and successful storage cleanup evidence.
+A separate job outside the
 production environment rebuilds the Worker and assets and compares their
 digest. On a fresh runner, the deploy job installs the pinned deployment
 CLI with lifecycle scripts disabled, rechecks the receipt, and restores the

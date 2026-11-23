@@ -4,13 +4,37 @@
 
 Rank 10 runs [the staging smoke workflow](../.github/workflows/drive-first-release-smoke.yml)
 from protected `main` with `expected_main_sha` set to the reviewed full commit
-SHA. The workflow validates the dispatch before entering the shared staging
-queue. Confirm required checks and both reviews for the release candidate before
+SHA. The workflow validates the dispatch before entering its venue's queue.
+Cloudflare runs join the shared staging queue. Confirm required checks and both reviews for the release candidate before
 dispatch. The `staging` GitHub environment must allow the `main` branch only.
-Use a new disposable D1 database for each attempt. The published Worker and the
-database are removed during cleanup.
 
-### Provider target and access
+### GitHub-hosted staging
+
+Select `github-hosted-local` to run the packaged Worker under local workerd
+with a fresh D1 database and the committed migrations on a GitHub-hosted runner.
+The same runner starts the SHA-256-pinned MinIO release over loopback TLS,
+creates a private bucket with synthetic credentials, and restricts Worker S3
+requests to the run's prefix. The Worker version in this venue is synthetic.
+
+Repeat the dispatch for each exact candidate on protected `main`.
+
+```sh
+gh workflow run drive-first-release-smoke.yml --repo TogetherWeOwn/qerith --ref main \
+  -f expected_main_sha="$reviewed_sha" -f staging_venue=github-hosted-local
+```
+
+The local venue reads back a three-day object expiry rule and a real part in an
+incomplete multipart upload. After the Worker stops, cleanup uses bounded,
+unfiltered bucket listings, requires the server to acknowledge the explicit abort,
+and verifies that the entire bucket has zero objects and open uploads. The run
+then removes its local Worker, D1, MinIO data, and key material. This venue
+proves local S3 interoperability, object expiry configuration, and explicit
+abort. Actual deployment bindings require their own provider readbacks.
+
+### Cloudflare staging target and access
+
+Select `cloudflare` for the Cloudflare staging venue. Use a new disposable D1
+database for each attempt. Cleanup removes the published Worker and database.
 
 Before dispatch, record dated provider custody evidence for the exact
 Cloudflare account, workers.dev subdomain, disposable database UUID and name,
@@ -66,8 +90,9 @@ node scripts/first-release-build-digest.mjs
 ```
 
 The build digest hashes the prebundled Worker and path-sorted asset hashes.
-Deployment uploads that Worker with `--no-bundle`. The smoke checks the serving
-SHA and provider version using a fresh nonce before and after the cases.
+The local runtime loads that Worker directly. Cloudflare uploads it with
+`--no-bundle`. The smoke checks the serving SHA and venue's Worker version
+using a fresh nonce before and after the cases.
 It enrolls a synthetic owner using a short-lived, release-bound one-shot
 bootstrap and enrolls two invited members. It checks that uninvited access is
 denied. It stops after the first acknowledged 16 MiB part, signs in again,
@@ -78,7 +103,7 @@ and an oversized final part, and verifies permanent deletion is unavailable.
 The first-release picker checks the same limit before hashing. The owner upload
 preview has a one-part limit. Shared staging keeps its existing upload policy.
 
-Cleanup first removes and verifies absence of the attempt Worker. It then
+Cloudflare cleanup first removes and verifies absence of the attempt Worker. It then
 removes and verifies the exact R2 attempt prefix and the named disposable D1
 UUID. This includes aborting any remaining multipart upload in that prefix. An incomplete run or
 cleanup leaves the release without a receipt. If a runner is lost, wait for the
@@ -90,10 +115,12 @@ fixtures while reconciliation is pending.
 
 A successful run publishes exactly one artifact
 `drive-first-release-smoke-<full-sha>-attempt-<run-attempt>` containing
-`receipt.json` for seven days. The receipt records the source SHA, run ID and
-attempt, build digest, immutable Worker version, tested cap in bytes
-(16,777,473), and the passed cases including cleanup. Rank 10 records the
-exact successful run and artifact for the production release preflight.
+`receipt.json` for seven days. The version 2 receipt records the staging venue,
+source SHA, run ID and attempt, build digest, Worker version, tested cap in bytes
+(16,777,473), and the passed cases including cleanup. The local venue also
+records the MinIO release, read-back object expiry rule, explicit abort, and
+empty bucket results. Record the exact successful run and artifact for the
+production release preflight.
 
 ## Shared staging preparation metadata
 

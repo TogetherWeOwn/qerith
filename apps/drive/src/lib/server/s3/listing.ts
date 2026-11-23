@@ -26,8 +26,9 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
     return response.body;
   }
   function verifyListingScope(root: ReturnType<typeof parseListingXml>, bucketField: string, prefix?: string) {
-    if (!prefix || listingText(root, bucketField) !== bucket ||
-        decodeURIComponent(listingText(root, 'Prefix')!.replace(/\+/g, '%20')) !== prefix ||
+    const echoedPrefix = listingText(root, 'Prefix', prefix !== undefined);
+    if (prefix === '' || listingText(root, bucketField) !== bucket ||
+        decodeURIComponent((echoedPrefix ?? '').replace(/\+/g, '%20')) !== (prefix ?? '') ||
         listingText(root, 'Delimiter', false) || listingChildren(root, 'CommonPrefixes').length !== 0) throw new Error();
   }
 

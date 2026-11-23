@@ -140,7 +140,8 @@ test('invalid source cannot replace a queued staging deployment', async () => {
   assert.doesNotMatch(workflow, /^concurrency:/m);
   assert.doesNotMatch(source, /^    concurrency:/m);
   assert.match(source, /Verify protected dispatch[\s\S]+EXPECTED_MAIN_SHA[^\n]+GITHUB_SHA/);
-  assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:\n      group: drive-staging-lifecycle/);
+  assert.match(workflow, /  smoke:\n    needs: source\n    if: success\(\) && needs\.source\.result == 'success'\n    concurrency:/);
+  assert.match(workflow, /group: \$\{\{ inputs\.staging_venue == 'cloudflare' && 'drive-staging-lifecycle' \|\| 'drive-first-release-smoke-local' \}\}/);
 });
 
 test('protected workflow has one success-only attempt receipt', async () => {
@@ -148,7 +149,15 @@ test('protected workflow has one success-only attempt receipt', async () => {
   assert.equal([...source.matchAll(/^  [a-z_]+:$/gm)].filter(([text]) => text === '  workflow_dispatch:').length, 1);
   assert.match(source, /environment: staging/);
   assert.match(source, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(source, /if: always\(\)[\s\S]*first-release-smoke\.mjs cleanup/);
+  assert.match(source, /if: always\(\) && inputs\.staging_venue == 'cloudflare'[\s\S]*first-release-smoke\.mjs cleanup/);
   assert.equal([...source.matchAll(/uses: actions\/upload-artifact@/g)].length, 1);
   assert.match(source, /upload-artifact@[^\n]+\n\s+if: success\(\)[\s\S]+name: drive-first-release-smoke-\$\{\{ github\.sha \}\}-attempt-\$\{\{ github\.run_attempt \}\}/);
+});
+
+test('protected workflow separates local staging from Cloudflare credentials', async () => {
+  const source = await readFile(new URL('../../../.github/workflows/drive-first-release-smoke.yml', import.meta.url), 'utf8');
+  assert.match(source, /default: github-hosted-local\n\s+options: \[github-hosted-local, cloudflare\]/);
+  assert.match(source, /"\$STAGING_VENUE" != github-hosted-local && "\$STAGING_VENUE" != cloudflare/);
+  assert.match(source, /if: inputs\.staging_venue == 'github-hosted-local'\n\s+run: [^\n]*scripts\/first-release-smoke-local\.mjs\n/);
+  assert.match(source, /if: inputs\.staging_venue == 'cloudflare'\n\s+env: &smoke_credentials\n\s+QERITH_FIRST_RELEASE_SMOKE_TARGET:/);
 });

@@ -2,18 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtempDisposable, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { firstReleaseUploadCapBytes } from '../src/lib/server/first-release-upload-limit.mjs';
 import { createS3Listing } from '../src/lib/server/s3/listing.ts';
 import { createS3Transport } from '../src/lib/server/s3/transport.ts';
 import { firstReleaseBuildDigest } from './first-release-build-digest.mjs';
 import { exerciseFirstReleaseCases } from './first-release-smoke-cases.mjs';
-import { scopedSmokeTarget, smokeDispatch, smokeMigrationArgs, smokeProvider, smokeWorkerConfig } from './first-release-smoke-target.mjs';
+import { versionIdPattern, writeSmokeReceipt } from './first-release-smoke-evidence.mjs';
+import { checkedSmokeDispatch, scopedSmokeTarget, smokeMigrationArgs, smokeProvider, smokeWorkerConfig,
+  smokeWorkerSecrets } from './first-release-smoke-target.mjs';
 import { cleanR2Prefix, readQualificationR2Prefix } from './staging-qualification-cleanup.mjs';
-
-const cases = ['invite', 'uninvitedDenial', 'share', 'revoke', 'multipartResume', 'byteIdenticalDownload',
-  'overCapRefusal', 'permanentDeletionUnavailable'];
-const versionIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const completionTimeoutMs = 3000;
 
 function wrangler(args, target, timeout, extraEnv) {
   try {
@@ -32,25 +28,13 @@ async function publish(scope, target) {
   const configPath = join(temp.path, 'wrangler.json');
   const outputPath = join(temp.path, 'wrangler-output.jsonl');
   const secretsPath = join(temp.path, 'secrets.json');
-  const { endpoint, bucket, region, accessKeyId, secretAccessKey } = target.s3;
-  const epoch = `smoke-${scope.runId}-${scope.runAttempt}`;
   const bootstrapToken = randomBytes(32).toString('base64url');
   const smokeToken = randomBytes(32).toString('base64url');
   const settings = smokeWorkerConfig(config, scope, target, Date.now());
   await writeFile(configPath, JSON.stringify(settings), { mode: 0o600 });
   wrangler([...smokeMigrationArgs(configPath), '--remote'], target, 120_000);
-  await writeFile(secretsPath, JSON.stringify({
-    DRIVE_FIRST_RELEASE_SMOKE_TOKEN: smokeToken,
-    DRIVE_OWNER_ENROLLMENT: `${scope.sha}:${Date.now() + 290_000}:${bootstrapToken}`,
-    DRIVE_S3_ENDPOINT: endpoint,
-    DRIVE_S3_BUCKET: bucket,
-    DRIVE_S3_REGION: region,
-    DRIVE_S3_ACCESS_KEY_ID: accessKeyId,
-    DRIVE_S3_SECRET_ACCESS_KEY: secretAccessKey,
-    DRIVE_S3_STORAGE_EPOCH: epoch,
-    DRIVE_S3_QUALIFICATION: JSON.stringify({ version: 1, sourceSha: scope.sha, runId: scope.runId,
-      runAttempt: scope.runAttempt, region, storageConfigId: JSON.stringify([endpoint, bucket, epoch]), completionTimeoutMs }),
-  }), { mode: 0o600 });
+  await writeFile(secretsPath, JSON.stringify(smokeWorkerSecrets(scope, target.s3,
+    { bootstrapToken, smokeToken, now: Date.now() })), { mode: 0o600 });
   wrangler(['deploy', '--config', configPath, '--no-bundle', '--secrets-file', secretsPath], target, 120_000,
     { WRANGLER_OUTPUT_FILE_PATH: outputPath });
   const entries = (await readFile(outputPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -68,9 +52,8 @@ async function publish(scope, target) {
 }
 
 async function run(mode, env) {
-  const scope = smokeDispatch(env);
-  if (execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim() !== scope.sha ||
-      !env.RUNNER_TEMP || (mode !== 'exercise' && mode !== 'cleanup')) throw new Error('Invalid smoke execution context');
+  const scope = checkedSmokeDispatch(env);
+  if (mode !== 'exercise' && mode !== 'cleanup') throw new Error('Invalid smoke execution context');
   const runPath = join(env.RUNNER_TEMP, `drive-first-release-${scope.runId}-${scope.runAttempt}`);
   const claimPath = join(runPath, 'claim.json');
   const successPath = join(runPath, 'cases.json');
@@ -115,14 +98,7 @@ async function run(mode, env) {
   }
   const outcome = await maybeRead(successPath);
   if (outcome === null) return;
-  if (!versionIdPattern.test(outcome.workerVersion) || Object.keys(outcome.cases).length !== cases.length ||
-      !cases.every(name => outcome.cases[name] === 'pass')) throw new Error('Smoke case evidence is incomplete');
-  const receipt = {
-    version: 1, sourceSha: scope.sha, runId: scope.runId, runAttempt: scope.runAttempt,
-    buildDigest, workerVersion: outcome.workerVersion, testedSizeCapBytes: firstReleaseUploadCapBytes,
-    cases: { ...outcome.cases, cleanup: 'pass' },
-  };
-  await writeFile(join(runPath, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+  await writeSmokeReceipt(runPath, { ...scope, buildDigest }, outcome, 'cloudflare');
 }
 
 try {

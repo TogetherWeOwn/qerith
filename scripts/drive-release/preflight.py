@@ -23,6 +23,11 @@ CASES = {
     "cleanup",
 }
 RECEIPT_LIMIT = 64 * 1024
+LOCAL_VENUE = "github-hosted-local"
+LOCAL_STORAGE = {
+    "minioRelease": "RELEASE.2025-09-07T16-13-09Z", "objectExpiryRule": "pass",
+    "incompleteUploadAbort": "pass", "bucketEmpty": "pass",
+}
 
 
 def require(condition, message):
@@ -139,16 +144,11 @@ def read_receipt(archive, artifact):
         raise SystemExit("Staging receipt archive is invalid.") from None
 
 
-def preflight(sha, accepted, production_accepted, run_id, attempt, get=github_get, now=None):
-    require(SHA.fullmatch(accepted), "accepted_sha must be lowercase 40-hex.")
-    require(accepted == sha, "accepted_sha must equal the dispatch SHA.")
-    require(accepted == production_accepted, "accepted_sha does not match PRODUCTION_ACCEPTED_SHA.")
+def verify_staging_receipt(sha, run_id, attempt, get=github_get, now=None):
     require(
         RUN_NUMBER.fullmatch(run_id) and RUN_NUMBER.fullmatch(attempt),
         "Staging run ID and attempt must be positive decimal integers.",
     )
-    protected_main(sha, get)
-    require_main_checks(sha, get)
     workflow = get(f"actions/workflows/{SMOKE}.yml")
     run = get(f"actions/runs/{run_id}")
     require(
@@ -179,7 +179,7 @@ def preflight(sha, accepted, production_accepted, run_id, attempt, get=github_ge
     )
     receipt = read_receipt(get(f"actions/artifacts/{artifact['id']}/zip", raw=True), artifact)
     require(
-        type(receipt["version"]) is int and receipt["version"] == 1
+        type(receipt["version"]) is int and receipt["version"] == 2
         and receipt["sourceSha"] == sha and receipt["runId"] == run_id
         and type(receipt["runAttempt"]) is int and receipt["runAttempt"] == int(attempt)
         and DIGEST.fullmatch(receipt["buildDigest"])
@@ -188,7 +188,26 @@ def preflight(sha, accepted, production_accepted, run_id, attempt, get=github_ge
         and receipt["cases"] == dict.fromkeys(CASES, "pass"),
         "Staging receipt does not prove the exact build, cap and all required cases.",
     )
-    return receipt["buildDigest"]
+    venue = receipt.get("stagingVenue")
+    require(
+        (venue == LOCAL_VENUE and receipt.get("localStorage") == LOCAL_STORAGE)
+        or (venue == "cloudflare" and "localStorage" not in receipt),
+        "Staging receipt does not prove a supported staging venue and its cleanup.",
+    )
+    return receipt["buildDigest"], venue
+
+
+def preflight(sha, accepted, production_accepted, run_id, attempt, get=github_get, now=None):
+    require(SHA.fullmatch(accepted), "accepted_sha must be lowercase 40-hex.")
+    require(accepted == sha, "accepted_sha must equal the dispatch SHA.")
+    require(accepted == production_accepted, "accepted_sha does not match PRODUCTION_ACCEPTED_SHA.")
+    require(
+        RUN_NUMBER.fullmatch(run_id) and RUN_NUMBER.fullmatch(attempt),
+        "Staging run ID and attempt must be positive decimal integers.",
+    )
+    protected_main(sha, get)
+    require_main_checks(sha, get)
+    return verify_staging_receipt(sha, run_id, attempt, get, now)
 
 
 def dispatch_sha(env):
@@ -208,13 +227,13 @@ if __name__ == "__main__":
             protected_main(sha, allow_ancestor=True)
         else:
             require(sys.argv[1:] == ["release"], "Invalid production operation.")
-            digest = preflight(
+            digest, venue = preflight(
                 sha, os.environ.get("ACCEPTED_SHA", ""),
                 os.environ.get("PRODUCTION_ACCEPTED_SHA", ""),
                 os.environ.get("STAGING_RUN_ID", ""), os.environ.get("STAGING_RUN_ATTEMPT", ""),
             )
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                 print(f"build_digest={digest}", file=output)
-            print(f"Exact-SHA staging receipt verified. Build digest {digest}.")
+            print(f"Exact-SHA staging receipt verified for {venue}. Build digest {digest}.")
     except (KeyError, TypeError, ValueError, OverflowError, OSError):
         raise SystemExit("Required GitHub evidence was incomplete or malformed.") from None
