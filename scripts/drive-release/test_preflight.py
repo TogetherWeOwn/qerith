@@ -1,132 +1,177 @@
+from datetime import datetime, timezone
+from hashlib import sha256
+from io import BytesIO
+import json
 import unittest
 from unittest.mock import Mock
+from zipfile import ZipFile
 
-from preflight import preflight
+from preflight import CAP, CASES, REPO, SMOKE, dispatch_sha, preflight, protected_main
 
-ACCEPTED, TIP = "a" * 40, "b" * 40
-BRANCH = "branches/main"
-COMPARE = f"compare/{ACCEPTED}...{TIP}?per_page=1"
+SHA = "a" * 40
+BUILD = "b" * 64
+RUN = "123"
+ATTEMPT = "2"
 ENV = "environments/production"
 POLICIES = f"{ENV}/deployment-branch-policies?per_page=2"
-RUNS = (
-    "actions/workflows/drive-staging-qualification.yml/runs?branch=main"
-    f"&event=workflow_dispatch&status=success&head_sha={ACCEPTED}&per_page=100"
-)
-RECEIPT = f"drive-staging-qualification-{ACCEPTED}-attempt-2"
-ARTIFACTS = f"actions/runs/123/artifacts?name={RECEIPT}&per_page=2"
+RECEIPT = f"{SMOKE}-{SHA}-attempt-{ATTEMPT}"
+ARTIFACTS = f"actions/runs/{RUN}/artifacts?name={RECEIPT}&per_page=2"
+ZIP = "actions/artifacts/456/zip"
+NOW = datetime(2026, 11, 23, tzinfo=timezone.utc)
+
+
+def run(workflow, event):
+    return {
+        "id": int(RUN),
+        "run_attempt": int(ATTEMPT),
+        "workflow_id": 42,
+        "path": f".github/workflows/{workflow}.yml@main",
+        "event": event,
+        "head_branch": "main",
+        "head_sha": SHA,
+        "status": "completed",
+        "conclusion": "success",
+        "head_repository": {"full_name": REPO},
+    }
 
 
 class PreflightTests(unittest.TestCase):
     def setUp(self):
-        self.run_record = {
-            "id": 123,
-            "run_attempt": 2,
-            "path": ".github/workflows/drive-staging-qualification.yml@main",
-            "event": "workflow_dispatch",
-            "head_branch": "main",
-            "head_sha": ACCEPTED,
-            "conclusion": "success",
-            "head_repository": {"full_name": "TogetherWeOwn/qerith"},
+        self.run = run(SMOKE, "workflow_dispatch")
+        self.receipt = {
+            "version": 1, "sourceSha": SHA, "runId": RUN, "runAttempt": int(ATTEMPT),
+            "buildDigest": BUILD, "workerVersion": "01234567-1234-4321-1234-0123456789ab",
+            "testedSizeCapBytes": CAP, "cases": dict.fromkeys(CASES, "pass"),
         }
+        self.artifact = {"id": 456, "name": RECEIPT, "expired": False, "expires_at": "2026-11-24T00:00:00Z"}
         self.responses = {
-            BRANCH: {"protected": True, "commit": {"sha": TIP}},
-            COMPARE: {
-                "status": "ahead",
-                "behind_by": 0,
-                "merge_base_commit": {"sha": ACCEPTED},
-            },
+            "branches/main": {"protected": True, "commit": {"sha": SHA}},
             ENV: {
                 "name": "production",
-                "deployment_branch_policy": {
-                    "custom_branch_policies": True,
-                    "protected_branches": False,
-                },
+                "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
             },
-            POLICIES: {
-                "total_count": 1,
-                "branch_policies": [{"type": "branch", "name": "main"}],
-            },
-            RUNS: [{"workflow_runs": [self.run_record]}],
-            ARTIFACTS: {"artifacts": [{"name": RECEIPT, "expired": False}]},
+            POLICIES: {"total_count": 1, "branch_policies": [{"type": "branch", "name": "main"}]},
+            f"actions/workflows/{SMOKE}.yml": {"id": 42, "path": f".github/workflows/{SMOKE}.yml", "state": "active"},
+            f"actions/runs/{RUN}": self.run,
+            ARTIFACTS: {"total_count": 1, "artifacts": [self.artifact]},
         }
+        for workflow in ("ci", "gitleaks"):
+            self.responses[self.checks_path(workflow)] = {"total_count": 1, "workflow_runs": [run(workflow, "push")]}
+        self.set_archive()
         self.get = Mock(side_effect=lambda path, **_: self.responses[path])
 
-    def reject(self, reason):
-        with self.assertRaisesRegex(SystemExit, reason):
-            preflight(ACCEPTED, ACCEPTED, self.get)
+    def checks_path(self, workflow):
+        return f"actions/workflows/{workflow}.yml/runs?branch=main&event=push&head_sha={SHA}&per_page=2"
 
-    def test_accepts_exact_receipt_from_later_page_and_main_workflow(self):
-        other = self.run_record | {"head_sha": TIP}
-        self.responses[RUNS].insert(0, {"workflow_runs": [other] * 100})
-        self.assertEqual(preflight(ACCEPTED, ACCEPTED, self.get), 123)
-        self.get.assert_any_call(RUNS, paginate=True)
+    def set_archive(self, raw=None, name="receipt.json"):
+        stream = BytesIO()
+        with ZipFile(stream, "w") as archive:
+            archive.writestr(name, json.dumps(self.receipt) if raw is None else raw)
+        self.responses[ZIP] = archive = stream.getvalue()
+        self.artifact.update(size_in_bytes=len(archive), digest=f"sha256:{sha256(archive).hexdigest()}")
 
-    def test_rejects_bad_sha_or_unaccepted_sha_before_api_access(self):
-        for sha in ["abc", ACCEPTED.upper(), f"{ACCEPTED}\n"]:
-            with self.subTest(sha=sha), self.assertRaisesRegex(SystemExit, "40-hex"):
-                preflight(sha, sha, self.get)
-        for configured in ["", "UNAPPROVED", TIP, ACCEPTED.upper(), f"{ACCEPTED}\n"]:
-            with (
-                self.subTest(configured=configured),
-                self.assertRaisesRegex(
-                    SystemExit, "does not match PRODUCTION_ACCEPTED_SHA"
-                ),
-            ):
-                preflight(ACCEPTED, configured, self.get)
+    def check(self):
+        return preflight(SHA, SHA, SHA, RUN, ATTEMPT, self.get, NOW)
+
+    def reject(self, message):
+        with self.assertRaisesRegex(SystemExit, message):
+            self.check()
+
+    def test_passes_only_the_exact_checked_build_digest(self):
+        self.assertEqual(self.check(), BUILD)
+        self.get.assert_called_with(ZIP, raw=True)
+
+    def test_rejects_wrong_dispatch_or_unaccepted_candidate_before_api_access(self):
+        for sha, accepted, configured, attempt, error in (
+            (SHA, "abc", SHA, ATTEMPT, "40-hex"),
+            ("d" * 40, SHA, SHA, ATTEMPT, "dispatch SHA"),
+            (SHA, SHA, "UNAPPROVED", ATTEMPT, "PRODUCTION_ACCEPTED_SHA"),
+            (SHA, SHA, "", ATTEMPT, "PRODUCTION_ACCEPTED_SHA"),
+            (SHA, SHA, SHA, "0", "positive decimal"),
+        ):
+            with self.subTest(error=error), self.assertRaisesRegex(SystemExit, error):
+                preflight(sha, accepted, configured, RUN, attempt, self.get, NOW)
         self.get.assert_not_called()
 
-    def test_rejects_unprotected_main_and_non_ancestor(self):
-        self.responses[BRANCH]["protected"] = False
+    def test_rejects_nonmanual_nonmain_or_fork_dispatch(self):
+        env = {"GITHUB_REPOSITORY": REPO, "GITHUB_EVENT_NAME": "workflow_dispatch",
+               "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}
+        self.assertEqual(dispatch_sha(env), SHA)
+        for key, value in (("GITHUB_REPOSITORY", "fork/qerith"), ("GITHUB_EVENT_NAME", "push"),
+                           ("GITHUB_REF", "refs/tags/main")):
+            with self.subTest(key=key), self.assertRaisesRegex(SystemExit, "dispatch"):
+                dispatch_sha(env | {key: value})
+
+    def test_rejects_unprotected_main_or_stale_dispatch(self):
+        self.responses["branches/main"]["protected"] = False
         self.reject("main must be protected")
-        self.responses[BRANCH]["protected"] = True
-        self.responses[COMPARE]["merge_base_commit"]["sha"] = TIP
-        self.reject("not on protected main")
+        self.responses["branches/main"] = {"protected": True, "commit": {"sha": "f" * 40}}
+        self.reject("current protected main tip")
 
-    def test_rejects_missing_environment(self):
-        self.get.side_effect = [
-            self.responses[BRANCH],
-            self.responses[COMPARE],
-            SystemExit("GitHub 404"),
-        ]
-        self.reject("GitHub 404")
-
-    def test_rejects_noncustom_environment_policy(self):
-        policy = self.responses[ENV]["deployment_branch_policy"]
-        policy["custom_branch_policies"] = False
-        self.reject("must use a custom branch policy")
-        policy.update(custom_branch_policies=True, protected_branches=True)
-        self.reject("must use a custom branch policy")
+    def test_rejects_missing_environment_or_noncustom_policy(self):
+        temporary = self.responses.pop(ENV)
+        with self.assertRaises(KeyError):
+            protected_main(SHA, self.get)
+        self.responses[ENV] = temporary
+        self.responses[ENV]["deployment_branch_policy"]["custom_branch_policies"] = False
+        self.reject("custom branch policy")
 
     def test_rejects_tag_named_main_or_additional_branch(self):
-        policies = self.responses[POLICIES]
-        policies["branch_policies"][0]["type"] = "tag"
-        self.reject("only the main branch")
-        policies["branch_policies"][0]["type"] = "branch"
-        policies["branch_policies"].append({"type": "branch", "name": "release/*"})
-        policies["total_count"] = 2
-        self.reject("only the main branch")
+        for entries in ([{"type": "tag", "name": "main"}],
+                        [{"type": "branch", "name": name} for name in ("main", "release")]):
+            self.responses[POLICIES] = {"total_count": len(entries), "branch_policies": entries}
+            with self.subTest(entries=entries):
+                self.reject("only the main branch")
 
-    def test_rejects_wrong_run_even_when_exactly_named_artifact_exists(self):
-        for key, value in [
-            ("head_sha", TIP),
-            ("head_branch", "feature"),
-            ("event", "pull_request"),
-            ("path", ".github/workflows/drive-staging-qualification.yml@evil"),
-            ("head_repository", {"full_name": "example/qerith"}),
-            ("conclusion", "failure"),
-        ]:
-            self.responses[RUNS][0]["workflow_runs"] = [self.run_record | {key: value}]
+    def test_requires_green_exact_main_checks(self):
+        for workflow in ("ci", "gitleaks"):
+            record = self.responses[self.checks_path(workflow)]["workflow_runs"][0]
+            record["conclusion"] = "failure"
+            self.reject(f"Required {workflow}")
+            record["conclusion"] = "success"
+
+    def test_rejects_untrusted_or_stale_staging_run_before_artifact_lookup(self):
+        for key, value in (
+            ("head_sha", BUILD[:40]), ("head_branch", "feature"), ("event", "pull_request"),
+            ("path", ".github/workflows/other.yml"), ("head_repository", {"full_name": "example/qerith"}),
+            ("conclusion", "failure"), ("status", "in_progress"), ("workflow_id", 8), ("run_attempt", 3),
+        ):
+            self.responses[f"actions/runs/{RUN}"] = self.run | {key: value}
             with self.subTest(key=key):
-                self.reject("No unexpired")
+                self.reject("current successful attempt")
         self.assertNotIn(ARTIFACTS, [call.args[0] for call in self.get.call_args_list])
 
-    def test_rejects_missing_expired_wrong_sha_or_previous_attempt_receipts(self):
-        for artifacts in [
-            [],
-            [{"name": RECEIPT, "expired": True}],
-            [{"name": RECEIPT.replace(ACCEPTED, TIP), "expired": False}],
-            [{"name": RECEIPT.replace("attempt-2", "attempt-1"), "expired": False}],
-        ]:
-            self.responses[ARTIFACTS]["artifacts"] = artifacts
-            with self.subTest(artifacts=artifacts):
-                self.reject("No unexpired")
+    def test_rejects_missing_or_duplicate_receipts(self):
+        for count, artifacts in [(0, []), (2, [self.artifact, self.artifact])]:
+            self.responses[ARTIFACTS] = {"total_count": count, "artifacts": artifacts}
+            self.reject("exactly one attempt-specific")
+
+    def test_rejects_expired_oversize_or_previous_attempt_receipts(self):
+        for key, value in (
+            ("expired", True), ("expires_at", "2026-11-22T00:00:00Z"),
+            ("size_in_bytes", 100_000), ("name", RECEIPT.replace("attempt-2", "attempt-1")),
+        ):
+            self.responses[ARTIFACTS]["artifacts"] = [self.artifact | {key: value}]
+            with self.subTest(key=key):
+                self.reject("receipt metadata")
+
+    def test_rejects_wrong_archive_digest_path_or_duplicated_json_key(self):
+        self.artifact["digest"] = f"sha256:{'0' * 64}"
+        self.reject("size and digest")
+        self.set_archive(name="../../receipt.json")
+        self.reject("single bounded")
+        self.set_archive(raw='{"sourceSha":"a","sourceSha":"b"}')
+        self.reject("archive is invalid")
+
+    def test_rejects_wrong_payload_attempt_sha_cap_or_incomplete_cases(self):
+        for key, value in (
+            ("sourceSha", "c" * 40), ("runId", "124"), ("runAttempt", 1),
+            ("testedSizeCapBytes", CAP + 1), ("cases", {"invite": "pass"}), ("buildDigest", "bad"),
+            ("workerVersion", "another-worker"),
+        ):
+            before = self.receipt[key]
+            self.receipt[key] = value
+            self.set_archive()
+            with self.subTest(key=key):
+                self.reject("does not prove the exact build")
+            self.receipt[key] = before
