@@ -81,11 +81,11 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(self.check(), (BUILD, LOCAL_VENUE))
         self.get.assert_called_with(ZIP, raw=True)
 
-    def test_accepts_explicit_cloudflare_receipt(self):
+    def test_refuses_cloudflare_receipt_for_production(self):
         del self.receipt["localStorage"]
         self.receipt["stagingVenue"] = "cloudflare"
         self.set_archive()
-        self.assertEqual(self.check(), (BUILD, "cloudflare"))
+        self.reject("protected local S3 venue and its cleanup")
 
     def test_requires_declared_venue_with_matching_storage_evidence(self):
         base = self.receipt.copy()
@@ -99,7 +99,7 @@ class PreflightTests(unittest.TestCase):
             self.receipt = base | change
             self.set_archive()
             with self.subTest(change=change):
-                self.reject("supported staging venue and its cleanup")
+                self.reject("protected local S3 venue and its cleanup")
 
     def test_rejects_wrong_dispatch_or_unaccepted_candidate_before_api_access(self):
         for sha, accepted, configured, attempt, error in (

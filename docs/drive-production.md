@@ -3,17 +3,20 @@
 [Deploy Drive production](../.github/workflows/deploy-drive-production.yml)
 is a protected manual workflow for the first private release. Run it only from
 `main` in a dedicated release task after [staging verification](drive-staging.md),
-exact-candidate review and independent release approval. Keep admission limited
-to the owner and invited members. The checked build caps uploads at 16 MiB +
-257 bytes (16,777,473 bytes). Permanent deletion and its scheduled drain are
-disabled.
+exact-candidate review and independent release approval. The initial deployment
+serves owner bootstrap, sign-in and settings with object storage unconfigured.
+The owner verifies and saves external S3-compatible storage in the Drive web
+UI. Keep member invites closed until storage is ready and file smoke passes.
+The checked build caps uploads at 16 MiB + 257 bytes (16,777,473 bytes).
+Permanent deletion and its scheduled drain are disabled.
 
 ## Before approval
 
 1. Confirm required CI, PR standards, secret scanning and tier reviews for the
    candidate. Wait for the successful `ci` and `gitleaks` push runs on the exact
    main SHA. Run the protected `drive-first-release-smoke.yml` workflow at that
-   SHA. Record its staging venue, run ID, attempt, build digest and all passing outcomes. The
+   SHA with `staging_venue=github-hosted-local`. Record its run ID, attempt,
+   build digest and all passing outcomes. The
    single success-only artifact
    `drive-first-release-smoke-<full-sha>-attempt-<run-attempt>` contains
    `receipt.json` with the venue, source SHA, immutable build digest, staged
@@ -24,33 +27,28 @@ disabled.
    policy allows only the `main` branch, and the production credentials and
    variables resolve from that environment. Check scope and custody through the
    established provider and GitHub authorities. Use dedicated production
-   identities throughout. Verify the production-only D1 database and private
-   R2 bucket named `qerith-drive-production` in the dedicated Cloudflare
-   account. Verify the production account differs from the shared staging
-   account and from the attested Cloudflare smoke account when that venue is
-   used. Read back the account's workers.dev
-   namespace and the production boundary in GitHub. Record the actual D1 UUID,
-   default bucket jurisdiction, storage epoch, Worker name and
+   identities throughout. Verify the production-only D1 database named
+   `qerith-drive-production` in the selected Cloudflare account. For the
+   dedicated boundary, verify the account differs from the shared staging
+   account. For the explicit shared-account boundary, follow the writer checks
+   below. Read back the account's workers.dev namespace and the production
+   boundary in GitHub. Record the actual D1 UUID, Worker name and
    `https://qerith-drive-production.<workerSubdomain>.workers.dev` origin. Confirm
-   the dedicated Worker does not exist, both R2 public-domain surfaces are off,
-   and no custom route, preview, trigger or service binding can reach the
-   Worker. The workers.dev route is the sole intended serving surface and the
+   the production Worker is absent and the intended Worker has no custom route,
+   preview, trigger or service binding. The workers.dev route is the sole
+   intended serving surface and the
    switch-off control.
 3. Establish the narrow production release window with the custodian. Confirm
-   that D1 and R2 have no other active consumers, writers, queued provider
-   operations or outstanding write URLs. Verify the effective scopes and
-   custody of a Cloudflare metadata/D1 reader, the Cloudflare deploy identity,
-   a bucket-only R2 reader, and the dedicated Worker R2 signer. Keep the
+   that the Worker and D1 have no other active consumers, writers or queued
+   provider operations. Verify the effective scopes and custody of a Cloudflare
+   metadata/D1 reader and the Cloudflare deploy identity. Keep the
    exclusion of other writers in effect through migration and activation.
    The workflow reads the exact targets. The release reviewer must independently
    establish the authority and coverage of those reads and the writer exclusion.
-4. Confirm D1 has no app schema or migration ledger and R2 has no objects or
-   open multipart uploads. Use a D1 query against `main.sqlite_schema` and
-   whole-bucket S3 `ListObjectsV2` and `ListMultipartUploads` with a one-item
-   provider limit, no prefix or delimiter and explicit non-truncated results.
-   Count only. Record classifications and outcomes without row data or object
-   names. Stop if any target, emptiness result, scope or writer status is
-   unknown. A pre-existing app schema, even with no rows, needs a separate plan.
+4. Confirm D1 has no app schema or migration ledger. Use a bounded D1 query
+   against `main.sqlite_schema` and record the result without row data. Stop
+   if any target, emptiness result, scope or writer status is unknown. A
+   pre-existing app schema, even with no rows, needs a separate plan.
 5. Obtain the current Time Travel bookmark for that exact D1 UUID. Verify
    Time Travel is available and read back the bookmark around the empty-target
    checks. Confirm the provider's retention window. Retain the actual bookmark
@@ -71,16 +69,27 @@ disabled.
 Store `DRIVE_PRODUCTION_BOUNDARY` as a secret in the main-only GitHub
 `production` environment. Encode the UTF-8 JSON as a single line of standard
 Base64, with no line wrapping. The release script decodes it in process. Never
-place the encoded or raw pin in Actions variables or dispatch inputs. The JSON
-object contains exactly two string fields. If either the boundary or target
-was stored as a `production` environment variable, remove that variable before
-setting the corresponding secret.
-`accountId` is the dedicated Cloudflare account ID (32 lowercase hex
-characters). `workerSubdomain` is the account's workers.dev subdomain as a
-single lowercase DNS label, up to 63 ASCII letters, digits and hyphens,
-starting and ending with a letter or digit. The guard rejects either legacy
-shared identifier and derives the Worker origin and default R2 endpoint from
-the pin. Use the same pin for release and switch-off.
+place the encoded or raw pin in Actions variables or dispatch inputs. If
+either the boundary or target was stored as a `production` environment
+variable, remove that variable before setting the corresponding secret.
+
+Use one of these exact JSON shapes.
+
+- **Dedicated account** has two fields. `accountId` is the dedicated
+  Cloudflare account ID (32 lowercase hex characters). `workerSubdomain` is
+  the account's workers.dev subdomain as a single lowercase DNS label, up to
+  63 ASCII letters, digits and hyphens, starting and ending with a letter or
+  digit. This shape refuses either shared staging identifier.
+- **Shared account** has four fields. `mode` is `shared-account`, `accountId`
+  and `workerSubdomain` match the exact existing pair already identified in
+  the guard, and `d1Id` is the independently reviewed production D1 UUID.
+  The guard refuses the staging D1 UUID and a release target with any other
+  D1 UUID. The Worker and database name are fixed to `qerith-drive-production`.
+
+All fields are strings. Both operations use the same pin and derive the
+production Worker origin from it. The release sets both
+private admission origin bindings to that Worker origin and verifies them on
+the closed Worker before enabling its route.
 
 Keep the verified pin and incident pair in protected custody across release
 windows. Changes to the pin are protected target changes and require a
@@ -93,13 +102,29 @@ operation.
 
 | Durable production environment secrets | Effective scope |
 | --- | --- |
-| `DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN` | Workers Scripts Read on the dedicated account for account and Worker subdomain readback |
-| `DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN` | Workers Scripts Write on the dedicated account for route disablement |
+| `DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN` | Workers Scripts Read for the selected account and Worker subdomain readback |
+| `DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN` | Workers Scripts Write for route disablement, scoped to the exact production Worker for the shared account |
 
-The custodian issues distinct, account-scoped incident identities without
-D1, R2 or zone grants and rotates them under incident custody. Workers Scripts
-Write also grants script and binding edits. Keep the incident writer in
+The custodian issues distinct incident identities without D1, storage or zone
+grants and rotates them under incident custody. Workers Scripts Write also
+grants script and binding edits. Keep the incident writer in
 protected custody and use it only for switch-off.
+
+### Shared-account writer checks
+
+Cloudflare grants the deployment operations for assets and D1 migrations at
+account scope. The workflow's fixed addresses constrain this release job.
+Other jobs retain the authority granted by their own credentials. The known
+remote Drive staging publisher has used a reusable account-wide Worker and
+D1 writer. In the dedicated release task, drain its pending work, disable
+that publishing path and revoke the exact credential before preparing the
+production targets. The deployed staging Worker and its bucket-scoped
+runtime signer can keep serving. Check the actual targets of recurring
+same-account publishers with Worker or D1 write authority. Resolve any
+deployed path or accepted operation that could change this Worker or its
+ingress or write or restore this D1. If a recovery-conflicting path cannot be
+resolved, keep the shared-account target closed and use the dedicated account
+path when available.
 
 ## Configure the accepted release
 
@@ -108,13 +133,11 @@ The release operator updates the repository Actions variable
 Set the release inputs in the `production` environment.
 
 - The `DRIVE_PRODUCTION_TARGET` secret uses the same single-line Base64 format
-  as the boundary. Its JSON contains `accountId`, `worker`, `origin`, `d1Id`,
-  `r2Bucket`, `storageEpoch` (a dedicated `prod-…` epoch), and
-  `credentials`. The account and origin must match the durable boundary. The
-  credential keys are `cfRead`, `cfDeploy`, `r2Read`,
-  `r2App` and `owner`. Each value is the lowercase SHA-256 of the matching
-  secret, or of the access key ID and secret joined by one NUL byte in that
-  order for R2. Compute the digests in credential custody. Keep raw values and
+  as the boundary. Its JSON contains `accountId`, `worker`, `origin`, `d1Id` and
+  `credentials`. The account and origin must match the durable boundary, as
+  must the D1 UUID when the shared-account mode is selected. The credential
+  keys are `cfRead`, `cfDeploy` and `owner`. Each value is the lowercase SHA-256
+  of the matching secret. Compute the digests in credential custody. Keep raw values and
   operator input out of shell history and the release record.
 - The `DRIVE_PRODUCTION_APPROVAL` JSON variable contains `sourceSha`, `buildDigest`,
   `stagingRunId` (string), `stagingRunAttempt` (integer), `targetDigest`,
@@ -127,10 +150,8 @@ Set the release inputs in the `production` environment.
 
 | Production environment secrets | Effective scope |
 | --- | --- |
-| `DRIVE_PRODUCTION_CF_READ_TOKEN` | Cloudflare read authority for exact Worker, D1, Time Travel and R2 metadata plus read-only D1 SQL |
+| `DRIVE_PRODUCTION_CF_READ_TOKEN` | Cloudflare read authority for exact Worker, D1 and Time Travel metadata plus read-only D1 SQL |
 | `DRIVE_PRODUCTION_CF_DEPLOY_TOKEN` | Cloudflare authority for the dedicated Worker and D1 deployment operations |
-| `DRIVE_PRODUCTION_R2_READ_ID`, `DRIVE_PRODUCTION_R2_READ_SECRET` | Dedicated private bucket, object and open multipart inventory only |
-| `DRIVE_PRODUCTION_R2_APP_ID`, `DRIVE_PRODUCTION_R2_APP_SECRET` | Dedicated private bucket, Drive object operations |
 | `DRIVE_PRODUCTION_OWNER_TOKEN` | Fresh 43-character base64url token delivered by the authorized custodian to the owner for this bootstrap |
 
 Plan the owner ceremony before dispatch. The workflow binds the token to the
@@ -139,7 +160,7 @@ enrolls over the production origin with a passkey. A successful owner enrollment
 closes bootstrap permanently for that D1. Reset acceptance to `UNAPPROVED`,
 clear the temporary target, approval and bootstrap inputs, and withdraw the
 release-only credentials when the release window closes. Retain the durable
-boundary and incident pair. Keep the runtime R2 signer in approved custody.
+boundary and incident pair.
 A failed or expired bootstrap requires the switch-off procedure and a reviewed
 recovery plan. Never insert or reset the owner directly in D1.
 
@@ -150,9 +171,8 @@ Dispatch `release` from protected `main` with `accepted_sha`,
 protected main SHA, exact green push runs, the production branch policy,
 and the trusted smoke workflow's current successful attempt. It verifies the
 unexpired archive against GitHub's digest and requires the exact SHA, build
-digest, staging venue, cap and complete passing case set. For `github-hosted-local`,
-it also verifies the pinned MinIO release and successful storage cleanup evidence.
-A separate job outside the
+digest, cap and complete passing case set from `github-hosted-local`. It
+verifies the local MinIO fixture and its cleanup. A separate job outside the
 production environment rebuilds the Worker and assets and compares their
 digest. On a fresh runner, the deploy job installs the pinned deployment
 CLI with lifecycle scripts disabled, rechecks the receipt, and restores the
@@ -164,47 +184,49 @@ the approved target and verifies the custody fingerprints and release window.
 It checks emptiness with read-only credentials and reads back the approved
 D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
-checked Worker is deployed with the route and previews off, and its version
-and bindings are read back before the route can be enabled. After enablement,
+workflow checks again that the production Worker is absent before deploying
+the checked Worker with the route and previews off. The deployment
+has no object-store endpoint, bucket, credentials or qualification binding.
+The workflow reads back its version and bindings before enabling the route.
+After enablement,
 the workflow checks the serving version, HTTP 200 on `HEAD /sign-in`, and HTTP
 401 on anonymous `GET /api/owner/invitations`. Both origin checks use the same
 curl transport as switch-off. A serving probe failure triggers switch-off.
 
 A failed or interrupted migration or deploy may leave provider writes in flight
 or committed. Stop, keep admission off, and reconcile the exact Worker,
-D1 ledger, bookmark and R2 state in the release task. A rerun cannot assume the
-targets are pristine. Any recovery write needs its own reviewed plan.
+D1 ledger and bookmark in the release task. A rerun cannot assume the targets
+are pristine. Any recovery write needs its own reviewed plan.
 
 ## Bounded production smoke and watch
 
-Start the watch when the production route is enabled. Restrict invites during
-the watch to the planned owner and two controlled synthetic member identities.
-Finish the authenticated smoke in the first ten minutes. Use one run-tagged
-synthetic object at or below the cap, one read grant and one revoke. Record
-statuses, counts and checksums. Keep passkeys, tokens, session cookies, signed
-URLs, member identifiers and response bodies out of evidence.
+Start the watch when the production route is enabled. Finish the authenticated
+shell smoke in the first ten minutes. Record statuses, counts and checksums.
+Keep passkeys, tokens, session cookies, signed URLs, member identifiers and
+response bodies out of evidence.
 
-- Verify the Workflow's source SHA and Worker version against the currently
+- Verify the workflow's source SHA and Worker version against the currently
   serving production deployment. Check sign-in and anonymous direct API denial.
   Complete the owner's passkey enrollment promptly and verify its one-time
-  behavior.
-- Accept the two controlled invitations. Confirm an uninvited principal is
-  denied. Upload and list the tagged object and compare the downloaded bytes
-  against the known checksum. Verify the second principal cannot read the
-  object before a grant, can read it after the grant and is denied immediately
-  after revocation. Verify permanent deletion is denied.
-- Revoke the temporary invitations, grant and synthetic members' access,
-  verifying denial with their existing sessions. Record the isolated fixture
-  as retained pending authorized exact-object erasure. Its data must be
-  synthetic and within this run's cap and count.
-- Observe the Worker version, request 5xx/errors and D1/R2 errors at activation
+  behavior. Verify the owner can sign in and reach storage settings and that
+  file operations are unavailable while storage is unconfigured.
+- Observe the Worker version, request 5xx/errors and D1 errors at activation
   and at least every five minutes for at least 30 minutes. Use the dedicated
   provider metrics and bounded no-credential sign-in and anonymous-denial
   requests, with a five-second maximum per request. Stop on version drift,
   unexpected 5xx, credential or data exposure, failed auth/denial or smoke,
-  or loss of observability. Keep other invitations closed until the smoke and
-  watch pass. Record the timestamps, checks, errors and outcome in the release
-  task and product log.
+  or loss of observability. Record the timestamps, checks, errors and outcome
+  in the release task and product log.
+
+The owner can verify and save an external S3-compatible target from Drive
+settings after deployment. Keep member invitations closed until storage is
+verified. Before inviting members, smoke the configured file path with two
+controlled synthetic identities, one run-tagged object at or below the cap,
+one read grant and one revoke. Check uninvited denial, byte-identical
+download, immediate denial after revoke and permanent deletion denial.
+Revoke the temporary invitations and member access, verify session denial,
+and record the isolated object as retained pending authorized exact-object
+erasure.
 
 ## Switch off the first release
 
@@ -224,9 +246,10 @@ admission. The workflow rejects cache hits, stale responses, and unrecognized
 immediately if either verification is unavailable or fails.
 
 The initial release has no earlier serving Worker. Route disablement stops
-serving and leaves D1 and R2 intact. Review any accepted writes and current
-data before reopening or considering a restore. A D1 snapshot never rolls
-back R2. Reopening requires a separately reviewed recovery plan and observed
+serving and preserves D1 and any subsequently configured object storage.
+After storage setup, reconcile any issued write URLs and accepted object
+writes before reopening or restoring D1. A D1 restore affects only the
+database. Reopening requires a separately reviewed recovery plan and observed
 private admission, binding and data checks.
 
 ### Hosted switch-off rehearsal evidence
