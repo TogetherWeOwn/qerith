@@ -1,10 +1,11 @@
 import { livePrincipalCheck, tokenHash } from './identity/sessions';
 import { readMetadataJson } from './metadata-request';
+import { publishedGenerationFilter, publishedGenerationJoins } from './metadata/published-generation-sql';
 import { firstReleaseOrigin, usesOwnerStorage, type QualificationReadinessEnv } from './qualification-readiness';
 import { allowsOrigin, allowsStagingInviteSite, readSession } from './request-auth';
 import { validateConfig, type S3Config } from './s3/config';
 import { ownerStorageFetch, ownerStorageOrigin } from './s3/public-egress';
-import { verifyStorageSettings } from './storage-settings-probe';
+import { verifyStorageSettings, type StorageContinuity } from './storage-settings-probe';
 import type { UploadRouteEnv } from './upload-routes';
 
 type Database = NonNullable<UploadRouteEnv['DB']>;
@@ -80,6 +81,23 @@ async function readInput(request: Request): Promise<Record<string, unknown> | nu
   return input;
 }
 
+async function storageContinuity(db: Database, saved: Saved): Promise<StorageContinuity> {
+  const primary = db.withSession('first-primary');
+  const storage = [saved.config.endpoint, saved.config.bucket, saved.epoch];
+  const [file, upload] = await Promise.all([
+    primary.prepare(`SELECT hex(g.object_key) AS keyHex, g.etag, g.size_bytes AS size
+      FROM drive_entries e ${publishedGenerationJoins} WHERE ${publishedGenerationFilter} LIMIT 1`)
+      .bind(...storage).first<NonNullable<StorageContinuity['file']>>(),
+    primary.prepare(`SELECT hex(i.object_key) AS keyHex, hex(i.upload_id) AS uploadHex
+      FROM drive_upload_intents i JOIN drive_upload_storage_bindings b ON b.intent_id = i.id
+      WHERE b.endpoint = ? AND b.bucket = ? AND b.storage_epoch = ? AND i.state = 'allocated'
+      AND i.upload_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM drive_upload_cleanup_claims c WHERE c.intent_id = i.id)
+      AND NOT EXISTS (SELECT 1 FROM drive_upload_publication_tombstones t WHERE t.intent_id = i.id) LIMIT 1`)
+      .bind(...storage).first<NonNullable<StorageContinuity['upload']>>()
+  ]);
+  return { file, upload };
+}
+
 export async function ownerStorageSettings(request: Request, env: StorageSettingsEnv): Promise<Response> {
   const origin = firstReleaseOrigin(env), db = env.DB;
   if (!origin || !db || !usesOwnerStorage(env)) return new Response(null, { status: 404, headers });
@@ -124,8 +142,11 @@ export async function ownerStorageSettings(request: Request, env: StorageSetting
       // Check revision again under the probe lease before any outbound request.
       const latest = await readSavedStorage(env);
       if ((latest?.revision ?? null) !== input.revision) return error(409, 'settings_conflict');
+      const continuity = latest ? await storageContinuity(db, latest) : undefined;
       try {
-        await verifyStorageSettings(config, ownerStorageFetch(ownerStorageOrigin(config, origin)), request.signal, liveOwner);
+        const { fetch, prepare } = ownerStorageFetch(ownerStorageOrigin(config, origin));
+        await prepare(request.signal);
+        await verifyStorageSettings(config, fetch, request.signal, liveOwner, continuity);
       } catch { return error(422, 'connection_failed'); }
       if (request.signal.aborted || !await liveOwner()) return error(403, 'forbidden');
       if (test) return Response.json({ status: 'verified' }, { headers });

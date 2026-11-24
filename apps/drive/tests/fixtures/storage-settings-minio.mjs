@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { checkServerIdentity } from 'node:tls';
 import { Agent, request as sendHttp } from 'undici'; // Locked by Wrangler.
-import { withLocalMinio } from '../scripts/first-release-smoke-minio.mjs';
-import { readBoundedBody } from '../src/lib/server/bounded-io.ts';
+import { withLocalMinio } from '../../scripts/first-release-smoke-minio.mjs';
+import { readBoundedBody } from '../../src/lib/server/bounded-io.ts';
 
 export const fixtureStorageEndpoint = 'https://drive-storage.example.com';
 

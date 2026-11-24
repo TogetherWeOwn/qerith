@@ -149,7 +149,7 @@ export async function createUploadIntent(request: Request, size: number, env: Up
     const sessionHash = await tokenHash(token);
     if (prefix && (request.signal.aborted || qualificationAllocationPrefix(env) !== prefix)) return reply(503);
     const claim = expectedParts
-      ? await intents.claimNewExpectedAllocation(owner, sessionHash, size, endpoint, bucket, epoch, 'active', expectedParts, prefix)
+      ? await intents.claimNewExpectedAllocation(owner, sessionHash, size, endpoint, bucket, epoch, ownerOnly ? 'owner' : 'active', expectedParts, prefix)
       : await intents.claimNewAllocation(owner, sessionHash, size, endpoint, bucket, epoch, ownerOnly, prefix);
     if (!claim) return reply(401);
     const { id, object_key: key, version } = claim;

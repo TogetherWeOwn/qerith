@@ -7,21 +7,24 @@ import { test } from 'node:test';
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery } from 'wrangler';
 import { Sessions } from '../src/lib/server/identity/sessions.ts';
+import { stagingOrigin, usesOwnerStorage } from '../src/lib/server/qualification-readiness.ts';
 import { createS3Listing } from '../src/lib/server/s3/listing.ts';
 import { fixture as passkey } from './ceremony-fixture.ts';
-import { withStorageSettingsMinio } from './storage-settings-minio-fixture.mjs';
+import { withStorageSettingsMinio } from './fixtures/storage-settings-minio.mjs';
 
 const origin = 'https://drive-owner-fixture.example.test';
 const settingsPath = '/api/owner/storage';
 const unconfigured = { status: 'unconfigured', revision: null, config: null };
 const randomToken = () => randomBytes(32).toString('base64url');
+const runMinio = process.env.DRIVE_STORAGE_SETTINGS_MINIO === '1';
+const packagePath = process.env.DRIVE_SETTINGS_PACKAGE ?? (runMinio ? '.svelte-kit/first-release-package/_worker.js' : undefined);
 
 async function withWorker(run, { settingsKey, outboundService = () => { throw new Error('Unexpected outbound request'); } } = {}) {
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   const release = 'a'.repeat(40), bootstrap = randomToken();
   const worker = new Miniflare(convertV4MiniflareOptions({
     host: '127.0.0.1', port: 0, cf: false, log: new Log(LogLevel.NONE),
-    modules: [{ type: 'ESModule', path: resolve(process.env.DRIVE_SETTINGS_PACKAGE || '.svelte-kit/first-release-package/_worker.js') }],
+    modules: [{ type: 'ESModule', path: resolve(packagePath) }],
     compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
     assets: { ...config.assets, directory: resolve(config.assets.directory), routerConfig: { has_user_worker: true } },
     d1Databases: { DB: randomUUID() },
@@ -76,7 +79,18 @@ async function ownerSession(send, bootstrap) {
   return cookie;
 }
 
-test('the packaged Worker admits first-owner setup and closes file bytes without S3 bindings', { timeout: 30_000 }, async () => {
+test('only the ordinary protected first-release mode owns saved storage', () => {
+  const release = { DRIVE_ORIGIN: origin, DRIVE_FIRST_RELEASE_ORIGIN: origin };
+  assert.equal(usesOwnerStorage(release), true);
+  for (const env of [{}, { ...release, DRIVE_FIRST_RELEASE_ORIGIN: undefined },
+    { DRIVE_ORIGIN: stagingOrigin, DRIVE_FIRST_RELEASE_ORIGIN: stagingOrigin },
+    { ...release, DRIVE_SIGN_IN_FIXTURE: '1' }, { ...release, DRIVE_QUALIFICATION_RUN_ID: '1' },
+    { ...release, DRIVE_QUALIFICATION_SHA: 'a'.repeat(40), DRIVE_QUALIFICATION_VERSION: { id: randomUUID() },
+      DRIVE_QUALIFICATION_EXPIRES_AT: String(Date.now() + 1000) }]) assert.equal(usesOwnerStorage(env), false);
+});
+
+test('the packaged Worker admits first-owner setup and closes file bytes without S3 bindings',
+  { timeout: 30_000, skip: packagePath === undefined }, async () => {
   await withWorker(async ({ db, send, bootstrap }) => {
     const html = await (await send(200, 'GET', '/sign-in')).text();
     assert.match(html, /Sign in/);
@@ -91,6 +105,10 @@ test('the packaged Worker admits first-owner setup and closes file bytes without
     await send(200, 'HEAD', '/', { cookie });
     await (await send(200, 'GET', '/', { cookie })).body.cancel();
     assert.deepEqual(await (await send(200, 'GET', settingsPath, { cookie })).json(), unconfigured);
+    const missingKey = await send(503, 'PUT', settingsPath, { cookie, body: { revision: null,
+      endpoint: 'https://drive-storage.example.com', region: 'us-east-1', bucket: 'test-bucket', pathStyle: true,
+      accessKeyId: 'test-key', secretAccessKey: randomToken() } });
+    assert.deepEqual(await missingKey.json(), { error: 'settings_unavailable' });
     const member = randomUUID();
     await db.prepare("INSERT INTO drive_principals (id, role, status) VALUES (?, 'member', 'active')").bind(member).run();
     const memberCookie = `__Host-drive-session=${(await new Sessions(db).issue(member)).token}`;
@@ -110,18 +128,33 @@ test('the packaged Worker admits first-owner setup and closes file bytes without
 });
 
 test('the packaged Worker verifies MinIO permissions, saves encrypted settings and transfers bytes',
-  { timeout: 120_000, skip: process.env.DRIVE_STORAGE_SETTINGS_MINIO !== '1' }, async () => {
+  { timeout: 120_000, skip: !runMinio }, async () => {
     await using dir = await mkdtempDisposable(join(tmpdir(), 'drive-owner-storage-test-'));
     await withStorageSettingsMinio(dir.path, 'drive-owner-storage-test', async ({ config: { secretAccessKey, ...config }, outbound, minio }) => {
       const { bucket, accessKeyId } = config;
       const input = { ...config, secretAccessKey, revision: null };
       const operations = [];
-      let redirect = false;
-      const outboundService = (request) => outbound(request, (request) => {
-        const url = new URL(request.url);
-        operations.push(`${request.method} ${url.pathname.startsWith(`/${bucket}/drive-storage-probes/`) ? 'probe' : 'file'} ${[...url.searchParams.keys()].sort().join(',')}`);
-        if (redirect) return new Response(null, { status: 307, headers: { location: 'https://different.example.com/' } });
-      });
+      const fileKeys = new Set();
+      let redirect = false, denied = false, deniedProbe = false, dnsDown = false, hold, settingsRequests = 0;
+      const outboundService = (request) => {
+        if (dnsDown && new URL(request.url).hostname === 'cloudflare-dns.com') return new Response(null, { status: 503 });
+        return outbound(request, (request) => {
+          const url = new URL(request.url), key = url.pathname.slice(bucket.length + 2);
+          assert.match(key, /^[a-f0-9-]{36}$/, 'Both probes and files use the ordinary upload key layout');
+          if (!settingsRequests) fileKeys.add(key);
+          const probe = !fileKeys.has(key);
+          operations.push(`${request.method} ${probe ? 'probe' : 'file'} ${[...url.searchParams.keys()].sort().join(',')}`);
+          if (redirect) return new Response(null, { status: 307, headers: { location: 'https://different.example.com/' } });
+          if (!probe && denied) return new Response(null, { status: 404 });
+          if (probe && deniedProbe) return new Response(null, { status: 403 });
+          if (hold) {
+            const current = hold;
+            hold = undefined;
+            current.entered.resolve();
+            return current.release.promise;
+          }
+        });
+      };
       await withWorker(async ({ db, send, bootstrap }) => {
         const cookie = await ownerSession(send, bootstrap);
         const redacted = async (response, secret = secretAccessKey) => {
@@ -130,16 +163,31 @@ test('the packaged Worker verifies MinIO permissions, saves encrypted settings a
           return JSON.parse(text);
         };
         const read = async () => redacted(await send(200, 'GET', settingsPath, { cookie }));
-        const write = async (status, body, test = false) => redacted(await send(status, test ? 'POST' : 'PUT',
-          test ? `${settingsPath}/test` : settingsPath, { cookie, body }), body.secretAccessKey);
+        const write = async (status, body, test = false) => {
+          settingsRequests++;
+          try { return await redacted(await send(status, test ? 'POST' : 'PUT',
+            test ? `${settingsPath}/test` : settingsPath, { cookie, body }), body.secretAccessKey); }
+          finally { settingsRequests--; }
+        };
         assert.deepEqual(await read(), unconfigured);
         for (const bad of ['http://drive-storage.example.com', 'https://127.0.0.1', 'https://[::1]']) {
           assert.deepEqual(await write(400, { ...input, endpoint: bad }, true), { error: 'invalid_settings' });
         }
+        deniedProbe = true;
+        assert.deepEqual(await write(422, input), { error: 'connection_failed' });
+        assert.deepEqual(await read(), unconfigured);
+        deniedProbe = false;
         try { assert.deepEqual(await write(200, input, true), { status: 'verified' }); }
         catch (error) { throw new Error(`MinIO probe stopped after ${operations.join('; ') || 'zero S3 operations'}`, { cause: error }); }
         assert.deepEqual(await read(), unconfigured);
-        const connected = await write(200, input);
+        const blocked = { entered: Promise.withResolvers(), release: Promise.withResolvers() };
+        hold = blocked;
+        const saving = write(200, input);
+        try {
+          await Promise.race([blocked.entered.promise, saving.then(() => assert.fail('Save skipped the held probe'))]);
+          assert.deepEqual(await write(409, input), { error: 'settings_conflict' });
+        } finally { blocked.release.resolve(); }
+        const connected = await saving;
         assert.deepEqual(connected, { status: 'connected', config, revision: connected.revision });
         assert.match(connected.revision, /^[a-f0-9-]{36}$/);
         const stored = await db.prepare('SELECT * FROM drive_storage_settings').first();
@@ -160,6 +208,10 @@ test('the packaged Worker verifies MinIO permissions, saves encrypted settings a
         assert.equal(operations.length, count + 1);
         redirect = false;
         assert.deepEqual(await write(422, { ...edit, secretAccessKey: randomToken() }), { error: 'connection_failed' });
+        denied = true;
+        assert.deepEqual(await write(422, edit), { error: 'connection_failed' });
+        assert.equal(operations.at(-1), 'GET file max-parts,uploadId');
+        denied = false;
         assert.deepEqual(await read(), connected);
         const rotated = await write(200, edit);
         assert.notEqual(rotated.revision, connected.revision);
@@ -167,18 +219,28 @@ test('the packaged Worker verifies MinIO permissions, saves encrypted settings a
         assert.equal(await db.prepare('SELECT storage_epoch FROM drive_storage_settings').first('storage_epoch'), stored.storage_epoch);
         assert.deepEqual(await write(409, edit), { error: 'settings_conflict' });
 
+        dnsDown = true;
+        const unavailable = await send(503, 'PUT', `/api/uploads/${id}/parts/1`, { cookie, body: data });
+        assert.deepEqual(await unavailable.json(), { error: 'settings_unavailable' });
+        assert.equal(await db.prepare('SELECT count(*) AS count FROM drive_upload_part_operations').first('count'), 0);
+        dnsDown = false;
         await send(204, 'PUT', `/api/uploads/${id}/parts/1`, { cookie, body: data });
         const resume = await (await send(200, 'GET', `/api/uploads/${id}/resume`, { cookie })).json();
         assert.equal(resume.parts[0].sha256, expectedPartSha256s);
         const { id: file } = await (await send(201, 'POST', `/api/uploads/${id}/complete`, { cookie,
           body: { parentId: null, name: 'test-transfer.bin' } })).json();
+        denied = true;
+        assert.deepEqual(await write(422, { ...edit, revision: rotated.revision }), { error: 'connection_failed' });
+        assert.equal(operations.at(-1), 'HEAD file ');
+        denied = false;
+        assert.deepEqual(await read(), rotated);
         const download = await send(200, 'GET', `/api/download/${file}`, { cookie });
         assert.deepEqual(Buffer.from(await download.arrayBuffer()), data);
         assert.equal(await db.prepare('SELECT count(*) AS count FROM drive_storage_probe').first('count'), 0);
         const listing = createS3Listing(minio.settings, minio.options);
         const { keys } = await listing.objects({ verifyScope: true });
         assert.equal(keys.length, 1);
-        assert.ok(!keys[0].startsWith('drive-storage-probes/'));
+        assert.ok(fileKeys.has(keys[0]));
         assert.deepEqual((await listing.uploads({ verifyScope: true })).uploads, []);
       }, { settingsKey: randomToken(), outboundService });
     });

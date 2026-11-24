@@ -9,7 +9,7 @@ export const trailingSlash = 'ignore';
 export const GET: RequestHandler = async ({ request, params, locals, cookies }) => {
   const session = locals.driveSession;
   if (!session) return new Response(null, { status: 401 });
-  const owner = await ownerStorageRuntime(env);
+  const owner = await ownerStorageRuntime(env, request.signal);
   if (owner && owner.status !== 'connected') return storageUnavailable(owner.status);
   let retryable = false;
   const response = entryId.test(params.fileId)

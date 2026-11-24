@@ -1,4 +1,4 @@
-import { readBoundedBody } from '../bounded-io';
+import { readBoundedBody, withIoDeadline } from '../bounded-io';
 import { s3Address, type S3Config } from './config';
 
 const publicDns = 'https://cloudflare-dns.com/dns-query';
@@ -63,21 +63,21 @@ async function publicAnswers(host: string, type: 1 | 28, signal: AbortSignal, se
 
 /** DNS screening covers every effective host. The deployed Worker's strictly public fetch also
  * enforces public routing at connection time, independently of these DNS answers. */
-export function ownerStorageFetch(origin: string, send: typeof fetch = fetch): typeof fetch {
+export function ownerStorageFetch(origin: string, send: typeof fetch = fetch) {
   const { hostname } = new URL(origin);
-  let check: Promise<unknown> | undefined;
-  return async (request) => {
+  let checked = false;
+  let pending: Promise<void> | undefined;
+  const prepare = (caller?: AbortSignal) => pending ??= withIoDeadline(2200, caller, async ({ signal }) => {
+    const [a, aaaa] = await Promise.all([publicAnswers(hostname, 1, signal, send), publicAnswers(hostname, 28, signal, send)]);
+    if (a + aaaa === 0) throw new Error('Storage DNS unavailable');
+  }).then(() => { checked = true; });
+  const outbound: typeof fetch = async (request) => {
     if (!(request instanceof Request) || new URL(request.url).origin !== origin || request.redirect !== 'manual') {
       throw new Error('Storage destination denied');
     }
-    request.signal.throwIfAborted();
-    check ??= (async () => {
-      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(2200)]);
-      const [a, aaaa] = await Promise.all([publicAnswers(hostname, 1, signal, send), publicAnswers(hostname, 28, signal, send)]);
-      if (a + aaaa === 0) throw new Error('Storage DNS unavailable');
-    })();
-    await check;
+    if (!checked) throw new Error('Storage DNS unavailable');
     request.signal.throwIfAborted();
     return send(request, { redirect: 'manual', cache: 'no-store' });
   };
+  return { prepare, fetch: outbound };
 }

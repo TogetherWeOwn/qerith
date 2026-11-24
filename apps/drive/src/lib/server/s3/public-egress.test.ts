@@ -33,7 +33,9 @@ test('the effective public authority is also the signed S3 destination for both 
       sent++;
       return new Response(null, { status: 204 });
     };
-    const request = createS3Transport(settings, { fetch: ownerStorageFetch(origin, send), timeoutMs: 5000 });
+    const transport = ownerStorageFetch(origin, send);
+    await transport.prepare();
+    const request = createS3Transport(settings, { fetch: transport.fetch, timeoutMs: 5000 });
     for (const method of ['HEAD', 'DELETE'] as const) await request({ method, key: 'folder/key', maxResponseBytes: 0 });
     assert.deepEqual(calls.sort(), [1, 28]);
     assert.equal(sent, 2);
@@ -57,7 +59,8 @@ test('private, reserved, mixed DNS answers and non-DNS destinations are rejected
       if (type === recordType || recordType === 5) Answer.push({ type: recordType, data: bad });
       return Response.json({ Status: 0, Question: [{ name: 'objects.example.com.', type }], Answer });
     });
-    await assert.rejects(request(new Request(config.endpoint, { redirect: 'manual' })), /Storage DNS denied/);
-    await assert.rejects(request(new Request('https://elsewhere.example.com', { redirect: 'manual' })), /Storage destination denied/);
+    await assert.rejects(request.prepare(), /Storage DNS denied/);
+    await assert.rejects(request.fetch(new Request(config.endpoint, { redirect: 'manual' })), /Storage DNS unavailable/);
+    await assert.rejects(request.fetch(new Request('https://elsewhere.example.com', { redirect: 'manual' })), /Storage destination denied/);
   }
 });

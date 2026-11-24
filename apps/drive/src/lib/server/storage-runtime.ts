@@ -115,13 +115,15 @@ export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB } & Quali
 }
 
 /** Resolve on each authorized request. A rotation preserves the location and storage epoch. */
-export async function ownerStorageRuntime<E extends StorageSettingsEnv & DriveAuthEnv>(env: E) {
+export async function ownerStorageRuntime<E extends StorageSettingsEnv & DriveAuthEnv>(env: E, providerSignal?: AbortSignal) {
   if (!usesOwnerStorage(env)) return;
   try {
     const saved = await readSavedStorage(env);
     if (!saved) return { status: 'storage_unconfigured' as const };
     const identity = { ...uploadStorageEvidence(saved.config, saved.epoch), epoch: saved.epoch };
-    const fetch = ownerStorageFetch(ownerStorageOrigin(identity.settings, firstReleaseOrigin(env)!));
+    const { prepare, fetch } = ownerStorageFetch(ownerStorageOrigin(identity.settings, firstReleaseOrigin(env)!));
+    // Prepare egress before claims and before the existing last-mile live-principal check.
+    if (providerSignal) await prepare(providerSignal);
     return { status: 'connected' as const, identity, fetch, upload: {
       ...env,
       DRIVE_UPLOAD_S3: identity.settings,

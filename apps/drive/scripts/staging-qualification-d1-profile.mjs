@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
-// Fully migrated post-#324 profile. Review a new migration tree and catalog
+// Fully migrated storage-settings profile. Review a new migration tree and catalog
 // together before expanding this profile. Pre-migration databases fail closed.
-export const reviewedMigrationTree = 'adb6cdb75652492064dc90d3c49335bbbddae74d';
-const catalogSize = 167;
-const catalogHash = 'ac4c24f3875bd1c8ede294207b16928c2c0ae6dae7523ad82591ee54761da861';
+export const reviewedMigrationTree = 'acffa6df1514f34151faad01be5b50ef816c580f';
+const catalogSize = 169;
+const catalogHash = 'fd995d07f239e787e790f2783b3b66ffefa2244a273794bf4e697f663047ae9e';
 const appTables = [
   'drive_bound_ceremonies',
   'drive_credentials',
@@ -20,6 +20,8 @@ const appTables = [
   'drive_read_grants',
   'drive_recovery_tokens',
   'drive_sessions',
+  'drive_storage_probe',
+  'drive_storage_settings',
   'drive_upload_cleanup_claims',
   'drive_upload_completion_dispatches',
   'drive_upload_completion_evidence',
