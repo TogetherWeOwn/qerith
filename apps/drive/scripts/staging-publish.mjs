@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const configPath = 'wrangler.staging.json';
 const entryPath = '.svelte-kit/cloudflare/_worker.js';
 const assetsPath = '.svelte-kit/cloudflare';
+export const stagingAccountId = '209cf7dd678adfb683947dd7874d05af';
 
 function requireContained(root, relative, type) {
   const actual = realpathSync(resolve(root, relative));
@@ -17,7 +18,7 @@ function requireContained(root, relative, type) {
 }
 
 export function validateStagingConfig(config, accountId) {
-  if (accountId !== '209cf7dd678adfb683947dd7874d05af') {
+  if (accountId !== stagingAccountId) {
     throw new Error('invalid staging Cloudflare account');
   }
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
@@ -84,18 +85,19 @@ export async function stagingStorage(env, receipt) {
   };
 }
 
-function reviewedStorage(env) {
-  const receipt = JSON.parse(readFileSync(new URL('./staging-storage-qualification.json', import.meta.url), 'utf8'));
+export function reviewedStorage(env, root = fileURLToPath(new URL('..', import.meta.url))) {
+  const receipt = JSON.parse(readFileSync(resolve(root, 'scripts/staging-storage-qualification.json'), 'utf8'));
   return stagingStorage(env, receipt);
 }
 
-export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID, storage, activate = false) {
+export function publishStaging(root, run = spawn, accountId = process.env.CLOUDFLARE_ACCOUNT_ID,
+  storage, activate = false, environment = process.env) {
   const config = validateStagingTarget(root, accountId);
   if (typeof activate !== 'boolean') throw new Error('invalid staging activation mode');
-  return deploy(root, run, config, storage, activate);
+  return deploy(root, run, config, storage, activate, environment);
 }
 
-async function deploy(root, run, config, storage, activate) {
+async function deploy(root, run, config, storage, activate, environment) {
   using deployDir = mkdtempDisposableSync(resolve(tmpdir(), 'drive-staging-'));
   const file = resolve(deployDir.path, configPath);
   writeFileSync(file, JSON.stringify({ ...config, main: resolve(root, config.main),
@@ -108,7 +110,7 @@ async function deploy(root, run, config, storage, activate) {
   const secretsFile = resolve(deployDir.path, 'secrets.json');
   writeFileSync(secretsFile, JSON.stringify(storage.secrets), { mode: 0o600, flag: 'wx' });
   const args = ['deploy', resolve(root, entryPath), '--config', file, '--secrets-file', secretsFile];
-  const env = { ...process.env };
+  const env = { ...environment };
   delete env.DRIVE_OWNER_ENROLLMENT;
   for (const key of storageKeys) delete env[`QERITH_S3_${key}`];
   await new Promise((resolveRun, reject) => {

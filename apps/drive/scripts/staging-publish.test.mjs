@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { publishStaging as publish, validateStagingTarget } from './staging-publish.mjs';
+import './staging-operator.test.mjs';
 
 const accountId = '209cf7dd678adfb683947dd7874d05af';
 const storage = { vars: {}, secrets: {} };
