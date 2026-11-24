@@ -3,7 +3,7 @@ import { newUploadObjectKey } from './metadata/upload-intents';
 import { decodeUploadIdentity } from './metadata/upload-storage-evidence';
 import { createCompleteForPublication } from './s3/complete-for-publication';
 import type { S3Config } from './s3/config';
-import { createS3Listing } from './s3/listing';
+import { createS3Listing, S3MultipartUploadMissing } from './s3/listing';
 import { createMultipartAbort } from './s3/multipart-abort';
 import { createMultipartCreate } from './s3/multipart-create';
 import { createMultipartUpload } from './s3/multipart-upload';
@@ -36,7 +36,12 @@ export async function verifyStorageSettings(config: S3Config, fetch: typeof glob
       if ((await objects.head(key, { signal })).status !== 404) throw new Error('Storage probe key unavailable');
       if (continuity?.upload) {
         const { keyHex, uploadHex } = continuity.upload;
-        await createS3Listing(config, options).parts(decodeUploadIdentity(keyHex), decodeUploadIdentity(uploadHex), { maxParts: 1, signal });
+        try {
+          await createS3Listing(config, options).parts(decodeUploadIdentity(keyHex), decodeUploadIdentity(uploadHex), { maxParts: 1, signal });
+        } catch (error) {
+          // A provider-expired upload can remain allocated in D1. The fresh probe still tests ListParts.
+          if (!(error instanceof S3MultipartUploadMissing)) throw error;
+        }
       }
       const create = createMultipartCreate(config, options);
       const abort = createMultipartAbort(config, options);

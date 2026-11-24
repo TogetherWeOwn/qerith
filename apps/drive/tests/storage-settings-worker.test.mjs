@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempDisposable, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare } from 'miniflare';
 import { unstable_splitSqlQuery } from 'wrangler';
 import { Sessions } from '../src/lib/server/identity/sessions.ts';
 import { stagingOrigin, usesOwnerStorage } from '../src/lib/server/qualification-readiness.ts';
 import { createS3Listing } from '../src/lib/server/s3/listing.ts';
+import { createMultipartAbort } from '../src/lib/server/s3/multipart-abort.ts';
 import { fixture as passkey } from './ceremony-fixture.ts';
 import { withStorageSettingsMinio } from './fixtures/storage-settings-minio.mjs';
 
@@ -22,9 +23,10 @@ const packagePath = process.env.DRIVE_SETTINGS_PACKAGE ?? (runMinio ? '.svelte-k
 async function withWorker(run, { settingsKey, outboundService = () => { throw new Error('Unexpected outbound request'); } } = {}) {
   const config = JSON.parse(await readFile('wrangler.build.jsonc', 'utf8'));
   const release = 'a'.repeat(40), bootstrap = randomToken();
+  const module = resolve(packagePath);
   const worker = new Miniflare(convertV4MiniflareOptions({
     host: '127.0.0.1', port: 0, cf: false, log: new Log(LogLevel.NONE),
-    modules: [{ type: 'ESModule', path: resolve(packagePath) }],
+    modulesRoot: dirname(module), modules: [{ type: 'ESModule', path: module }],
     compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
     assets: { ...config.assets, directory: resolve(config.assets.directory), routerConfig: { has_user_worker: true } },
     d1Databases: { DB: randomUUID() },
@@ -234,6 +236,16 @@ test('the packaged Worker verifies MinIO permissions, saves encrypted settings a
         assert.equal(operations.at(-1), 'HEAD file ');
         denied = false;
         assert.deepEqual(await read(), rotated);
+
+        // An S3 lifecycle rule can remove a multipart upload while its allocation remains in D1.
+        const abandoned = await (await send(201, 'POST', '/api/uploads', { cookie, body: { size: data.length, expectedPartSha256s } })).json();
+        const stale = await db.prepare('SELECT object_key, upload_id FROM drive_upload_intents WHERE id = ? AND state = ?')
+          .bind(abandoned.id, 'allocated').first();
+        assert.ok(stale, 'Expected an allocated upload before expiring it');
+        await createMultipartAbort(minio.settings, minio.options)(stale.object_key, stale.upload_id);
+        const afterExpiry = await write(200, { ...edit, revision: rotated.revision });
+        assert.notEqual(afterExpiry.revision, rotated.revision);
+        assert.deepEqual(await read(), afterExpiry);
         const download = await send(200, 'GET', `/api/download/${file}`, { cookie });
         assert.deepEqual(Buffer.from(await download.arrayBuffer()), data);
         assert.equal(await db.prepare('SELECT count(*) AS count FROM drive_storage_probe').first('count'), 0);

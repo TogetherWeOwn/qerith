@@ -64,3 +64,19 @@ test('private, reserved, mixed DNS answers and non-DNS destinations are rejected
     await assert.rejects(request.fetch(new Request('https://elsewhere.example.com', { redirect: 'manual' })), /Storage destination denied/);
   }
 });
+
+test('a refused DNS lookup cancels its pending sibling before preparation returns', async () => {
+  let aborted = false;
+  const transport = ownerStorageFetch(config.endpoint, async (input) => {
+    assert.ok(input instanceof Request);
+    const type = new URL(input.url).searchParams.get('type');
+    if (type === '1') return new Response(null, { status: 503 });
+    assert.equal(type, '28');
+    return new Promise<Response>((_, reject) => input.signal.addEventListener('abort', () => {
+      aborted = true;
+      reject(input.signal.reason);
+    }, { once: true }));
+  });
+  await assert.rejects(transport.prepare(), /Storage DNS unavailable/);
+  assert.equal(aborted, true);
+});

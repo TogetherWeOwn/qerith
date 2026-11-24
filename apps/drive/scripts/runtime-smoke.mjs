@@ -101,6 +101,7 @@ const rootDataPath = '/__data.json?x-sveltekit-invalidated=01';
 async function exerciseStagingRoutes(worker, origin, owner, member) {
   const flags = {
     invite: { 'x-test-invite': '1' },
+    'upload-resume': { 'x-test-invite': '1' },
     'read-grants': { 'x-test-read-grants': '1' },
     shared: { 'x-test-invite': '1', 'x-test-shared-listing': '1' },
   };

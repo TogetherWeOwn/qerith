@@ -1,6 +1,8 @@
 import { listingChildren, listingText, parseListingXml } from './listing-xml';
 import { createS3Transport } from './transport';
 
+export class S3MultipartUploadMissing extends Error {}
+
 function verifyListingNamespaces(root: ReturnType<typeof parseListingXml>, ...fields: string[]) {
   const names = new Set(['Prefix', 'Delimiter', 'CommonPrefixes', 'EncodingType', 'IsTruncated', ...fields]);
   // The ordinary selectors ignore foreign lookalikes; strict verification must not count them as absent.
@@ -12,6 +14,19 @@ function verifyListingNamespaces(root: ReturnType<typeof parseListingXml>, ...fi
   }
 }
 
+function missingMultipartUpload(body: Uint8Array, bucket: string, key: string, uploadId: string): boolean {
+  if (body.byteLength > 8192) return false;
+  try {
+    const root = parseListingXml(body, 'Error');
+    verifyListingNamespaces(root, 'Code', 'BucketName', 'Bucket', 'Key', 'UploadId');
+    return listingText(root, 'Code') === 'NoSuchUpload' &&
+      Object.entries({ BucketName: bucket, Bucket: bucket, Key: key, UploadId: uploadId }).every(([name, expected]) => {
+        const echoed = listingText(root, name, false);
+        return echoed === undefined || echoed === expected;
+      });
+  } catch { return false; }
+}
+
 /** List one bounded page; continuation tokens and object keys remain opaque. */
 export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
   const { bucket } = args[0];
@@ -21,6 +36,10 @@ export function createS3Listing(...args: Parameters<typeof createS3Transport>) {
     let response: Awaited<ReturnType<typeof request>>;
     try { response = await request({ method: 'GET', key, query, signal, maxResponseBytes: 8 * 1024 * 1024 }); }
     catch { throw new Error(signal?.aborted ? 'S3 request cancelled' : 'S3 request failed'); }
+    if (response.status === 404 && query.uploadId && !response.headers.has('content-range') &&
+        missingMultipartUpload(response.body, bucket, key, query.uploadId)) {
+      throw new S3MultipartUploadMissing('S3 request failed with status 404');
+    }
     if (response.status !== 200) throw new Error(`S3 request failed with status ${response.status}`);
     if (response.headers.has('content-range')) throw new Error('Invalid S3 listing response');
     return response.body;

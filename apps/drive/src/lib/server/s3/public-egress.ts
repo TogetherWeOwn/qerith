@@ -68,8 +68,12 @@ export function ownerStorageFetch(origin: string, send: typeof fetch = fetch) {
   let checked = false;
   let pending: Promise<void> | undefined;
   const prepare = (caller?: AbortSignal) => pending ??= withIoDeadline(2200, caller, async ({ signal }) => {
-    const [a, aaaa] = await Promise.all([publicAnswers(hostname, 1, signal, send), publicAnswers(hostname, 28, signal, send)]);
-    if (a + aaaa === 0) throw new Error('Storage DNS unavailable');
+    const group = new AbortController();
+    const lookup = AbortSignal.any([signal, group.signal]);
+    try {
+      const [a, aaaa] = await Promise.all([publicAnswers(hostname, 1, lookup, send), publicAnswers(hostname, 28, lookup, send)]);
+      if (a + aaaa === 0) throw new Error('Storage DNS unavailable');
+    } finally { group.abort(); }
   }).then(() => { checked = true; });
   const outbound: typeof fetch = async (request) => {
     if (!(request instanceof Request) || new URL(request.url).origin !== origin || request.redirect !== 'manual') {

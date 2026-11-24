@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { createS3Listing } from './listing';
+import { createS3Listing, S3MultipartUploadMissing } from './listing';
 
 const config = { endpoint: 'https://storage.example', bucket: 'test-bucket', region: 'us-east-1', accessKeyId: 'access', secretAccessKey: 'secret' };
 const page = (content: string) => `<ListBucketResult><EncodingType>url</EncodingType>${content}</ListBucketResult>`;
@@ -87,6 +87,26 @@ test('requires one exact bucket, key and upload ID in each ListParts result', as
       ) });
       await assert.rejects(listing.parts('key', 'id'), { message: 'Invalid S3 listing response' });
     }
+  }
+});
+
+test('distinguishes a confirmed missing multipart upload from a generic failure', async () => {
+  const xml = '<Error><Code>NoSuchUpload</Code><BucketName>test-bucket</BucketName><Key>key</Key><UploadId>id</UploadId></Error>';
+  for (const [status, body, headers, missing] of [
+    [404, xml, {}, true],
+    [404, '<Error><Code>NoSuchUpload</Code></Error>', {}, true],
+    [403, xml, {}, false],
+    [404, '', {}, false],
+    [404, xml, { 'content-range': 'bytes 0-1/3' }, false],
+    [404, xml.replace('NoSuchUpload', 'NoSuchBucket'), {}, false],
+    [404, xml.replace('<Key>key', '<Key>wrong'), {}, false],
+    [404, xml.replace('<UploadId>id', '<UploadId>wrong'), {}, false],
+    [404, xml.replace('</Code>', '</Code><Code>NoSuchUpload</Code>'), {}, false],
+    [404, xml + ' '.repeat(8192), {}, false],
+  ] as const) {
+    const listing = createS3Listing(config, { timeoutMs: 1000, fetch: async () => new Response(body, { status, headers }) });
+    await assert.rejects(listing.parts('key', 'id'), (error: unknown) => error instanceof Error &&
+      error.message === `S3 request failed with status ${status}` && (error instanceof S3MultipartUploadMissing) === missing);
   }
 });
 
