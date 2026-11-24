@@ -343,6 +343,9 @@ def promote(boundary, target, credentials, approval, read, write):
             (dry_run / "_worker.js").read_bytes() == (APP / PACKAGE).read_bytes(),
             "Wrangler changed the checked Worker module.",
         )
+        cloud_run(["node", "scripts/production-shell-smoke.mjs", str(config)], cli_env(), 60,
+                  "Offline storage-unconfigured serving probes")
+        print("Verified private serving probes with local D1 and no object storage.", flush=True)
         output = tmp / "deployment.jsonl"
         env = cli_env() | {"CLOUDFLARE_API_TOKEN": credentials["cfDeploy"],
                            "CLOUDFLARE_ACCOUNT_ID": boundary.account_id, "WRANGLER_OUTPUT_FILE_PATH": str(output)}

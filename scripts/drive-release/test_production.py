@@ -555,9 +555,17 @@ class DeploymentOrderTests(ProductionFixture):
         self.active = body["enabled"]
         self.events.append(("switch", self.active))
 
+    def fake_shell_probe(self, args, env, timeout, label):
+        self.assertEqual(args[:2], ["node", "scripts/production-shell-smoke.mjs"])
+        self.assertEqual(prod.json_object(Path(args[2]).read_bytes()), self.bindings)
+        self.assertEqual(env, prod.cli_env())
+        self.assertEqual(timeout, 60)
+        self.events.append(("shell probe", label))
+
     def promote(self, status=(200, 401)):
         self.write.side_effect = self.fake_switch
         with patch.object(prod, "wrangler", side_effect=self.fake_wrangler), \
+             patch.object(prod, "cloud_run", side_effect=self.fake_shell_probe), \
              patch.object(prod, "probe_status", side_effect=status) as probe, patch.object(prod, "sleep"):
             prod.promote(self.boundary, self.target, self.credentials, self.approval, self.read, self.write)
         return probe.call_args_list
@@ -582,12 +590,22 @@ class DeploymentOrderTests(ProductionFixture):
         self.assertEqual(probes, [call(self.boundary, "/sign-in"), call(self.boundary, "/api/owner/invitations", method="GET")])
         positions = [key for key, _ in self.events]
         snapshot = f"{DB}/time_travel/bookmark"
+        self.assertLess(positions.index("shell probe"), positions.index(DB))
         self.assertEqual(positions.count(snapshot), 2)
         self.assertLess(positions.index(snapshot, positions.index(snapshot) + 1), positions.index("d1"))
         self.assertLess(positions.index("d1"), positions.index("deploy"))
         self.assertLess(positions.index(f"{prod.WORKER}/versions/{UUID}"), positions.index("switch"))
         self.assertLess(positions.index(f"{prod.WORKER}/deployments"), positions.index("switch"))
         self.assertTrue(self.active)
+
+    def test_shell_smoke_failure_refuses_before_any_provider_access(self):
+        with patch.object(prod, "wrangler", side_effect=self.fake_wrangler), \
+             patch.object(prod, "cloud_run", side_effect=SystemExit("Offline serving probes failed.")), \
+             self.assertRaisesRegex(SystemExit, "Offline serving probes failed"):
+            prod.promote(self.boundary, self.target, self.credentials, self.approval, self.read, self.write)
+        self.read.assert_not_called()
+        self.write.assert_not_called()
+        self.assertFalse(self.committed)
 
     def test_worker_that_appears_during_migration_is_never_overwritten(self):
         before = self.read.side_effect
@@ -631,7 +649,7 @@ class DeploymentOrderTests(ProductionFixture):
         with patch.object(sys, "argv", ["production.py", "release"]), \
              patch.object(prod, "cloudflare", side_effect=provider), \
              patch.object(prod, "wrangler", side_effect=self.fake_wrangler), \
-             patch.object(prod, "cloud_run") as unexpected_command, \
+             patch.object(prod, "cloud_run", side_effect=self.fake_shell_probe) as shell_probe, \
              patch.object(prod, "probe_status", side_effect=[200, 401]) as probe:
             self.responses[DB]["name"] = "qerith-drive-staging"
             with self.assertRaisesRegex(SystemExit, "D1 identity"):
@@ -640,7 +658,7 @@ class DeploymentOrderTests(ProductionFixture):
             self.write.assert_not_called()
             self.responses[DB]["name"] = prod.NAME
             prod.main(self.release_env())
-        unexpected_command.assert_not_called()
+        self.assertEqual(shell_probe.call_count, 2)
         self.assertEqual(probe.call_args_list, [call(self.boundary, "/sign-in"),
                                                call(self.boundary, "/api/owner/invitations", method="GET")])
         self.assertTrue(self.active)

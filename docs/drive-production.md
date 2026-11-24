@@ -6,18 +6,20 @@ is a protected manual workflow for the first private release. Run it only from
 exact-candidate review and independent release approval. The initial deployment
 serves owner bootstrap, sign-in and settings with object storage unconfigured.
 The owner verifies and saves external S3-compatible storage in the Drive web
-UI. Keep member invites closed until storage is ready and file smoke passes.
+UI. Keep member invites closed until storage is ready, file smoke passes and
+the 30-minute watch is complete.
 The checked build caps uploads at 16 MiB + 257 bytes (16,777,473 bytes).
 Permanent deletion and its scheduled drain are disabled.
 
 ## Before approval
 
 1. Confirm required CI, PR standards, secret scanning and tier reviews for the
-   candidate. Wait for the successful `ci` and `gitleaks` push runs on the exact
-   main SHA. Run the protected `drive-first-release-smoke.yml` workflow at that
-   SHA with `staging_venue=github-hosted-local`. Record its run ID, attempt,
-   build digest and all passing outcomes. The
-   single success-only artifact
+   candidate, including owner storage settings and fail-closed file operations
+   before storage is configured. Wait for the successful `ci` and `gitleaks`
+   push runs on the exact main SHA. Run the protected
+   `drive-first-release-smoke.yml` workflow at that SHA with
+   `staging_venue=github-hosted-local`. Record its run ID, attempt, build digest
+   and all passing outcomes. The single success-only artifact
    `drive-first-release-smoke-<full-sha>-attempt-<run-attempt>` contains
    `receipt.json` with the venue, source SHA, immutable build digest, staged
    Worker version, tested cap, case outcomes and cleanup result. An expired artifact,
@@ -34,10 +36,10 @@ Permanent deletion and its scheduled drain are disabled.
    below. Read back the account's workers.dev namespace and the production
    boundary in GitHub. Record the actual D1 UUID, Worker name and
    `https://qerith-drive-production.<workerSubdomain>.workers.dev` origin. Confirm
-   the production Worker is absent and the intended Worker has no custom route,
-   preview, trigger or service binding. The workers.dev route is the sole
-   intended serving surface and the
-   switch-off control.
+   the production Worker is absent. From deployed provider metadata, verify
+   that no custom domain, route, preview, trigger or inbound service binding
+   targets that Worker. The workers.dev route is the sole intended serving
+   surface and the switch-off control.
 3. Establish the narrow production release window with the custodian. Confirm
    that the Worker and D1 have no other active consumers, writers or queued
    provider operations. Verify the effective scopes and custody of a Cloudflare
@@ -103,12 +105,13 @@ operation.
 | Durable production environment secrets | Effective scope |
 | --- | --- |
 | `DRIVE_PRODUCTION_CF_SWITCH_READ_TOKEN` | Workers Scripts Read for the selected account and Worker subdomain readback |
-| `DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN` | Workers Scripts Write for route disablement, scoped to the exact production Worker for the shared account |
+| `DRIVE_PRODUCTION_CF_SWITCH_WRITE_TOKEN` | For the shared account, Individual Workers Editor on the production Worker. For the dedicated account, Workers Scripts Write on the dedicated account. |
 
 The custodian issues distinct incident identities without D1, storage or zone
-grants and rotates them under incident custody. Workers Scripts Write also
-grants script and binding edits. Keep the incident writer in
-protected custody and use it only for switch-off.
+grants and rotates them under incident custody. The writer can also edit
+scripts and bindings within its scope. Keep it in protected custody and use
+it only for switch-off. The route update API lists Individual Workers Editor
+as an accepted permission. [Cloudflare route update API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/create/)
 
 ### Shared-account writer checks
 
@@ -181,7 +184,9 @@ and asset digest before receiving production credentials.
 
 Before contacting Cloudflare, the workflow matches the durable boundary to
 the approved target and verifies the custody fingerprints and release window.
-It checks emptiness with read-only credentials and reads back the approved
+It exercises the same sign-in and anonymous API probes on the checked Worker
+with disposable local D1, the release bindings and no object storage or
+provider access. It then checks production D1 emptiness and reads back the approved
 D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
 post-apply D1 ledger must exactly match the checked-in migration order. The
 workflow checks again that the production Worker is absent before deploying
@@ -220,7 +225,8 @@ response bodies out of evidence.
 
 The owner can verify and save an external S3-compatible target from Drive
 settings after deployment. Keep member invitations closed until storage is
-verified. Before inviting members, smoke the configured file path with two
+verified, file smoke passes and the 30-minute watch is complete. For file smoke,
+exercise the configured path with two
 controlled synthetic identities, one run-tagged object at or below the cap,
 one read grant and one revoke. Check uninvited denial, byte-identical
 download, immediate denial after revoke and permanent deletion denial.
