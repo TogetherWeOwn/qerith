@@ -19,6 +19,13 @@ const origin = 'https://qerith-drive-staging.5150.workers.dev';
 const rpID = new URL(origin).hostname;
 const sessionName = '__Host-drive-session';
 const dataPath = '/__data.json';
+const started = performance.now();
+function checkpoint(step) {
+  const elapsed = ((performance.now() - started) / 1_000).toFixed(1);
+  console.log(`Staging-origin (${elapsed}s): ${step}`);
+}
+
+checkpoint('starting disposable Worker and D1');
 await using dir = await mkdtempDisposable('../.svelte-kit/staging-root-browser-');
 const config = JSON.parse(await readFile('../wrangler.build.jsonc', 'utf8'));
 const configPath = resolve(dir.path, 'wrangler.json');
@@ -84,6 +91,7 @@ stagingRoot: try {
   assert.equal(redirect.status, 303);
   assert.equal(redirect.headers.get('location'), '/sign-in?next=%2F');
 
+  checkpoint('checking owner passkey sign-in and file round trip');
   browser = await chromium.launch({ ignoreDefaultArgs: ['--disable-back-forward-cache'] });
   const context = await browser.newContext();
   // Leave time for Playwright to report the failing operation before the fixture deadline.
@@ -184,9 +192,11 @@ stagingRoot: try {
       file, downloadPath: await row.getAttribute('href') });
     break stagingRoot;
   }
+  checkpoint('checking shared listing');
   await proveSharedListing(browser, { origin, DB, worker, relay, ownerCookie: cookie, memberToken,
     file, downloadPath: await row.getAttribute('href') });
 
+  checkpoint('checking upload limits and notice recovery');
   // Without invite mode the owner picker still rejects files above the preview cap.
   const size = 16 * 1024 * 1024 + 1;
   const oversized = 'Above preview cap.bin';
@@ -260,6 +270,7 @@ stagingRoot: try {
   assert.equal(await listingRetry.getAttribute('href'), '/');
   await DB.prepare(index).run();
 
+  checkpoint('checking private route denials');
   const privateNodes = [...assets].filter(path => /\/nodes\/.*\.js$/.test(path) && !signInAssets.has(path));
   assert.ok(privateNodes.length, 'hydration loaded a root-only generated node');
   const data = new URL(refresh.url());
@@ -287,13 +298,14 @@ stagingRoot: try {
     headers.set('x-fixture-invite', '1');
     return worker.fetch(url, { ...init, headers });
   } };
+  checkpoint('checking invite enrollment and member actions');
   const recipientNodes = await proveInvite(browser, { origin, relay: (route, site) => relay(route, inviteWorker, site),
     worker: inviteWorker, DB, ownerToken: session.value,
     stagingRoot: { asset: privateNodes[0], ownerDownload: failedDownload, ownerFile: file, defaultWorker: worker,
       otherMemberCookie: `${sessionName}=${memberToken}`,
       storageCalls: async () => (await get('/', { 'x-fixture-storage-count': '1' })).json(), renderNotice } });
   await page.bringToFront(); // Resume the owner tab before frame-dependent checks.
-  console.log('Staging-origin: invite context closed; checking route denials');
+  checkpoint('checking invite route denials');
   const inviteNodes = recipientNodes.filter(path => !signInAssets.has(path) && !privateNodes.includes(path));
   assert.ok(inviteNodes.length > 0, 'staging invite loaded an invite-specific generated route node');
   for (const path of inviteNodes) await deny(path, 404, {});
@@ -314,25 +326,27 @@ stagingRoot: try {
     overrides.delete(pathname);
     return override ? override(route, forward) : forward();
   });
-  console.log('Staging-origin: checking folder documents and accessibility');
+  checkpoint('checking folder documents and accessibility');
   await captureFolderView(page, origin, DB, { owner: 'owner', scope: 'staging-folder' });
   assert.ok(await page.evaluate(async () => {
     await document.fonts.ready;
     return [...document.fonts].some(font => font.family.replaceAll('"', '') === 'Qerith Sans' && font.status === 'loaded');
   }), 'the opted-in SSR folder loads its actual font');
   const intercept = (path, handler) => overrides.set(path, handler);
-  console.log('Staging-origin: checking owner folder creation');
+  checkpoint('checking owner folder creation');
   await proveNewFolder(page, origin, DB, 'owner', intercept, index);
-  console.log('Staging-origin: checking owner rename');
+  checkpoint('checking owner rename');
   await proveRename(page, { origin, DB, principal: 'owner', intercept, cursor: '00000000-0000-4000-8000-000000000090' });
   // Paging evidence is complete; make the published file visible on the first page.
   await DB.prepare("DELETE FROM drive_entries WHERE owner_id = 'owner' AND name GLOB 'Folder [0-9][0-9][0-9]' AND parent_id IS NULL").run();
+  checkpoint('checking owner root move');
   page.setDefaultTimeout(10_000);
   await proveMove(page, { origin, DB, intercept, file, downloadPath: failedDownload });
+  checkpoint('checking owner nested move');
   page.setDefaultTimeout(5_000); // Report a stalled nested step before the fixture deadline.
   await proveNestedMove(page, origin, DB, intercept);
 
-  console.log('Staging-origin: checking owner session recovery and revocation');
+  checkpoint('checking owner session recovery and revocation');
   await DB.prepare("UPDATE drive_sessions SET expires_at = 0 WHERE principal_id = 'owner'").run();
   const recovery = await inviteWorker.fetch(`${origin}/people`, { headers: { cookie, 'x-fixture-navigation': '1', 'sec-fetch-site': 'same-origin' }, redirect: 'manual' });
   await page.goto(origin + recovery.headers.get('location'), { waitUntil: 'networkidle' });
@@ -351,7 +365,7 @@ stagingRoot: try {
       signedOut: 401, member: 403, revoked: 401, wrongOrigin: 403, crossSite: 403, unlisted: 404,
     },
   }, null, 2));
-  console.log('Staging-origin Worker + Chromium + D1: passkey, keyboard picker, root data refresh, full/range download and denials passed');
+  checkpoint('all scenarios passed and staging-root evidence written');
 } finally {
   await browser?.close();
   await harness.close();

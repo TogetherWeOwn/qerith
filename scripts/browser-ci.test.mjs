@@ -129,7 +129,7 @@ test('generated browser entrypoints have separate exact-head deadlines', async (
   assert.match(coverage, /VERIFIED_BROWSER_POLICY:.*needs.drive-browser.outputs.policy/);
   assert.doesNotMatch(capture + coverage + verifier, /continue-on-error/);
   assert.match(await readFile(new URL('./browser-job.mjs', import.meta.url), 'utf8'),
-    /'timeout', \['--signal=TERM', '--kill-after=10s', '90s', process.execPath, \.\.\.args\]/);
+    /'timeout', \['--signal=TERM', '--kill-after=10s', deadline, process.execPath, \.\.\.args\]/);
   const browser = new URL('../apps/drive/browser/', import.meta.url);
   assert.match(await readFile(new URL('staging-root-standalone.mjs', browser), 'utf8'), /^import '\.\/staging-root\.mjs';$/m);
   assert.doesNotMatch(await readFile(new URL('sign-in.mjs', browser), 'utf8'), /staging-root.*\.mjs/);
@@ -382,14 +382,18 @@ test('routed Share requires each registered fixture’s evidence', async t => {
 test('the trusted registry inventories sources and controls legacy selection', () => {
   const paths = new Set(['apps/drive/browser/run.mjs', 'apps/drive/browser/upload-storage.mjs',
     'apps/drive/browser/root-share.mjs', 'apps/drive/browser/staging-root-standalone.mjs',
-    'apps/drive/browser/share-dialog.mjs']);
+    'apps/drive/browser/nested-share.mjs', 'apps/drive/browser/share-dialog.mjs']);
   const proposed = { 'root-share': { states: [], modes: [], widths: [] } };
   const exact = planBrowser(paths, proposed);
   assert.equal(exact.checks.rootShare, true);
   assert.throws(() => generatedCommands(paths, undefined, true), /Missing required generated browser module/);
   paths.add('apps/drive/browser/sign-in.mjs');
-  assert.deepEqual(generatedCommands(paths, undefined, true),
-    [['sign-in.mjs'], ['staging-root-standalone.mjs'], ['staging-root-standalone.mjs', '--root-share-only']]);
+  assert.deepEqual(generatedCommands(paths, undefined, true), [
+    { args: ['sign-in.mjs'], deadline: '90s' },
+    { args: ['staging-root-standalone.mjs'], deadline: '150s' },
+    { args: ['staging-root-standalone.mjs', '--root-share-only'], deadline: '90s' },
+    { args: ['staging-root-standalone.mjs', '--nested-share-only'], deadline: '90s' },
+  ]);
   assert.deepEqual(isolatedSchedule(paths, proposed), [['share-dialog', 'exerciseShareDialog']]);
   assert.deepEqual(isolatedSchedule(paths, { 'share-dialog': {} }), [['share-dialog', 'exerciseShareDialog']]);
   const legacy = planBrowser(paths, proposed, false);
