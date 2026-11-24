@@ -1,4 +1,4 @@
-import { validateConfig, type S3Config } from './config';
+import { s3Address, validateConfig, type S3Config } from './config';
 import { createS3Signer } from './signer';
 
 const MAX_PART_BYTES = 16 * 1024 * 1024;
@@ -56,6 +56,7 @@ function cancelResponse(response: Response): void {
 export function createS3Transport(config: S3Config, options: TransportOptions) {
   const settings = validateConfig(config);
   if (new URL(settings.endpoint).protocol !== 'https:') throw new Error('S3 signer requires HTTPS');
+  const address = s3Address(settings);
   const { timeoutMs, streamBudget: configuredBudget } = options;
   const streamBudget = configuredBudget && { idleMs: configuredBudget.idleMs, totalMs: configuredBudget.totalMs };
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || (streamBudget &&
@@ -83,7 +84,7 @@ export function createS3Transport(config: S3Config, options: TransportOptions) {
     }
     const path = key.split('/').map(encode).join('/');
     const query = Object.entries(queryParams ?? {}).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
-    const url = `${settings.endpoint}/${settings.bucket}/${path}${query ? `?${query}` : ''}`;
+    const url = `${address.origin}${address.prefix}${path}${query ? `?${query}` : ''}`;
     const headers = new Headers(inputHeaders);
     if (headers.has('x-amz-content-sha256')) throw new Error('S3 payload hash is managed by transport');
     // Revalidate after processing caller-controlled metadata, then snapshot before hashing.

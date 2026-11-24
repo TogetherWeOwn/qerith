@@ -3,13 +3,12 @@ import { driveNext, folderDocumentRoute, isDrivePageNavigation, isExactFolderDoc
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
-import { privateDriveOrigin, stagingOrigin, type DriveReleaseOrigin } from './qualification-readiness';
+import { privateDriveOrigin, stagingOrigin, usesOwnerStorage, type DriveReleaseOrigin, type QualificationReadinessEnv } from './qualification-readiness';
 import { eligibleRecipientEntry, readGrantAdmissionRoute, readGrantCollectionRoute, readGrantOriginalRequest, readGrantRecipientRoute } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor, sharedRoute } from './shared-page';
 import { isBodylessUploadResume, uploadAdmissionRoute, uploadResumeRoute } from './upload-admission';
 
-export interface DriveAuthEnv extends DriveReleaseOrigin {
-  DRIVE_SIGN_IN_FIXTURE?: string;
+export interface DriveAuthEnv extends QualificationReadinessEnv {
   DRIVE_STAGING_INVITE_ACCEPTANCE?: string;
   DRIVE_STAGING_READ_GRANTS?: string;
   DRIVE_STAGING_SHARED_LISTING?: string;
@@ -45,6 +44,7 @@ export type DriveUploadMode = 'disabled' | 'preview' | 'multipart';
 // write: storage readiness and the checks on each mutation are separate.
 export function driveUploadMode(env: DriveAuthEnv, role?: 'owner' | 'member'): DriveUploadMode {
   if (role === 'member' && admitsStagingInvite(env)) return 'multipart';
+  if (role === 'owner' && usesOwnerStorage(env)) return 'multipart';
   if (role === 'owner' && (privateDriveOrigin(env) !== null || admitsSignInFixture(env))) return 'preview';
   return 'disabled';
 }
@@ -139,7 +139,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
     }
     if (!allowsOrigin(request, origin.origin)) return refuse(403);
     if (uploadResume) {
-      if (!admitsStagingInvite(env) || uploadAdmissionRoute(request, url) !== routeId) return deny(404);
+      if (!(admitsStagingInvite(env) || usesOwnerStorage(env)) || uploadAdmissionRoute(request, url) !== routeId) return deny(404);
       if (!allowsStagingInviteSite(request)) return deny(403);
       if (!isBodylessUploadResume(request)) return deny(400);
     }

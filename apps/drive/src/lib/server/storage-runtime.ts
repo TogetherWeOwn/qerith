@@ -1,9 +1,11 @@
 import { withIoDeadline } from './bounded-io';
 import { uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import type { QualificationReadinessEnv } from './qualification-readiness';
+import { firstReleaseOrigin, usesOwnerStorage, type QualificationReadinessEnv } from './qualification-readiness';
 import type { DriveAuthEnv } from './request-auth';
 import { createS3Listing } from './s3/listing';
 import { MAX_PARTS, type CompletedPart } from './s3/multipart-completion';
+import { ownerStorageFetch, ownerStorageOrigin } from './s3/public-egress';
+import { readSavedStorage, type StorageSettingsEnv } from './storage-settings';
 import type { UploadRouteEnv } from './upload-routes';
 
 export interface StorageBindings {
@@ -48,10 +50,9 @@ const maxPartEtagBytes = 8192;
 // this budget fits within the downstream 16 MiB completion manifest limit.
 const maxRetainedEtagBytes = 2 * 1024 * 1024;
 
-function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity>>, proof: string | undefined,
+function storageVerifier(identity: NonNullable<ReturnType<typeof storageIdentity>>, budget: number | null,
   transport: typeof fetch): UploadRouteEnv['DRIVE_UPLOAD_VERIFIER'] {
   const { settings, storageConfigId } = identity;
-  const budget = qualifiedBudget(proof, storageConfigId, settings.region);
   if (budget === null) return undefined;
   return {
     async isQualified(id: string, signal?: AbortSignal) { return id === storageConfigId && !signal?.aborted; },
@@ -108,6 +109,33 @@ export function wireUploadStorage<DB>(env: StorageBindings & { DB?: DB } & Quali
     DRIVE_STAGING_INVITE_ACCEPTANCE: env.DRIVE_STAGING_INVITE_ACCEPTANCE,
     DRIVE_UPLOAD_S3: identity?.settings,
     DRIVE_UPLOAD_EPOCH: identity?.epoch,
-    DRIVE_UPLOAD_VERIFIER: identity ? storageVerifier(identity, env.DRIVE_S3_QUALIFICATION, transport) : undefined
+    DRIVE_UPLOAD_VERIFIER: identity ? storageVerifier(identity,
+      qualifiedBudget(env.DRIVE_S3_QUALIFICATION, identity.storageConfigId, identity.settings.region), transport) : undefined
   };
+}
+
+/** Resolve on each authorized request. A rotation preserves the location and storage epoch. */
+export async function ownerStorageRuntime<E extends StorageSettingsEnv & DriveAuthEnv>(env: E) {
+  if (!usesOwnerStorage(env)) return;
+  try {
+    const saved = await readSavedStorage(env);
+    if (!saved) return { status: 'storage_unconfigured' as const };
+    const identity = { ...uploadStorageEvidence(saved.config, saved.epoch), epoch: saved.epoch };
+    const fetch = ownerStorageFetch(ownerStorageOrigin(identity.settings, firstReleaseOrigin(env)!));
+    return { status: 'connected' as const, identity, fetch, upload: {
+      ...env,
+      DRIVE_UPLOAD_S3: identity.settings,
+      DRIVE_UPLOAD_EPOCH: identity.epoch,
+      DRIVE_UPLOAD_VERIFIER: storageVerifier(identity, 15_000, fetch)
+    } };
+  } catch { return { status: 'settings_unavailable' as const }; }
+}
+
+export function storageUnavailable(status: 'storage_unconfigured' | 'settings_unavailable') {
+  return Response.json({ error: status }, { status: 503, headers: { 'cache-control': 'private, no-store' } });
+}
+
+export async function requestStorageIdentity(env: StorageSettingsEnv & StorageBindings & DriveAuthEnv) {
+  const owner = await ownerStorageRuntime(env);
+  return owner ? owner.identity ?? null : storageIdentity(env);
 }

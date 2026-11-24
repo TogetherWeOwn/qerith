@@ -1,6 +1,6 @@
 export const routeMethods = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
 export type RouteMethod = typeof routeMethods[number];
-export type StagingGate = 'invite' | 'read-grants' | 'shared';
+export type StagingGate = 'invite' | 'read-grants' | 'shared' | 'upload-resume';
 export type RouteAccess = 'public' | 'owner' | 'member' | 'owner-or-member' | 'owner-or-invited-member' | 'owner-or-multipart-member';
 export type SignedOut = 'dispatch' | 401 | 'return-to-route' | 'return-to-root';
 export type CeremonyStep = 'challenge' | 'restart' | 'verify';
@@ -61,7 +61,7 @@ export const stagingRoutes: readonly (StagingRoute | StagingExclusion)[] = [
   { path: '/api/uploads/[intentId]/parts/[partNumber]', methods: ['PUT'], source: 'endpoint', target: { kind: 'upload' }, ...upload },
   { path: '/api/uploads/[intentId]/complete', methods: ['POST'], source: 'endpoint', target: { kind: 'upload' }, ...upload },
   { path: '/api/uploads/[intentId]/resume', methods: ['GET'], source: 'endpoint', target: { kind: 'upload-resume' },
-    gate: 'invite', ...upload },
+    gate: 'upload-resume', ...upload },
   { path: '/api/owner/invitations', methods: ['GET', 'POST'], source: 'endpoint', ...owner },
   { path: '/api/owner/invitations/[id]/cancel', methods: ['POST'], source: 'endpoint', ...owner },
   { path: '/api/owner/members/[id]/revoke', methods: ['POST'], source: 'endpoint', ...owner },

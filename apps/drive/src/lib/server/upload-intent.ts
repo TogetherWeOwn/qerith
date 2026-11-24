@@ -4,7 +4,7 @@ import { readBoundedBody } from './bounded-io';
 import { Sessions, tokenHash } from './identity/sessions';
 import { UploadIntents, type ExpectedUploadPart, type UploadAllocationDatabase } from './metadata/upload-intents';
 import { uploadCompletionBudget, uploadStorageEvidence } from './metadata/upload-storage-evidence';
-import { firstReleaseOrigin, qualificationAllocationPrefix, type QualificationReadinessEnv } from './qualification-readiness';
+import { firstReleaseOrigin, qualificationAllocationPrefix, usesOwnerStorage, type QualificationReadinessEnv } from './qualification-readiness';
 import { admitsStagingInvite, allowsOrigin, authOrigin, driveUploadMode, readSession, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
 import type { S3Config } from './s3/config';
 import { MAX_PART_BYTES } from './s3/multipart-completion';
@@ -70,7 +70,7 @@ async function readIntent(request: Request, multipartLimit: number | null): Prom
 
 export async function postUploadIntent(request: Request, env: UploadIntentEnv,
   transport?: Parameters<typeof createUploadIntent>[3]): Promise<Response> {
-  const input = await readIntent(request, admitsStagingInvite(env) ? multipartLimit(env) : null);
+  const input = await readIntent(request, admitsStagingInvite(env) || usesOwnerStorage(env) ? multipartLimit(env) : null);
   if (!input || request.signal.aborted) return reply(400);
   const { DRIVE_UPLOAD_VERIFIER: verifier } = env;
   return createUploadIntent(request, input.size, {

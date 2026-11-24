@@ -5,7 +5,9 @@ export function uploadStorageEvidence(config: S3Config, epoch: string) {
   const settings = validateConfig(config);
   const { endpoint, bucket } = settings;
   if (endpoint.length > 2048) throw new TypeError('Invalid storage identity');
-  return { settings, storageConfigId: JSON.stringify([endpoint, bucket, epoch]) };
+  const identity = [endpoint, bucket, epoch];
+  if (settings.pathStyle === false) identity.push('virtual-hosted');
+  return { settings, storageConfigId: JSON.stringify(identity) };
 }
 
 export function uploadCompletionBudget(verifier: { completionTimeoutMs?(id: string): number | null }, id: string): number | null {

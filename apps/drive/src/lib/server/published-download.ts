@@ -11,8 +11,7 @@ export interface DownloadEnv extends StorageBindings, Pick<DriveAuthEnv, 'DRIVE_
 const timeoutMs = 15_000;
 const streamBudget = { idleMs: 30_000, totalMs: 4 * 60 * 60 * 1000 };
 
-export function downloadStorage(env: DownloadEnv, inviteMode: 'own-file' | 'grant-aware' = 'own-file') {
-  const identity = storageIdentity(env);
+export function downloadStorage(env: DownloadEnv, inviteMode: 'own-file' | 'grant-aware' = 'own-file', identity = storageIdentity(env)) {
   if (!env.DB || !identity) return null;
   const { settings: config, epoch } = identity;
   const mode = admitsStagingInvite(env) ? inviteMode : privateDriveOrigin(env) !== null;
@@ -64,8 +63,8 @@ async function fixedLength(body: ReadableStream<Uint8Array>, length: number, sig
 }
 
 export async function publishedDownload(request: Request, id: string, token: string,
-  env: DownloadEnv, onReadError: () => void, transport: typeof fetch = fetch) {
-  const storage = downloadStorage(env, 'grant-aware');
+  env: DownloadEnv, onReadError: () => void, transport: typeof fetch = fetch, identity?: ReturnType<typeof storageIdentity>) {
+  const storage = downloadStorage(env, 'grant-aware', identity);
   if (!storage) return downloadFile(request, id);
   const { config, storageConfigId, resolveGeneration } = storage;
   const staging = privateDriveOrigin(env) !== null;

@@ -20,6 +20,12 @@ export function privateDriveOrigin(env: DriveReleaseOrigin): string | null {
   return env.DRIVE_ORIGIN === stagingOrigin ? stagingOrigin : firstReleaseOrigin(env);
 }
 
+/** The ordinary release uses owner-managed storage. Qualification retains its pinned bindings. */
+export function usesOwnerStorage(env: QualificationReadinessEnv): boolean {
+  return env.DRIVE_ORIGIN !== stagingOrigin && firstReleaseOrigin(env) !== null &&
+    env.DRIVE_SIGN_IN_FIXTURE !== '1' && env.DRIVE_QUALIFICATION_SHA === undefined && allowsQualificationTraffic(env);
+}
+
 export const readinessPath = '/api/deployer/qualification-readiness';
 export const readinessHeaders = {
   nonce: 'x-drive-qualification-nonce',

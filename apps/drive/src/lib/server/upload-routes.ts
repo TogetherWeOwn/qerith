@@ -1,5 +1,5 @@
 import { firstReleaseUploadCapBytes } from './first-release-upload-limit.mjs';
-import { firstReleaseOrigin } from './qualification-readiness';
+import { firstReleaseOrigin, usesOwnerStorage } from './qualification-readiness';
 import { livePrincipalCheck, tokenHash, type LivePrincipalMode } from './identity/sessions';
 import { requireActiveOwner, validateName } from './metadata/private';
 import { accessibleUploadParent, availableUploadDestination, createUploadCompletionReceipts,
@@ -124,7 +124,7 @@ export function uploadRoutes(env: UploadRouteEnv, transport = { fetch: globalThi
     },
     async stagingResume(request: Request, intentId: string): Promise<Response> {
       const url = new URL(request.url);
-      if (!admitsStagingInvite(env) || uploadAdmissionRoute(request, url) !== uploadResumeRoute ||
+      if (!(admitsStagingInvite(env) || usesOwnerStorage(env)) || uploadAdmissionRoute(request, url) !== uploadResumeRoute ||
           url.pathname !== `/api/uploads/${intentId}/resume`) return reply(404);
       return resumeEvidence(request, url, intentId);
     },
