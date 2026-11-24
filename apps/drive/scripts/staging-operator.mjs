@@ -4,8 +4,7 @@ import {
   openSync, readSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, isAbsolute, join } from 'node:path';
 import { readBoundedBody } from '../src/lib/server/bounded-io.ts';
 import { reviewedStorage, publishStaging, stagingAccountId, validateStagingTarget } from './staging-publish.mjs';
 import { applyStagingMigrations, boundedStagingWrangler } from './staging-qualification-migrations.mjs';
@@ -21,7 +20,7 @@ function readPrivateFile(path) {
   try {
     const stat = fstatSync(file);
     if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600 ||
-        stat.size < 1 || stat.size > 8192) throw new Error('Invalid Operator file.');
+        stat.size === 0 || stat.size > 8192) throw new Error('Invalid Operator file.');
     const buffer = Buffer.alloc(8193);
     const size = readSync(file, buffer);
     if (size !== stat.size) throw new Error('Operator file changed during read.');
@@ -163,8 +162,21 @@ export async function operatorPublish(sha, stateDir, mode = 'closed', { run = co
     if (lines.length !== 2 || lines[0] !== 'Resource location: remote' || lines[1] !== '✅ No migrations to apply!') {
       throw new Error('Staging D1 still has pending migrations.');
     }
-    await publishStaging(app, undefined, stagingAccountId, storage, mode === 'owner-preview', publishEnv);
+    const outputFile = join(workspace.path, 'wrangler-deploy.jsonl');
+    writeFileSync(outputFile, '', { flag: 'wx', mode: 0o600 });
+    await publishStaging(app, undefined, stagingAccountId, storage, mode === 'owner-preview', {
+      ...publishEnv, WRANGLER_OUTPUT_FILE_PATH: outputFile,
+    });
+    const outputs = readPrivateFile(outputFile).trimEnd().split('\n').map(line => JSON.parse(line))
+      .filter(entry => entry?.type === 'deploy');
+    const [{ version, worker_name: worker, version_id: publishedVersion } = {}] = outputs;
+    if (outputs.length !== 1 || version !== 1 || worker !== target.name ||
+        typeof publishedVersion !== 'string' || !uuid.test(publishedVersion) || publishedVersion === previousVersion) {
+      throw new Error('Wrangler did not report a new version for the fixed staging Worker.');
+    }
+    record('deploy-reported', { publishedVersion });
     const currentVersion = await deployedVersion(runWrangler);
+    if (currentVersion !== publishedVersion) throw new Error('The serving Worker version differs from the publish result.');
     record('published', { currentVersion });
   } catch (error) {
     if (admitted) throw new Error('Publish outcome needs reconciliation. Preserve the in-progress record before retry.');
@@ -176,7 +188,7 @@ export async function operatorPublish(sha, stateDir, mode = 'closed', { run = co
   renameSync(pending, join(stateDir, 'last-publish.jsonl'));
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   try {
     if (process.argv.length < 4 || process.argv.length > 5) throw new Error();
     await operatorPublish(...process.argv.slice(2));

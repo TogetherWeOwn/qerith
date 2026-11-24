@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,6 +9,7 @@ import { operatorPublish } from './staging-operator.mjs';
 
 const previousVersion = 'a1111111-1111-1111-1111-111111111111';
 const currentVersion = 'b2222222-2222-2222-2222-222222222222';
+const otherVersion = 'c3333333-3333-3333-3333-333333333333';
 const emptyList = 'Resource location: remote \n\n✅ No migrations to apply!';
 const settings = {
   CLOUDFLARE_API_TOKEN: 'synthetic-publish-token-only',
@@ -20,7 +21,7 @@ const settings = {
   QERITH_S3_SECRET_ACCESS_KEY: 'synthetic-secret-key',
 };
 
-function fixture(t, { alterTarget, failPending, failPublish, tokenMinutes = 30 } = {}) {
+function fixture(t, { alterTarget, failPending, failPublish, readbackVersion = currentVersion, tokenMinutes = 30 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'drive-operator-test-'));
   t.after(() => rmSync(root, { recursive: true }));
   const repo = join(root, 'repo');
@@ -86,7 +87,7 @@ if (args.includes('--dry-run')) {
 assert.equal(process.env.CLOUDFLARE_API_TOKEN, 'synthetic-publish-token-only');
 assert.equal(process.env.CLOUDFLARE_ACCOUNT_ID, '209cf7dd678adfb683947dd7874d05af');
 if (args[0] === 'deployments') {
-  console.log(JSON.stringify({ versions: [{ percentage: 100, version_id: seen('deploy') ? '${currentVersion}' : '${previousVersion}' }] }));
+  console.log(JSON.stringify({ versions: [{ percentage: 100, version_id: seen('deploy') ? '${readbackVersion}' : '${previousVersion}' }] }));
   return record('version');
 }
 if (args[0] === 'deploy') {
@@ -98,6 +99,9 @@ if (args[0] === 'deploy') {
   assert.equal(config.vars.DRIVE_OWNER_ENROLLMENT_RELEASE, 'disabled');
   assert.equal(secrets.DRIVE_S3_SECRET_ACCESS_KEY, 'synthetic-secret-key');
   fs.writeFileSync(${JSON.stringify(modeFile)}, config.vars.DRIVE_ORIGIN);
+  fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
+    type: 'deploy', version: 1, worker_name: config.name, version_id: '${currentVersion}',
+  }) + '\\n');
   process.exitCode = ${failPublish ? 1 : 0};
   return;
 }
@@ -146,16 +150,19 @@ record('apply');
 test('operator builds and publishes a reviewed SHA closed and records D1 and Worker evidence', async (t) => {
   const f = fixture(t);
   f.approvalFor();
+  // The inclusive size limit allows JSON with padding up to 8192 bytes.
+  writeFileSync(f.credentials, JSON.stringify(settings).padEnd(8192));
   await f.publish();
   assert.deepEqual(f.readTrace(), ['dry-run', 'version', 'bookmark', 'list', 'ledger-before', 'apply', 'ledger-after', 'pending', 'deploy', 'version']);
   assert.equal(readFileSync(f.modeFile, 'utf8'), 'disabled');
-  const [admitted, recover, migrated, published] = f.readRecords();
+  const [admitted, recover, migrated, deploy, published] = f.readRecords();
   assert.equal(admitted.previousVersion, previousVersion);
   assert.equal(recover.bookmark, 'synthetic-bookmark');
   assert.deepEqual(migrated.before, []);
   assert.equal(migrated.after[0].name, '0001_fixture.sql');
+  assert.equal(deploy.publishedVersion, currentVersion);
   assert.equal(published.currentVersion, currentVersion);
-  assert.ok([admitted, recover, migrated, published].every(record => record.sha === f.sha && record.mode === 'closed'));
+  assert.ok(f.readRecords().every(record => record.sha === f.sha && record.mode === 'closed'));
   assert.ok(!existsSync(f.pending));
 });
 
@@ -180,12 +187,17 @@ test('operator rejects unapproved source, wrong main tip, and mismatched target 
 test('operator refuses unmatched storage, reusable tokens, and an inherited approval', async (t) => {
   const f = fixture(t, { tokenMinutes: 120 });
   f.approvalFor();
+  writeFileSync(f.approval, '');
+  await assert.rejects(f.publish(), /Invalid Operator file/);
+  f.approvalFor();
   writeFileSync(f.credentials, JSON.stringify({ ...settings, QERITH_S3_BUCKET: 'wrong-fixture' }));
   await assert.rejects(f.publish(f.sha, undefined, () => assert.fail('provider access attempted')), /passing qualification/);
   writeFileSync(f.credentials, JSON.stringify(settings));
   await assert.rejects(f.publish(), /active staging token/);
   unlinkSync(f.approval);
-  const cli = spawnSync(process.execPath, [new URL('./staging-operator.mjs', import.meta.url).pathname, f.sha, f.state], {
+  const launcher = join(f.state, 'launcher.mjs');
+  symlinkSync(new URL('./staging-operator.mjs', import.meta.url), launcher);
+  const cli = spawnSync(process.execPath, [launcher, f.sha, f.state], {
     encoding: 'utf8', env: { ...process.env, EXPECTED_MAIN_SHA: f.sha, GITHUB_ACTIONS: 'true' },
   });
   assert.equal(cli.status, 1, cli.stderr);
@@ -193,8 +205,9 @@ test('operator refuses unmatched storage, reusable tokens, and an inherited appr
   assert.deepEqual(f.readTrace(), ['dry-run', 'dry-run']);
 });
 
-test('operator preserves the recovery record and blocks retry after a pending list or publish failure', async (t) => {
-  for (const options of [{ failPending: true }, { failPublish: true }]) {
+test('operator preserves the recovery record and blocks retry after a pending list, publish, or readback failure', async (t) => {
+  for (const options of [{ failPending: true }, { failPublish: true },
+    { readbackVersion: previousVersion }, { readbackVersion: otherVersion }]) {
     const f = fixture(t, options);
     f.approvalFor();
     await assert.rejects(f.publish(), /needs reconciliation/);

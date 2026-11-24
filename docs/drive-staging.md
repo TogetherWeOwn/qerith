@@ -316,8 +316,10 @@ local D1 and S3. Use the commands below in a separately authorized cutover.
    builds it with the existing lock checks, and dry-runs the pinned target.
    It verifies expiry with Cloudflare, records the previous serving version and
    a pre-migration bookmark, checks the native ledger and empty pending list,
-   and reads back the serving version after deploy. Retain `last-publish.jsonl`
-   with the exact SHA and verify the serving SHA and readiness. Withdraw
+   and requires the serving version to match the new version reported by
+   Wrangler. Archive `last-publish.jsonl` with the exact SHA before the next
+   publish and verify
+   the serving SHA and readiness. Withdraw
    `approved-publish` and remove `staging-settings.json` after the attempt.
    An unresolved `publish-in-progress.jsonl` blocks subsequent attempts.
 
