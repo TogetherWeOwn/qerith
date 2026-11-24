@@ -1,4 +1,4 @@
-"""First-ever Drive deploy to the dedicated production Cloudflare targets."""
+"""First-ever Drive deploy to the pinned production Cloudflare targets."""
 
 from base64 import b64decode
 from dataclasses import dataclass
@@ -22,10 +22,10 @@ SHARED_ACCOUNT = "209cf7dd678adfb683947dd7874d05af"
 SHARED_SUBDOMAIN = "5150"
 NAME = "qerith-drive-production"
 APP = Path(__file__).resolve().parents[2] / "apps/drive"
+BUILD_CONFIG = "wrangler.build.jsonc"
 PACKAGE = ".svelte-kit/first-release-package/_worker.js"
 ASSETS = ".svelte-kit/cloudflare"
 WORKER = f"/workers/scripts/{NAME}"
-BUCKET = f"/r2/buckets/{NAME}"
 STAGING_DB = "87ac8041-ad2d-4650-b0d7-05bb78846f60"
 PRISTINE_SCHEMA = (
     "SELECT 1 AS present FROM main.sqlite_schema "
@@ -35,11 +35,9 @@ PRISTINE_SCHEMA = (
 MAX_MIGRATIONS = 100
 MAX_PROTECTED_JSON_BYTES = 4096
 CREDENTIALS = {
-    "cfRead": ("DRIVE_PRODUCTION_CF_READ_TOKEN",),
-    "cfDeploy": ("DRIVE_PRODUCTION_CF_DEPLOY_TOKEN",),
-    "r2Read": ("DRIVE_PRODUCTION_R2_READ_ID", "DRIVE_PRODUCTION_R2_READ_SECRET"),
-    "r2App": ("DRIVE_PRODUCTION_R2_APP_ID", "DRIVE_PRODUCTION_R2_APP_SECRET"),
-    "owner": ("DRIVE_PRODUCTION_OWNER_TOKEN",),
+    "cfRead": "DRIVE_PRODUCTION_CF_READ_TOKEN",
+    "cfDeploy": "DRIVE_PRODUCTION_CF_DEPLOY_TOKEN",
+    "owner": "DRIVE_PRODUCTION_OWNER_TOKEN",
 }
 
 
@@ -47,14 +45,11 @@ CREDENTIALS = {
 class Boundary:
     account_id: str
     worker_subdomain: str
+    d1_id: str | None = None
 
     @property
     def origin(self):
         return f"https://{NAME}.{self.worker_subdomain}.workers.dev"
-
-    @property
-    def r2_endpoint(self):
-        return f"https://{self.account_id}.r2.cloudflarestorage.com"
 
 
 def protected_json(encoded, message):
@@ -69,11 +64,25 @@ def protected_json(encoded, message):
         raise SystemExit(message) from None
 
 
+def production_d1_id(value):
+    return (type(value) is str and UUID.fullmatch(value) is not None
+            and value not in (STAGING_DB, "00000000-0000-0000-0000-000000000000"))
+
+
 def production_boundary(env):
-    message = "Missing or invalid dedicated production boundary."
+    message = "Missing or invalid production boundary."
     pin = protected_json(env.get("DRIVE_PRODUCTION_BOUNDARY", ""), message)
+    require(type(pin) is dict, message)
+    if set(pin) == {"mode", "accountId", "workerSubdomain", "d1Id"}:
+        require(
+            pin["mode"] == "shared-account"
+            and (pin["accountId"], pin["workerSubdomain"]) == (SHARED_ACCOUNT, SHARED_SUBDOMAIN)
+            and production_d1_id(pin["d1Id"]),
+            message,
+        )
+        return Boundary(SHARED_ACCOUNT, SHARED_SUBDOMAIN, pin["d1Id"])
     require(
-        type(pin) is dict and set(pin) == {"accountId", "workerSubdomain"}
+        set(pin) == {"accountId", "workerSubdomain"}
         and type(pin["accountId"]) is str and re.fullmatch(r"[0-9a-f]{32}", pin["accountId"])
         and type(pin["workerSubdomain"]) is str
         and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", pin["workerSubdomain"])
@@ -101,28 +110,27 @@ def canonical(data):
 
 def target_and_approval(boundary, env, sha, now):
     target = protected_json(
-        env.get("DRIVE_PRODUCTION_TARGET", ""), "Missing or invalid dedicated production target.",
+        env.get("DRIVE_PRODUCTION_TARGET", ""), "Missing or invalid production target.",
     )
     require(
-        set(target) == {"accountId", "worker", "origin", "d1Id", "r2Bucket", "storageEpoch", "credentials"}
+        type(target) is dict and set(target) == {"accountId", "worker", "origin", "d1Id", "credentials"}
         and target["accountId"] == boundary.account_id and target["worker"] == NAME
-        and target["origin"] == boundary.origin and target["r2Bucket"] == NAME
-        and UUID.fullmatch(target["d1Id"]) and target["d1Id"] not in (STAGING_DB, "00000000-0000-0000-0000-000000000000")
-        and re.fullmatch(r"prod-[a-z0-9-]{1,48}", target["storageEpoch"])
-        and set(target["credentials"]) == set(CREDENTIALS),
-        "Production target does not match the dedicated release namespace.",
+        and target["origin"] == boundary.origin
+        and production_d1_id(target["d1Id"])
+        and (boundary.d1_id is None or target["d1Id"] == boundary.d1_id)
+        and type(target["credentials"]) is dict and set(target["credentials"]) == set(CREDENTIALS),
+        "Production target does not match the pinned release namespace.",
     )
-    credentials = {key: tuple(env.get(name, "") for name in names) for key, names in CREDENTIALS.items()}
-    for key, values in credentials.items():
+    credentials = {key: env.get(name, "") for key, name in CREDENTIALS.items()}
+    for key, value in credentials.items():
         require(
-            all(re.fullmatch(r"[A-Za-z0-9_+/=-]{20,256}", value) for value in values)
-            and target["credentials"][key] == fingerprint("\0".join(values)),
+            re.fullmatch(r"[A-Za-z0-9_+/=-]{20,256}", value)
+            and target["credentials"][key] == fingerprint(value),
             "Production credentials are missing or differ from reviewed custody evidence.",
         )
     require(
         credentials["cfRead"] != credentials["cfDeploy"]
-        and credentials["r2Read"][0] != credentials["r2App"][0]
-        and re.fullmatch(r"[A-Za-z0-9_-]{43}", credentials["owner"][0]),
+        and re.fullmatch(r"[A-Za-z0-9_-]{43}", credentials["owner"]),
         "Production must use separate read and write identities and a bounded owner token.",
     )
 
@@ -149,8 +157,6 @@ def target_and_approval(boundary, env, sha, now):
 
 def cloudflare(boundary, token, path, *, body=None, missing_worker=False):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json"}
-    if path.startswith(f"{BUCKET}/") or path == BUCKET:
-        headers["cf-r2-jurisdiction"] = "default"
     payload = json.dumps(body).encode() if body is not None else None
     request = Request(f"https://api.cloudflare.com/client/v4/accounts/{boundary.account_id}{path}", payload, headers)
     try:
@@ -168,6 +174,8 @@ def cloudflare(boundary, token, path, *, body=None, missing_worker=False):
     require(len(data) <= 65536, "Cloudflare evidence exceeded the response limit.")
     result = json_object(data)
     require(result["success"] is True and result["errors"] == [], "Cloudflare rejected the scoped request.")
+    if missing_worker:
+        require(type(result["result"]) is dict, "Cloudflare Worker presence evidence is incomplete.")
     return result["result"]
 
 
@@ -180,14 +188,14 @@ def query_d1(read, db, sql):
     return result[0]["results"]
 
 
-def cloud_run(args, env, timeout, label):
+def cloud_run(args, env, timeout, label, *, failure_hint="Reconcile provider state before retrying."):
     try:
         return subprocess.run(
             args, cwd=APP, env=env, timeout=timeout, stdin=subprocess.DEVNULL,
             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        raise SystemExit(f"{label} failed or timed out. Reconcile provider state before retrying.") from None
+        raise SystemExit(f"{label} failed or timed out. {failure_hint}") from None
 
 
 def cli_env():
@@ -196,52 +204,16 @@ def cli_env():
     }
 
 
-def r2_listing(boundary, reader, operation, limit):
-    env = cli_env() | {
-        "AWS_ACCESS_KEY_ID": reader[0], "AWS_SECRET_ACCESS_KEY": reader[1],
-        "AWS_CONFIG_FILE": "/dev/null", "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
-        "AWS_EC2_METADATA_DISABLED": "true", "AWS_MAX_ATTEMPTS": "1",
-    }
-    args = ["aws", "--no-cli-pager", "--no-paginate", "--cli-connect-timeout", "5",
-            "--cli-read-timeout", "8", "--output", "json", "--region", "auto", "--endpoint-url", boundary.r2_endpoint,
-            "s3api", operation, "--bucket", NAME, limit, "1"]
-    return json_object(cloud_run(args, env, 15, "R2 read-only listing"))
-
-
-def verify_emptiness(read, db, list_r2):
-    require(query_d1(read, db, PRISTINE_SCHEMA) == [], "D1 has an application schema or migration ledger.")
-    objects = list_r2("list-objects-v2", "--max-keys")
-    require(
-        objects["Name"] == NAME and objects["IsTruncated"] is False
-        and type(objects["KeyCount"]) is int and objects["KeyCount"] == 0
-        and all(objects.get(key, "") == "" for key in
-                ("Prefix", "Delimiter", "StartAfter", "ContinuationToken", "NextContinuationToken"))
-        and objects.get("Contents", []) == [] and objects.get("CommonPrefixes", []) == [],
-        "The dedicated R2 bucket is nonempty or its object listing is incomplete.",
-    )
-    multipart = list_r2("list-multipart-uploads", "--max-uploads")
-    require(
-        multipart["Bucket"] == NAME and multipart["IsTruncated"] is False
-        and all(multipart.get(key, "") == "" for key in
-                ("Prefix", "Delimiter", "KeyMarker", "UploadIdMarker", "NextKeyMarker", "NextUploadIdMarker"))
-        and multipart.get("Uploads", []) == [] and multipart.get("CommonPrefixes", []) == [],
-        "An unfinished R2 multipart upload exists or its listing is incomplete.",
-    )
-
-
 def verify_targets(boundary, read, db):
     actual = read(db)
     require(
         actual["uuid"] == db.rsplit("/", 1)[1] and actual["name"] == NAME and actual["version"] == "production",
         "Production D1 identity or Time Travel compatibility differs from reviewed target.",
     )
-    bucket = read(BUCKET)
-    require(bucket["name"] == NAME and bucket["jurisdiction"] == "default", "Production R2 identity differs.")
-    require(
-        read(f"{BUCKET}/domains/managed")["enabled"] is False
-        and read(f"{BUCKET}/domains/custom")["domains"] == [],
-        "Production R2 must have no public domain.",
-    )
+    verify_absent_worker(boundary, read)
+
+
+def verify_absent_worker(boundary, read):
     require(
         read("/workers/subdomain")["subdomain"] == boundary.worker_subdomain
         and read(f"{WORKER}/settings", missing_worker=True) is None,
@@ -249,16 +221,16 @@ def verify_targets(boundary, read, db):
     )
 
 
-def verify_snapshot(read, db, list_r2, expected):
+def verify_snapshot(read, db, expected):
     before = read(f"{db}/time_travel/bookmark")["bookmark"]
-    verify_emptiness(read, db, list_r2)
+    require(query_d1(read, db, PRISTINE_SCHEMA) == [], "D1 has an application schema or migration ledger.")
     after = read(f"{db}/time_travel/bookmark")["bookmark"]
     require(
         re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", before) and after == before
         and fingerprint(before) == expected,
         "Could not verify the approved D1 Time Travel snapshot across the empty-target check.",
     )
-    print(f"Verified pristine D1, empty private R2 and pre-migration snapshot SHA-256 {expected}.", flush=True)
+    print(f"Verified pristine D1 and pre-migration snapshot SHA-256 {expected}.", flush=True)
 
 
 def switch_state(read, write, on):
@@ -331,6 +303,7 @@ def migration_names():
 
 
 def worker_config(boundary, target, approval):
+    build = json_object((APP / BUILD_CONFIG).read_bytes())
     values = {
         "DRIVE_ORIGIN": boundary.origin,
         "DRIVE_FIRST_RELEASE_ORIGIN": boundary.origin,
@@ -338,21 +311,11 @@ def worker_config(boundary, target, approval):
         "DRIVE_STAGING_READ_GRANTS": "1",
         "DRIVE_STAGING_SHARED_LISTING": "1",
         "DRIVE_OWNER_ENROLLMENT_RELEASE": approval["sourceSha"],
-        "DRIVE_S3_ENDPOINT": boundary.r2_endpoint,
-        "DRIVE_S3_BUCKET": NAME,
-        "DRIVE_S3_REGION": "auto",
-        "DRIVE_S3_STORAGE_EPOCH": target["storageEpoch"],
-        "DRIVE_S3_QUALIFICATION": canonical({
-            "version": 1,
-            "storageConfigId": canonical([boundary.r2_endpoint, NAME, target["storageEpoch"]]),
-            "region": "auto", "sourceSha": approval["sourceSha"], "runId": approval["stagingRunId"],
-            "runAttempt": approval["stagingRunAttempt"], "completionTimeoutMs": 30_000,
-        }),
     }
     return {
         "account_id": boundary.account_id, "name": NAME, "main": str(APP / PACKAGE),
-        "compatibility_date": "2026-07-30",
-        "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+        "compatibility_date": build["compatibility_date"],
+        "compatibility_flags": build["compatibility_flags"],
         "workers_dev": False, "preview_urls": False,
         "assets": {"directory": str(APP / ASSETS), "binding": "ASSETS", "run_worker_first": True},
         "d1_databases": [{"binding": "DB", "database_name": NAME, "database_id": target["d1Id"],
@@ -365,7 +328,7 @@ def wrangler(args, env, timeout, label):
     cloud_run([str(APP / "node_modules/.bin/wrangler"), *args], env, timeout, label)
 
 
-def promote(boundary, target, credentials, approval, read, write, list_r2):
+def promote(boundary, target, credentials, approval, read, write):
     db = f"/d1/database/{target['d1Id']}"
     names = migration_names()
     require((APP / PACKAGE).is_file() and (APP / ASSETS).is_dir(), "Checked release package is missing.")
@@ -382,24 +345,27 @@ def promote(boundary, target, credentials, approval, read, write, list_r2):
             (dry_run / "_worker.js").read_bytes() == (APP / PACKAGE).read_bytes(),
             "Wrangler changed the checked Worker module.",
         )
+        cloud_run(["node", "scripts/production-shell-smoke.mjs", str(config)], cli_env(), 60,
+                  "Offline storage-unconfigured serving probes",
+                  failure_hint="No provider requests were made. Check sign-in and anonymous owner API denial without storage.")
+        print("Verified private serving probes with local D1 and no object storage.", flush=True)
         output = tmp / "deployment.jsonl"
-        env = cli_env() | {"CLOUDFLARE_API_TOKEN": credentials["cfDeploy"][0],
+        env = cli_env() | {"CLOUDFLARE_API_TOKEN": credentials["cfDeploy"],
                            "CLOUDFLARE_ACCOUNT_ID": boundary.account_id, "WRANGLER_OUTPUT_FILE_PATH": str(output)}
 
         verify_targets(boundary, read, db)
-        verify_snapshot(read, db, list_r2, approval["bookmarkDigest"])
+        verify_snapshot(read, db, approval["bookmarkDigest"])
         require(datetime.now(timezone.utc) < utc_time(approval["expiresAt"]), "Independent release approval expired.")
         wrangler(["d1", "migrations", "apply", "DB", "--remote", "--config", str(config)], env, 120, "D1 migration")
         rows = query_d1(read, db, f"SELECT name FROM d1_migrations ORDER BY id LIMIT {MAX_MIGRATIONS}")
         require(rows == [{"name": name} for name in names], "The production D1 migration ledger differs from reviewed source.")
+        verify_absent_worker(boundary, read)
         require(datetime.now(timezone.utc) < utc_time(approval["expiresAt"]), "Independent release approval expired.")
 
         owner_expiry = int(datetime.now(timezone.utc).timestamp() * 1000) + 300_000
         secrets = tmp / "secrets.json"
         secrets.write_text(canonical({
-            "DRIVE_S3_ACCESS_KEY_ID": credentials["r2App"][0],
-            "DRIVE_S3_SECRET_ACCESS_KEY": credentials["r2App"][1],
-            "DRIVE_OWNER_ENROLLMENT": f"{approval['sourceSha']}:{owner_expiry}:{credentials['owner'][0]}",
+            "DRIVE_OWNER_ENROLLMENT": f"{approval['sourceSha']}:{owner_expiry}:{credentials['owner']}",
         }), encoding="utf-8")
         secrets.chmod(0o600)
         wrangler(["deploy", "--no-bundle", "--config", str(config), "--secrets-file", str(secrets)],
@@ -434,7 +400,7 @@ def verify_worker_bindings(read, version, config):
     require(result["id"] == version, "Cloudflare version identity differs.")
     bindings = result["resources"]["bindings"]
     by_name = {binding["name"]: binding for binding in bindings}
-    expected_secrets = {"DRIVE_S3_ACCESS_KEY_ID", "DRIVE_S3_SECRET_ACCESS_KEY", "DRIVE_OWNER_ENROLLMENT"}
+    expected_secrets = {"DRIVE_OWNER_ENROLLMENT"}
     require(
         len(by_name) == len(bindings)
         and set(by_name) == set(config["vars"]) | expected_secrets | {"DB", "ASSETS"}
@@ -482,10 +448,9 @@ def main(env):
     else:
         require(sys.argv[1:] == ["release"], "Invalid production operation.")
         target, credentials, approval = target_and_approval(boundary, env, sha, datetime.now(timezone.utc))
-        read_token = credentials["cfRead"][0]
-        write_token = credentials["cfDeploy"][0]
-        promote(boundary, target, credentials, approval, read, write,
-                lambda *args: r2_listing(boundary, credentials["r2Read"], *args))
+        read_token = credentials["cfRead"]
+        write_token = credentials["cfDeploy"]
+        promote(boundary, target, credentials, approval, read, write)
 
 
 if __name__ == "__main__":

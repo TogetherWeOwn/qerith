@@ -190,9 +190,8 @@ def verify_staging_receipt(sha, run_id, attempt, get=github_get, now=None):
     )
     venue = receipt.get("stagingVenue")
     require(
-        (venue == LOCAL_VENUE and receipt.get("localStorage") == LOCAL_STORAGE)
-        or (venue == "cloudflare" and "localStorage" not in receipt),
-        "Staging receipt does not prove a supported staging venue and its cleanup.",
+        venue == LOCAL_VENUE and receipt.get("localStorage") == LOCAL_STORAGE,
+        "Staging receipt does not prove the protected local S3 venue and its cleanup.",
     )
     return receipt["buildDigest"], venue
 

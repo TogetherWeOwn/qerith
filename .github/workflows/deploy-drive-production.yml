@@ -160,7 +160,7 @@ jobs:
           python3 -EsB scripts/drive-release/package_artifact.py
           cd apps/drive
           test "$(node scripts/first-release-build-digest.mjs)" = "$CHECKED_BUILD_DIGEST"
-      - name: Prove empty targets and snapshot, then migrate and activate
+      - name: Prove empty D1 and snapshot, then migrate and activate
         working-directory: .
         env:
           CHECKED_BUILD_DIGEST: ${{ steps.recheck.outputs.build_digest }}
@@ -173,10 +173,6 @@ jobs:
           DRIVE_PRODUCTION_APPROVAL: ${{ vars.DRIVE_PRODUCTION_APPROVAL }}
           DRIVE_PRODUCTION_CF_READ_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_READ_TOKEN }}
           DRIVE_PRODUCTION_CF_DEPLOY_TOKEN: ${{ secrets.DRIVE_PRODUCTION_CF_DEPLOY_TOKEN }}
-          DRIVE_PRODUCTION_R2_READ_ID: ${{ secrets.DRIVE_PRODUCTION_R2_READ_ID }}
-          DRIVE_PRODUCTION_R2_READ_SECRET: ${{ secrets.DRIVE_PRODUCTION_R2_READ_SECRET }}
-          DRIVE_PRODUCTION_R2_APP_ID: ${{ secrets.DRIVE_PRODUCTION_R2_APP_ID }}
-          DRIVE_PRODUCTION_R2_APP_SECRET: ${{ secrets.DRIVE_PRODUCTION_R2_APP_SECRET }}
           DRIVE_PRODUCTION_OWNER_TOKEN: ${{ secrets.DRIVE_PRODUCTION_OWNER_TOKEN }}
         run: python3 -EsB scripts/drive-release/production.py release
 
