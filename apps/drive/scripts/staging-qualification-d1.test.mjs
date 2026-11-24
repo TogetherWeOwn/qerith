@@ -142,8 +142,8 @@ function fixture(t, { emptyBaseline = false, echoTarget = true, reviewedCensus =
 
 test('app table census covers the committed fully migrated schema and returns an empty inventory scan', async t => {
   const f = fixture(t, { reviewedCensus: true });
-  assert.equal(f.historical.length, 37);
-  assert.equal(f.sql("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table'")[0].n, 35);
+  assert.equal(f.historical.length, 38);
+  assert.equal(f.sql("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table'")[0].n, 37);
   assert.deepEqual(await f.census(), { complete: true, items: [] });
   assert.deepEqual(f.calls, ['', '/query']);
   assert.deepEqual(await f.census({ fromDriveDirectory: true }), { complete: true, items: [] });
@@ -160,7 +160,7 @@ test('app table census accepts complete D1 read metadata', async t => {
       served_by: 'fixture', served_by_region: 'ENAM', served_by_colo: 'IAD', served_by_primary: true,
       timings: { sql_duration_ms: 0.25 }, duration: 0.25,
       changes: 0, last_row_id: 0, changed_db: false, size_after: 839680,
-      rows_read: 167, rows_written: 0, total_attempts: 1,
+      rows_read: 169, rows_written: 0, total_attempts: 1,
     };
     return ok(result);
   });
@@ -176,6 +176,13 @@ test('app table census rejects expired, unnamed and permanent rows under the rea
   assert.equal(f.sql('SELECT display_name FROM drive_principals')[0].display_name, null);
   await assert.rejects(f.census(), censusError);
   f.sql('DELETE FROM drive_principals');
+  assert.deepEqual(await f.census(), { complete: true, items: [] });
+  f.sql("INSERT INTO drive_storage_probe VALUES (1, printf('%036d', 1), 1)");
+  await assert.rejects(f.census(), censusError);
+  f.sql('DELETE FROM drive_storage_probe');
+  f.sql("INSERT INTO drive_storage_settings VALUES (1, printf('%036d', 1), printf('%036d', 2), printf('%024d', 3), printf('%032d', 4))");
+  await assert.rejects(f.census(), censusError);
+  f.sql('DELETE FROM drive_storage_settings');
   assert.deepEqual(await f.census(), { complete: true, items: [] });
   f.sql("INSERT INTO drive_upload_key_reservations VALUES ('opaque-key')");
   await assert.rejects(f.census(), censusError);

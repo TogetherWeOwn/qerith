@@ -532,6 +532,12 @@ jobs:
           npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.build.jsonc --dry-run --outdir "$RUNNER_TEMP/drive-app"
           npx --no-install wrangler deploy .svelte-kit/cloudflare/_worker.js --config wrangler.staging.json --dry-run --outdir "$RUNNER_TEMP/drive-staging"
           npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/drive-worker"
+      - name: Verify owner storage setup in the packaged Worker
+        if: hashFiles('apps/drive/tests/storage-settings-worker.test.mjs') != ''
+        env:
+          DRIVE_SETTINGS_PACKAGE: ${{ runner.temp }}/drive-app/_worker.js
+          DRIVE_STORAGE_SETTINGS_MINIO: '1'
+        run: timeout --signal=TERM --kill-after=10s 140s node --import tsx --test tests/storage-settings-worker.test.mjs
       - name: Test first-release staging scope and cleanup guards
         if: hashFiles('apps/drive/scripts/first-release-smoke.test.mjs') != ''
         run: node --import tsx --test scripts/first-release-smoke.test.mjs

@@ -6,6 +6,7 @@ import { postFolder } from './folder-route';
 import { Sessions } from './identity/sessions';
 import { getMoveDestinations } from './move-destinations';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
+import { usesOwnerStorage } from './qualification-readiness';
 import { eligibleRecipientEntry, readGrantAdapterRequest, readGrantAdmissionRoute, readGrantCursor } from './read-grant-admission';
 import { isExactSharedDocument, sharedPageCursor } from './shared-page';
 import { admitsSharedListing, admitsStagingInvite, admitsStagingReadGrants, allowsOrigin, allowsStagingInviteSite, driveUploadMode, readSessionToken, privateDriveOrigin, type DriveAuthEnv } from './request-auth';
@@ -74,11 +75,13 @@ function deny(status: number): Response {
 export async function admitStagingRequest(request: Request, env: DriveAuthEnv, storageReady: boolean,
   assets: PreviewAssets): Promise<Target | Response> {
   const origin = privateDriveOrigin(env);
-  if (origin === null || typeof env.DB?.prepare !== 'function' || !storageReady) return deny(503);
+  if (origin === null || typeof env.DB?.prepare !== 'function' || (!storageReady && !usesOwnerStorage(env))) return deny(503);
   if (!allowsOrigin(request, origin)) return deny(403);
   const url = new URL(request.url);
   const { pathname, search } = url;
-  const gates = { invite: admitsStagingInvite(env), 'read-grants': admitsStagingReadGrants(env), shared: admitsSharedListing(env) };
+  const invite = admitsStagingInvite(env);
+  const gates = { invite, 'read-grants': admitsStagingReadGrants(env), shared: admitsSharedListing(env),
+    'upload-resume': invite || usesOwnerStorage(env) };
   const route = stagingRoutes.find((route): route is StagingRoute => !('excluded' in route) &&
     (!route.gate || gates[route.gate]) && route.methods.some(method => method === request.method) && matchesRoute(route, request, url));
   const admission = route ?? assetAdmission(request, url, assets, gates);

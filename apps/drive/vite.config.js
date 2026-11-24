@@ -91,13 +91,14 @@ import { handleInviteAcceptance } from '../../src/lib/server/invite-acceptance.t
 import { listingRequest } from '../../src/lib/server/listing-routes.ts';
 import { deletePrivateEntry } from '../../src/lib/server/private-deletion-route.ts';
 import { admitsOwnerEnrollment, ownerEnrollment } from '../../src/lib/server/owner-enrollment.ts';
-import { admitsFirstReleaseSmokeRequest, allowsQualificationTraffic, qualificationReadiness, readinessPath } from '../../src/lib/server/qualification-readiness.ts';
+import { admitsFirstReleaseSmokeRequest, allowsQualificationTraffic, qualificationReadiness, readinessPath, usesOwnerStorage } from '../../src/lib/server/qualification-readiness.ts';
 import { admitsSignInFixture, allowsOrigin, privateDriveOrigin } from '../../src/lib/server/request-auth.ts';
 import { signIn } from '../../src/lib/server/sign-in.ts';
 import { sharedRoute } from '../../src/lib/server/shared-page.ts';
 import { dispatchStagingRequest } from '../../src/lib/server/staging-admission.ts';
 import { dispatchStagingDeletion, resolveWorkerDeletionQualification, runStagingDeletionDrain } from '../../src/lib/server/staging-deletion.ts';
 import { wireUploadStorage } from '../../src/lib/server/storage-runtime.ts';
+import { ownerStorageSettings, storageSettingsPath, storageTestPath } from '../../src/lib/server/storage-settings.ts';
 
 const appPath = ${JSON.stringify(`/${builder.getAppPath()}`)};
 const generated = ${JSON.stringify(generatedAssets(builder))};
@@ -134,9 +135,15 @@ const handlers = {
       // Upload readiness does not admit deletion.
       const deletion = dispatchStagingDeletion(request, env, resolveWorkerDeletionQualification(env, capability));
       if (deletion) return deletion;
-      const ready = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
-        typeof env.ASSETS?.fetch === 'function' && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
+      const serving = typeof env.DB?.prepare === 'function' && typeof env.DB?.batch === 'function' &&
+        typeof env.ASSETS?.fetch === 'function';
+      const ownerStorage = usesOwnerStorage(env);
+      const ready = serving && !ownerStorage && !!wireUploadStorage(env).DRIVE_UPLOAD_VERIFIER;
       if (url.pathname === readinessPath) return qualificationReadiness(request, env, ready);
+      if (ownerStorage && !serving) return unavailable();
+      if (ownerStorage && (url.pathname === storageSettingsPath || url.pathname === storageTestPath)) {
+        return ownerStorageSettings(request, env);
+      }
       return dispatchStagingRequest(request, env, ready, assets, {
         adapter: request => adapterWorker.fetch(request, { ...env, ASSETS: unavailableAssets }, ctx),
         ceremony: (request, step) => signIn(request, step, env),

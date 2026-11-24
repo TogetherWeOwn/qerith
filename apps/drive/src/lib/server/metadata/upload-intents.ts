@@ -35,6 +35,10 @@ export interface ExpectedUploadPart {
 
 type AllocationPrefix = '' | ReturnType<typeof qualificationPrefix> | ReturnType<typeof firstReleaseSmokePrefix>;
 
+export function newUploadObjectKey(prefix: AllocationPrefix = ''): string {
+  return prefix + crypto.randomUUID();
+}
+
 const maxExpectedUploadBytes = 5 * 1024 ** 3;
 const partSha256 = /^[0-9a-f]{64}$/;
 
@@ -92,7 +96,7 @@ export class UploadIntents<DB extends Database = Database> {
   private async claimAllocation(this: UploadIntents<UploadAllocationDatabase>, principalId: string, sessionHash: string,
     size: number, endpoint: string, bucket: string, epoch: string, ownerOnly: boolean,
     expected: string | null, prefix: AllocationPrefix): Promise<UploadIntent | null> {
-    const id = crypto.randomUUID(), key = prefix + crypto.randomUUID();
+    const id = crypto.randomUUID(), key = newUploadObjectKey(prefix);
     const [, , claim] = await this.db.batch<UploadIntent>([
       this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size${
         expected === null ? '' : ', expected_part_sha256s'})
@@ -123,7 +127,7 @@ export class UploadIntents<DB extends Database = Database> {
   private async insert(principalId: string, declaredSize: number | null): Promise<UploadIntent | null> {
     return this.db.prepare(`INSERT INTO drive_upload_intents (id, owner_id, object_key, state, declared_size)
       SELECT ?, ?, ?, 'created', ? WHERE ${active} RETURNING ${columns}`)
-      .bind(crypto.randomUUID(), principalId, crypto.randomUUID(), declaredSize, principalId).first<UploadIntent>();
+      .bind(crypto.randomUUID(), principalId, newUploadObjectKey(), declaredSize, principalId).first<UploadIntent>();
   }
 
   async get(principalId: string, id: string): Promise<UploadIntent | null> {

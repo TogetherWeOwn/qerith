@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { folderPage } from '../../../lib/server/folder-page';
 import { ReadAccess } from '../../../lib/server/metadata/read-access';
 import { admitsSignInFixture, admitsStagingInvite, admitsStagingReadGrants } from '../../../lib/server/request-auth';
-import { storageIdentity } from '../../../lib/server/storage-runtime';
+import { requestStorageIdentity } from '../../../lib/server/storage-runtime';
 import type { PageServerLoad } from './$types';
 
 export const csr = !building && admitsStagingInvite(env);
@@ -15,7 +15,7 @@ export const load: PageServerLoad = async ({ request, params, locals, setHeaders
     return { result: { status: 'unavailable' as const } };
   }
   // Each ReadAccess statement rechecks the session on the primary.
-  const identity = storageIdentity(env);
+  const identity = await requestStorageIdentity(env);
   const primary = () => new ReadAccess(db.withSession('first-primary'),
     identity ? [identity.settings.endpoint, identity.settings.bucket, identity.epoch] : undefined);
   const { id, role } = session.principal;

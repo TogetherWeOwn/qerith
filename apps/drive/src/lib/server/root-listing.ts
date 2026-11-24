@@ -23,7 +23,8 @@ export function rootPageCursor(tokens: readonly string[]): string | null | undef
   if (tokens.length === 1 && entryId.test(tokens[0])) return tokens[0];
 }
 
-export async function loadRootListing(request: Request, env: RootListingEnv, pageTokens: readonly string[]): Promise<RootListingResult> {
+export async function loadRootListing(request: Request, env: RootListingEnv, pageTokens: readonly string[],
+  storage = storageIdentity(env)): Promise<RootListingResult> {
   const origin = authOrigin(env.DRIVE_ORIGIN);
   const db = env.DB;
   if (!origin || !db) return { status: 'unavailable' };
@@ -40,7 +41,7 @@ export async function loadRootListing(request: Request, env: RootListingEnv, pag
       const inviteMode = admitsStagingInvite(env);
       const ownerOnly = privateDriveOrigin(env) !== null && !inviteMode;
       const invitee = inviteMode && principal.role === 'member';
-      const identity = invitee ? storageIdentity(env) : null;
+      const identity = invitee ? storage : null;
       const primary = identity && db.withSession?.('first-primary');
       const page = await new PrivateMetadata(primary ?? db).list(principal.id, parentId, cursor, await tokenHash(token), ownerOnly,
         primary && identity ? [identity.settings.endpoint, identity.settings.bucket, identity.epoch] : undefined);
