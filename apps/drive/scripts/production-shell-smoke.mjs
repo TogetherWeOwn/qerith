@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare } from 'miniflare'; // Locked by Wrangler.
@@ -25,7 +25,9 @@ try {
     await db.batch(unstable_splitSqlQuery(sql).map(statement => db.prepare(statement)));
   }
   for (const [method, path, expected] of [['HEAD', '/sign-in', 200], ['GET', '/api/owner/invitations', 401]]) {
-    const response = await worker.dispatchFetch(config.vars.DRIVE_ORIGIN + path, { method, redirect: 'manual' });
+    const url = new URL(path, config.vars.DRIVE_ORIGIN);
+    if (path === '/sign-in') url.searchParams.set('qerith_probe', randomBytes(16).toString('hex'));
+    const response = await worker.dispatchFetch(url, { method, redirect: 'manual' });
     await response.body?.cancel();
     if (response.status !== expected) {
       throw new Error(`${method} ${path} returned ${response.status}; expected ${expected}`);

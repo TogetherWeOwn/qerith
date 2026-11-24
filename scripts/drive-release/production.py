@@ -22,6 +22,7 @@ SHARED_ACCOUNT = "209cf7dd678adfb683947dd7874d05af"
 SHARED_SUBDOMAIN = "5150"
 NAME = "qerith-drive-production"
 APP = Path(__file__).resolve().parents[2] / "apps/drive"
+BUILD_CONFIG = "wrangler.build.jsonc"
 PACKAGE = ".svelte-kit/first-release-package/_worker.js"
 ASSETS = ".svelte-kit/cloudflare"
 WORKER = f"/workers/scripts/{NAME}"
@@ -187,14 +188,14 @@ def query_d1(read, db, sql):
     return result[0]["results"]
 
 
-def cloud_run(args, env, timeout, label):
+def cloud_run(args, env, timeout, label, *, failure_hint="Reconcile provider state before retrying."):
     try:
         return subprocess.run(
             args, cwd=APP, env=env, timeout=timeout, stdin=subprocess.DEVNULL,
             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        raise SystemExit(f"{label} failed or timed out. Reconcile provider state before retrying.") from None
+        raise SystemExit(f"{label} failed or timed out. {failure_hint}") from None
 
 
 def cli_env():
@@ -302,6 +303,7 @@ def migration_names():
 
 
 def worker_config(boundary, target, approval):
+    build = json_object((APP / BUILD_CONFIG).read_bytes())
     values = {
         "DRIVE_ORIGIN": boundary.origin,
         "DRIVE_FIRST_RELEASE_ORIGIN": boundary.origin,
@@ -312,8 +314,8 @@ def worker_config(boundary, target, approval):
     }
     return {
         "account_id": boundary.account_id, "name": NAME, "main": str(APP / PACKAGE),
-        "compatibility_date": "2026-07-30",
-        "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+        "compatibility_date": build["compatibility_date"],
+        "compatibility_flags": build["compatibility_flags"],
         "workers_dev": False, "preview_urls": False,
         "assets": {"directory": str(APP / ASSETS), "binding": "ASSETS", "run_worker_first": True},
         "d1_databases": [{"binding": "DB", "database_name": NAME, "database_id": target["d1Id"],
@@ -344,7 +346,8 @@ def promote(boundary, target, credentials, approval, read, write):
             "Wrangler changed the checked Worker module.",
         )
         cloud_run(["node", "scripts/production-shell-smoke.mjs", str(config)], cli_env(), 60,
-                  "Offline storage-unconfigured serving probes")
+                  "Offline storage-unconfigured serving probes",
+                  failure_hint="No provider requests were made. Check sign-in and anonymous owner API denial without storage.")
         print("Verified private serving probes with local D1 and no object storage.", flush=True)
         output = tmp / "deployment.jsonl"
         env = cli_env() | {"CLOUDFLARE_API_TOKEN": credentials["cfDeploy"],

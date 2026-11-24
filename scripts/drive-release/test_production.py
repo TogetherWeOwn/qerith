@@ -403,6 +403,20 @@ class ProductionTests(ProductionFixture):
         self.assertEqual(config["vars"]["DRIVE_OWNER_ENROLLMENT_RELEASE"], SHA)
         self.assertFalse(any("DELETION" in key or "DELETE" in key for key in config["vars"]))
 
+    def test_copies_checked_build_compatibility_without_importing_destinations_or_bindings(self):
+        date = "2026-08-01"
+        flags = ["nodejs_compat", "enable_request_signal", "global_fetch_strictly_public"]
+        with TemporaryDirectory() as directory, patch.object(prod, "APP", Path(directory)):
+            (prod.APP / prod.BUILD_CONFIG).write_text(prod.canonical({
+                "compatibility_date": date, "compatibility_flags": flags,
+                "name": "qerith-drive-staging", "vars": {"DRIVE_S3_ENDPOINT": "synthetic"},
+            }))
+            config = prod.worker_config(self.boundary, self.target, self.approval)
+        self.assertEqual(config["compatibility_date"], date)
+        self.assertEqual(config["compatibility_flags"], flags)
+        self.assertEqual(config["name"], prod.NAME)
+        self.assertNotIn("DRIVE_S3_ENDPOINT", config["vars"])
+
     def test_rejects_extra_bindings_and_wrong_database_on_the_deployed_version(self):
         config = prod.worker_config(self.boundary, self.target, self.approval)
         bindings = [
@@ -488,12 +502,14 @@ class ProductionTests(ProductionFixture):
 class DeploymentOrderTests(ProductionFixture):
     def setUp(self):
         super().setUp()
+        build_config = (prod.APP / prod.BUILD_CONFIG).read_bytes()
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         app = Path(directory.name)
         patcher = patch.object(prod, "APP", app)
         patcher.start()
         self.addCleanup(patcher.stop)
+        (app / prod.BUILD_CONFIG).write_bytes(build_config)
         (app / prod.ASSETS).mkdir(parents=True)
         (app / prod.PACKAGE).parent.mkdir(parents=True)
         (app / prod.PACKAGE).write_text("export default {}")
@@ -555,11 +571,12 @@ class DeploymentOrderTests(ProductionFixture):
         self.active = body["enabled"]
         self.events.append(("switch", self.active))
 
-    def fake_shell_probe(self, args, env, timeout, label):
+    def fake_shell_probe(self, args, env, timeout, label, *, failure_hint):
         self.assertEqual(args[:2], ["node", "scripts/production-shell-smoke.mjs"])
         self.assertEqual(prod.json_object(Path(args[2]).read_bytes()), self.bindings)
         self.assertEqual(env, prod.cli_env())
         self.assertEqual(timeout, 60)
+        self.assertIn("No provider requests were made.", failure_hint)
         self.events.append(("shell probe", label))
 
     def promote(self, status=(200, 401)):

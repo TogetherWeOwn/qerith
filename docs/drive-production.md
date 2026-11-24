@@ -186,15 +186,16 @@ Before contacting Cloudflare, the workflow matches the durable boundary to
 the approved target and verifies the custody fingerprints and release window.
 It exercises the same sign-in and anonymous API probes on the checked Worker
 with disposable local D1, the release bindings and no object storage or
-provider access. It then checks production D1 emptiness and reads back the approved
-D1 snapshot. Only then can Wrangler apply the exact source's migrations. The
-post-apply D1 ledger must exactly match the checked-in migration order. The
+provider access. The probe and deployment use the compatibility date and flags
+from the checked build config. The workflow then checks production D1 emptiness
+and reads back the approved D1 snapshot. Only then can Wrangler apply the exact
+source's migrations. The post-apply D1 ledger must exactly match the checked-in
+migration order. The
 workflow checks again that the production Worker is absent before deploying
 the checked Worker with the route and previews off. The deployment
 has no object-store endpoint, bucket, credentials or qualification binding.
 The workflow reads back its version and bindings before enabling the route.
-After enablement,
-the workflow checks the serving version, HTTP 200 on `HEAD /sign-in`, and HTTP
+After enablement, it checks the serving version, HTTP 200 on `HEAD /sign-in`, and HTTP
 401 on anonymous `GET /api/owner/invitations`. Both origin checks use the same
 curl transport as switch-off. A serving probe failure triggers switch-off.
 
