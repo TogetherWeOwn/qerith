@@ -1,7 +1,10 @@
 <script lang="ts">
   import './tokens.css';
+  import { storageSettingsPath } from './drive-navigation';
 
-  let { current, shared = false, owner = true }: { current: 'home' | 'people' | 'shared'; shared?: boolean; owner?: boolean } = $props();
+  let { current, shared = false, owner = true, storage = false }: {
+    current: 'home' | 'people' | 'shared' | 'storage'; shared?: boolean; owner?: boolean; storage?: boolean;
+  } = $props();
 </script>
 
 <a class="skip" href="#main">Skip to content</a>
@@ -10,6 +13,7 @@
     <a href="/" aria-current={current === 'home' ? 'page' : undefined}>My Drive</a>
     {#if shared}<a href="/shared" aria-current={current === 'shared' ? 'page' : undefined}>Shared with me</a>{/if}
     {#if owner}<a href="/people" aria-current={current === 'people' ? 'page' : undefined}>Users and invites</a>{/if}
+    {#if storage}<a href={storageSettingsPath} aria-current={current === 'storage' ? 'page' : undefined}>Storage settings</a>{/if}
   </nav>
 </header>
 

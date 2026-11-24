@@ -1,5 +1,5 @@
 import type { Handle } from '@sveltejs/kit/hooks';
-import { driveNext, folderDocumentRoute, isDrivePageNavigation, isExactFolderDocument, isTopLevelDocumentNavigation } from '../drive-navigation';
+import { driveNext, folderDocumentRoute, isDrivePageNavigation, isExactFolderDocument, isTopLevelDocumentNavigation, storageSettingsPath } from '../drive-navigation';
 import { downloadRedirect, downloadRoute, downloadSignIn, isDownloadDocumentNavigation, isDownloadNavigation, isExactDownloadGet } from './download-navigation';
 import { Sessions } from './identity/sessions';
 import { ownerLifecycleRoute } from './owner-lifecycle-route';
@@ -155,12 +155,16 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       if (!allowsStagingInviteSite(request)) return deny(403);
     }
     const peoplePage = routeId === '/people';
+    const storagePage = routeId === storageSettingsPath;
     const folderPage = routeId === folderDocumentRoute;
     const sharedPage = routeId === sharedRoute;
     if (sharedPage && (!admitsSharedListing(env) || !isExactSharedDocument(request, url))) return deny(404);
     if (staging && folderPage && (!admitsStagingInvite(env) || !isExactFolderDocument(request, url))) return deny(404);
     if (peoplePage && (!admitsStagingInvite(env) || request.url !== `${origin.origin}/people` ||
         (request.method !== 'GET' && request.method !== 'HEAD'))) return deny(404);
+    if (storagePage && (!usesOwnerStorage(env) || request.url !== origin.origin + storageSettingsPath ||
+        (request.method !== 'GET' && request.method !== 'HEAD') ||
+        (!allowsStagingInviteSite(request) && request.headers.get('sec-fetch-site') !== 'none'))) return deny(404);
     if ((fixture || staging) && routeId?.startsWith('/api/owner/')) {
       if (fixture || !admitsStagingInvite(env) || ownerLifecycleRoute(request, url) !== routeId) return deny(404);
       if (!allowsStagingInviteSite(request)) return deny(403);
@@ -188,7 +192,7 @@ export function privateRequests(env: DriveAuthEnv): Handle {
       if (session?.principal.role !== 'member') return deny(session ? 404 : 401);
       if (sharedPageCursor(url.search) === undefined) return deny(400);
     }
-    if (peoplePage && session?.principal.role !== 'owner') return deny(session ? 404 : 401);
+    if ((peoplePage || storagePage) && session?.principal.role !== 'owner') return deny(session ? 404 : 401);
     if (staging && session && session.principal.role !== 'owner') {
       const memberRoot = routeId === '/' &&
         ((pathname === '/' && (request.method === 'GET' || request.method === 'HEAD')) ||

@@ -32,6 +32,9 @@ if (params.has('delete-file')) {
   mount(ShareRecipientFixture, { target });
 } else if (params.has('root-upload')) {
   mount(RootUploadFixture, { target, props: window.fixtureRootUpload });
+} else if (params.has('owner-storage')) {
+  const { default: StorageSettingsFixture } = await import('./StorageSettingsFixture.svelte');
+  mount(StorageSettingsFixture, { target });
 } else {
   mount(params.has('owner-invite') ? OwnerInviteFixture : params.has('invite') ? InviteFixture : Fixture, { target });
 }

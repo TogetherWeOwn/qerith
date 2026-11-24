@@ -1,12 +1,14 @@
+import { storageSettingsPath } from '../drive-navigation.ts';
+
 export const routeMethods = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
 export type RouteMethod = typeof routeMethods[number];
-export type StagingGate = 'invite' | 'read-grants' | 'shared' | 'upload-resume';
+export type StagingGate = 'invite' | 'read-grants' | 'shared' | 'upload-resume' | 'owner-storage';
 export type RouteAccess = 'public' | 'owner' | 'member' | 'owner-or-member' | 'owner-or-invited-member' | 'owner-or-multipart-member';
 export type SignedOut = 'dispatch' | 401 | 'return-to-route' | 'return-to-root';
 export type CeremonyStep = 'challenge' | 'restart' | 'verify';
 export type InviteStep = 'present' | 'challenge' | 'enroll';
 export type StagingRouteTarget =
-  | { kind: 'sign-in' | 'root' | 'root-data' | 'invite' | 'people' | 'folder' | 'shared' | 'download' |
+  | { kind: 'sign-in' | 'root' | 'root-data' | 'invite' | 'people' | 'storage-settings' | 'folder' | 'shared' | 'download' |
       'upload' | 'upload-resume' | 'owner-lifecycle' | 'read-grant' | 'eligible-recipients' | 'move-destinations' }
   | { kind: 'metadata-write'; operation: 'create-folder' | 'change-entry' }
   | { kind: 'ceremony'; step: CeremonyStep }
@@ -46,6 +48,8 @@ export const stagingRoutes: readonly (StagingRoute | StagingExclusion)[] = [
     gate: 'invite', access: 'owner', signedOut: 'return-to-route' },
   { path: '/people', methods: ['HEAD'], source: 'page', target: { kind: 'people' },
     gate: 'invite', access: 'owner', signedOut: 401 },
+  { path: storageSettingsPath, methods: document, source: 'page', target: { kind: 'storage-settings' },
+    gate: 'owner-storage', access: 'owner', signedOut: 'return-to-route' },
   { path: '/f/[folderId]', methods: document, source: 'page', target: { kind: 'folder' }, ...invited },
   { path: '/shared', methods: document, source: 'page', target: { kind: 'shared' },
     gate: 'shared', access: 'member', signedOut: 401 },

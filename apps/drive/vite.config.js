@@ -57,6 +57,10 @@ function generatedAssets(builder) {
   const people = [...assets];
   assets.clear();
   visited.clear();
+  include(leaf('/src/routes/settings/storage/+page.svelte'));
+  const storageSettings = [...assets];
+  assets.clear();
+  visited.clear();
   // Staging may hydrate; the read-only sign-in fixture still needs only styles.
   include(leaf('/src/routes/f/[folderId]/+page.svelte'));
   const styles = () => [...assets].filter(path => /\.(?:css|woff2)$/.test(path));
@@ -64,7 +68,7 @@ function generatedAssets(builder) {
   assets.clear();
   visited.clear();
   include(leaf('/src/routes/shared/+page.svelte'));
-  return { signIn, root, invite, people, folder, folderStyles, shared: styles() };
+  return { signIn, root, invite, people, storageSettings, folder, folderStyles, shared: styles() };
 }
 
 // The adapter writes its output to Wrangler's main, so never point it at the
@@ -108,6 +112,7 @@ const assets = {
   root: new Set(generated.root),
   invite: new Set(generated.invite),
   people: new Set(generated.people),
+  storageSettings: new Set(generated.storageSettings),
   folder: new Set(generated.folder),
   shared: new Set(generated.shared)
 };

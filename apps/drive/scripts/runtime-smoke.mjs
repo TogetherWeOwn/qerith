@@ -116,10 +116,12 @@ async function exerciseStagingRoutes(worker, origin, owner, member) {
       if (body) assert.match(await response.text(), body);
       else await response.body?.cancel();
     };
-    if ('excluded' in route) {
+    // The packaged owner-settings browser proof exercises ordinary release admission.
+    if ('excluded' in route || route.gate === 'owner-storage') {
+      const status = 'excluded' in route ? route.signedOut : 404;
       for (const method of route.methods) {
-        await probe(method, { cookie: owner }, route.signedOut);
-        await probe(method, { cookie: owner, ...flags.shared, ...flags['read-grants'] }, route.signedOut);
+        await probe(method, { cookie: owner }, status);
+        await probe(method, { cookie: owner, ...flags.shared, ...flags['read-grants'] }, status);
       }
       continue;
     }

@@ -1,7 +1,8 @@
+export const storageSettingsPath = '/settings/storage';
 const otherDrivePage = /^(?:\/|\/shared|\/people|\/shared\/f\/[A-Za-z0-9_-]+)$/;
 export const isLinkableFolderId = (id: string) => /^[A-Za-z0-9_-]{1,128}$/.test(id);
 const folderPath = (path: string) => path.startsWith('/f/') && isLinkableFolderId(path.slice(3));
-const drivePage = (path: string) => folderPath(path) || otherDrivePage.test(path);
+const drivePage = (path: string) => path === storageSettingsPath || folderPath(path) || otherDrivePage.test(path);
 const conditionalHeaders = ['range', 'if-range', 'if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since'];
 
 export function driveNext(value: string | null): string {
