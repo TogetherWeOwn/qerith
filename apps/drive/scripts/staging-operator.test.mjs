@@ -11,6 +11,9 @@ const previousVersion = 'a1111111-1111-1111-1111-111111111111';
 const currentVersion = 'b2222222-2222-2222-2222-222222222222';
 const otherVersion = 'c3333333-3333-3333-3333-333333333333';
 const emptyList = 'Resource location: remote \n\n✅ No migrations to apply!';
+const deployReceipt = (versionId = currentVersion) => JSON.stringify({
+  type: 'deploy', version: 1, worker_name: 'qerith-drive-staging', version_id: versionId,
+}) + '\n';
 const settings = {
   CLOUDFLARE_API_TOKEN: 'synthetic-publish-token-only',
   QERITH_S3_ENDPOINT: 'https://storage.example.test',
@@ -21,7 +24,9 @@ const settings = {
   QERITH_S3_SECRET_ACCESS_KEY: 'synthetic-secret-key',
 };
 
-function fixture(t, { alterTarget, failPending, failPublish, readbackVersion = currentVersion, tokenMinutes = 30 } = {}) {
+function fixture(t, {
+  alterTarget, failPending, failPublish, readbackVersion = currentVersion, tokenMinutes = 30, deployOutput = deployReceipt(),
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'drive-operator-test-'));
   t.after(() => rmSync(root, { recursive: true }));
   const repo = join(root, 'repo');
@@ -99,9 +104,7 @@ if (args[0] === 'deploy') {
   assert.equal(config.vars.DRIVE_OWNER_ENROLLMENT_RELEASE, 'disabled');
   assert.equal(secrets.DRIVE_S3_SECRET_ACCESS_KEY, 'synthetic-secret-key');
   fs.writeFileSync(${JSON.stringify(modeFile)}, config.vars.DRIVE_ORIGIN);
-  fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({
-    type: 'deploy', version: 1, worker_name: config.name, version_id: '${currentVersion}',
-  }) + '\\n');
+  fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, ${JSON.stringify(deployOutput)});
   process.exitCode = ${failPublish ? 1 : 0};
   return;
 }
@@ -213,6 +216,17 @@ test('operator preserves the recovery record and blocks retry after a pending li
     await assert.rejects(f.publish(), /needs reconciliation/);
     assert.equal(f.readRecords(f.pending)[1].bookmark, 'synthetic-bookmark');
     if (options.failPending) assert.ok(!f.readTrace().includes('deploy'));
+    await assert.rejects(f.publish(), /in-progress or unreconciled/);
+  }
+});
+
+test('operator blocks retries when a successful deploy lacks an exact Wrangler receipt', async (t) => {
+  for (const deployOutput of ['', '{invalid', deployReceipt() + deployReceipt(), deployReceipt(previousVersion)]) {
+    const f = fixture(t, { deployOutput, readbackVersion: previousVersion });
+    f.approvalFor();
+    await assert.rejects(f.publish(), /needs reconciliation/);
+    assert.equal(f.readTrace().at(-1), 'deploy');
+    assert.equal(f.readRecords(f.pending).at(-1).phase, 'migrated');
     await assert.rejects(f.publish(), /in-progress or unreconciled/);
   }
 });
