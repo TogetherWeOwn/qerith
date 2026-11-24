@@ -42,7 +42,7 @@ function verifiedInputs(cwd, sha, accountId) {
 
 const readBudget = 45_000;
 
-function wrangler(binary, cwd, env, args, { timeout, discard = false, signal, applyTimeLeft }) {
+export function boundedStagingWrangler(binary, cwd, env, args, { timeout, discard = false, signal, applyTimeLeft }) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const deadline = performance.now() + timeout;
@@ -106,9 +106,14 @@ function readLedger(text, expected) {
 }
 
 // The protected caller must verify storage and await durable recovery recording before mutation.
-export async function applyQualificationMigrations({ recordRecovery, timeLeft }, env, cwd = process.cwd(), signal) {
+export async function applyQualificationMigrations(options, env, cwd = process.cwd(), signal) {
   cwd = resolve(cwd);
   const identity = assertQualificationJob(env, cwd);
+  return applyStagingMigrations(identity, options, env, cwd, signal);
+}
+
+// The caller must have independently admitted the exact source and verified storage.
+export async function applyStagingMigrations(identity, { recordRecovery, timeLeft }, env, cwd, signal) {
   const { CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN } = env;
   if (typeof CLOUDFLARE_API_TOKEN !== 'string' || !CLOUDFLARE_API_TOKEN.trim() || typeof recordRecovery !== 'function') {
     throw new Error('Staging migrations require a token and recovery writer.');
@@ -130,7 +135,7 @@ export async function applyQualificationMigrations({ recordRecovery, timeLeft },
     if (!Number.isFinite(available) || available <= 0 || (reserve > 0 && available < timeout)) {
       throw new Error('Staging D1 migration time budget is exhausted.');
     }
-    return wrangler(binary, snapshotDir.path, {
+    return boundedStagingWrangler(binary, snapshotDir.path, {
       PATH: env.PATH, HOME: env.HOME, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
       CI: 'true', NO_COLOR: '1', WRANGLER_HIDE_BANNER: 'true', WRANGLER_SEND_METRICS: 'false', WRANGLER_WRITE_LOGS: 'false',
     }, ['d1', ...args], { timeout: Math.min(timeout, available), discard, signal,

@@ -236,6 +236,122 @@ Recreation requires reviewed updates to the Wrangler binding and publisher UUID
 pin before dispatching the new SHA; do not relax validation. Record the previous
 Worker version or its absence; Worker rollback is separate from D1 recovery.
 
+## Operator publisher (dormant)
+
+The on-demand [Operator command](../apps/drive/scripts/staging-operator.mjs)
+publishes to the existing staging Worker and database. The protected
+`github-hosted-local` smoke continues to qualify exact builds using its own
+local D1 and S3. Use the commands below in a separately authorized cutover.
+
+### Switch future staging publishes
+
+1. From a reviewed installation of the launcher on the existing Linux Operator
+   host, prepare a private, Operator-owned state directory (`0700`) on local
+   persistent storage. Leave it without an `approved-publish` file. Confirm
+   Node 24.21.0 with npm 11.19.0 and access to the public source and npm
+   registry. Record the exact reviewed, green `main` SHA and the closed or
+   explicitly qualified owner-preview mode in the task. Keep edge access
+   restrictions in place.
+2. Pause new dispatches, re-runs, and protected environment approvals for the
+   old publisher. Cancel unadmitted runs. Let every admitted publish finish.
+   Inspect failed or cancelled admitted attempts for an uncertain migration or
+   deployment before proceeding. Enumerate all nonterminal runs and check
+   again after disabling the workflow. Resolve any run caught by the switch
+   before arming the Operator path.
+
+   ```sh
+   repo=TogetherWeOwn/qerith
+   workflow=drive-staging-preparation.yml
+   old_runs() {
+     gh api --paginate "repos/$repo/actions/workflows/$workflow/runs?per_page=100" \
+       --jq '.workflow_runs[] | select(.status != "completed") | [.id, .status, .html_url] | @tsv'
+   }
+   old_runs
+   # After draining and reconciling admitted runs:
+   gh workflow disable "$workflow" --repo "$repo"
+   workflow_state=$(gh api "repos/$repo/actions/workflows/$workflow" --jq .state) || exit 1
+   test "$workflow_state" = disabled_manually || exit 1
+   remaining=$(old_runs) || exit 1
+   test -z "$remaining" || { printf '%s\n' "$remaining"; exit 1; }
+   ```
+
+3. Once the workflow reports `disabled_manually` and the run list is empty,
+   remove only the old publish token from the protected environment. Revoke
+   the exact user token matched to old Drive publishes in the private
+   Cloudflare audit evidence. Read back the GitHub secret list and the
+   Cloudflare token's revoked status or absence. Keep the other staging
+   environment settings available for their existing callers. Coordinate any
+   other publisher or qualification that can mutate this fixed target before
+   arming the Operator. The local-S3 smoke needs no pause.
+
+   ```sh
+   gh secret delete QERITH_STAGING_CLOUDFLARE_API_TOKEN --env staging --repo "$repo"
+   gh secret list --env staging --repo "$repo"
+   ```
+
+4. Use an authorized, expiring Cloudflare **user** API token restricted to this
+   account with Workers Scripts Write and D1 Write. The account-level grants
+   cover other resources during the short validity window. Confirm the token's
+   policy in custody and use a lifetime of at most one hour with at least
+   10 minutes remaining at verification. Put the token in an Operator-owned
+   `0600` JSON file at `$state/staging-settings.json` under
+   `CLOUDFLARE_API_TOKEN`. In that file supply the six existing qualified
+   `QERITH_S3_` settings (`ENDPOINT`, `BUCKET`, `REGION`, `STORAGE_EPOCH`,
+   `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`). Keep values in Operator custody.
+   The selected commit's passing storage receipt must match that signer.
+   No provider credential is needed for Git checkout, npm, or the dry run.
+   The Operator UID trusts the reviewed source and locked build tools.
+5. In the Operator shell, set `state` to the absolute private directory,
+   `launcher` to the reviewed command's absolute path, and `node_bin` to the
+   pinned toolchain's bin directory. After checking the approval evidence,
+   write the exact SHA and reviewed mode. Use `owner-preview` in both the
+   approval and the final argument only for a qualified owner-only preview.
+
+   ```sh
+   (umask 077; printf '%s closed\n' "$reviewed_sha" > "$state/approved-publish")
+   env -i PATH="$node_bin:/usr/bin:/bin" "$node_bin/node" "$launcher" "$reviewed_sha" "$state"
+   ```
+
+   The command requires the approved candidate to equal the fetched main tip,
+   builds it with the existing lock checks, and dry-runs the pinned target.
+   It verifies expiry with Cloudflare, records the previous serving version and
+   a pre-migration bookmark, checks the native ledger and empty pending list,
+   and reads back the serving version after deploy. Retain `last-publish.jsonl`
+   with the exact SHA and verify the serving SHA and readiness. Withdraw
+   `approved-publish` and remove `staging-settings.json` after the attempt.
+   An unresolved `publish-in-progress.jsonl` blocks subsequent attempts.
+
+### Undo
+
+1. Remove `$state/approved-publish` to close Operator admission. Wait for any
+   admitted run to finish. If the marker persists, check that the process and
+   its children have stopped. Reconcile any uncertain provider operation from
+   the journal before archiving the marker. A local timeout can leave a
+   provider request in flight. Remove the Operator settings file and revoke
+   its short-lived token if it is still active.
+2. If a publish changed the serving Worker, use the recorded previous version
+   for rollback when needed. Verify the fixed Worker's serving version and
+   admission. Reconcile an uncertain D1 migration separately using the recorded
+   bookmark and ledger before retrying, as described above.
+3. If returning to the GitHub path has been authorized, use a fresh authorized
+   credential and the same protected `staging` environment. Confirm main-only
+   access and an empty old run list before re-enabling dispatches.
+
+   ```sh
+   gh secret set QERITH_STAGING_CLOUDFLARE_API_TOKEN --env staging --repo "$repo" \
+     < "$fresh_legacy_token_file"
+   gh workflow enable "$workflow" --repo "$repo"
+   gh api "repos/$repo/actions/workflows/$workflow" --jq .state
+   ```
+
+The disposable rehearsal runs with
+`node --test apps/drive/scripts/staging-operator.test.mjs`. It uses a local
+Git source, synthetic settings and a fake provider. Live cutover requires an
+authorized maintenance window on the fixed staging target, access to the
+matched legacy token for revocation, the expiring replacement and the
+qualified storage settings in Operator custody. Provider permissions and
+credential issuance are live cutover prerequisites.
+
 ## Exact-SHA qualification (disabled)
 
 `drive-staging-qualification.yml` verifies that `tested_sha` is one lowercase
