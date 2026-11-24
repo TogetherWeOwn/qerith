@@ -69,6 +69,24 @@ The isolated K13 picker (`?share-recipient`) uses synthetic choices, not a provi
 `*share-recipient-*` evidence covers keyboard, axe and reflow at 1280×800, 390×844
 and 320×844. Screen reader: carried to the first route rendering `ShareRecipientPicker`.
 
+The owner storage scenario (`?owner-storage`) exercises the settings form with a
+synthetic API, including a pending test, a failed connection, revision conflict,
+locked destination, and replacement credentials. For the packaged Worker, run
+the focused Chromium proof from `apps/drive` after installing the Drive and
+browser lockfiles and the pinned Playwright Chromium.
+
+```sh
+export DRIVE_BUILD_SHA="$(git rev-parse HEAD)"
+npm run build
+node_modules/.bin/wrangler deploy .svelte-kit/cloudflare/_worker.js \
+  --config wrangler.build.jsonc --dry-run --outdir .svelte-kit/first-release-package
+node --import tsx tests/owner-storage-browser.mjs
+```
+
+The packaged proof runs first-owner bootstrap, passkey sign-in, storage setup,
+key rotation, and a byte-identical upload and download against disposable D1
+and TLS MinIO. The browser relay and the Worker's storage requests stay local.
+
 To add an isolated scenario, add one `<scenario>.mjs` module exporting
 `exercise(browser, origin, axe, output, entry)` and a matching entry in
 `scenarios.json`. Declare the states, widths `[390, 1280]`, and modes

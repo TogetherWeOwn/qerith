@@ -126,6 +126,11 @@
   "owner-enrollment": {
     "legacy": true
   },
+  "owner-storage": {
+    "states": ["unconfigured", "testing", "connected", "connection-failed"],
+    "widths": [390, 1280],
+    "modes": ["screenshot", "axe", "keyboard", "greyscale", "forced-colours", "reflow"]
+  },
   "owner-invite-runtime": {
     "legacy": true,
     "inventory": {

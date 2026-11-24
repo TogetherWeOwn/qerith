@@ -3,6 +3,7 @@
   import SignInPage from '../../lib/SignInPage.svelte';
   import { passkeyBrowser, signInWithPasskey } from '../../lib/passkey-sign-in';
   import type { SignInState } from '../../lib/sign-in-state';
+  import { storageSettingsPath } from '../../lib/drive-navigation';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -22,9 +23,9 @@
     const current = attempt = new AbortController();
     state = 'waiting';
     const outcome = await signInWithPasskey(browser, current.signal);
-    const next = outcome === 'signed-in' && data.next === '/people'
-      ? await browser.fetch('/people', { method: 'HEAD', cache: 'no-store', redirect: 'error', signal: current.signal })
-        .then(response => response.status === 200 ? '/people' : '/', () => '/')
+    const next = outcome === 'signed-in' && (data.next === '/people' || data.next === storageSettingsPath)
+      ? await browser.fetch(data.next, { method: 'HEAD', cache: 'no-store', redirect: 'error', signal: current.signal })
+        .then(response => response.status === 200 ? data.next : '/', () => '/')
       : data.next;
     if (attempt !== current) return;
     attempt = undefined;

@@ -19,12 +19,13 @@ interface PreviewAssets {
   root: ReadonlySet<string>;
   invite: ReadonlySet<string>;
   people: ReadonlySet<string>;
+  storageSettings?: ReadonlySet<string>;
   folder: ReadonlySet<string>;
   shared?: ReadonlySet<string>;
 }
 
 type Target = (StagingRouteTarget |
-  { kind: 'public-asset' | 'invite-asset' | 'private-asset' | 'people-asset' | 'folder-asset' | 'shared-asset' }) &
+  { kind: 'public-asset' | 'invite-asset' | 'private-asset' | 'people-asset' | 'storage-settings-asset' | 'folder-asset' | 'shared-asset' }) &
   { deadline?: number };
 type Admission = { target: Target; access: RouteAccess; signedOut: SignedOut };
 
@@ -64,6 +65,9 @@ function assetAdmission(request: Request, url: URL, assets: PreviewAssets, gates
   if (request.url !== url.origin + path) return;
   if (gates.invite && assets.folder.has(path)) return { target: { kind: 'folder-asset' }, access: 'owner-or-member', signedOut: 401 };
   if (gates.shared && assets.shared?.has(path)) return { target: { kind: 'shared-asset' }, access: 'member', signedOut: 401 };
+  if (gates['owner-storage'] && assets.storageSettings?.has(path)) {
+    return { target: { kind: 'storage-settings-asset' }, access: 'owner', signedOut: 401 };
+  }
 }
 
 function deny(status: number): Response {
@@ -75,13 +79,14 @@ function deny(status: number): Response {
 export async function admitStagingRequest(request: Request, env: DriveAuthEnv, storageReady: boolean,
   assets: PreviewAssets): Promise<Target | Response> {
   const origin = privateDriveOrigin(env);
-  if (origin === null || typeof env.DB?.prepare !== 'function' || (!storageReady && !usesOwnerStorage(env))) return deny(503);
+  const ownerStorage = usesOwnerStorage(env);
+  if (origin === null || typeof env.DB?.prepare !== 'function' || (!storageReady && !ownerStorage)) return deny(503);
   if (!allowsOrigin(request, origin)) return deny(403);
   const url = new URL(request.url);
   const { pathname, search } = url;
   const invite = admitsStagingInvite(env);
   const gates = { invite, 'read-grants': admitsStagingReadGrants(env), shared: admitsSharedListing(env),
-    'upload-resume': invite || usesOwnerStorage(env) };
+    'upload-resume': invite || ownerStorage, 'owner-storage': ownerStorage };
   const route = stagingRoutes.find((route): route is StagingRoute => !('excluded' in route) &&
     (!route.gate || gates[route.gate]) && route.methods.some(method => method === request.method) && matchesRoute(route, request, url));
   const admission = route ?? assetAdmission(request, url, assets, gates);
@@ -100,7 +105,8 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
     if (request.url !== url.origin + pathname) return deny(404);
     return allowsStagingInviteSite(request, target.kind === 'invite') ? target : deny(403);
   }
-  const ownerPage = target.kind === 'people' || target.kind === 'people-asset';
+  const ownerPage = target.kind === 'people' || target.kind === 'people-asset' ||
+    target.kind === 'storage-settings' || target.kind === 'storage-settings-asset';
   if (ownerPage && request.url !== url.origin + pathname) return deny(404);
   const site = request.headers.get('sec-fetch-site');
   const navigation = isTopLevelDocumentNavigation(request);
@@ -125,7 +131,7 @@ export async function admitStagingRequest(request: Request, env: DriveAuthEnv, s
       const memberRoute = access === 'owner-or-member' || (access === 'owner-or-invited-member' && gates.invite) ||
         (access === 'owner-or-multipart-member' && driveUploadMode(env, session.role) === 'multipart' && allowsStagingInviteSite(request));
       if (session.role === 'owner' || memberRoute) {
-        return target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
+        return target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'storage-settings-asset' || target.kind === 'folder-asset' ||
           (target.kind === 'root' && request.method === 'HEAD')
           ? { ...target, deadline } : target;
       }
@@ -146,7 +152,7 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
   const target = await admitStagingRequest(request, env, storageReady, assets);
   if (target instanceof Response) return target;
   const rootProbe = target.kind === 'root' && request.method === 'HEAD';
-  if (target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'folder-asset' ||
+  if (target.kind === 'private-asset' || target.kind === 'people-asset' || target.kind === 'storage-settings-asset' || target.kind === 'folder-asset' ||
       target.kind === 'shared' || target.kind === 'shared-asset' || rootProbe) {
     if (!(performance.now() < (target.deadline ?? 0))) return deny(401);
     // The sign-in probe reports authorization, not whether the listing rendered.
@@ -161,6 +167,7 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
     case 'public-asset':
     case 'private-asset':
     case 'people-asset':
+    case 'storage-settings-asset':
     case 'folder-asset':
     case 'shared-asset':
     case 'root-data': {
@@ -180,6 +187,7 @@ export async function dispatchStagingRequest(request: Request, env: MetadataWrit
     case 'upload-resume':
     case 'owner-lifecycle':
     case 'people':
+    case 'storage-settings':
     case 'folder':
       return dispatch.adapter(request);
     case 'shared':

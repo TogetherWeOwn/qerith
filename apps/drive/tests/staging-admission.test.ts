@@ -100,6 +100,35 @@ test('people document and its exclusive assets require the invite flag and live 
   for (const path of ['/people/__data.json', '/%70eople', `${people}.map`]) denied(await check(path, 'GET'), 404);
 });
 
+test('storage settings and their exclusive assets require a live owner in ordinary release mode', async () => {
+  const origin = 'https://drive-release.example.test';
+  const page = '/settings/storage';
+  const asset = '/_app/immutable/nodes/storage-settings.js';
+  const releaseAssets = { ...assets, storageSettings: new Set([asset]) };
+  const enabled = (role?: 'owner' | 'member' | 'revoked') =>
+    ({ ...runtime(role).env, DRIVE_ORIGIN: origin, DRIVE_FIRST_RELEASE_ORIGIN: origin });
+  const check = (path: string, env = enabled(), headers: HeadersInit = { cookie }, method = 'GET') =>
+    admitStagingRequest(new Request(env.DRIVE_ORIGIN + path, { method, headers }), env, false, releaseAssets);
+  for (const [path, kind] of [[page, 'storage-settings'], [asset, 'storage-settings-asset']]) {
+    for (const method of ['GET', 'HEAD']) {
+      assert.equal((await check(path, enabled(), { cookie }, method) as { kind: string }).kind, kind);
+      denied(await check(path, enabled(), {}, method), 401);
+      denied(await check(path, enabled('member'), { cookie }, method), 404);
+      denied(await check(path, enabled('revoked'), { cookie }, method), 401);
+      denied(await admitStagingRequest(request(path, method), runtime().env, true, releaseAssets), 404);
+    }
+    denied(await check(path + '?'), 404);
+    denied(await check(path, enabled(), { cookie, origin }, 'POST'), 404);
+    denied(await check(path, enabled(), { cookie, 'sec-fetch-site': 'same-site' }), 404);
+  }
+  denied(await check(page + '/__data.json'), 404);
+  const redirect = await check(page, enabled(), {
+    'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document',
+  });
+  denied(redirect, 303);
+  assert.equal(redirect.headers.get('location'), '/sign-in?next=%2Fsettings%2Fstorage');
+});
+
 test('folder document and its styles require opt-in and a live owner or member', async () => {
   const enabled = (role?: 'owner' | 'member' | 'revoked') => ({ ...runtime(role).env, DRIVE_STAGING_INVITE_ACCEPTANCE: '1' });
   const check = (path: string, method: string, env = enabled(), headers?: HeadersInit) =>
