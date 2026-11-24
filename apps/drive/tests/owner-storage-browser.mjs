@@ -157,7 +157,7 @@ async function proveBrowser(worker, db, storage, replacement, bootstrapToken) {
     const secret = page.getByLabel('Secret access key', { exact: true });
     const test = page.getByRole('button', { name: 'Test connection' });
     const save = page.getByRole('button', { name: 'Save settings' });
-    await fillStorageSettings(page, candidate);
+    await fillStorageSettings(page, { ...candidate, endpoint: candidate.endpoint.replace(/^https:/, 'HTTPS:') });
     await secret.fill(storage.secretAccessKey);
     await test.click();
     await main.getByText('Connection verified.', { exact: false }).waitFor();

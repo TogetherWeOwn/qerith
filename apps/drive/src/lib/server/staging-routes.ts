@@ -1,4 +1,4 @@
-import { storageSettingsPath } from '../drive-navigation';
+import { storageSettingsPath } from '../drive-navigation.ts';
 
 export const routeMethods = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'] as const;
 export type RouteMethod = typeof routeMethods[number];

@@ -175,7 +175,7 @@
             <label for="storage-endpoint">HTTPS endpoint</label>
             <span id="storage-endpoint-hint">Use the service URL, for example https://s3.example.com.</span>
             <input type="url" id="storage-endpoint" name="endpoint" bind:value={draft.endpoint}
-              aria-describedby="storage-endpoint-hint" pattern="https://.+" required spellcheck="false"
+              aria-describedby="storage-endpoint-hint" pattern="[Hh][Tt][Tt][Pp][Ss]://.+" required spellcheck="false"
               autocapitalize="none" autocorrect="off" oninput={edited} />
           </div>
           <div class="field">
